@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QPointer>
 #include "../addons/AddonModels.h"
+#include "../core/Tracker.h"   // tracker::Kind - TrackerLeaf names it by value (issue #156)
 #include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
 #include "../core/GameFilter.h"   // gamefilter::GameFacts — saved-filter shelf extraction (#63)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
@@ -239,6 +240,12 @@ public:
     // The "Other versions" detail action (issue #50) reads this to re-derive the game's region/revision
     // siblings from its own folder.
     QString themedLeafGamePath(int browseIndex) const;
+    // The tracker identity of the browse leaf at `browseIndex` (issue #156): the link key (built by the
+    // one shared rule, tracker::itemKeyFor, so the reader/player/detail surfaces cannot disagree about
+    // what "this series" is), the title to search the tracker with, and whether to search its manga or
+    // its anime catalogue. An empty key means the row is not trackable.
+    struct TrackerLeaf { QString key; QString title; tracker::Kind kind = tracker::Kind::Anime; };
+    TrackerLeaf themedLeafTracker(int browseIndex) const;
     // True when the focused browse row is a game leaf (item.type == "game"), regardless of whether its OWN system
     // resolved. The Start emulation panel (Task 5) uses this so a game whose system can only be inferred from the
     // console FOLDER it sits in (a catalog/streamed game with no systemHint and an ambiguous/absent extension) is
@@ -392,6 +399,12 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // The tracker verb (issue #156) was activated on this item, from the classic detail button or the
+    // themed action row. MainWindow owns the NavMenu flows and the network object, exactly as it owns the
+    // source picker above; HomeView only says WHICH item.
+    // `manga` comes from the SAME gate the Play/Read button uses (classicActionGates, private here), so
+    // the caller does not have to re-derive it from a type list that could drift from the button.
+    void trackerRequested(const MediaItem& item, bool manga);
     // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
     // confirm and the install — the same shape as chooseSourceRequested above.
     void romhacksRequested(const MediaItem& item, const QString& systemId);
@@ -941,6 +954,10 @@ private:
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
     QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)
+    // "Track…" / "Tracking" — the AniList link for this series (issue #156). The classic twin of the
+    // themed action row's "tracker" pill. Hidden entirely until an AniList client is configured, so a
+    // user who does not use a tracker never sees it.
+    QPushButton* trackBtn_ = nullptr;
     QPushButton* manualBtn_ = nullptr;   // 📖 "Manual" — open the scraped game manual (issue #89), on demand
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.

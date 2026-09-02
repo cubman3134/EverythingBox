@@ -5,6 +5,7 @@
 #include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 #include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
 #include "Scrobble.h"          // isBackgroundStateKey() - the #192 counter/queue family, out of scope
+#include "Tracker.h"           // isBackgroundStateKey() - the #156 token/queue family, out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -186,6 +187,18 @@ bool SettingsTxn::inScope(const QString& key)
     // which is why the two families have distinct top-level prefixes rather than one with a sub-group: a
     // prefix that covered both would silently make the token undiscardable. probe_scrobble pins both halves.
     if (Scrobble::isBackgroundStateKey(key)) return false;
+    // ANIME/MANGA TRACKERS (#156). Two things, and the split is the trakt/clientId-vs-trakt/access one
+    // above repeated exactly: trackerstate/* (the undelivered progress queue, the per-item debounce
+    // stamps, the last error) is written by PLAYBACK while a settings panel is open - finishing a
+    // chapter with Settings up is ordinary - so in scope it would inflate the exit prompt with changes
+    // the user never made and a Discard would throw away queued progress. And the OAuth TOKENS are
+    // excluded because linking an account is done FROM this panel, so a Discard on the way out would
+    // un-link it. tracker/anilist/clientId and clientSecret are deliberately NOT matched: they are typed
+    // into Settings and pasting the wrong one has to be discardable. probe_tracker pins both halves.
+    if (tracker::isBackgroundStateKey(key)) return false;
+    // The per-item link store, for the reason marks/ and metaoverrides/ are excluded above: it is owned
+    // by the CloudMerge document and is written by the match prompt, not by this panel.
+    if (key.startsWith(tracker::linkKeyPrefix())) return false;
 
     // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
     // from a settings row, so in principle it could move mid-transaction — but the player page and the

@@ -64,6 +64,9 @@
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
+#include "../core/AniListTracker.h"   // isConfigured() - the tracker verb is hidden until it is (#156)
+#include "../core/TrackerLinks.h"     // ...and whether THIS item is already linked, for the pill label
+#include "../core/TrackerRules.h"     // ...and tracker::itemKeyFor, the one key rule
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
@@ -856,6 +859,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     editMetaBtn_->installEventFilter(this);
     arl->addWidget(editMetaBtn_);
+
+    // "Track…" (issue #156): the classic twin of the themed action row's tracker pill, and the escape
+    // hatch the issue calls not optional — auto-matching anime titles is famously imperfect, so a user
+    // must be able to link, re-link and unlink by hand from the page the wrong link is visible on.
+    // Hidden unless an AniList client is configured (refreshed per item in requestMeta), so nothing about
+    // this appears for someone who does not use a tracker.
+    trackBtn_ = new QPushButton(tr("📈  Track…"), actionRow_);
+    trackBtn_->setCursor(Qt::PointingHandCursor);
+    trackBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E4F0FF;border:2px solid #6E9BD6;border-radius:6px;"
+        "padding:6px 14px;color:#1B3A63;font-weight:bold;}"
+        "QPushButton:hover{background:#CFE2FA;}"
+        "QPushButton:focus{background:#B4D2F6;border-color:#3C6EA8;}"));
+    trackBtn_->setVisible(false);
+    connect(trackBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        emit trackerRequested(stack_.last().item, classicActionGates(stack_.last().item).readable);
+    });
+    trackBtn_->installEventFilter(this);
+    arl->addWidget(trackBtn_);
 
     // "📖 Manual": the scraped game manual (issue #89). Shown only for a game whose bundle carries a manual
     // role (or that already has one on disk). The PDF is megabytes, so it is NOT prefetched — clicking fetches
@@ -8252,6 +8275,24 @@ QString HomeView::themedLeafKey(int idx) const
     return MetaCache::keyFor(items_[browseRowMap_[idx]]);
 }
 
+// The tracker identity of one browse row (issue #156). The KEY is built by tracker::itemKeyFor and not by
+// anything local, because the comic reader and the video player build theirs the same way and the three have
+// to agree: if they did not, the reader would prompt for a manga this page had already linked.
+HomeView::TrackerLeaf HomeView::themedLeafTracker(int idx) const
+{
+    TrackerLeaf t;
+    if (idx < 0 || idx >= browseRowMap_.size()) return t;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    t.title = it.title;
+    t.key = tracker::itemKeyFor(it.imdbStreamId, it.title);
+    // A row the READER opens is manga; everything else is searched as anime. The distinction only picks
+    // which AniList catalogue the search hits, and guessing wrong shows no matches rather than wrong ones -
+    // which is why it leans on the gate the Play/Read button already computes rather than a type list of
+    // its own that could drift from it.
+    if (classicActionGates(it).readable) t.kind = tracker::Kind::Manga;
+    return t;
+}
+
 // Re-apply the hidden filter after Show-hidden / a profile switch flipped it. The Home list rebuilds in place
 // (renderRecents re-reads the stores and re-runs the filter); a catalogue level re-issues its request so the
 // filter runs in populate() as the fresh items land. browseItemsChanged re-syncs any themed browse mirror.
@@ -8528,6 +8569,17 @@ QVariantMap HomeView::themedDetailData(int idx)
         // (favourite / hide / tag / reassign-system) to all of them. Offered on the same real-media rows as
         // the other library-management verbs; the host (MainWindow) runs the selection checklist + the loops.
         verbs << QStringLiteral("select");
+        // "Track…" (issue #156): link this series to an AniList entry, refresh from it, or unlink. Same
+        // requirement as the verbs above (a stable identity to write against) plus one more: a tracker has
+        // to be set up, so nothing about this appears for a user who does not use one.
+        const QString trackKey = tracker::itemKeyFor(it.imdbStreamId, it.title);
+        if (AniListTracker::isConfigured() && !trackKey.isEmpty())
+        {
+            verbs << QStringLiteral("tracker");
+            // Drives the pill's label. Without it a tracked series and an untracked one look identical.
+            out.insert(QStringLiteral("tracked"),
+                       TrackerLinks::get(tracker::Id::AniList, trackKey).linked());
+        }
     }
     // "Launch options…" (issue #51): per-game core / standalone emulator / extra args. Offered only on a game
     // that resolves to a system with something to override, so it never appears on a movie or a metadata-only
@@ -8985,6 +9037,17 @@ void HomeView::requestMeta(const MediaItem& item)
         const QString mk = MetaCache::keyFor(item);
         editMetaBtn_->setVisible(!mk.isEmpty());
         editMetaBtn_->setText(MetaOverrides::has(mk) ? tr("✎  Info edited") : tr("✎  Fix info…"));
+    }
+    // "Track…" (#156). Two gates: a tracker has to be set up at all, and the row has to have an identity
+    // to key a link against. The label says whether this one is already linked, because otherwise there is
+    // nothing on any screen that distinguishes a tracked series from an untracked one.
+    if (trackBtn_)
+    {
+        const QString tk = tracker::itemKeyFor(item.imdbStreamId, item.title);
+        trackBtn_->setVisible(AniListTracker::isConfigured() && !tk.isEmpty()
+                              && !item.type.startsWith(QLatin1Char('_')));
+        trackBtn_->setText(TrackerLinks::get(tracker::Id::AniList, tk).linked() ? tr("📈  Tracking")
+                                                                                : tr("📈  Track…"));
     }
     refreshManualButton(item); // 📖 Manual — a game whose bundle carries (or has cached) a manual (issue #89)
 

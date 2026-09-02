@@ -117,6 +117,46 @@ dir at runtime — note that downloading + `dlopen`-ing cores is against Google 
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
 
+## Trackers (anime and manga)
+
+**AniList** keeps your anime and manga progress in step with the app: finish a chapter or an episode here
+and the chapter/episode count on your AniList list moves with it. Trakt (above) keeps film and general TV;
+these two never write to each other.
+
+**Setting it up.** The app ships no AniList client of its own yet, so you register a free one:
+
+1. Sign in at [anilist.co](https://anilist.co) and open **Settings -> Developer -> Create New Client**.
+2. Give it any name, and set its **redirect URL** to the loopback address `127.0.0.1` (the app opens a
+   one-shot local listener on a random port and hands the browser back to it; AniList accepts the bare
+   loopback host).
+3. Copy the **Client ID** and **Client Secret** into **Settings -> General -> AniList** and press
+   **Connect to AniList**. A browser opens; approve, and the tab tells you when you can close it.
+
+Your client id, secret and tokens are stored **on this device only** and are deliberately excluded from
+cloud sync, so you enter them once per machine. (They are also excluded from a settings *Discard*: linking
+an account from inside the settings screen is not something backing out of it should undo.)
+
+**Linking a series.** The first time you finish a chapter or an episode of something that is not linked
+yet, the app searches AniList by title and offers the matches. Pick one and it is remembered; that link
+*does* sync, so linking a series on the TV means the phone never asks. If the thing is not on AniList,
+answer **This is not on AniList - stop asking** and you will not be asked again. Either answer can be
+changed later from the item's detail page: **Track...** offers *Refresh from AniList*, *Link to a different
+entry...* and *Unlink*.
+
+**What is sent, and when.** One update per series per 30 seconds, so a fast reader does not spend the
+account's rate limit; anything that cannot be sent is written to disk and delivered on the next launch, so
+an offline session is not lost. The last chapter/episode of a series sets its status to **Completed** -
+but only when AniList's own count agrees that it *was* the last one. A **score** is sent only if you have
+actually rated the item here: AniList reads a zero as "rated zero", not as "unrated", so an unrated item
+sends no score at all rather than wiping one you set by hand.
+
+**Refreshing.** *Refresh from AniList* reconciles both ways, **furthest wins**: if AniList is ahead
+(you read three chapters in another app), the app catches up; if the app is ahead, AniList is pushed to.
+Neither side is ever moved backwards.
+
+**Not there yet:** MyAnimeList and Kitsu (the seam is built for them and the ids are reserved), a
+zero-config built-in client so no registration is needed, list browsing, and recommendations.
+
 ## After a crash
 
 On Windows a crash records itself. `crash_report.log` gets the faulting module and offset, the
