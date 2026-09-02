@@ -1,7 +1,7 @@
 {
   "id": "com.everythingbox.aiocatalog",
   "name": "AIO Catalog",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "media-source",
   "entry": "main.js",
   "author": "EverythingBox",
@@ -17,6 +17,10 @@
     { "id": "audiobooks", "name": "Audiobooks", "type": "audiobook" },
     { "id": "comics", "name": "Comics",    "type": "comic" },
     { "id": "manga",  "name": "Manga",     "type": "manga" }
+  ],
+  "resources": [
+    { "name": "chapters", "types": ["manga"] },
+    { "name": "pages",    "types": ["manga"] }
   ],
   "settings": [
     { "key": "tmdbApiKey",       "label": "TMDB API Key",                "type": "password", "description": "themoviedb.org API key — enables Movies and TV Shows." },

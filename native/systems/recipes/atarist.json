@@ -1,0 +1,27 @@
+{
+  "system": "atarist",
+  "summary": "Atari ST disk images run in hatari, which needs a TOS ROM image you supply. Without it the core rejects every game.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "hatari",
+      "options": {
+        "hatari_tosimage": "default"
+      },
+      "firmware": [
+        {
+          "purpose": "Atari ST TOS ROM",
+          "files": ["tos.img", "hatari/tos/tos.img"],
+          "required": true
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

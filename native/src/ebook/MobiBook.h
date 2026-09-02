@@ -1,7 +1,12 @@
-// Minimal MOBI (Mobipocket / older Kindle) reader. Parses the PalmDB container + MOBI header, decompresses
-// the text records (PalmDoc LZ77, or uncompressed), and stages the resulting HTML as a single chapter file
-// that EbookView renders like an EPUB chapter. Handles MOBI6; HUFF/CDIC compression and KF8-only (AZW3)
-// payloads aren't supported (reported as an error). Images are stripped for now.
+// MOBI / AZW / AZW3 (Mobipocket and Kindle) through the shared reader. The container walk - the PalmDB
+// record list, the MOBI header, EXTH, the KF8 (AZW3) boundary and the DRM refusal - is MobiHeader's; this
+// class decompresses nothing and parses nothing. It takes the HTML that walk produced, strips the wrappers
+// and the unresolvable image/stylesheet references, and stages it as a single chapter file that EbookView
+// renders like an EPUB chapter.
+//
+// Handles MOBI6 and KF8 (issue #144); HUFF/CDIC compression is still not supported, and a DRM-protected file
+// is refused BY NAME rather than decoded (MobiHeader.h says why at length). Images are stripped: MOBI
+// references them by a record index this reader has nowhere to resolve to.
 #pragma once
 #include "EbookSource.h"
 

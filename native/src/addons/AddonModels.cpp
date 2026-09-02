@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <algorithm>
 
 // -------------------------------------------------------------------------------- MediaArt
 
@@ -176,8 +177,124 @@ AddonManifest AddonManifest::fromJson(const QByteArray& json, bool* ok)
         if (!s.isEmpty()) m.metaFor << s;
     }
 
+    // Optional protocol resources (#188). Unknown names are kept verbatim rather than filtered against a
+    // list of the ones this build understands: declares() asks for a name, so an unknown one is inert here,
+    // and a whitelist would mean a client older than a resource DROPS an addon's declaration of it — which
+    // is a silent capability loss the addon author cannot see. A resource with no `name` is skipped.
+    for (const QJsonValue& v : o.value(QStringLiteral("resources")).toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject ro = v.toObject();
+        AddonResource r;
+        r.name = ro.value(QStringLiteral("name")).toString().trimmed();
+        for (const QJsonValue& tv : ro.value(QStringLiteral("types")).toArray())
+        {
+            const QString t = tv.toString().trimmed();
+            if (!t.isEmpty()) r.types << t;
+        }
+        if (!r.name.isEmpty()) m.resources.push_back(r);
+    }
+
     if (ok) *ok = !m.id.isEmpty();
     return m;
+}
+
+// -------------------------------------------------------------------- chapters / pages (issue #188)
+
+AddonChapterList AddonChapterList::fromJson(const QByteArray& json)
+{
+    AddonChapterList out;
+    const QJsonObject o = QJsonDocument::fromJson(json).object();
+    for (const QJsonValue& v : o.value(QStringLiteral("chapters")).toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject co = v.toObject();
+        AddonChapter c;
+        c.id        = co.value(QStringLiteral("id")).toString();
+        // A number arrives as a string ("9.5") or, from a source that stored it as one, as a JSON number.
+        // toVariant().toString() takes both; the model keeps it as text either way.
+        c.number    = co.value(QStringLiteral("number")).toVariant().toString().trimmed();
+        c.volume    = co.value(QStringLiteral("volume")).toVariant().toString().trimmed();
+        c.title     = co.value(QStringLiteral("title")).toString();
+        c.language  = co.value(QStringLiteral("language")).toString();
+        c.group     = co.value(QStringLiteral("group")).toString();
+        c.published = co.value(QStringLiteral("published")).toString();
+        c.pageCount = co.contains(QStringLiteral("pageCount"))
+                          ? co.value(QStringLiteral("pageCount")).toInt(-1) : -1;
+        if (!c.id.isEmpty()) out.chapters.push_back(c);   // an entry with no id cannot be opened
+    }
+    out.hasMore = o.value(QStringLiteral("hasMore")).toBool();
+    return out;
+}
+
+AddonPageList AddonPageList::fromJson(const QByteArray& json)
+{
+    AddonPageList out;
+    const QJsonObject o = QJsonDocument::fromJson(json).object();
+    for (const QJsonValue& v : o.value(QStringLiteral("pages")).toArray())
+    {
+        AddonPage p;
+        // A page may be a bare url string — the shortest thing a static addon can write — or an object.
+        if (v.isString()) p.url = v.toString();
+        else if (v.isObject())
+        {
+            const QJsonObject po = v.toObject();
+            p.url     = po.value(QStringLiteral("url")).toString();
+            p.width   = po.value(QStringLiteral("width")).toInt();
+            p.height  = po.value(QStringLiteral("height")).toInt();
+            p.headers = StreamHeaders::parseHeaderMap(po.value(QStringLiteral("headers")).toObject());
+        }
+        if (!p.url.isEmpty()) out.pages.push_back(p);
+    }
+    return out;
+}
+
+namespace
+{
+    // The leading digit run of `s` from `i`, as a (value, length) pair. Values are compared as text with
+    // leading zeros stripped — longer means bigger — so a chapter number longer than any integer type does
+    // not wrap. Nothing publishes one, but a source is untrusted input and "9999999999999999999" costing an
+    // ordering is not a trade worth making for a std::stoll.
+    QString digitRun(const QString& s, int& i)
+    {
+        const int start = i;
+        while (i < s.size() && s.at(i).isDigit()) ++i;
+        QString run = s.mid(start, i - start);
+        int z = 0;
+        while (z + 1 < run.size() && run.at(z) == QLatin1Char('0')) ++z;
+        return run.mid(z);
+    }
+}
+
+bool AddonChapters::numberLess(const QString& a, const QString& b)
+{
+    // No number sorts LAST, and two no-numbers are equal (so a stable sort keeps source order between them).
+    if (a.isEmpty() || b.isEmpty()) return !a.isEmpty() && b.isEmpty();
+    int i = 0, j = 0;
+    while (i < a.size() && j < b.size())
+    {
+        const bool da = a.at(i).isDigit(), db = b.at(j).isDigit();
+        if (da && db)
+        {
+            const QString ra = digitRun(a, i), rb = digitRun(b, j);
+            if (ra.size() != rb.size()) return ra.size() < rb.size();
+            const int c = QString::compare(ra, rb);
+            if (c != 0) return c < 0;
+            continue;
+        }
+        // A digit sorts before a letter, so "12" precedes "12a" precedes "Extra".
+        if (da != db) return da;
+        const int c = QString::compare(a.at(i), b.at(j), Qt::CaseInsensitive);
+        if (c != 0) return c < 0;
+        ++i; ++j;
+    }
+    return (a.size() - i) < (b.size() - j);
+}
+
+void AddonChapters::sortNaturally(QVector<AddonChapter>& chapters)
+{
+    std::stable_sort(chapters.begin(), chapters.end(),
+                     [](const AddonChapter& x, const AddonChapter& y) { return numberLess(x.number, y.number); });
 }
 
 static MediaItem itemFromJson(const QJsonObject& o)

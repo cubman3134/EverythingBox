@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.171 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -316,6 +316,7 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
     add_subdirectory(third_party/lzma)     # read-only .7z decoder (LZMA SDK) for archived ROMs, all platforms
+    add_subdirectory(third_party/unarr)    # #144: extraction-only RAR decoder (unarr 1.1.1, LGPLv3) for .cbr
 
     # ---------------------------------------------------------------------------
     # librashader (issue #99, SLICE 2): the slang-shader runtime, BUILT FROM RUST SOURCE.
@@ -475,8 +476,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
         src/ebook/EbookSource.h
+        src/ebook/EbookFormats.h  # #144: the ONE list of what the book reader opens (header-only)
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
         src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        # #144: the PalmDB/MOBI/EXTH/KF8 container walk, split out of MobiBook for the reason EpubMeta was
+        # split out of EpubBook - the library scan wants a title and a cover without decompressing a novel,
+        # and two walks over one grammar is how a shelf comes to disagree with the book it opens. Also where
+        # a DRM-protected file is refused BY NAME rather than decoded.
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        # #144: FictionBook 2. Fb2Meta is the <description> walk (reader + scan), Fb2Book maps the bodies
+        # onto EbookSource's chapter model - one renderer, a second format mapped onto it.
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/Fb2Book.cpp     src/ebook/Fb2Book.h
+        # #144: plain text and Markdown through the same chapter model. MarkdownHtml is header-only and
+        # pure so the whole Markdown pass is unit-testable with no file and no widget.
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h    src/ebook/MarkdownHtml.h
         src/ebook/PdfTextBook.cpp src/ebook/PdfTextBook.h
         # #134: the ONE reading of container.xml and of the OPF's <metadata>. EpubBook calls it for the
         # title/author it always read, and the library scan calls it for those plus the series and the
@@ -487,6 +501,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
+        src/comic/RarComic.cpp    src/comic/RarComic.h        # #144 CBR, via the vendored unarr RAR decoder
         # #134: what a comic's FILENAME is allowed to mean. Pure, no filesystem, its own TU so the whole
         # rule can be probed and mutated without a widget anywhere near it.
         src/comic/ComicName.cpp   src/comic/ComicName.h
@@ -596,6 +611,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
+        src/core/LastFmClient.cpp       src/core/LastFmClient.h        # ...and its second (#192 inc 2):
+                                                                       # signed calls + the #81 app key
+        src/core/BuiltinSecretBlob.h     # the ONE runtime de-obfuscator, shared with the addon creds
         # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
         # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
         src/core/Presence.cpp src/core/Presence.h
@@ -608,6 +626,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # JELLYFIN, N SERVERS MERGED INTO ONE LIBRARY (#160). Jellyfin.h/.cpp is the pure half (the
+        # server-qualified item id, the auth handshake, the payload readers and the union across
+        # servers) and is what probe_jellyfin drives; JellyfinMigrate is the repeatable, idempotent
+        # repair that moves rows written in the old single-server shape onto qualified ids, and lands
+        # before any of the UI for the reason the issue gives: a bare id cannot be attributed to a
+        # server after a second one exists. The store is device-local (tokens; CloudSync carves out
+        # "jellyfin/"), and the client is the only half that opens a socket.
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
         # AUDIOBOOKSHELF CLIENT (#197 increment 1): an Audiobookshelf server as a supplier of the audiobook
         # shapes #139's local library uses, plus its podcasts. Audiobookshelf.h/.cpp is the pure half (the
         # id scheme, the URL rules, the payload readers, the chapter arithmetic, the reporting throttle) and
@@ -657,6 +686,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
+        src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
+        src/core/PlayOnHost.cpp   src/core/PlayOnHost.h    # device-local pairing tokens, both directions (#143)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -678,6 +710,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
+        src/core/HomeRows.cpp     src/core/HomeRows.h  # per-profile custom home rows: the list + the pure planner (#161)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # per-game core/emulator/args override (issue #51)
         src/core/LaunchHooks.h                                          # pure argv tokenizer + {rom} subst (issue #64, header-only)
@@ -744,6 +777,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
@@ -799,7 +833,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_compile_options(everythingbox PRIVATE /bigobj)
     endif()
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
-    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z tag Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
+    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z unarr tag Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
@@ -854,6 +888,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # bound to. probe_ports reads the same resource, so a build where this line is wrong fails the suite too.
     qt_add_resources(EB_PORTS_RCC resources/ports.qrc)
     target_sources(everythingbox PRIVATE ${EB_PORTS_RCC})
+    # #190: the shipped per-system LAUNCH RECIPES (native/systems/recipes/*.json). Same wiring, same reason
+    # as the port catalog above: through qt_add_resources, never the source list. A recipe that is not
+    # embedded reads exactly like a system nobody has written one for, so the failure is invisible - which is
+    # why probe_recipes byte-compares the embedded copy against the file in the source tree.
+    qt_add_resources(EB_RECIPES_RCC resources/recipes.qrc)
+    target_sources(everythingbox PRIVATE ${EB_RECIPES_RCC})
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
@@ -927,7 +967,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_epub PRIVATE Qt6::Core)
 
     # Console harness for the MOBI parser (Qt Core only).
-    add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp)
+    add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp src/ebook/MobiHeader.cpp)
     target_include_directories(probe_mobi PRIVATE src src/ebook)
     target_link_libraries(probe_mobi PRIVATE Qt6::Core)
 
@@ -999,6 +1039,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/ComicPageOrder.h src/comic/Tar.h        # header-only (page collation, the .cbt reader)
+        src/comic/RarComic.cpp    src/comic/RarComic.h    # ComicView's .cbr branch (#144, vendored unarr)
         src/core/SevenZip.cpp     src/core/SevenZip.h     # ComicView's .cb7 branch
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h # ComicView's photo mode (issue #102)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
@@ -1013,7 +1054,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2 third_party)
     target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
-        lzma7z)
+        lzma7z unarr)
 
     # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
     # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
@@ -1048,6 +1089,34 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/NaturalOrder.h)  # header-only units under test (NaturalOrder: the #205 C-locale block)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
+
+    # #144: the .cbr reader (src/comic/RarComic) over the vendored unarr RAR decoder. QtCore-only — the
+    # RAR layer is a pure function over a path, exactly as the CBT one is, and the widget that shows the
+    # pages is probe_readerbookmarks' business. The probe writes its OWN RAR 4 archives byte by byte, so
+    # unarr is under test here rather than merely linked.
+    add_executable(probe_cbr tools/probe_cbr.cpp
+        src/comic/RarComic.cpp src/comic/RarComic.h
+        src/comic/ComicPageOrder.h src/core/NaturalOrder.h   # the shared page collation (#205)
+        tools/BookFixtures.h)                                # the byte placers (no src/ dependency)
+    target_include_directories(probe_cbr PRIVATE src src/comic src/core tools)
+    target_link_libraries(probe_cbr PRIVATE Qt6::Core unarr)
+
+    # #144: the three BOOK formats — FictionBook 2, the Kindle container (MOBI6 + KF8/AZW3 + the DRM
+    # refusal) and plain text / Markdown — plus the one list that routes them. QtCore-only: every unit here
+    # is a parser over bytes or a staging step onto disk, and EbookView (which is the widget) is not linked.
+    # miniz is for the zipped .fb2.zip wire form, and MINIZ_NO_ZLIB_COMPATIBLE_NAMES matches the app build.
+    add_executable(probe_ebookformats tools/probe_ebookformats.cpp
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/Fb2Book.cpp     src/ebook/Fb2Book.h
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h
+        src/ebook/MarkdownHtml.h  src/ebook/EbookFormats.h  # header-only units under test
+        tools/BookFixtures.h                                # the byte placers (no src/ dependency)
+        third_party/miniz.c)
+    target_include_directories(probe_ebookformats PRIVATE src src/ebook third_party tools)
+    target_compile_definitions(probe_ebookformats PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_ebookformats PRIVATE Qt6::Core)
 
     # Chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter title, the newest-first
     # reversal that turns a provider's display order into reading order, and the natural filename order behind a
@@ -1251,6 +1320,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp      src/core/ProfileStore.h)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
+
+    # Custom home rows (issue #161): the pure planner that orders/hides/caps the home's rows, the
+    # per-profile row list behind it and the two-device merge of that list (src/core/HomeRows). QtCore-only
+    # — plain vectors in, a render plan out, and a QSettings wrapper — so the probe links lean and runs
+    # under offscreen QPA. Needs ProfileStore.cpp (the list is namespaced by the active profile id).
+    add_executable(probe_homerows tools/probe_homerows.cpp
+        src/core/HomeRows.cpp     src/core/HomeRows.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_homerows PRIVATE src src/core)
+    target_link_libraries(probe_homerows PRIVATE Qt6::Core)
 
     # Hardware-decode Setting (issue #67): the pure choice->mpv-option map (src/video/HwDecode.h, header-only)
     # plus the Settings default. QtCore-only; Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves
@@ -1471,13 +1550,29 @@ if(EVERYTHINGBOX_BUILD_APP)
     # .qrc reaching a target any other way is silently not embedded, and the only symptom of that here is a
     # verb that never appears. The probe reads the catalog out of the SAME resource the app does, so this
     # wiring is asserted rather than assumed. Header-only + QtCore.
+    # It also drives src/core/RecompRows.h (issue #248): the Recomps section's row list and its install-state
+    # derivation, which is pure precisely so this QtCore-only target can stage states a live app cannot.
     qt_add_resources(EB_PORTS_RCC_PROBE resources/ports.qrc)
     add_executable(probe_ports tools/probe_ports.cpp src/core/NativePorts.h src/core/EmulatorRegistry.h
+        src/core/RecompRows.h
         ${EB_PORTS_RCC_PROBE})
     target_include_directories(probe_ports PRIVATE src src/core)
     target_link_libraries(probe_ports PRIVATE Qt6::Core)
     target_compile_definitions(probe_ports PRIVATE
         EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
+
+    # Launch recipes (src/core/LaunchRecipe.h, issue #190): the per-system launch knowledge - core options to
+    # seed, firmware to name when it is missing, how content reaches the core, and the MS-DOS executable
+    # autodetect - carried as data instead of as folklore. Compiles resources/recipes.qrc IN through
+    # qt_add_resources so the probe reads the recipes out of the SAME resource the app does, and compares each
+    # one byte for byte with native/systems/recipes via EB_RECIPES_SOURCE_DIR. Header-only + QtCore.
+    qt_add_resources(EB_RECIPES_RCC_PROBE resources/recipes.qrc)
+    add_executable(probe_recipes tools/probe_recipes.cpp src/core/LaunchRecipe.h src/core/SystemCatalog.h
+        ${EB_RECIPES_RCC_PROBE})
+    target_include_directories(probe_recipes PRIVATE src src/core)
+    target_link_libraries(probe_recipes PRIVATE Qt6::Core)
+    target_compile_definitions(probe_recipes PRIVATE
+        EB_RECIPES_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/systems/recipes")
 
     # PS3 game auto-update pure-logic units (src/core/ps3): the PARAM.SFO Title-ID parser and the rest of the
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,
@@ -1640,6 +1735,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
         src/core/GameFilter.cpp      src/core/GameFilter.h
+        # issue #161: the home row list rides the merge document, and CloudMerge folds it with
+        # homerows::merge. QtCore-only (a QSettings wrapper + pure JSON), so it costs one TU.
+        src/core/HomeRows.cpp        src/core/HomeRows.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)
@@ -1743,13 +1841,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h
         src/core/Scrobbler.cpp     src/core/Scrobbler.h
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h
+        src/core/LastFmClient.cpp  src/core/LastFmClient.h    # the second provider (#192 increment 2)
         src/core/ProfileStore.cpp  src/core/ProfileStore.h    # the queue is namespaced by the active profile
         src/core/Settings.cpp      src/core/Settings.h
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h
         src/core/TraktRead.cpp     src/core/TraktRead.h
         src/core/TraktSync.cpp     src/core/TraktSync.h
         src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
-    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
+    # tools/fixtures/lastfm holds a FIXTURE BuiltinSecrets.h, and it is deliberately the ONLY place this
+    # target looks for that header - ${EB_SECRETS_GEN_DIR} is NOT on the list. The generated one is built from
+    # the git-ignored native/secrets/lastfm.secrets, which is absent in every clone and on CI, so a probe
+    # compiled against it would have empty Last.fm slots and could assert nothing but "not available in this
+    # build". The fixture's arrays carry an obviously-fake key + secret through the REAL de-obfuscation, which
+    # is the one part of the mechanism no compiler can check (it mirrors GenerateSecrets.cmake, in CMake, in
+    # another file). See the header for the whole argument.
+    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2 tools/fixtures/lastfm)
     target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:
@@ -1781,7 +1887,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
@@ -1839,6 +1947,31 @@ if(EVERYTHINGBOX_BUILD_APP)
     # here because this probe WRITES records - a run against the app's real ini would move a user's data.
     target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
+
+    # Headless test for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1): the
+    # server-qualified item id and everything it must refuse, the transport verdicts, the auth header and
+    # the two "both halves or neither" payload readers, the union across servers with a timed-out /
+    # disabled / failed leg contributing nothing, the connected-server store (per-server enable, remove,
+    # and a token that lives under "jellyfin/" and nowhere else) - and the MIGRATION itself against a
+    # redirected ini: every store, then the same run again, and again.
+    #
+    # Jellyfin.cpp, JellyfinMigrate.cpp and JellyfinServerStore.cpp are QtCore-only (AppPaths/AppBrand are
+    # header-only; ProfileStore.cpp is the one dependency, for the per-profile namespacing), so this links
+    # against Qt6::Core alone and is fast enough to mutate in a loop. NO NETWORK: JellyfinClient is
+    # deliberately absent, and its socket half is driven live against fixture servers instead.
+    add_executable(probe_jellyfin tools/probe_jellyfin.cpp
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+    target_include_directories(probe_jellyfin PRIVATE src src/core tools)
+    # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
+    # setters are not compiled at all, so a production call is a compile error rather than a silent
+    # process-wide redirect. Load-bearing twice over here - this probe WRITES records, and the server
+    # store it drives holds TOKENS, so a run against the app's real ini would both move a user's data and
+    # write a fixture credential into their settings file.
+    target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
+    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
@@ -1996,7 +2129,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_pdftext PRIVATE Qt6::Gui Qt6::Pdf)
 
     # Renders a few paginated pages to PNG to verify the reader paginates by line (no cut text).
-    add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp)
+    add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp src/ebook/MobiHeader.cpp)
     target_include_directories(probe_pageview PRIVATE src src/ebook)
     target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
 
@@ -2062,7 +2195,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
         src/core/MetaCache.h src/core/MetaOverrides.h
         src/core/ScrapedSnapshot.h   # the metadata editor's keyed baseline (header-only, pure)
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
 
@@ -2071,7 +2206,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # window/player, so it runs as a plain no-argument probe.
     add_executable(probe_attract tools/probe_attract.cpp
         src/core/AttractController.cpp src/core/AttractController.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_attract PRIVATE src src/core src/addons)
     target_link_libraries(probe_attract PRIVATE Qt6::Core)
 
@@ -2080,13 +2217,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     # is enough (raster paint needs no platform plugin), so this runs as a plain no-argument probe.
     add_executable(probe_miximage tools/probe_miximage.cpp
         src/core/Miximage.cpp src/core/Miximage.h
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_miximage PRIVATE src src/core src/addons)
     target_link_libraries(probe_miximage PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # EmulationStation / RetroBat gamelist.xml reader (parse + ES-role mapping + local media resolve).
     add_executable(probe_gamelist tools/probe_gamelist.cpp
-        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp)
+        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_gamelist PRIVATE src src/core src/addons)
     target_link_libraries(probe_gamelist PRIVATE Qt6::Core Qt6::Network)
 
@@ -2109,6 +2250,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2134,6 +2277,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_iptv PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_iptv PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2179,6 +2324,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp src/core/TraktSync.h                  # SyntheticCatalogs -> TraktListEntry
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h            # SyntheticCatalogs -> displayTitle / tileId
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/Settings.cpp src/core/Settings.h                    # LocalLibrary::root() -> libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h            # Settings.cpp -> FormFactor::instance()
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)           # SyntheticCatalogs -> groupByFolder (#102)
@@ -2194,6 +2341,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/TraktSync.cpp src/core/TraktSync.h   # SyntheticCatalogs -> traktListCatalog's TraktListEntry (#23)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)      # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
@@ -2270,7 +2419,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/media/LyricSources.h   src/media/LrcLyrics.h
         src/media/AudioTags.cpp    src/media/AudioTags.h
         src/core/MetaCache.cpp     src/core/MetaOverrides.cpp
-        src/addons/AddonModels.cpp src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h)
     target_include_directories(probe_lyricsources PRIVATE src src/core src/media src/addons)
     target_link_libraries(probe_lyricsources PRIVATE Qt6::Core Qt6::Network tag)
 
@@ -2320,7 +2471,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_musicbrowse PRIVATE src src/core src/media src/browse src/addons src/theme2)
@@ -2344,7 +2497,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/video/Crossfade.h)
@@ -2367,7 +2522,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h    # the OTHER reading of the same file
         src/media/AudioTags.cpp   src/media/AudioTags.h
         src/media/CueSheet.cpp    src/media/CueSheet.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
@@ -2422,16 +2579,24 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BookLibrary.cpp  src/core/BookLibrary.h
         src/core/BookMeta.cpp     src/core/BookMeta.h
         src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
+        # #144: the four container readers BookMeta grew - FB2's <description>, the MOBI/AZW3 header walk,
+        # the .txt/.md encoding ladder + Markdown headings, and the RAR page listing (via unarr).
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h    src/ebook/MarkdownHtml.h
+        src/comic/RarComic.cpp    src/comic/RarComic.h
         src/comic/ComicName.cpp   src/comic/ComicName.h
         src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
-        src/addons/AddonModels.cpp src/addons/AddonModels.h
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         third_party/miniz.c)
     target_include_directories(probe_books PRIVATE src src/core src/ebook src/comic src/browse src/addons
         src/theme2 third_party tools)
     target_compile_definitions(probe_books PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf)
+    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf unarr)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
@@ -2548,6 +2713,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_remoteapi PRIVATE src src/core)
     target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
 
+    # Headless test for "Play on device" (#143): the mDNS advertisement's records and query bytes, the picker
+    # merge over three target kinds (and the rule that an instance never lists itself), the hand-off payload
+    # and decideOpen's whole table including the 409 an unresolvable reference gets, pairing (code -> token,
+    # attempt budget, one-shot burn) and the credential rule, remote-mode state mapping, and "Continue on this
+    # device" re-deriving byte-for-byte the hand-off the peer would have sent. Links RemoteApi.cpp too because
+    # #143 extends that same pure surface with /open + /pair and the /state item reference; both units are
+    # QtCore-only, so this needs no socket, no player and no window.
+    add_executable(probe_playon tools/probe_playon.cpp
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp    src/core/RemoteApi.h)
+    target_include_directories(probe_playon PRIVATE src src/core)
+    target_link_libraries(probe_playon PRIVATE Qt6::Core)
+
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
     add_executable(probe_resolver tools/probe_resolver.cpp
@@ -2558,7 +2736,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaOverrides.cpp src/core/MetaOverrides.h          # #73: override>.nfo>scraped composition (QtCore-only)
         src/core/Settings.cpp src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/addons/AddonModels.cpp)
+        src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_resolver PRIVATE src src/core src/addons src/theme2)
     target_link_libraries(probe_resolver PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -2601,6 +2781,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
         src/core/Tombstones.cpp src/core/Tombstones.h   # RecentStore::remove/clear date the removal (#150)
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -2916,7 +3098,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # On-demand game manual (issue #89): the "manual" art role merges by precedence but is EXCLUDED from
     # saveArt's eager prefetch — fetched only on explicit open. Merge/exclusion/fetch, over a loopback server.
     add_executable(probe_manual tools/probe_manual.cpp
-        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+       )
     target_include_directories(probe_manual PRIVATE src src/core src/addons)
     target_link_libraries(probe_manual PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -2956,6 +3140,23 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_docbridge PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_docbridge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_docbridge PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
+    # Issue #188: the SERIAL protocol resources (chapters/pages) over a real AddonManager. Two loopback
+    # providers differing only in whether their manifest declares the resources, plus two Duktape fixtures,
+    # so the never-ask rule is asserted on the SERVER'S request log rather than on a return value. Same
+    # addon/JS/miniz set as probe_addon minus the resolver/library sources it does not stand up.
+    add_executable(probe_chapters tools/probe_chapters.cpp
+        src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
+        src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
+        src/core/StreamHeaders.cpp        # ...and a page's `headers` go through the same hygiene rules
+        src/core/SubtitleHash.cpp src/core/SubtitleHash.h  # AddonManager builds the /subtitles videoHash extra (#79)
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_chapters PRIVATE src src/addons src/core third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
+    target_compile_definitions(probe_chapters PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_chapters PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
     endif() # NOT ANDROID (console probes)
 

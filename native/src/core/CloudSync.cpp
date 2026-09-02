@@ -9,6 +9,7 @@
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
 #include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
 #include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
+#include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
 
 #include <QSet>
 #include <QSettings>
@@ -258,6 +259,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     //     two queues would submit the same listens twice — which is the double-count this feature is otherwise
     //     careful to avoid.
     if (Scrobble::isDeviceLocalKey(key)) return true;
+    // "Play on device" (#143): the per-peer PAIRING TOKENS, matched through the pure layer's own predicate so
+    // the carve-out cannot drift from the writer. A token is a credential minted BY another device FOR this
+    // one -- it authorises /open on that peer, and it is meaningless anywhere else. Riding the synced bundle
+    // it would be a credential in a zip in somebody's Drive folder (the reason the ListenBrainz token above
+    // is carved out) AND it would hand every other install on the account the right to start playback on a
+    // device it never paired with. Device-local in both directions, with no syncing sibling under the prefix.
+    if (PlayOn::isDeviceLocalKey(key)) return true;
     // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
     // must not start broadcasting because presence was switched on for a laptop on the same account.
     if (key.startsWith(QLatin1String("discord/"))) return true;
@@ -301,6 +309,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
         // SubsonicServerStore keys everything under this prefix.
         || key.startsWith(QStringLiteral("subsonic/"))
+        // jellyfin/* (issue #160): the connected Jellyfin servers. Same family as the three above, and the
+        // credential is the strongest of the four — a Jellyfin ACCESS TOKEN is a bearer credential for a
+        // whole account, usable from anywhere until it is revoked, and it sits beside a url that is often a
+        // private LAN address meaningless on another machine anyway. Left in the heavy settings bundle it
+        // would put that token in a zip in a third party's Drive folder. Device-local, and
+        // JellyfinServerStore keys everything (server list, tokens, per-server enable) under this prefix.
+        // probe_cloudmerge pins the carve-out.
+        || key.startsWith(QStringLiteral("jellyfin/"))
         // audiobookshelf/* (issue #197): saved Audiobookshelf servers. Same shape and the same hazard as the
         // three above, with the credential in its most concentrated form — the stored value is an API TOKEN,
         // which is a standing grant against that server rather than something a login screen still stands

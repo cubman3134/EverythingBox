@@ -30,6 +30,10 @@ namespace RemoteApi
         QString path;                  // percent-decoded path, no query ("/player")
         QMap<QString, QString> query;  // percent-decoded key -> value from the target's query string
         QByteArray body;               // exactly Content-Length bytes when declared and present
+        // The bearer credential a PAIRED peer presents (issue #143), read off `Authorization: Bearer <t>` or
+        // `X-EB-Token: <t>`. A CREDENTIAL: it is compared and then dropped -- never logged, never echoed into
+        // a response body, never written to a transcript.
+        QString token;
     };
 
     // Split a raw request into method / path / query / body, honouring Content-Length (a body shorter than
@@ -37,7 +41,11 @@ namespace RemoteApi
     // failure to find a two-token request line returns an invalid Request.
     Request parseRequest(const QByteArray& rawHttp);
 
-    enum class CommandKind { State, Player, Input, NotFound, BadRequest };
+    // State/Player/Input are #76's original three. Open/PairBegin/PairRedeem are #143's hand-off surface:
+    // /open takes an item REFERENCE plus a position (never bytes) and /pair is how a source obtains the token
+    // /open then requires. The BODY of an /open is left in Request::body and decoded by PlayOn::parseHandoff,
+    // so this unit stays free of the hand-off vocabulary and the routing table can be tested apart from it.
+    enum class CommandKind { State, Player, Input, Open, PairBegin, PairRedeem, NotFound, BadRequest };
 
     // The /player verbs. PlayPause is the toggle a single remote button wants; Play/Pause force a state.
     enum class PlayerAction
@@ -57,6 +65,7 @@ namespace RemoteApi
         bool    seekRelative = false;
         double  seekSeconds  = 0.0;
         int     volume       = -1;    // 0..100 on a Volume command; -1 otherwise
+        QString pairCode;             // the code entered on a PairRedeem; empty on every other kind
         QString error;                // human-readable reason on a BadRequest (never shown as HTML)
     };
 
@@ -76,6 +85,18 @@ namespace RemoteApi
         double  durationSec = 0.0;
         int     volume   = 0;          // 0..100 UI level
         QString screen;                // "home" | "player" | "browse" | ... the current app screen
+        // What is playing, as a REFERENCE (issue #143) -- the same vocabulary /open accepts, so a peer's
+        // /state can be read straight back into the open this device should perform ("Continue on this
+        // device"). An empty kind/id means "playing something it cannot name", which is a refusal, not a
+        // guess: opening by title would open the wrong thing.
+        QString refKind;               // "catalog" | "addon" | "server" | "local"
+        QString refId;
+        QString refType;               // "movie" | "episode" | "music" | ...
+        QString refTitle;
+        QString refSource;             // addon / server key when the kind needs one
+        QString audioTrack;            // selected track ids, opaque strings ("" = the source's default)
+        QString subtitleTrack;
+        bool    volumeControllable = false;   // does this device own a volume a remote may move
     };
 
     // Serialize a state view to the compact /state JSON body.

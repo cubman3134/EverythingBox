@@ -240,6 +240,21 @@ public:
 
     double takeResumeSeek(); // returns the pending resume target once, then 0 (consumed by onDuration)
 
+    // START THIS ENTRY SOMEWHERE THE STORE DID NOT CHOOSE (issue #139 increment 2): the audiobook chapter
+    // list, which is the one caller that knows a position the resume marks do not hold — a chapter's start
+    // inside its file. Called right after setQueue and before mpv has loaded anything, so it replaces the
+    // target beginResume just queued rather than racing it; onDuration consumes it exactly as it would the
+    // stored one, including its "essentially the end, so start fresh" guard.
+    //
+    // ZERO IS A REAL ANSWER HERE and it is why this is a setter rather than an argument on setQueue: jumping
+    // to PART THREE of a multi-file book means "the top of part three", and the position that part may still
+    // carry from a previous listen is exactly what the listener is asking not to be sent to.
+    //
+    // The stats cursor moves with it. beginResume seeded lastAccruedPos_ from the STORED position, and
+    // leaving that behind while the file starts somewhere else would accrue the difference as listening that
+    // never happened (or, jumping backwards, silently discard real seconds).
+    void overrideResumeSeek(double seconds);
+
     int currentIndex() const { return trackIndex_; }
     int count() const { return tracks_.size(); }
     QString trackAt(int i) const { return tracks_.value(i); }
