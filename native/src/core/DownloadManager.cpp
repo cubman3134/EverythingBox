@@ -2,6 +2,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "NetHeaderApply.h"
+#include "LogSafeText.h"       // issue #231: the ONE definition of a url as it may be LOGGED
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -31,15 +32,9 @@ static void dlLog(const QString& msg)
 
 // A log-safe rendering of a URL: scheme://host[:port]/…/<filename>. Drops the path's middle segments (which
 // can carry an addon access token) and the query string (which can carry debrid keys), so logs never leak secrets.
-static QString logSafeUrl(const QString& url)
-{
-    const QUrl u(url);
-    if (u.scheme().isEmpty()) return QFileInfo(url).fileName(); // a local path
-    const QString file = QFileInfo(u.path()).fileName();
-    return u.scheme() + QStringLiteral("://") + u.host()
-         + (u.port() > 0 ? QStringLiteral(":") + QString::number(u.port()) : QString())
-         + QStringLiteral("/…/") + file;
-}
+// THE RULE ITSELF now lives in core/LogSafeText.h — it was written out identically here, in MainWindow.cpp,
+// DownloadManager.cpp and StreamResolver.cpp, and #231 needed a fourth caller. Same rendering, one definition.
+static QString logSafeUrl(const QString& url) { return LogSafeText::url(url); }
 
 // The complete length out of a Content-Range field — "bytes 0-99/1234", or "bytes */1234" as a 416 states the
 // resource's size — or -1 when the field is absent or the length is unknown ("*"). RFC 7233 §4.2.

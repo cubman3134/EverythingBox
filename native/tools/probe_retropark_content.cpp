@@ -36,6 +36,7 @@
 #include "loader/Manifest.h"
 #include "RetroParkState.h"   // pure rpstate::retroParkStatePath — the state-path non-collision proof (Task 4)
 #include "RetroParkPace.h"    // pure rppace::nextFrameIntervalMs — the fractional-frame pacing proof (review fix)
+#include "RetroParkShimDir.h" // pure rpshim::mirrorIsStale -- the shim-copy freshness proof
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -72,6 +73,76 @@ std::string to_utf8(const std::wstring& w) {
 }
 
 } // namespace
+
+// (3) SHIM-COPY FRESHNESS — always runs, no device, no DLL, no ROM.
+//
+// RetroParkView mirrors the staged LibretroShim.dll into a per-system sibling directory (N64 ->
+// libretro_shim_n64). Those directories are created once and then outlive every later upgrade, so the
+// mirror has to be refreshed by CONTENT. This pins the exact case that made a real fix invisible: the shim
+// before and after a GL fix are the SAME SIZE (98816 bytes) and differ only in their bytes, so both "copy
+// only if absent" and a size comparison call the stale copy current and the app keeps loading the old DLL.
+// Qt-free, like the helper it exercises — this probe is also built by the retropark-windows CI job, which
+// configures with the app gate off and has no Qt.
+static bool put_file(const std::wstring& path, const std::string& bytes) {
+    std::ofstream f(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(bytes.data(), (std::streamsize)bytes.size());
+    return (bool)f;
+}
+
+static bool probeShimMirrorFreshness() {
+    wchar_t tempRoot[MAX_PATH + 1] = {};
+    if (GetTempPathW(MAX_PATH, tempRoot) == 0) {
+        std::printf("PROBE probe_retropark_content FAILED: GetTempPathW\n");
+        return false;
+    }
+    // Unique per run so two probes in the same suite cannot collide on these names.
+    wchar_t dirBuf[MAX_PATH * 2] = {};
+    swprintf(dirBuf, MAX_PATH * 2, L"%seb_shimfresh_%lu", tempRoot, (unsigned long)GetCurrentProcessId());
+    const std::wstring dir = dirBuf;
+    if (!CreateDirectoryW(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        std::printf("PROBE probe_retropark_content FAILED: could not create %ls\n", dir.c_str());
+        return false;
+    }
+
+    const std::wstring src     = dir + L"\\src.bin";
+    const std::wstring same    = dir + L"\\same.bin";
+    const std::wstring diff    = dir + L"\\diff_same_size.bin";
+    const std::wstring shorter = dir + L"\\shorter.bin";
+    const std::wstring missing = dir + L"\\never-written.bin";
+
+    const std::string a(4096, 'A');
+    std::string b = a; b[2048] = 'B';          // SAME LENGTH, one byte different — the real-world case
+    if (!put_file(src, a) || !put_file(same, a) || !put_file(diff, b) || !put_file(shorter, a.substr(0, 4095))) {
+        std::printf("PROBE probe_retropark_content FAILED: could not write shim-mirror fixtures\n");
+        return false;
+    }
+
+    struct Case { const char* what; const std::wstring* dst; bool wantStale; };
+    const Case cases[] = {
+        { "an identical copy is fresh",           &same,    false },
+        { "same size, different bytes is STALE",  &diff,    true  },
+        { "a different size is stale",            &shorter, true  },
+        { "an absent mirror is stale",            &missing, true  },
+    };
+    bool ok = true;
+    for (const Case& c : cases) {
+        const bool got = rpshim::mirrorIsStale(src, *c.dst);
+        if (got != c.wantStale) {
+            std::printf("PROBE probe_retropark_content FAILED: shim mirror — %s: mirrorIsStale=%d want %d\n",
+                        c.what, (int)got, (int)c.wantStale);
+            ok = false;
+        }
+    }
+
+    for (const std::wstring* p : { &src, &same, &diff, &shorter }) DeleteFileW(p->c_str());
+    RemoveDirectoryW(dir.c_str());   // leave no fixtures behind (the suite checks for stray files)
+
+    if (ok)
+        std::printf("probe_retropark_content: shim-copy freshness OK (content-compared; a same-size, "
+                    "different-byte copy is correctly seen as stale)\n");
+    return ok;
+}
 
 int main() {
     int rc = 0;
@@ -222,6 +293,10 @@ int main() {
         }
     }
     if (rc != 0) return rc;
+
+    // (3) is device-independent, so it runs BEFORE the best-effort runtime section: that section has
+    // three exits (DEFERRED / SKIPPED / OK) and a check placed after them would silently not run.
+    if (!probeShimMirrorFreshness()) return 1;
 
     // ---- (2) RUNTIME LOAD (best-effort) ------------------------------------------------------------------
     const std::wstring shimDirW = exe_dir() + L"\\cores\\libretro_shim";

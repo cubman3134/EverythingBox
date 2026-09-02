@@ -1,6 +1,9 @@
 #include "MpvWidget.h"
 #include "MpvHeaderApply.h"
 #include "HwDecode.h"
+#include "MpvLogThrottle.h"        // #231: the burst counter mpv's own log is written through
+#include "MpvLogLevel.h"           // #231: what is asked of libmpv, and which of it is worth keeping
+#include "../core/LogSafeText.h"   // #231: StoredUrl's rule applied to whatever mpv put in a message
 #include "RefreshSync.h"
 #include "AudioOutput.h"
 #include "HdrOutput.h"
@@ -33,6 +36,18 @@ static void videoLog(const QString& msg)
     QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
     if (f.open(QIODevice::Append | QIODevice::Text))
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
+}
+
+// What mpv is asked to report, and which of it is written down (issue #231). The rule, the measurement
+// behind it and why "warn" is the wrong answer are all in MpvLogLevel.h; these two are only the environment
+// reads, kept here so the header stays pure and testable.
+static QByteArray mpvLogLevel() { return MpvLogLevel::requested(qgetenv("EB_MPV_LOG")); }
+
+// "Show me everything at the level I asked for": the tree's existing diagnostics switch, or an explicit
+// EB_MPV_LOG, which is nobody's accident.
+static bool mpvVerboseWanted()
+{
+    return qEnvironmentVariableIntValue("EB_PERF") == 1 || !qgetenv("EB_MPV_LOG").trimmed().isEmpty();
 }
 
 MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
@@ -124,6 +139,34 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
     // set a polling host misses.
     mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG);
 
+    // #231: ASK MPV WHAT IT THINKS. Everything above this line tells mpv what to do; nothing until now ever
+    // listened to what it said back, so a truncated bitstream, a reconnect, a refused range request and a
+    // dead link all reached the log as the same silence. Delivered as MPV_EVENT_LOG_MESSAGE on the queue the
+    // wakeup below already drains — see handleLogMessage for the scrub and the burst counter.
+    {
+        const QByteArray lvl = mpvLogLevel();
+        const int rc = mpv_request_log_messages(mpv, lvl.constData());
+        videoLog(QStringLiteral("mpv: log capture level='") + QString::fromUtf8(lvl)
+                 + QStringLiteral("' filter=") + (mpvVerboseWanted() ? QStringLiteral("all")
+                                                                     : QStringLiteral("warn+ffmpeg"))
+                 + (rc < 0 ? QStringLiteral(" — REFUSED (") + QString::fromUtf8(mpv_error_string(rc))
+                                 + QStringLiteral("), falling back to 'v'")
+                           : QString()));
+        if (rc < 0) mpv_request_log_messages(mpv, "v");   // a mistyped EB_MPV_LOG must not silence the capture
+    }
+    // The summary half of the burst counter needs a clock the messages themselves do not provide: a stream
+    // that emits 1,400 concealment warnings and then goes quiet would otherwise hold its own "and 1,396 more"
+    // line until the next message, which may be never. Started only while something is actually being
+    // counted, and stopped again the moment nothing is — an idle player pays for no timer at all.
+    logFlushTimer_ = new QTimer(this);
+    logFlushTimer_->setInterval(2000);
+    connect(logFlushTimer_, &QTimer::timeout, this, [this] {
+        for (const QString& line : logThrottle_.flush(logClock_.elapsed()))
+            videoLog(QStringLiteral("mpvlog ") + line);
+        if (!logThrottle_.pending()) logFlushTimer_->stop();
+    });
+    logClock_.start();
+
     mpv_set_wakeup_callback(mpv, onMpvWakeup, this);
 
 #ifdef Q_OS_IOS
@@ -164,6 +207,10 @@ MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
 
 MpvWidget::~MpvWidget()
 {
+    // #231: the last outstanding counts, before the player that was accumulating them goes away. Closing the
+    // app during a broken stream is exactly when the summary matters and is the one exit that has no EOF.
+    for (const QString& line : logThrottle_.drain(logClock_.elapsed()))
+        videoLog(QStringLiteral("mpvlog ") + line);
 #ifndef Q_OS_IOS
     makeCurrent();
 #endif
@@ -311,8 +358,53 @@ void MpvWidget::onMpvEvents()
     }
 }
 
+// One MPV_EVENT_LOG_MESSAGE, scrubbed, counted, and written (issue #231).
+//
+// Handled BEFORE the inactive-deck gate below, and on purpose. That gate exists because letting a second
+// decoder's TRANSPORT events through is how the app ends up showing a position, a duration or an EOF that
+// belongs to a file nothing on screen is playing. A log line drives nothing — and the crossfade deck's own
+// reason for failing to open a track is exactly the kind of thing the log has never had. It is tagged so the
+// two decks can be told apart.
+//
+// The order here is not arbitrary: SCRUB, then throttle. The throttle keys on the shape of the message, and
+// an unscrubbed url would put a per-request signature into that key — every message its own bucket, and the
+// rate limiting silently does nothing. Scrubbing first also means a credential never reaches the throttle's
+// stored `lastSuppressed`, so there is exactly one place in this path that has ever held one.
+void MpvWidget::handleLogMessage(mpv_event* event, bool fromActive)
+{
+    auto* m = static_cast<mpv_event_log_message*>(event->data);
+    if (!m) return;
+    const QByteArray level  = m->level  ? QByteArray(m->level)  : QByteArrayLiteral("?");
+    const QByteArray prefix = m->prefix ? QByteArray(m->prefix) : QByteArrayLiteral("?");
+    // libmpv is asked for `v` because the message this exists for is one ffmpeg logs at INFO; the filter is
+    // what keeps a healthy open from costing a hundred lines of mpv's own verbose. See MpvLogLevel.h.
+    static const bool verbose = mpvVerboseWanted();
+    if (!MpvLogLevel::keep(level, prefix, verbose)) return;
+    // mpv's own text arrives with a trailing newline (and occasionally several lines at once); stream_debug.log
+    // is one record per line, so it is trimmed here rather than embedded raw.
+    QString text = QString::fromUtf8(m->text ? m->text : "").trimmed();
+    if (text.isEmpty()) return;
+    text.replace(QLatin1Char('\n'), QLatin1String(" | "));
+
+    const QString body = QStringLiteral("[%1] %2%3: %4")
+                             .arg(QString::fromUtf8(level),
+                                  fromActive ? QString() : QStringLiteral("deck2 "),
+                                  QString::fromUtf8(prefix),
+                                  LogSafeText::scrub(text));
+
+    for (const QString& line : logThrottle_.admit(body, logClock_.elapsed()))
+        videoLog(QStringLiteral("mpvlog ") + line);
+    if (logThrottle_.pending() && logFlushTimer_ && !logFlushTimer_->isActive())
+        logFlushTimer_->start();
+}
+
 void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
 {
+    if (event->event_id == MPV_EVENT_LOG_MESSAGE)
+    {
+        handleLogMessage(event, fromActive);
+        return;
+    }
     if (!fromActive)
     {
         // The deck fading IN during a crossfade window, or a deck that has been stopped and is waiting to be
@@ -446,6 +538,11 @@ void MpvWidget::handleEvent(mpv_event* event, mpv_handle* from, bool fromActive)
     }
     case MPV_EVENT_END_FILE:
     {
+        // #231: whatever this file was still being counted for, say so now — a burst that ran out the last
+        // seconds of a stream is the most interesting one in the log, and its window has not closed.
+        for (const QString& line : logThrottle_.drain(logClock_.elapsed()))
+            videoLog(QStringLiteral("mpvlog ") + line);
+        if (logFlushTimer_) logFlushTimer_->stop();
         if (nowPlaying_) nowPlaying_->hide();
         if (loadTimer_) loadTimer_->stop();       // #213: the file ended, however it ended; nothing to watch
         // Only a natural end-of-file should advance a playlist; stop/seek/redirect must not.
@@ -1183,6 +1280,10 @@ mpv_handle* MpvWidget::ensureSecondDeck()
     // it is the deck the transport button is speaking for. A deck that never observed `pause` would report no
     // change for the rest of its life, and the button would freeze on whatever it last said.
     mpv_observe_property(h, 0, "pause", MPV_FORMAT_FLAG);
+    // #231 on this deck too. A crossfade deck is the one that opens the NEXT track, so "the file the fade was
+    // going to hand over to could not be read" is a fault only it can report; requested here for the same
+    // reason the observers above are, at creation rather than at promotion.
+    mpv_request_log_messages(h, mpvLogLevel().constData());
     mpv_set_wakeup_callback(h, onMpvWakeup, this);
     videoLog(QStringLiteral("mpv: crossfade - second deck created (audio-only)"));
     return h;

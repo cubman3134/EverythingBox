@@ -8,6 +8,7 @@
 #include <QVector>
 #include "../core/MediaSegments.h"   // MediaSegments::Chapter — declared in core so it needs no libmpv
 #include "../core/StreamHeaders.h"   // per-stream proxyHeaders (QtCore-only, so it costs the probes nothing)
+#include "MpvLogThrottle.h"          // #231: the burst counter mpv's own log is written through (pure)
 #include <mpv/client.h>
 #ifdef Q_OS_IOS
 // iOS: OpenGL ES context creation fails in the simulator (and EAGL is deprecated on device), so render
@@ -228,6 +229,9 @@ private:
     // position is not the position anything above is showing, and letting either through was the whole class
     // of bug a second decoder introduces.
     void handleEvent(mpv_event* event, mpv_handle* from, bool fromActive);
+    // #231: one MPV_EVENT_LOG_MESSAGE — mpv's and ffmpeg's own words about the stream — scrubbed of any
+    // credential and passed through the burst counter on its way into stream_debug.log.
+    void handleLogMessage(mpv_event* event, bool fromActive);
     void logVideoInfo(); // append the loaded video's codec/resolution/pixfmt/hwdec to the debug log
 
     // Crossfade internals (issue #141). See the beginCrossfade note above for the deck model.
@@ -280,4 +284,12 @@ private:
     void armLoadWatchdog(LoadWatchdog::Phase phase);
     LoadWatchdog::Progress loadProgress() const; // what mpv can say about the file's bytes: three-valued, see .cpp
     void onLoadWatchdog();
+
+    // #231 mpv log capture. The throttle holds the per-shape burst counters; the clock is its only source of
+    // time (the class deliberately has none of its own, so a probe can drive four windows in microseconds);
+    // the timer exists ONLY to get a summary out of a burst that has stopped, and runs only while one is
+    // outstanding. Not started here — see the constructor.
+    MpvLogThrottle logThrottle_;
+    QElapsedTimer  logClock_;
+    QTimer*        logFlushTimer_ = nullptr;
 };

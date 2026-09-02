@@ -174,7 +174,9 @@ if(WIN32 AND NOT ANDROID AND NOT IOS)
     add_executable(probe_retropark_content tools/probe_retropark_content.cpp)
     add_dependencies(probe_retropark_content retropark_ext)
     target_include_directories(probe_retropark_content PRIVATE ${RETROPARK_DIR}/include ${RETROPARK_DIR}/src
-        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath helper (state-path non-collision proof)
+        src src/emu)   # src/emu: the pure rpstate::retroParkStatePath + rpshim::mirrorIsStale helpers
+    # No Qt here on purpose: the retropark-windows CI job configures with the app gate OFF, so Qt is
+    # not available to it at all. Both helpers above are deliberately Qt-free for that reason.
     target_link_libraries(probe_retropark_content PRIVATE
         "${EB_RETROPARK_LIB}" Vulkan::Vulkan
         d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
@@ -1239,6 +1241,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_hwdecode PRIVATE src src/core src/video)
     target_link_libraries(probe_hwdecode PRIVATE Qt6::Core)
+
+    # mpv's own log, captured (issue #231): the two pure pieces the capture is built out of -
+    # src/core/LogSafeText.h (what may be written down - StoredUrl's rule plus the path collapse a LOG can
+    # afford) and src/video/MpvLogThrottle.h (how much of it may be). Both header-only, so this is QtCore-only
+    # and needs neither libmpv nor a window. QRegularExpression comes with Qt6::Core.
+    add_executable(probe_mpvlog tools/probe_mpvlog.cpp
+        src/core/LogSafeText.h    src/core/StoredUrl.h
+        src/video/MpvLogThrottle.h src/video/MpvLogLevel.h)
+    target_include_directories(probe_mpvlog PRIVATE src src/core src/video)
+    target_link_libraries(probe_mpvlog PRIVATE Qt6::Core)
 
     # Hardcore RetroAchievements (issue #94): the pure hardcore-affordance policy (src/core/Hardcore.h,
     # header-only, QtCore-free) plus the opt-in Setting default that drives it. QtCore-only; Settings.cpp pulls
