@@ -43,6 +43,7 @@ native/
   src/core/                 Settings, CoreManager, SystemCatalog
   src/ui/                   MainWindow, SettingsDialog, ControllerRemapDialog, LibraryView
   src/main.cpp              app entry
+  systems/recipes/          per-system launch recipes (#190: core options, firmware, content) - see docs/retro-computers.md
   third_party/              miniz (zip), duktape/ (JS engine)
   addons/aiocatalog/        bundled AIO Catalog addon (TMDB / IGDB / MusicBrainz)
   tools/probe_*.cpp         console verification harnesses (core / epub / pdf / audio / addon)

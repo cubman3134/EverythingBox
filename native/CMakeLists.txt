@@ -864,6 +864,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # bound to. probe_ports reads the same resource, so a build where this line is wrong fails the suite too.
     qt_add_resources(EB_PORTS_RCC resources/ports.qrc)
     target_sources(everythingbox PRIVATE ${EB_PORTS_RCC})
+    # #190: the shipped per-system LAUNCH RECIPES (native/systems/recipes/*.json). Same wiring, same reason
+    # as the port catalog above: through qt_add_resources, never the source list. A recipe that is not
+    # embedded reads exactly like a system nobody has written one for, so the failure is invisible - which is
+    # why probe_recipes byte-compares the embedded copy against the file in the source tree.
+    qt_add_resources(EB_RECIPES_RCC resources/recipes.qrc)
+    target_sources(everythingbox PRIVATE ${EB_RECIPES_RCC})
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
@@ -1520,6 +1526,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_ports PRIVATE Qt6::Core)
     target_compile_definitions(probe_ports PRIVATE
         EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
+
+    # Launch recipes (src/core/LaunchRecipe.h, issue #190): the per-system launch knowledge - core options to
+    # seed, firmware to name when it is missing, how content reaches the core, and the MS-DOS executable
+    # autodetect - carried as data instead of as folklore. Compiles resources/recipes.qrc IN through
+    # qt_add_resources so the probe reads the recipes out of the SAME resource the app does, and compares each
+    # one byte for byte with native/systems/recipes via EB_RECIPES_SOURCE_DIR. Header-only + QtCore.
+    qt_add_resources(EB_RECIPES_RCC_PROBE resources/recipes.qrc)
+    add_executable(probe_recipes tools/probe_recipes.cpp src/core/LaunchRecipe.h src/core/SystemCatalog.h
+        ${EB_RECIPES_RCC_PROBE})
+    target_include_directories(probe_recipes PRIVATE src src/core)
+    target_link_libraries(probe_recipes PRIVATE Qt6::Core)
+    target_compile_definitions(probe_recipes PRIVATE
+        EB_RECIPES_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/systems/recipes")
 
     # PS3 game auto-update pure-logic units (src/core/ps3): the PARAM.SFO Title-ID parser and the rest of the
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,

@@ -1,0 +1,28 @@
+{
+  "system": "zxspectrum",
+  "summary": "Fuse auto-loads tapes and runs snapshots directly. Auto model selection picks a 128K machine for content that needs one, which is the single most common reason a Spectrum game appears to do nothing.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "fuse",
+      "options": {
+        "fuse_auto_load": "enabled",
+        "fuse_auto_machine": "enabled"
+      },
+      "firmware": [
+        {
+          "purpose": "Pentagon / Scorpion clone ROMs (optional; every stock Sinclair model is built into the core)",
+          "files": ["fuse/128p-0.rom", "fuse/256s-0.rom"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

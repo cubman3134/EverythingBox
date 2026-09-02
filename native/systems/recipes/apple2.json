@@ -1,0 +1,21 @@
+{
+  "system": "apple2",
+  "summary": "AppleWin has the Apple II ROMs built in, so a disk image boots with nothing supplied. The enhanced //e is the machine most software expects.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "applewin",
+      "options": {
+        "applewin_machine": "Apple //e (enhanced)"
+      },
+      "firmware": [],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

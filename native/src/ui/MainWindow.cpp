@@ -1863,6 +1863,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& m, int ms) { statusBar()->showMessage(m, ms); });
     connect(launcher_, &GameLauncher::notifyUser, this,
             [this](const QString& m, int ms) { notifier_->notify(m, ms); });
+    // #190: a folder game (MS-DOS) holding several plausible programs. Ask once with a nav-kit menu — which
+    // renders in-window over BOTH the themed and the classic surface, so this one call serves both layouts —
+    // record the answer in the game's launch override, and re-open. The connection is QUEUED on purpose: the
+    // signal is emitted from inside the launch, and opening a menu there would run a nested event loop inside
+    // a signal delivery, which is the #28 / #211 crash family. Queued, the launch has fully unwound first.
+    connect(launcher_, &GameLauncher::chooseBootProgram, this,
+            [this](const QString& title, const QStringList& choices, const QString& rom, const QString& thumb,
+                   const QString& key, const QString& systemHint) {
+                const int row = NavMenu::pick(tr("Which program runs “%1”?").arg(title), choices, this);
+                if (row < 0 || row >= choices.size()) return;   // backed out: no launch, nothing remembered
+                // The identity the answer is filed under. A catalog row has a stable id; a game opened
+                // straight off disk has only its path — and it MUST still get an identity here, because
+                // re-opening with nothing remembered would ask the same question again, forever. This is the
+                // same "stable id, else the path" rule LaunchOpts documents, and GameLauncher recomputes it
+                // from these same two values, so both sides agree without a new field on the plan.
+                const QString bootKey = key.isEmpty() ? rom : key;
+                LaunchOpts::Override ov = LaunchOpts::get(bootKey);
+                ov.bootFile = choices.at(row);
+                LaunchOpts::set(bootKey, ov);
+                // Re-open: resolution now finds the stored answer and has nothing left to ask.
+                launcher_->open(rom, title, thumb, key, systemHint);
+            }, Qt::QueuedConnection);
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
