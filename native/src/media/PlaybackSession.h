@@ -6,6 +6,7 @@
 #include <QSettings>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 // The audio-queue + resume state machine: owns the current track list/position, drives next/prev/
 // track-end advance, and persists "where you left off" for any timed media (video/audio/audiobook),
@@ -177,6 +178,42 @@ public:
     // Durable at position zero, and only where the entry carries nothing already. See the definition.
     void noteEntryReached();
 
+    // ---- A SERVER THAT OWNS ITS OWN PROGRESS (issue #197) ----------------------------------------------
+    //
+    // Some entries are not ours to remember. An Audiobookshelf item's position belongs to the server: every
+    // client that touches it reports to the same place and reads back from the same place, which is the
+    // whole reason somebody runs one. #83 sets the identical rule for Jellyfin and #153 for PSE. So for
+    // those entries this object must do TWO things differently, and both of them are here rather than in
+    // the host because both are inside persistResume/beginResume — the throttled hook and the arm — and a
+    // host that wanted to intervene from outside would have to duplicate the throttle.
+    //
+    // THE REPORTING HOOK. Called from persistResume with the entry's resume identity, its position and its
+    // duration. Returning TRUE means "this one is mine, I have taken it" — and this object then writes
+    // NOTHING into the resume store for it. That is the point: a position duplicated into our synced
+    // resume categories would be merged across devices by OUR rules (newest-timestamp-wins) alongside the
+    // server's own, and the two would disagree the first time a phone and a TV listened out of order. One
+    // owner, and for these ids the owner is the server.
+    //
+    // Consumption stats still accrue, deliberately: those are this DEVICE's "how much have I listened"
+    // accumulator, keyed by an identity that carries no credential, and the server has no equivalent of
+    // them to be the owner of.
+    // `leaving` is true for the LAST report this media will make — the persistResume clearQueue does on
+    // the way out. It exists because the network gate on the far side is necessarily slower than this
+    // object's (a round trip to somebody's Raspberry Pi is not an ini write), and a listener who stops
+    // nine seconds into that interval would otherwise leave the server holding a position from before the
+    // last thing they heard. Every other report is ordinary and rides the far side's throttle.
+    using RemoteProgressFn = std::function<bool(const QString& identity, double pos, double dur,
+                                                bool leaving)>;
+    void setRemoteProgress(RemoteProgressFn fn) { remoteProgress_ = std::move(fn); }
+
+    // THE RESUME HOOK. Called from beginResume BEFORE the local mark is read. A return of < 0 means "not
+    // mine" and the local mark is used exactly as it always was; anything >= 0 is the server's answer and
+    // WINS — including 0, which is a real answer ("the server has this entry at its top") and not an
+    // absence. Deferring to the server over a local mark is the rule; a local mark for one of these ids
+    // could only be a leftover from before this existed.
+    using RemoteResumeFn = std::function<double(const QString& identity)>;
+    void setRemoteResume(RemoteResumeFn fn) { remoteResume_ = std::move(fn); }
+
     // Consumption stats: the host reports the loaded file's media kind (mpv's fileLoaded isVideo flag) so the
     // persistResume heartbeat accrues watch (video) vs listen (audio) seconds into the right category.
     void setMediaVideo(bool isVideo) { mediaIsVideo_ = isVideo; }
@@ -271,4 +308,9 @@ private:
     double duration_ = 0.0;        // last reported duration (for the "dur" progress hint)
     QString settingsFile_;
     QSettings* settings_ = nullptr;
+    // #197: the two seams a server that owns its own progress needs. Unset by default and unset in every
+    // headless probe that does not install them, so a queue of local files is byte-for-byte what it was.
+    RemoteProgressFn remoteProgress_;
+    RemoteResumeFn   remoteResume_;
+    bool             leavingMedia_ = false;   // set only around clearQueue's own persistResume
 };

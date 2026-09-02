@@ -884,6 +884,11 @@ int main(int argc, char** argv)
         // OPDS catalog's is, and a synced bundle is a zip in somebody's Drive folder.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subsonic/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("subsonic/profileA/servers")) == false);
+        // audiobookshelf/* (issue #197): saved Audiobookshelf servers. The same carve-out, and the value it
+        // protects is an API TOKEN — a standing grant against that server, with no login screen left in
+        // front of it. Uncarved, it would ride the heavy settings bundle into somebody's Drive folder.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("audiobookshelf/profileA/servers")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("audiobookshelf/profileA/servers")) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's

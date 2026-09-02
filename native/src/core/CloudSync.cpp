@@ -301,6 +301,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
         // SubsonicServerStore keys everything under this prefix.
         || key.startsWith(QStringLiteral("subsonic/"))
+        // audiobookshelf/* (issue #197): saved Audiobookshelf servers. Same shape and the same hazard as the
+        // three above, with the credential in its most concentrated form — the stored value is an API TOKEN,
+        // which is a standing grant against that server rather than something a login screen still stands
+        // between. Left in the heavy settings bundle it would put that token in a zip in a third party's
+        // Drive folder, for a server the user signed into on one machine. Device-local, and AbsServerStore
+        // keys everything under this prefix. probe_cloudmerge pins the carve-out; probe_absclient byte-scans
+        // a fixture token against everything the feature writes.
+        || key.startsWith(QStringLiteral("audiobookshelf/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore

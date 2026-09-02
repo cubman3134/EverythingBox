@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -608,6 +608,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # AUDIOBOOKSHELF CLIENT (#197 increment 1): an Audiobookshelf server as a supplier of the audiobook
+        # shapes #139's local library uses, plus its podcasts. Audiobookshelf.h/.cpp is the pure half (the
+        # id scheme, the URL rules, the payload readers, the chapter arithmetic, the reporting throttle) and
+        # is what probe_absclient drives; AbsClient is the socket half; AbsCatalogs renders the levels.
+        src/core/Audiobookshelf.cpp      src/core/Audiobookshelf.h
+        src/core/AbsServerStore.cpp      src/core/AbsServerStore.h        # saved servers, device-local
+        src/core/AbsClient.cpp           src/core/AbsClient.h             # the fetches, the cache, AbsSupply
+        src/browse/AbsCatalogs.cpp       src/browse/AbsCatalogs.h         # the thirteen browse levels
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -2364,6 +2372,38 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_audiobooks PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # The AUDIOBOOKSHELF client (issue #197, increment 1): the pure half (the id scheme, the URL rules, the
+    # payload readers, the chapter rebase, the book timeline, the reporting throttle), the browse levels, the
+    # device-local server store, and the socket half driven against a FIXTURE HTTP STUB the probe itself
+    # starts on a loopback port.
+    #
+    # A REAL SOCKET, because half of what is under test is not a function of the payload: that the token
+    # rides an Authorization HEADER and never a url, that exactly one PATCH leaves the process for two ticks
+    # a second apart, and that a play session's tracks come back in the SERVER's order. Hence Qt6::Network.
+    #
+    # PlaybackSession (and the three stores behind its resume/stats writes) is linked because #197's central
+    # claim - that a server's own item's position is written to the SERVER and NOT into our synced resume
+    # categories - is a claim about what that real object does not write, and a fake would prove only that a
+    # fake writes nothing. MetaCache is AbsClient's cover sink; Settings/FormFactor/ProfileStore are what
+    # ConsumptionStats and the per-profile store key through (probe_playback's link set, for the same reason).
+    add_executable(probe_absclient tools/probe_absclient.cpp
+        src/core/Audiobookshelf.cpp   src/core/Audiobookshelf.h
+        src/core/AbsServerStore.cpp   src/core/AbsServerStore.h
+        src/core/AbsClient.cpp        src/core/AbsClient.h
+        src/browse/AbsCatalogs.cpp    src/browse/AbsCatalogs.h
+        src/core/RemoteAudiobook.h    src/core/NaturalOrder.h   # the part token this queue is built from
+        src/core/MetaCache.cpp        src/core/MetaOverrides.cpp src/core/MetaCache.h
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        src/core/ResumeStore.cpp      src/core/ResumeStore.h
+        src/core/Tombstones.cpp       src/core/Tombstones.h
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/ProfileStore.cpp     src/core/ProfileStore.h
+        src/core/Settings.cpp         src/core/Settings.h
+        src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
+        src/addons/AddonModels.cpp    src/addons/AddonModels.h)
+    target_include_directories(probe_absclient PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    target_link_libraries(probe_absclient PRIVATE Qt6::Core Qt6::Network)
 
     # The local READING library (issue #134, increment 1): the container reader (EpubMeta/BookMeta), the
     # comic filename rule (ComicName), the scan and grouping (BookLibrary) and the browse builders over it

@@ -43,6 +43,10 @@ Everything lives under [`native/`](native/):
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
 
+Feature notes for things with a server on the other end live in [`docs/`](docs/) —
+see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
+library.
+
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status.
 
