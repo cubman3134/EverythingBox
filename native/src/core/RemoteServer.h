@@ -12,9 +12,16 @@
 //     listener down the moment the setting is turned off.
 //   * A per-connection read cap (kMaxRequestBytes) so a malicious or broken client cannot make the app buffer
 //     an unbounded request.
+//
+// #143 adds two routes to this same listener and nothing else: POST /open (a hand-off — an item REFERENCE
+// plus a position, never bytes) and POST /pair (show a code / redeem it for a token). The safety posture
+// above is unchanged and one line stronger: /open is the only route that requires a paired credential, and a
+// request without one is refused 401 BEFORE the hooks are consulted, so an unpaired caller cannot make this
+// process resolve anything at all.
 #pragma once
 #include <QHash>
 #include <QObject>
+#include "PlayOnDevice.h"
 #include "RemoteApi.h"
 #include <functional>
 
@@ -32,6 +39,15 @@ public:
     {
         std::function<RemoteApi::PlayerStateView()>     state;
         std::function<bool(const RemoteApi::Command&)>  dispatch;
+        // #143. `open` performs a hand-off and returns the target's answer (200 / 403 / 409); it is called
+        // ONLY after the token check has passed. `pairBegin` puts a code on this device's screen and returns
+        // true when it is showing; `pairRedeem` answers with a token on a match and an empty string
+        // otherwise. `tokens` reads the credentials this device has issued. All optional: an unset hook
+        // degrades to a 503, never a crash and never an unauthenticated open.
+        std::function<PlayOn::OpenResult(const PlayOn::Handoff&)> open;
+        std::function<bool()>                                     pairBegin;
+        std::function<QString(const QString&)>                    pairRedeem;
+        std::function<QSet<QString>()>                            tokens;
     };
 
     explicit RemoteServer(QObject* parent = nullptr);

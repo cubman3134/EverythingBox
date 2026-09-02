@@ -11,6 +11,7 @@
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QUuid>
+#include <QSysInfo>
 
 static QSettings& store()
 {
@@ -30,6 +31,28 @@ QString Settings::deviceId()
     store().setValue(QStringLiteral("device/id"), id);
     store().sync();
     return id;
+}
+
+QString Settings::deviceName()
+{
+    const QString stored = store().value(QStringLiteral("device/name")).toString().trimmed();
+    if (!stored.isEmpty()) return stored;
+    // NOT persisted on read, unlike deviceId above. The host name is a live fact about the machine, and
+    // freezing a copy of it into the ini the first time anything asked would leave a renamed box advertising
+    // its old name for ever with nothing to explain why.
+    const QString host = QSysInfo::machineHostName().trimmed();
+    return host.isEmpty() ? QStringLiteral("EverythingBox") : host;
+}
+
+void Settings::setDeviceName(const QString& name)
+{
+    const QString v = name.trimmed();
+    // An empty write CLEARS the override rather than storing a nameless device: the getter then falls back
+    // to the host name, which is the behaviour "reset this" should have and the only one that cannot leave a
+    // peer's picker showing a blank row.
+    if (v.isEmpty()) store().remove(QStringLiteral("device/name"));
+    else             store().setValue(QStringLiteral("device/name"), v);
+    store().sync();
 }
 
 bool Settings::subtitlesOnByDefault()

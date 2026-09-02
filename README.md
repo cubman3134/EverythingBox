@@ -44,7 +44,9 @@ Everything lives under [`native/`](native/):
 - `native/addons/` — a bundled sample media-source addon.
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
-and current status.
+and current status, and
+**[`native/docs/play-on-device.md`](native/docs/play-on-device.md)** for handing playback
+between two EverythingBoxes on the same network.
 
 ## Quick build
 
