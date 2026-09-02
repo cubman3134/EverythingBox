@@ -44,7 +44,9 @@ Everything lives under [`native/`](native/):
 - `native/addons/` — a bundled sample media-source addon.
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
-and current status.
+and current status, and
+**[`native/docs/play-on-device.md`](native/docs/play-on-device.md)** for handing playback
+between two EverythingBoxes on the same network.
 
 ## Quick build
 
@@ -136,6 +138,25 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Home rows
+
+The home screen's rows are yours to arrange. **Settings ▸ Home screen ▸ Choose home rows** opens a list of
+the rows your home can show; each one can be moved up, moved down, hidden, or capped to the first *N* items,
+and **Add row…** offers the ones that are not on it yet. It is driven entirely with a D-pad or the arrow
+keys — there is no drag-and-drop to reach for.
+
+- **Nothing changes until you change it.** A profile that has never opened the editor sees exactly the home
+  it saw before, in the order the app ships with. **Reset to default** puts it back at any time.
+- **It is per profile, and it syncs.** The arrangement rides the same profile sync as your favourites and
+  playlists, so a new device inherits it. If two devices are edited apart, the most recent arrangement wins
+  and rows only one of them knew about are kept, never dropped.
+- **Your theme still decides what it can show.** The list orders and hides rows among the ones the active
+  home actually draws; it cannot add a row a theme has no place for. The classic home arranges its shelves
+  (Continue watching, Airing Soon, You Missed, Favorites, and — once you add them — Downloaded, a playlist,
+  or a saved filter); a themed home arranges its media-type categories and catalogue tiles. Rows that belong
+  to the other layout are kept in your list and simply skipped, so switching layouts never loses them. Theme
+  authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
 
 ## After a crash
 

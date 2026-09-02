@@ -1,0 +1,14 @@
+<RCC>
+  <qresource prefix="/recipes">
+    <file alias="msdos.json">../systems/recipes/msdos.json</file>
+    <file alias="amiga.json">../systems/recipes/amiga.json</file>
+    <file alias="atarist.json">../systems/recipes/atarist.json</file>
+    <file alias="c64.json">../systems/recipes/c64.json</file>
+    <file alias="vic20.json">../systems/recipes/vic20.json</file>
+    <file alias="zxspectrum.json">../systems/recipes/zxspectrum.json</file>
+    <file alias="amstradcpc.json">../systems/recipes/amstradcpc.json</file>
+    <file alias="apple2.json">../systems/recipes/apple2.json</file>
+    <file alias="pc98.json">../systems/recipes/pc98.json</file>
+    <file alias="x1.json">../systems/recipes/x1.json</file>
+  </qresource>
+</RCC>

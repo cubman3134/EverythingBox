@@ -63,6 +63,15 @@ public:
     // password, plus the two explicit downgrades). PUBLIC because both settings builders open it too — a
     // capability reachable only from the shelf it manages is one most people never find.
     void addMusicServerInteractive();
+    // #160: the ONE manager for connected Jellyfin servers — list, connect another, switch one off, remove
+    // one. PUBLIC for the same reason as the row above: both settings builders open it. Add / enable /
+    // remove are three verbs about one list, so they share one entry point rather than three settings rows
+    // that would put the list itself nowhere.
+    void manageJellyfinServersInteractive();
+    // The connect flow the manager's first row opens: address -> WHO IS THIS SERVER (/System/Info/Public)
+    // -> only then a username and password. In that order deliberately: a server whose identity cannot be
+    // read is never asked for a password, because there would be nothing to qualify its rows with.
+    void connectJellyfinServerInteractive();
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
@@ -134,6 +143,18 @@ public:
     static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
     QVariantList categoryItems();
     QVariantList categoryCatalogs(const QString& categoryKey);
+
+    // Custom home rows (issue #161): every row this device could put on a home, in the app's default order —
+    // the "Add row…" catalogue, and the source of the editor's human labels. It deliberately spans BOTH
+    // families, because the two layouts have different homes: the classic home is a list of SHELVES
+    // (continue / Trakt / favourites / downloads / a playlist / a saved filter) and the themed home is a grid
+    // of BUCKETS and CATALOGUES. One list arranges both; a row belonging to the other layout is simply not
+    // producible there, which is the same kept-and-skipped rule a deleted preset takes (see HomeRows.h).
+    //
+    // `cappable` says whether an item cap can change anything: a shelf holds many items, a catalogue tile is
+    // one row. The editor only offers the cap action where it is true.
+    struct HomeRowChoice { QString rowId; QString label; bool cappable = true; };
+    QVector<HomeRowChoice> homeRowCatalogue();
     // Drill the Playlists folder for a category. Reached two ways: nested under a catalogue (asRoot=false, the
     // default — stacks on the catalogue level), or straight from the category-level bucket column (asRoot=true —
     // resets the browse stack so the list is the root, its Back returning to the bucket column). The themed home

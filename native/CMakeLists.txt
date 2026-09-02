@@ -611,6 +611,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
+        src/core/LastFmClient.cpp       src/core/LastFmClient.h        # ...and its second (#192 inc 2):
+                                                                       # signed calls + the #81 app key
+        src/core/BuiltinSecretBlob.h     # the ONE runtime de-obfuscator, shared with the addon creds
         # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
         # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
         src/core/Presence.cpp src/core/Presence.h
@@ -623,6 +626,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # JELLYFIN, N SERVERS MERGED INTO ONE LIBRARY (#160). Jellyfin.h/.cpp is the pure half (the
+        # server-qualified item id, the auth handshake, the payload readers and the union across
+        # servers) and is what probe_jellyfin drives; JellyfinMigrate is the repeatable, idempotent
+        # repair that moves rows written in the old single-server shape onto qualified ids, and lands
+        # before any of the UI for the reason the issue gives: a bare id cannot be attributed to a
+        # server after a second one exists. The store is device-local (tokens; CloudSync carves out
+        # "jellyfin/"), and the client is the only half that opens a socket.
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -664,6 +678,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
+        src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
+        src/core/PlayOnHost.cpp   src/core/PlayOnHost.h    # device-local pairing tokens, both directions (#143)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -685,6 +702,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
+        src/core/HomeRows.cpp     src/core/HomeRows.h  # per-profile custom home rows: the list + the pure planner (#161)
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # per-game core/emulator/args override (issue #51)
         src/core/LaunchHooks.h                                          # pure argv tokenizer + {rom} subst (issue #64, header-only)
@@ -751,6 +769,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
@@ -862,6 +881,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # bound to. probe_ports reads the same resource, so a build where this line is wrong fails the suite too.
     qt_add_resources(EB_PORTS_RCC resources/ports.qrc)
     target_sources(everythingbox PRIVATE ${EB_PORTS_RCC})
+    # #190: the shipped per-system LAUNCH RECIPES (native/systems/recipes/*.json). Same wiring, same reason
+    # as the port catalog above: through qt_add_resources, never the source list. A recipe that is not
+    # embedded reads exactly like a system nobody has written one for, so the failure is invisible - which is
+    # why probe_recipes byte-compares the embedded copy against the file in the source tree.
+    qt_add_resources(EB_RECIPES_RCC resources/recipes.qrc)
+    target_sources(everythingbox PRIVATE ${EB_RECIPES_RCC})
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
@@ -1302,6 +1327,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_filterpreset PRIVATE src src/core)
     target_link_libraries(probe_filterpreset PRIVATE Qt6::Core)
 
+    # Custom home rows (issue #161): the pure planner that orders/hides/caps the home's rows, the
+    # per-profile row list behind it and the two-device merge of that list (src/core/HomeRows). QtCore-only
+    # — plain vectors in, a render plan out, and a QSettings wrapper — so the probe links lean and runs
+    # under offscreen QPA. Needs ProfileStore.cpp (the list is namespaced by the active profile id).
+    add_executable(probe_homerows tools/probe_homerows.cpp
+        src/core/HomeRows.cpp     src/core/HomeRows.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_homerows PRIVATE src src/core)
+    target_link_libraries(probe_homerows PRIVATE Qt6::Core)
+
     # Hardware-decode Setting (issue #67): the pure choice->mpv-option map (src/video/HwDecode.h, header-only)
     # plus the Settings default. QtCore-only; Settings.cpp pulls FormFactor.cpp (virtualPadEnabled resolves
     # against it), same as probe_softpatch.
@@ -1532,6 +1567,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_ports PRIVATE
         EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
 
+    # Launch recipes (src/core/LaunchRecipe.h, issue #190): the per-system launch knowledge - core options to
+    # seed, firmware to name when it is missing, how content reaches the core, and the MS-DOS executable
+    # autodetect - carried as data instead of as folklore. Compiles resources/recipes.qrc IN through
+    # qt_add_resources so the probe reads the recipes out of the SAME resource the app does, and compares each
+    # one byte for byte with native/systems/recipes via EB_RECIPES_SOURCE_DIR. Header-only + QtCore.
+    qt_add_resources(EB_RECIPES_RCC_PROBE resources/recipes.qrc)
+    add_executable(probe_recipes tools/probe_recipes.cpp src/core/LaunchRecipe.h src/core/SystemCatalog.h
+        ${EB_RECIPES_RCC_PROBE})
+    target_include_directories(probe_recipes PRIVATE src src/core)
+    target_link_libraries(probe_recipes PRIVATE Qt6::Core)
+    target_compile_definitions(probe_recipes PRIVATE
+        EB_RECIPES_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/systems/recipes")
+
     # PS3 game auto-update pure-logic units (src/core/ps3): the PARAM.SFO Title-ID parser and the rest of the
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,
     # network, or process spawns. Qt6::Core only.
@@ -1693,6 +1741,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h
         src/core/GameFilter.cpp      src/core/GameFilter.h
+        # issue #161: the home row list rides the merge document, and CloudMerge folds it with
+        # homerows::merge. QtCore-only (a QSettings wrapper + pure JSON), so it costs one TU.
+        src/core/HomeRows.cpp        src/core/HomeRows.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h  # issue #51: mergeAll() carries + invalidates it
         src/core/Pad2KeyStore.cpp    src/core/Pad2KeyStore.h     # issue #105: mergeAll() carries + invalidates it (Pad2Key.h comes along)
@@ -1796,13 +1847,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h
         src/core/Scrobbler.cpp     src/core/Scrobbler.h
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h
+        src/core/LastFmClient.cpp  src/core/LastFmClient.h    # the second provider (#192 increment 2)
         src/core/ProfileStore.cpp  src/core/ProfileStore.h    # the queue is namespaced by the active profile
         src/core/Settings.cpp      src/core/Settings.h
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h
         src/core/TraktRead.cpp     src/core/TraktRead.h
         src/core/TraktSync.cpp     src/core/TraktSync.h
         src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
-    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
+    # tools/fixtures/lastfm holds a FIXTURE BuiltinSecrets.h, and it is deliberately the ONLY place this
+    # target looks for that header - ${EB_SECRETS_GEN_DIR} is NOT on the list. The generated one is built from
+    # the git-ignored native/secrets/lastfm.secrets, which is absent in every clone and on CI, so a probe
+    # compiled against it would have empty Last.fm slots and could assert nothing but "not available in this
+    # build". The fixture's arrays carry an obviously-fake key + secret through the REAL de-obfuscation, which
+    # is the one part of the mechanism no compiler can check (it mirrors GenerateSecrets.cmake, in CMake, in
+    # another file). See the header for the whole argument.
+    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2 tools/fixtures/lastfm)
     target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:
@@ -1894,6 +1953,31 @@ if(EVERYTHINGBOX_BUILD_APP)
     # here because this probe WRITES records - a run against the app's real ini would move a user's data.
     target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
+
+    # Headless test for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1): the
+    # server-qualified item id and everything it must refuse, the transport verdicts, the auth header and
+    # the two "both halves or neither" payload readers, the union across servers with a timed-out /
+    # disabled / failed leg contributing nothing, the connected-server store (per-server enable, remove,
+    # and a token that lives under "jellyfin/" and nowhere else) - and the MIGRATION itself against a
+    # redirected ini: every store, then the same run again, and again.
+    #
+    # Jellyfin.cpp, JellyfinMigrate.cpp and JellyfinServerStore.cpp are QtCore-only (AppPaths/AppBrand are
+    # header-only; ProfileStore.cpp is the one dependency, for the per-profile namespacing), so this links
+    # against Qt6::Core alone and is fast enough to mutate in a loop. NO NETWORK: JellyfinClient is
+    # deliberately absent, and its socket half is driven live against fixture servers instead.
+    add_executable(probe_jellyfin tools/probe_jellyfin.cpp
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+    target_include_directories(probe_jellyfin PRIVATE src src/core tools)
+    # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
+    # setters are not compiled at all, so a production call is a compile error rather than a silent
+    # process-wide redirect. Load-bearing twice over here - this probe WRITES records, and the server
+    # store it drives holds TOKENS, so a run against the app's real ini would both move a user's data and
+    # write a fixture credential into their settings file.
+    target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
+    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
@@ -2602,6 +2686,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RemoteApi.cpp src/core/RemoteApi.h)
     target_include_directories(probe_remoteapi PRIVATE src src/core)
     target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
+
+    # Headless test for "Play on device" (#143): the mDNS advertisement's records and query bytes, the picker
+    # merge over three target kinds (and the rule that an instance never lists itself), the hand-off payload
+    # and decideOpen's whole table including the 409 an unresolvable reference gets, pairing (code -> token,
+    # attempt budget, one-shot burn) and the credential rule, remote-mode state mapping, and "Continue on this
+    # device" re-deriving byte-for-byte the hand-off the peer would have sent. Links RemoteApi.cpp too because
+    # #143 extends that same pure surface with /open + /pair and the /state item reference; both units are
+    # QtCore-only, so this needs no socket, no player and no window.
+    add_executable(probe_playon tools/probe_playon.cpp
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp    src/core/RemoteApi.h)
+    target_include_directories(probe_playon PRIVATE src src/core)
+    target_link_libraries(probe_playon PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
