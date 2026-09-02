@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -596,6 +596,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
+        src/core/LastFmClient.cpp       src/core/LastFmClient.h        # ...and its second (#192 inc 2):
+                                                                       # signed calls + the #81 app key
+        src/core/BuiltinSecretBlob.h     # the ONE runtime de-obfuscator, shared with the addon creds
         # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
         # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
         src/core/Presence.cpp src/core/Presence.h
@@ -1735,13 +1738,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h
         src/core/Scrobbler.cpp     src/core/Scrobbler.h
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h
+        src/core/LastFmClient.cpp  src/core/LastFmClient.h    # the second provider (#192 increment 2)
         src/core/ProfileStore.cpp  src/core/ProfileStore.h    # the queue is namespaced by the active profile
         src/core/Settings.cpp      src/core/Settings.h
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h
         src/core/TraktRead.cpp     src/core/TraktRead.h
         src/core/TraktSync.cpp     src/core/TraktSync.h
         src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
-    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2)
+    # tools/fixtures/lastfm holds a FIXTURE BuiltinSecrets.h, and it is deliberately the ONLY place this
+    # target looks for that header - ${EB_SECRETS_GEN_DIR} is NOT on the list. The generated one is built from
+    # the git-ignored native/secrets/lastfm.secrets, which is absent in every clone and on CI, so a probe
+    # compiled against it would have empty Last.fm slots and could assert nothing but "not available in this
+    # build". The fixture's arrays carry an obviously-fake key + secret through the REAL de-obfuscation, which
+    # is the one part of the mechanism no compiler can check (it mirrors GenerateSecrets.cmake, in CMake, in
+    # another file). See the header for the whole argument.
+    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2 tools/fixtures/lastfm)
     target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:

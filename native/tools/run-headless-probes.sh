@@ -2232,6 +2232,7 @@ else
     'scrobble.on|new QCheckBox(tr("Scrobble music I listen to"))'
     'scrobble.lbtoken|addCredRow(tr("ListenBrainz token:")'
     'scrobble.lburl|addCredRow(tr("Custom API URL:")'
+    'scrobble.lastfm|new QPushButton(LastFmClient::connectActionLabel())'
     'scrobble.spoken|new QCheckBox(tr("Also scrobble audiobooks and podcasts"))'
     'profiles.skipsingle|new QCheckBox(tr("Skip the profile picker when there'
     'parental.setpin|new QPushButton(Settings::hasParentalPin() ? tr("Change PIN")'

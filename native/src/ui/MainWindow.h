@@ -1437,6 +1437,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This

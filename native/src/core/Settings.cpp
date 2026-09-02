@@ -508,6 +508,19 @@ QString Settings::listenBrainzApiUrl()
 void Settings::setListenBrainzApiUrl(const QString& url)
 { store().setValue(scrobbleKey(QStringLiteral("lb/url")), url.trimmed()); store().sync(); }
 
+// THE USER'S OWN SECRET, again — the same rule and the same one reader (LastFmClient, when it signs). Under
+// the SAME scrobble/<profile>/ prefix as the ListenBrainz token, so it inherits both carve-outs already
+// written in terms of that prefix rather than needing a second pair that could drift from this writer.
+QString Settings::lastFmSessionKey()
+{ return store().value(scrobbleKey(QStringLiteral("lastfm/sk"))).toString(); }
+void Settings::setLastFmSessionKey(const QString& key)
+{ store().setValue(scrobbleKey(QStringLiteral("lastfm/sk")), key.trimmed()); store().sync(); }
+
+QString Settings::lastFmAccount()
+{ return store().value(scrobbleKey(QStringLiteral("lastfm/user"))).toString(); }
+void Settings::setLastFmAccount(const QString& name)
+{ store().setValue(scrobbleKey(QStringLiteral("lastfm/user")), name.trimmed()); store().sync(); }
+
 QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
 void Settings::setOpenSubApiKey(const QString& key)
 {
