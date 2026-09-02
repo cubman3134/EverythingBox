@@ -166,6 +166,19 @@ public:
     void setSpeed(double factor);             // playback rate (1.0 = normal); pitch-corrected by mpv
     double speed() const;                     // current playback rate
 
+    // Issue #162's brightness gesture. In-app brightness: mpv's own video equalizer, not a widget drawn over
+    // the frame — the platform (Windows/desktop Linux) has no per-app screen-brightness API, and a dimming
+    // overlay would sit above the subtitles and be captured by a screenshot. 0..100 percent, where 100 is the
+    // untouched picture and 0 is fully dark; mpv's "brightness" spans -100..100, so the mapping is pct-100.
+    void setVideoBrightness(int percent);
+    int  videoBrightness() const { return brightnessPercent_; }
+
+    // Issue #162's pinch gesture. 0 = Fit (letterbox, the default), 1 = Fill (crop to the frame), 2 = Stretch
+    // (ignore the aspect ratio). Kept as an int rather than PlayerGestures::VideoFit so this widget keeps
+    // knowing nothing about the gesture layer.
+    void setVideoFit(int fit);
+    int  videoFit() const { return videoFit_; }
+
 signals:
     void durationChanged(double seconds);
     void positionChanged(double seconds);
@@ -259,6 +272,8 @@ private:
     double xfSeconds_ = 0.0;            // the window length asked for
     double xfElapsed_ = 0.0;            // how far into it we are (frozen while paused)
     int volumePercent_ = 100;           // the volume the HOST asked for; the ramp scales this, never replaces it
+    int brightnessPercent_ = 100;       // #162: the in-app brightness gesture's level (100 = untouched)
+    int videoFit_ = 0;                  // #162: 0 Fit / 1 Fill / 2 Stretch, re-applied to each new deck
     bool gaplessArmed_ = false;         // setGaplessAudio() state, so a newly created deck inherits it
 
     mpv_handle* mpv = nullptr;          // the ACTIVE deck — always mpvPrimary_ or mpvSecond_

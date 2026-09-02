@@ -348,6 +348,31 @@ void Settings::setAudioJumpSeconds(int seconds)
     store().setValue(QStringLiteral("playback/jumpSeconds"), qBound(5, seconds, 120)); store().sync();
 }
 
+// ---- Touch gestures over the video player (issue #162) ----------------------------------------------------
+// One key per gesture FAMILY, all default-on: they only ever register on a touch form factor (the recogniser's
+// own gate), so "on" costs a desktop or TV user nothing and a phone user gets the vocabulary they arrived
+// expecting. Plain playback preferences, so they bundle-sync like autoplayNext — a phone and a tablet signed
+// into the same profile should agree about what a swipe does.
+bool Settings::gestureVolume()      { return store().value(QStringLiteral("gestures/videoVolume"), true).toBool(); }
+void Settings::setGestureVolume(bool on)      { store().setValue(QStringLiteral("gestures/videoVolume"), on); store().sync(); }
+bool Settings::gestureBrightness()  { return store().value(QStringLiteral("gestures/videoBrightness"), true).toBool(); }
+void Settings::setGestureBrightness(bool on)  { store().setValue(QStringLiteral("gestures/videoBrightness"), on); store().sync(); }
+bool Settings::gestureSeek()        { return store().value(QStringLiteral("gestures/videoSeek"), true).toBool(); }
+void Settings::setGestureSeek(bool on)        { store().setValue(QStringLiteral("gestures/videoSeek"), on); store().sync(); }
+bool Settings::gestureDoubleTap()   { return store().value(QStringLiteral("gestures/videoDoubleTap"), true).toBool(); }
+void Settings::setGestureDoubleTap(bool on)   { store().setValue(QStringLiteral("gestures/videoDoubleTap"), on); store().sync(); }
+bool Settings::gestureLongPress()   { return store().value(QStringLiteral("gestures/videoLongPress"), true).toBool(); }
+void Settings::setGestureLongPress(bool on)   { store().setValue(QStringLiteral("gestures/videoLongPress"), on); store().sync(); }
+bool Settings::gesturePinch()       { return store().value(QStringLiteral("gestures/videoPinch"), true).toBool(); }
+void Settings::setGesturePinch(bool on)       { store().setValue(QStringLiteral("gestures/videoPinch"), on); store().sync(); }
+
+// The band along each window edge in which a touch is ignored outright, because it belongs to the OS's own
+// back / notification swipes. Clamped on read AND write for the same reason audioJumpSeconds is: 0 disables
+// the reservation entirely (a kiosk or a desktop window with no system gestures), 96 is as wide as any
+// platform's reserved band gets, and anything outside that is a value nobody could have meant.
+int  Settings::gestureEdgeInset()   { return qBound(0, store().value(QStringLiteral("gestures/edgeInset"), 24).toInt(), 96); }
+void Settings::setGestureEdgeInset(int px)    { store().setValue(QStringLiteral("gestures/edgeInset"), qBound(0, px, 96)); store().sync(); }
+
 // Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
 // before the next flush cannot lose the user's choice.
 bool Settings::skipSegments() { return store().value(QStringLiteral("playback/skipSegments"), true).toBool(); }

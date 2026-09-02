@@ -162,6 +162,26 @@ namespace Settings
     int  audioJumpSeconds();
     void setAudioJumpSeconds(int seconds);
 
+    // Touch gestures over the video player (issue #162). One switch per gesture FAMILY, all default ON: the
+    // recogniser only ever runs on a touch form factor, so an enabled family is invisible on desktop and TV.
+    // gestureEdgeInset is the band along each window edge where a touch is ignored so the OS's own back /
+    // notification swipes are never fought (0..96 px, default 24). The video skip interval is NOT here on
+    // purpose — it is audioJumpSeconds above, shared, exactly as issue #162 asks.
+    bool gestureVolume();
+    void setGestureVolume(bool on);
+    bool gestureBrightness();
+    void setGestureBrightness(bool on);
+    bool gestureSeek();
+    void setGestureSeek(bool on);
+    bool gestureDoubleTap();
+    void setGestureDoubleTap(bool on);
+    bool gestureLongPress();
+    void setGestureLongPress(bool on);
+    bool gesturePinch();
+    void setGesturePinch(bool on);
+    int  gestureEdgeInset();
+    void setGestureEdgeInset(int px);
+
     // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
     // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
     // a button you ignored, and invisible when it is a seek that already happened).

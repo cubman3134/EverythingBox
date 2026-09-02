@@ -4192,6 +4192,32 @@ bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
         frames->append({ tp(0, S::Released, x2, y2) });
         intervalMs = qMax(1, ms / (steps + 1));
     }
+    else if (sub == QStringLiteral("hold") && t.size() >= 3)
+    {
+        // A long press (issue #162): press, sit still for MS, release. The stationary Updated frames matter —
+        // a real finger keeps producing them, and without any the recogniser would only ever hear about the
+        // hold from its own deadline timer, which is a different code path from the one a user drives.
+        const qreal x = t[1].toDouble(), y = t[2].toDouble();
+        const int ms = t.size() >= 4 ? t[3].toInt() : 800;
+        const int steps = 8;
+        frames->append({ tp(0, S::Pressed, x, y) });
+        for (int i = 0; i < steps; ++i) frames->append({ tp(0, S::Updated, x, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        intervalMs = qMax(1, ms / (steps + 1));
+    }
+    else if (sub == QStringLiteral("dtap") && t.size() >= 3)
+    {
+        // A double tap as ONE sequence rather than two `tap` commands: the gap has to be shorter than the
+        // recogniser's window, and two commands down the pipe cannot promise that — the busy latch alone
+        // costs a round trip. GAP defaults to 200 ms, comfortably inside the 350 ms window.
+        const qreal x = t[1].toDouble(), y = t[2].toDouble();
+        const int gap = t.size() >= 4 ? t[3].toInt() : 200;
+        frames->append({ tp(0, S::Pressed, x, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        frames->append({ tp(0, S::Pressed, x, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        intervalMs = qMax(1, gap / 2);               // press->press is two ticks, so a tick is half the gap
+    }
     else if (sub == QStringLiteral("pinch") && t.size() >= 4)
     {
         const qreal cx = t[1].toDouble(), cy = t[2].toDouble(), scale = t[3].toDouble();
@@ -4381,6 +4407,26 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("mediaControls"), mediaControls_ && mediaControls_->isVisible());
             o.insert(QStringLiteral("playerPermille"), seek_ ? seek_->value() : 0);
             o.insert(QStringLiteral("playerDur"), duration_);
+            // Touch gestures (issue #162). Everything a synthetic-touch drive needs to assert what a gesture
+            // DID, since the HUD it draws is a transient notice and the picture itself is an mpv frame the
+            // classic layout screenshots as black: the volume the swipe landed on, mpv's brightness, the fit
+            // the pinch cycled to, whether the lock is engaged, and whether the recogniser is live at all
+            // (false on desktop/TV, which is the form-factor gate observable from the outside).
+            o.insert(QStringLiteral("gestVolume"), volume_ ? volume_->value() : 0);
+            o.insert(QStringLiteral("gestBrightness"), player_ ? player_->videoBrightness() : 100);
+            o.insert(QStringLiteral("gestFit"), int(videoFit_));
+            o.insert(QStringLiteral("gestLocked"), gestures_.locked());
+            o.insert(QStringLiteral("gestEnabled"), gestures_.config().enabled);
+            o.insert(QStringLiteral("gestSpeed"), player_ ? player_->speed() : 1.0);
+            // The lock control's own rect, in the WINDOW coordinates `click`/`touch` take — the same reason
+            // playerSeekRect exists: without it the lock can be read but not pressed, and a control that
+            // cannot be driven is one no test covers. Empty while it is hidden.
+            if (gestureLockBtn_ && gestureLockBtn_->isVisible())
+            {
+                const QPoint ltl = gestureLockBtn_->mapTo(this, QPoint(0, 0));
+                o.insert(QStringLiteral("gestLockRect"), QStringLiteral("%1 %2 %3 %4")
+                             .arg(ltl.x()).arg(ltl.y()).arg(gestureLockBtn_->width()).arg(gestureLockBtn_->height()));
+            }
             // The seek bar's own rect, in the WINDOW coordinates `click`/`touch` take — without it a test can
             // read where playback IS but has no way to press a point on the bar and check it went there, which
             // is the whole of "clicking the bar seeks". Reported whether or not the transport is up; a caller
@@ -5597,58 +5643,10 @@ void MainWindow::togglePlayerChrome()
     else revealMediaControls();
 }
 
-// Player touch filter (touch-only — the mouse path is frozen). Single-finger tap on the BARE video is a tap
-// candidate; a touch that lands on the visible transport chrome (slider/buttons) is DEFERRED (return false) so it
-// rides synthesized mouse (QSlider drag / QPushButton tap need nothing new). Consuming the bare-video tap stops
-// mouse synthesis so a tap can't double-fire. Movement past a slop cancels the tap (a bare-video drag is inert).
-bool MainWindow::handlePlayerTouch(QTouchEvent* te)
-{
-    const auto pts = te->points();
-    auto overControls = [this](const QPointF& p) {
-        const QPoint ip = p.toPoint();
-        return (mediaControls_ && mediaControls_->isVisible() && mediaControls_->geometry().contains(ip))
-            || (videoBack_ && videoBack_->isVisible() && videoBack_->geometry().contains(ip))
-            || (streamIssueBtn_ && streamIssueBtn_->isVisible() && streamIssueBtn_->geometry().contains(ip));
-    };
-    switch (te->type())
-    {
-    case QEvent::TouchBegin:
-        if (pts.size() != 1 || overControls(pts.first().position())) { playerTouchTap_ = false; return false; }
-        playerTouchTap_ = true;
-        playerTouchStart_ = pts.first().position();
-        return true;
-    case QEvent::TouchUpdate:
-        if (playerTouchTap_ && !pts.isEmpty()
-            && (pts.first().position() - playerTouchStart_).manhattanLength() > 24)
-            playerTouchTap_ = false;
-        return playerTouchTap_;
-    case QEvent::TouchEnd:
-        if (!playerTouchTap_) return false;
-        playerTouchTap_ = false;
-        onPlayerTap(pts.isEmpty() ? playerTouchStart_ : pts.first().position());
-        return true;
-    default:
-        return false;
-    }
-}
-
-// Resolve a bare-video tap: a second tap within 350 ms is a double-tap seek (left third −10 s / right third
-// +10 s via the EXACT relative-seek the ⏪/⏩ transport buttons fire, with a transient notify flash); a lone tap
-// (the timer expires) toggles the chrome. A centre double-tap is a net single toggle.
-void MainWindow::onPlayerTap(const QPointF& pos)
-{
-    if (playerTapTimer_->isActive())
-    {
-        playerTapTimer_->stop();
-        const int w = player_->width();
-        const qreal x = pos.x();
-        if (x < w / 3.0)              { player_->seekRelative(-10.0); notify(tr("⏪  −10s"), 900); revealMediaControls(); }
-        else if (x > 2.0 * w / 3.0)   { player_->seekRelative(10.0);  notify(tr("⏩  +10s"), 900); revealMediaControls(); }
-        else                          togglePlayerChrome();
-        return;
-    }
-    playerTapTimer_->start(350);
-}
+// The player's touch filter and the whole of issue #162's gesture vocabulary live in MainWindowGestures.cpp:
+// handlePlayerTouch(), handleGestureEvents(), the lock control and the fit cycle. Only the wiring stays here
+// (the WA_AcceptTouchEvents attribute + the pending-tap timer in the constructor, and the eventFilter branch
+// that hands the three touch event types over).
 
 void MainWindow::hideNotice()
 {
@@ -20212,6 +20210,19 @@ void MainWindow::openGeneralSettings()
         QStringList jumpOpts;
         for (const auto& p : jumpPairs) jumpOpts << p.first;
 
+        // Touch-gesture edge inset (issue #162). Display <-> pixels; the band along each window edge in which
+        // a touch is ignored outright, because the OS's own back / notification swipes start there. The
+        // handler maps the picked display back through this same list, and the classic twin builds it too.
+        const QList<QPair<QString, int>> gestEdgePairs = {
+            { tr("Off"), 0 }, { tr("16 px"), 16 }, { tr("24 px (default)"), 24 },
+            { tr("32 px"), 32 }, { tr("48 px"), 48 }, { tr("64 px"), 64 },
+        };
+        const int curGestEdge = Settings::gestureEdgeInset();
+        QString curGestEdgeDisp = gestEdgePairs.at(2).first;         // "24 px" if a stored value is odd
+        for (const auto& p : gestEdgePairs) if (p.second == curGestEdge) { curGestEdgeDisp = p.first; break; }
+        QStringList gestEdgeOpts;
+        for (const auto& p : gestEdgePairs) gestEdgeOpts << p.first;
+
         // Preferred music source (issue #194). Display <-> the stored value, built by the one shared list so
         // the classic twin below cannot offer a different set of rows.
         const QList<QPair<QString, QString>> musicSrcPairs = musicSourcePrefPairs();
@@ -20712,6 +20723,28 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("pb.jumphint"),
              tr("How far the skip-back and skip-forward controls jump in an audiobook or podcast. Video seeking "
                 "is unchanged."), QString());
+        // --- Gestures (issue #162). ONE "Gestures" home in the UI, sitting with the jump interval it shares
+        // rather than in a screen of its own. Every row is a whole gesture FAMILY, on by default, and every
+        // one of them is inert unless this device reports a touch form factor — so a desktop or TV user sees
+        // rows that describe something their input cannot do, which the hint says outright rather than
+        // hiding the section and leaving a phone-and-TV household unable to find it from the couch. The
+        // classic twins are in the QWidget builder below (GS_TWINS). ---
+        sep(tr("Gestures"));
+        info(QStringLiteral("gest.hint"),
+             tr("Swipe, tap and pinch over a playing video. These apply on touch screens only — a mouse, a "
+                "keyboard and a remote behave exactly as they always have."), QString());
+        toggle(QStringLiteral("gest.volume"), tr("Swipe up and down on the right for volume"),
+               Settings::gestureVolume());
+        toggle(QStringLiteral("gest.brightness"), tr("Swipe up and down on the left for brightness"),
+               Settings::gestureBrightness());
+        toggle(QStringLiteral("gest.seek"), tr("Swipe across to scrub"), Settings::gestureSeek());
+        toggle(QStringLiteral("gest.doubletap"), tr("Double-tap the sides to skip"), Settings::gestureDoubleTap());
+        toggle(QStringLiteral("gest.longpress"), tr("Hold for double speed"), Settings::gestureLongPress());
+        toggle(QStringLiteral("gest.pinch"), tr("Pinch to change how the video fits"), Settings::gesturePinch());
+        choice(QStringLiteral("gest.edge"), tr("Ignore touches near the screen edge"), gestEdgeOpts, curGestEdgeDisp);
+        info(QStringLiteral("gest.edgehint"),
+             tr("A double-tap skips by the same interval as the row above. The edge band is left to the system "
+                "so its own back and notification swipes still work."), QString());
         // Offer to skip an episode's opening and end credits when one is known; "Skip automatically" seeks
         // past them without asking, instead of showing a button.
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
@@ -20950,7 +20983,7 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, attractTimeoutPairs, resumeModePairs,
+            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, gestEdgePairs, attractTimeoutPairs, resumeModePairs,
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              xfPairs,                  // Crossfade (#141): same, for the seconds row
              musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
@@ -21250,6 +21283,18 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("pb.jump")) {
                     for (const auto& p : jumpPairs) if (p.first == val) { Settings::setAudioJumpSeconds(p.second); break; }
+                }
+                // Touch gestures (issue #162). No live re-apply and none is owed: the recogniser rebuilds its
+                // whole Config from these keys on the NEXT press (applyGestureConfig), so a row flipped here
+                // is in force by the time a finger next touches the video.
+                else if (id == QStringLiteral("gest.volume"))     Settings::setGestureVolume(on);
+                else if (id == QStringLiteral("gest.brightness")) Settings::setGestureBrightness(on);
+                else if (id == QStringLiteral("gest.seek"))       Settings::setGestureSeek(on);
+                else if (id == QStringLiteral("gest.doubletap"))  Settings::setGestureDoubleTap(on);
+                else if (id == QStringLiteral("gest.longpress"))  Settings::setGestureLongPress(on);
+                else if (id == QStringLiteral("gest.pinch"))      Settings::setGesturePinch(on);
+                else if (id == QStringLiteral("gest.edge")) {
+                    for (const auto& p : gestEdgePairs) if (p.first == val) { Settings::setGestureEdgeInset(p.second); break; }
                 }
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
@@ -22518,6 +22563,70 @@ void MainWindow::openGeneralSettings()
                                        "podcast. Video seeking is unchanged."));
         jumpNote->setWordWrap(true); jumpNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(jumpNote);
+
+        // --- Gestures (issue #162): the classic twins of the themed gest.* rows. Same Settings keys, same
+        // setters — one write path, no drift (GS_TWINS). No live re-apply is needed on either side: the
+        // recogniser rebuilds its Config from these keys on the next press. ---
+        auto* gestHeading = new QLabel(tr("Gestures"));
+        gestHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(gestHeading);
+        auto* gestNote = new QLabel(tr("Swipe, tap and pinch over a playing video. These apply on touch screens "
+                                       "only — a mouse, a keyboard and a remote behave exactly as they always have."));
+        gestNote->setWordWrap(true); gestNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(gestNote);
+        // Spelled out one construction at a time rather than through a factory: the parity gate matches the
+        // CLASSIC CONSTRUCTION as a fixed string, so a shared factory would give six rows one indistinguishable
+        // twin and the gate would stop asserting which of them exists.
+        auto* gestVol = new QCheckBox(tr("Swipe up and down on the right for volume"));
+        gestVol->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestVol->setChecked(Settings::gestureVolume());
+        connect(gestVol, &QCheckBox::toggled, this, [](bool c) { Settings::setGestureVolume(c); });
+        v->addWidget(gestVol);
+        auto* gestBright = new QCheckBox(tr("Swipe up and down on the left for brightness"));
+        gestBright->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestBright->setChecked(Settings::gestureBrightness());
+        connect(gestBright, &QCheckBox::toggled, this, [](bool c) { Settings::setGestureBrightness(c); });
+        v->addWidget(gestBright);
+        auto* gestSeek = new QCheckBox(tr("Swipe across to scrub"));
+        gestSeek->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestSeek->setChecked(Settings::gestureSeek());
+        connect(gestSeek, &QCheckBox::toggled, this, [](bool c) { Settings::setGestureSeek(c); });
+        v->addWidget(gestSeek);
+        auto* gestDouble = new QCheckBox(tr("Double-tap the sides to skip"));
+        gestDouble->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestDouble->setChecked(Settings::gestureDoubleTap());
+        connect(gestDouble, &QCheckBox::toggled, this, [](bool c) { Settings::setGestureDoubleTap(c); });
+        v->addWidget(gestDouble);
+        auto* gestHold = new QCheckBox(tr("Hold for double speed"));
+        gestHold->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestHold->setChecked(Settings::gestureLongPress());
+        connect(gestHold, &QCheckBox::toggled, this, [](bool c) { Settings::setGestureLongPress(c); });
+        v->addWidget(gestHold);
+        auto* gestPinch = new QCheckBox(tr("Pinch to change how the video fits"));
+        gestPinch->setStyleSheet(QStringLiteral("font-size:15px;"));
+        gestPinch->setChecked(Settings::gesturePinch());
+        connect(gestPinch, &QCheckBox::toggled, this, [](bool c) { Settings::setGesturePinch(c); });
+        v->addWidget(gestPinch);
+        auto* gestEdgeRow = new QHBoxLayout();
+        auto* gestEdgeLbl = new QLabel(tr("Ignore touches near the screen edge"));
+        gestEdgeLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* gestEdge = new QComboBox();
+        gestEdge->addItem(tr("Off"), 0);
+        gestEdge->addItem(tr("16 px"), 16);
+        gestEdge->addItem(tr("24 px (default)"), 24);
+        gestEdge->addItem(tr("32 px"), 32);
+        gestEdge->addItem(tr("48 px"), 48);
+        gestEdge->addItem(tr("64 px"), 64);
+        gestEdge->setCurrentIndex(qMax(0, gestEdge->findData(Settings::gestureEdgeInset())));
+        connect(gestEdge, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [gestEdge](int) { Settings::setGestureEdgeInset(gestEdge->currentData().toInt()); });
+        gestEdgeRow->addWidget(gestEdgeLbl); gestEdgeRow->addWidget(gestEdge); gestEdgeRow->addStretch(1);
+        v->addLayout(gestEdgeRow);
+        auto* gestEdgeNote = new QLabel(tr("A double-tap skips by the same interval as the row above. The edge "
+                                           "band is left to the system so its own back and notification swipes "
+                                           "still work."));
+        gestEdgeNote->setWordWrap(true); gestEdgeNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(gestEdgeNote);
 
         // Refresh-rate matching, Tier 1 (issue #70): the classic twin of the themed pb.refreshsync row. Same
         // Settings key/setter and the same live re-apply (applyRefreshSyncLive) — one write path, no drift.

@@ -136,6 +136,32 @@ keys — there is no drag-and-drop to reach for.
   to the other layout are kept in your list and simply skipped, so switching layouts never loses them. Theme
   authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
 
+## Gestures
+
+On a phone or tablet the video player answers to the gestures every mobile player uses. They register on
+**touch form factors only** — with a mouse, a keyboard or a TV remote nothing here applies and nothing about
+those inputs changes.
+
+- **Swipe up and down** — on the **right** half for volume, on the **left** half for brightness, with the
+  level shown while you move. Brightness is in-app: it dims the picture itself, so it works on platforms with
+  no screen-brightness API of their own.
+- **Swipe across** — scrub, with the time you are at and the time you would land on. Lifting your finger
+  commits it; sliding back to where you started cancels it and nothing moves.
+- **Double-tap** — the left or right third skips back or forward. It skips by the **same interval** as the
+  skip buttons (Settings > Playback > *Audio jump interval*), not a second setting. Double-tap the middle to
+  play or pause.
+- **Hold** — double speed for as long as you hold, back to normal when you let go.
+- **Pinch** — cycle how the video fits the screen: fit, fill, stretch.
+- **Lock** — the lock button on the player suspends every gesture, for listening with the screen in a pocket.
+  While it is locked a tap does nothing but bring the button back so you can unlock.
+
+Each family can be switched off in **Settings > General > Gestures**, on either layout. The same section sets
+how wide a band along the screen edge is left alone (24 px by default) so the system's own back and
+notification swipes are never fought, and no gesture registers while a menu or overlay is open.
+
+The readers have their own touch handling — tap zones for page turns, a swipe to turn, and pinch-to-zoom in
+the PDF and comic views.
+
 ## After a crash
 
 On Windows a crash records itself. `crash_report.log` gets the faulting module and offset, the
