@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.170 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -505,6 +505,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # #134: what a comic's FILENAME is allowed to mean. Pure, no filesystem, its own TU so the whole
         # rule can be probed and mutated without a widget anywhere near it.
         src/comic/ComicName.cpp   src/comic/ComicName.h
+        # #152: ComicInfo.xml -- what a comic archive SAYS about itself, read in the same pass that counts
+        # its pages. One parser, four containers (the seam dispatches on the extension); pure XML + the
+        # rating/direction tables, so the whole of it is probe-testable without an archive at all.
+        src/comic/ComicInfo.cpp   src/comic/ComicInfo.h
         src/core/NaturalOrder.h                             # #205 the one numeric-aware collator (header-only)
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
@@ -1007,6 +1011,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/ComicPageOrder.h src/comic/Tar.h        # header-only (page collation, the .cbt reader)
         src/comic/RarComic.cpp    src/comic/RarComic.h    # ComicView's .cbr branch (#144, vendored unarr)
+        src/comic/ComicInfo.cpp   src/comic/ComicInfo.h   # ComicView's reading direction (#152)
+        src/comic/ComicName.cpp   src/comic/ComicName.h   # seriesKey(): the direction override's key (#152)
         src/core/SevenZip.cpp     src/core/SevenZip.h     # ComicView's .cb7 branch
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h # ComicView's photo mode (issue #102)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
@@ -2436,6 +2442,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/TextBook.cpp    src/ebook/TextBook.h    src/ebook/MarkdownHtml.h
         src/comic/RarComic.cpp    src/comic/RarComic.h
         src/comic/ComicName.cpp   src/comic/ComicName.h
+        # #152: BookMeta reads a comic archive's ComicInfo.xml in the same pass, so the scan half of this
+        # probe cannot be built without it. SevenZip/lzma7z come along for the seam's .cb7 branch, which
+        # this probe references through ComicInfo.cpp and does not drive.
+        src/comic/ComicInfo.cpp   src/comic/ComicInfo.h
+        src/core/SevenZip.cpp     src/core/SevenZip.h
         src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
         src/addons/AddonModels.cpp src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
@@ -2444,7 +2455,28 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_books PRIVATE src src/core src/ebook src/comic src/browse src/addons
         src/theme2 third_party tools)
     target_compile_definitions(probe_books PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf unarr)
+    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf lzma7z unarr)
+
+    # ComicInfo.xml (issue #152): the comic world's metadata standard, read from inside the archive. The
+    # PARSER is pure bytes-in/struct-out, so most of this probe needs nothing but QtCore; the four-container
+    # SEAM is why the rest of the list is here - miniz for .cbz, unarr for .cbr, Tar.h for .cbt and
+    # SevenZip/lzma7z for .cb7, which is exactly the set ComicView already opens. Settings.cpp (+ its
+    # FormFactor pairing) comes along for the per-series direction override, which is a Settings value.
+    #
+    # It links NO BookLibrary and NO BookMeta: what the LIBRARY does with a parsed document is probe_books'
+    # question, and keeping the two apart is what stops a change to the grouping from being able to hide a
+    # change to the parse.
+    add_executable(probe_comicinfo tools/probe_comicinfo.cpp
+        src/comic/ComicInfo.cpp   src/comic/ComicInfo.h
+        src/comic/ComicPageOrder.h src/comic/Tar.h      # header-only (the image-member rule, the .cbt reader)
+        src/comic/RarComic.cpp    src/comic/RarComic.h
+        src/core/SevenZip.cpp     src/core/SevenZip.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        third_party/miniz.c)
+    target_include_directories(probe_comicinfo PRIVATE src src/core src/comic src/theme2 third_party tools)
+    target_compile_definitions(probe_comicinfo PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_comicinfo PRIVATE Qt6::Core Qt6::Gui lzma7z unarr)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

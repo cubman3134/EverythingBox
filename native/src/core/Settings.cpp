@@ -8,6 +8,8 @@
 #include "Scrobble.h"               // the scrobble keys (#192) are built off the prefix the carve-out excludes
 #include <QSettings>
 #include <QCoreApplication>
+#include <QJsonDocument>   // #152: the per-series comic direction overrides are one JSON value
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QUuid>
@@ -733,6 +735,42 @@ QString Settings::readingFolder()
 void Settings::setReadingFolder(const QString& path)
 {
     store().setValue(QStringLiteral("reading/folder"), path); store().sync();
+}
+
+// Per-series comic reading direction (issue #152). ONE settings value holding a JSON object, rather than one
+// key per series: a series key is arbitrary user text — it can hold a '/', which QSettings reads as a group
+// separator, and a ']' or a '=', which the INI backend escapes — so keys minted from it would be a family of
+// silent corruptions. A JSON object stored as a single string has none of those questions.
+namespace
+{
+    const char* kComicDirKey = "reading/comicDirections";
+
+    QJsonObject comicDirections()
+    {
+        const QString raw = store().value(QLatin1String(kComicDirKey)).toString();
+        if (raw.isEmpty()) return QJsonObject();
+        return QJsonDocument::fromJson(raw.toUtf8()).object();   // unparseable == no overrides, never a throw
+    }
+}
+
+int Settings::comicDirectionOverride(const QString& seriesKey)
+{
+    if (seriesKey.isEmpty()) return 0;
+    const int v = comicDirections().value(seriesKey).toInt(0);
+    return (v == 1 || v == 2) ? v : 0;   // anything else stored is "no override"
+}
+
+void Settings::setComicDirectionOverride(const QString& seriesKey, int direction)
+{
+    if (seriesKey.isEmpty()) return;
+    QJsonObject o = comicDirections();
+    // 0 FORGETS rather than storing a third state — see Settings.h.
+    if (direction == 1 || direction == 2) o.insert(seriesKey, direction);
+    else                                  o.remove(seriesKey);
+    if (o.isEmpty()) store().remove(QLatin1String(kComicDirKey));
+    else store().setValue(QLatin1String(kComicDirKey),
+                          QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+    store().sync();
 }
 
 // The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and

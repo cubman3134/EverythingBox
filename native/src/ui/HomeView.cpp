@@ -2324,9 +2324,23 @@ void HomeView::onAudiobookLibraryChanged()
 // Why the Books category is empty, in the user's terms. Only this layer can tell the three cases apart - the
 // pure builder is handed the sentence precisely so the reasons can live next to the Settings state they are
 // about.
+// WHAT THIS PROFILE MAY SEE (issue #152). The installed index is the whole library; a restricted (kids)
+// profile is shown it with every comic whose ComicInfo.xml rated it Mature or Adults dropped, its empty
+// author buckets dropped with them and its series view rebuilt — BookLibrary::filterForProfile owns all of
+// that, and returns the index UNCHANGED for every other profile. It is read here rather than filtered into
+// the installed index because switching profile must not need a rescan.
+//
+// BY VALUE, and every caller below binds it to a named local before taking a pointer into it: the Author /
+// Series lookups return pointers into the index's own nested vectors, and reading one out of a temporary
+// would dangle at the end of the statement.
+static BookLibrary::Index visibleBookIndex()
+{
+    return BookLibrary::filterForProfile(BookLibrary::index(), ProfileStore::current().restricted);
+}
+
 browse::BookEmptyNote HomeView::bookEmptyNote() const
 {
-    if (!BookLibrary::index().isEmpty()) return {};
+    if (!visibleBookIndex().isEmpty()) return {};
     const QString root  = BookLibrary::root();
     const QString shown = QDir::toNativeSeparators(root);
     if (root.isEmpty() || !QFileInfo::exists(root))
@@ -2371,7 +2385,7 @@ void HomeView::selectBooks()
 
 void HomeView::populateBooks()
 {
-    showSyntheticCatalog(browse::bookRootCatalog(BookLibrary::index(), bookEmptyNote(), bookCover()));
+    showSyntheticCatalog(browse::bookRootCatalog(visibleBookIndex(), bookEmptyNote(), bookCover()));
 }
 
 // One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the marker
@@ -2380,7 +2394,8 @@ void HomeView::populateBooks()
 void HomeView::openBookAuthorLevel(const QString& authorKey)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    const BookLibrary::Author* a = BookLibrary::index().author(authorKey);
+    const BookLibrary::Index idx = visibleBookIndex();
+    const BookLibrary::Author* a = idx.author(authorKey);
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true;
     lvl.title = a ? BookLibrary::displayAuthor(*a) : tr("My Books");
@@ -2394,7 +2409,7 @@ void HomeView::openBookAuthorLevel(const QString& authorKey)
 
 void HomeView::populateBookAuthor(const QString& authorKey)
 {
-    showSyntheticCatalog(browse::bookAuthorCatalog(BookLibrary::index(), authorKey, bookCover()));
+    showSyntheticCatalog(browse::bookAuthorCatalog(visibleBookIndex(), authorKey, bookCover()));
 }
 
 void HomeView::openBookSeriesListLevel()
@@ -2412,13 +2427,14 @@ void HomeView::openBookSeriesListLevel()
 
 void HomeView::populateBookSeriesList()
 {
-    showSyntheticCatalog(browse::bookSeriesListCatalog(BookLibrary::index(), bookCover()));
+    showSyntheticCatalog(browse::bookSeriesListCatalog(visibleBookIndex(), bookCover()));
 }
 
 void HomeView::openBookSeriesLevel(const QString& seriesKey)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    const BookLibrary::Series* s = BookLibrary::index().seriesFor(seriesKey);
+    const BookLibrary::Index idx = visibleBookIndex();
+    const BookLibrary::Series* s = idx.seriesFor(seriesKey);
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true;
     lvl.title = s && !s->name.trimmed().isEmpty() ? s->name.trimmed() : tr("Series");
@@ -2432,7 +2448,7 @@ void HomeView::openBookSeriesLevel(const QString& seriesKey)
 
 void HomeView::populateBookSeries(const QString& seriesKey)
 {
-    showSyntheticCatalog(browse::bookSeriesCatalog(BookLibrary::index(), seriesKey, bookCover()));
+    showSyntheticCatalog(browse::bookSeriesCatalog(visibleBookIndex(), seriesKey, bookCover()));
 }
 
 // A finished scan installed a new index (MainWindow::rescanBookLibrary). Refresh whichever Books level the
