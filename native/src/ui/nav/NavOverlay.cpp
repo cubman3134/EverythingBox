@@ -339,7 +339,7 @@ QStringList NavOverlay::clippedTexts() const
 // ---------------------------------------------------------------- NavMenu
 
 NavMenu::NavMenu(const QString& title, const QStringList& items,
-                 const std::function<void(int)>& onChosen, QWidget* window)
+                 const std::function<void(int)>& onChosen, QWidget* window, int initialRow)
     : NavOverlay(window), onChosen_(onChosen)
 {
     auto* v = new QVBoxLayout(panel());
@@ -396,7 +396,10 @@ NavMenu::NavMenu(const QString& title, const QStringList& items,
         list_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         list_->setFixedHeight(measure());
     }
-    list_->setCurrentRow(0);
+    // Clamped, and scrolled to: an initial row the viewport is not showing looks exactly like a menu that
+    // opened at the top and lost the highlight.
+    list_->setCurrentRow(qBound(0, initialRow, qMax(0, list_->count() - 1)));
+    list_->scrollToItem(list_->currentItem());
     // Mouse path: a click chooses the row directly (same flow as controller Enter).
     connect(list_, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { handleNavKey(Qt::Key_Return); });
     v->addWidget(list_);
@@ -434,11 +437,11 @@ QString NavMenu::describe() const
     return list_ && list_->currentItem() ? list_->currentItem()->text() : QString();
 }
 
-int NavMenu::pick(const QString& title, const QStringList& items, QWidget* window)
+int NavMenu::pick(const QString& title, const QStringList& items, QWidget* window, int initialRow)
 {
     int result = -1;
     QEventLoop loop;
-    auto* menu = new NavMenu(title, items, [&result](int row) { result = row; }, window);
+    auto* menu = new NavMenu(title, items, [&result](int row) { result = row; }, window, initialRow);
     QObject::connect(menu, &NavOverlay::closed, &loop, [&loop](int) { loop.quit(); });
     loop.exec();
     return result;

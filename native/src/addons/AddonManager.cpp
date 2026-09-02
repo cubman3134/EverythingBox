@@ -163,6 +163,25 @@ static QUrl remoteMetaUrl(const QString& base, const QString& type, const QStrin
                + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
 }
 
+// #188. Both routes are keyed by the FAMILY (series) media type, so one manifest declaration covers a
+// container and its leaves. `page` is optional on /chapters, exactly as it is on /detail: a source that
+// returns a whole series at once never sees it, and a static addon can precompute page=2 as a file.
+//   {base}/chapters/{type}/{seriesId}.json     (+ "/page={n}")  -> { "chapters": [...], "hasMore": bool? }
+//   {base}/pages/{type}/{chapterId}.json                        -> { "pages": [...] }
+static QUrl remoteChaptersUrl(const QString& base, const QString& type, const QString& id, int page)
+{
+    QString u = base + QStringLiteral("/chapters/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+              + QStringLiteral("/") + segEnc(id);
+    if (page > 1) u += QStringLiteral("/page=") + QString::number(page);
+    return QUrl(u + QStringLiteral(".json"));
+}
+
+static QUrl remotePagesUrl(const QString& base, const QString& type, const QString& id)
+{
+    return QUrl(base + QStringLiteral("/pages/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+               + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
+}
+
 static QUrl remoteStreamUrl(const QString& base, const QString& type, const QString& id, int attempt = 0)
 {
     QString u = base + QStringLiteral("/stream/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
@@ -1185,6 +1204,18 @@ int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int pag
                                 const QMap<QString, QString>& filters, const QString& query)
 {
     if (!src) return -1;
+    // #188: a serial container reads through the `chapters` resource when its addon declares one. THE
+    // OUTDATED-ADDON FALLBACK IS THIS LINE NOT TAKEN: bundled addons are copy-if-absent, so an install that
+    // predates the resource keeps its old script, does not declare `chapters`, and drops through to the
+    // /detail children path it always used — the chapter list still appears, from the older route, and the
+    // log says once that the addon is behind (logOutdatedOnce). Nothing here knows what kind of container
+    // it is; the manifest does.
+    // The type test is `is this the FAMILY type` rather than `is the item expandable`: a chapter LEAF is
+    // "manga_chapter", whose family is "manga", so an addon declaring chapters for manga would otherwise
+    // answer a leaf's /detail with the whole series. `expandable` is the caller's word for the same thing
+    // and is not always set on an item rebuilt from a Recent, which is exactly where that would land.
+    if (AddonManager::familyType(item.type) == item.type && supportsChapters(src, item.type))
+        return dispatchChapters(src, item, page);
     if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteDetail(src, item, page);
     QJsonObject a{ { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
                    { QStringLiteral("page"), page } };
@@ -2484,85 +2515,262 @@ QString AddonManager::resolveStreamSync(LoadedAddon* src, const MediaItem& item)
         httpGetBlocking(remoteStreamUrl(src->baseUrl, item.type, item.id), remoteConfigHeader(src)), src->baseUrl);
 }
 
-// MangaDex page resolution. A chapter item id is "mangadexch:{verId1,verId2,...}" - all the language
-// versions of one chapter number. We pick the English version (when several exist), then ask MangaDex's
-// at-home server for that chapter's image host + filenames, and build the ordered page URLs.
-void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
-                                            std::function<void(const QStringList&)> cb)
-{
-    static const QString kMdxApi = QStringLiteral("https://api.mangadex.org");
-    QString csv = chapterItemId;
-    const int colon = csv.indexOf(QLatin1Char(':'));
-    if (colon >= 0) csv = csv.mid(colon + 1);
-    const QStringList ids = csv.split(QLatin1Char(','), Qt::SkipEmptyParts);
-    streamLog(QStringLiteral("manga: resolve %1 (%2 version id(s))").arg(chapterItemId).arg(ids.size()));
-    if (ids.isEmpty()) { cb({}); return; }
+// ---- serial reading: the `chapters` and `pages` resources (issue #188) ------------------------------
+//
+// WHAT USED TO BE HERE. A hardcoded resolver for one manga site: it split a provider-shaped item id, asked
+// that site's API which language versions existed, picked one, asked its at-home server for the image host,
+// and assembled the page URLs. Manga therefore worked for exactly one source, and a second source needed a
+// change to THIS FILE — the opposite of how every other media type works, where an addon declares what it
+// serves and the client stays neutral. The two resources below are that declaration, and there is no
+// provider name anywhere in this file any more. If something ever needs one again, the protocol is not good
+// enough yet: fix the protocol.
 
-    // Given a single chapter id, fetch its at-home server and assemble the page URLs.
-    auto fetchPages = [this, cb](const QString& chapterId) {
-        streamLog(QStringLiteral("manga: at-home for chapter %1").arg(chapterId));
-        QNetworkRequest rq((QUrl(kMdxApi + QStringLiteral("/at-home/server/") + chapterId)));
+// A chapter leaf's type is its family plus "_chapter"; both routes are keyed by the FAMILY, so one manifest
+// line ("chapters"/"pages" for "manga") covers the container and every leaf under it.
+QString AddonManager::familyType(const QString& type)
+{
+    static const QString kChapterSuffix = QStringLiteral("_chapter");
+    return type.endsWith(kChapterSuffix) ? type.left(type.size() - kChapterSuffix.size()) : type;
+}
+
+// Say ONCE, per addon and per resource, that an installed addon predates the resource being asked for.
+// Bundled addons are copy-if-absent: an existing install keeps its old main.js forever, so this is the
+// normal state of an upgraded install and not an error — but it is invisible without a line in the log,
+// and repeating it on every drill-in would bury it.
+static void logOutdatedOnce(QSet<QString>& seen, const LoadedAddon* src, const QString& resource)
+{
+    if (!src || src->manifest.id.isEmpty()) return;
+    const QString key = src->manifest.id + QLatin1Char('|') + resource;
+    if (seen.contains(key)) return;
+    seen.insert(key);
+    streamLog(QStringLiteral("addon \"%1\" declares no \"%2\" resource: it predates the chapters/pages "
+                             "protocol. Falling back to the older path; reinstall or update the addon to "
+                             "read through the protocol.").arg(src->manifest.id, resource));
+}
+
+bool AddonManager::supportsChapters(const LoadedAddon* src, const QString& type) const
+{
+    if (!src || !isEnabled(src->manifest.id)) return false;
+    if (src->transport == LoadedAddon::JsLocal && !src->hasScript) return false;
+    return src->manifest.declares(QStringLiteral("chapters"), familyType(type));
+}
+
+bool AddonManager::supportsPages(const LoadedAddon* src, const QString& type) const
+{
+    if (!src || !isEnabled(src->manifest.id)) return false;
+    if (src->transport == LoadedAddon::JsLocal && !src->hasScript) return false;
+    return src->manifest.declares(QStringLiteral("pages"), familyType(type));
+}
+
+// One off-thread JS invocation that returns the addon's RAW JSON rather than a parsed MediaCatalog. The
+// chapters/pages payloads are not catalogs, and running them through MediaCatalog::fromJson to get them
+// onto a worker thread would lose every field this protocol added.
+static QString executeJsonRequest(const AddonRequest& req)
+{
+    if (req.source.isEmpty()) return {};
+    auto ctx = std::make_unique<AddonContext>(req.manifest, req.storageDir);
+    QString err;
+    std::unique_ptr<JsAddon> addon = JsAddon::load(req.source, std::move(ctx), &err);
+    if (!addon)
+    {
+        qWarning().noquote() << QStringLiteral("addon '%1' failed to load: %2").arg(req.manifest.id, err);
+        return {};
+    }
+    if (!addon->hasFunction(req.function)) return {};   // declared but not implemented: an empty answer
+    return addon->invoke(req.function, req.argJson);
+}
+
+static QString serialArg(const QString& id, const QString& type, int page)
+{
+    QJsonObject a{ { QStringLiteral("id"), id }, { QStringLiteral("type"), type } };
+    if (page > 0) a.insert(QStringLiteral("page"), page);
+    return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact));
+}
+
+void AddonManager::requestChapters(LoadedAddon* src, const QString& type, const QString& seriesId, int page,
+                                   ChaptersCb cb)
+{
+    if (!cb) return;
+    const QString fam = familyType(type);
+    // THE NEVER-ASK RULE. No request leaves the process for an addon that has not declared it can answer
+    // one — not a JS invocation, not an HTTP GET.
+    if (!supportsChapters(src, fam) || seriesId.isEmpty())
+    {
+        logOutdatedOnce(outdatedLogged_, src, QStringLiteral("chapters"));
+        cb({}, false);
+        return;
+    }
+
+    // Ordering is the CLIENT'S, applied identically to every source: natural sort on `number`, stable, so
+    // ties keep the order the source listed them in. A source that already orders its list loses nothing.
+    auto deliver = [cb](AddonChapterList l) {
+        AddonChapters::sortNaturally(l.chapters);
+        cb(l.chapters, l.hasMore);
+    };
+
+    if (src->transport == LoadedAddon::RemoteHttp)
+    {
+        if (!nam_) nam_ = new QNetworkAccessManager(this);
+        QNetworkRequest rq(remoteChaptersUrl(src->baseUrl, fam, seriesId, page));
         rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-        rq.setTransferTimeout(15000);
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(15000); // liveness: a black-holed remote must still end in a callback
+        applyServerHeaders(rq, src);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [reply, deliver] {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError)
+            {
+                streamLog(QStringLiteral("chapters: fetch failed: %1").arg(reply->errorString()));
+                deliver({});
+                return;
+            }
+            deliver(AddonChapterList::fromJson(reply->readAll()));
+        });
+        return;
+    }
+
+    const AddonRequest req = buildRequest(src, QStringLiteral("getChapters"), serialArg(seriesId, fam, page));
+    auto* watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [watcher, deliver] {
+        const QString json = watcher->result();
+        watcher->deleteLater();
+        deliver(AddonChapterList::fromJson(json.toUtf8()));
+    });
+    watcher->setFuture(QtConcurrent::run([req] { return executeJsonRequest(req); }));
+}
+
+void AddonManager::requestPages(LoadedAddon* src, const QString& type, const QString& chapterId, PagesCb cb)
+{
+    if (!cb) return;
+    const QString fam = familyType(type);
+    if (!supportsPages(src, fam) || chapterId.isEmpty())
+    {
+        logOutdatedOnce(outdatedLogged_, src, QStringLiteral("pages"));
+        cb({});
+        return;
+    }
+
+    if (src->transport == LoadedAddon::RemoteHttp)
+    {
+        if (!nam_) nam_ = new QNetworkAccessManager(this);
+        QNetworkRequest rq(remotePagesUrl(src->baseUrl, fam, chapterId));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(20000); // a source may have to ask its own image host where the pages live
+        applyServerHeaders(rq, src);
         QNetworkReply* reply = nam_->get(rq);
         connect(reply, &QNetworkReply::finished, this, [reply, cb] {
             reply->deleteLater();
-            QStringList urls;
             if (reply->error() != QNetworkReply::NoError)
-                streamLog(QStringLiteral("manga: at-home error: %1").arg(reply->errorString()));
-            else
             {
-                const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
-                const QString base = o.value(QStringLiteral("baseUrl")).toString();
-                const QJsonObject ch = o.value(QStringLiteral("chapter")).toObject();
-                const QString hash = ch.value(QStringLiteral("hash")).toString();
-                if (!base.isEmpty() && !hash.isEmpty())
-                    for (const QJsonValue& f : ch.value(QStringLiteral("data")).toArray())
-                        urls << base + QStringLiteral("/data/") + hash + QStringLiteral("/") + f.toString();
-                else
-                    streamLog(QStringLiteral("manga: at-home missing baseUrl/hash"));
+                streamLog(QStringLiteral("pages: fetch failed: %1").arg(reply->errorString()));
+                cb({});
+                return;
             }
-            streamLog(QStringLiteral("manga: resolved %1 page(s)").arg(urls.size()));
-            cb(urls);
+            const AddonPageList l = AddonPageList::fromJson(reply->readAll());
+            streamLog(QStringLiteral("pages: %1 page(s)").arg(l.pages.size()));
+            cb(l.pages);
         });
-    };
+        return;
+    }
 
-    // Fetch every version's metadata at once so we can skip "external" releases (licensed chapters hosted
-    // off-site, which have NO page images on MangaDex) and prefer an English *hosted* version - falling back
-    // to any hosted version (e.g. a non-English fan translation) so something readable opens when one exists.
-    QUrl q(kMdxApi + QStringLiteral("/chapter"));
-    QUrlQuery qq;
-    qq.addQueryItem(QStringLiteral("limit"), QString::number(ids.size()));
-    for (const QString& id : ids) qq.addQueryItem(QStringLiteral("ids[]"), id);
-    q.setQuery(qq);
-    QNetworkRequest rq(q);
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-    rq.setTransferTimeout(15000);
-    QNetworkReply* reply = nam_->get(rq);
-    const QString fallback = ids.first();
-    connect(reply, &QNetworkReply::finished, this, [reply, fallback, cb, fetchPages] {
-        reply->deleteLater();
-        QString englishHosted, anyHosted, anyHostedLang;
-        if (reply->error() == QNetworkReply::NoError)
-        {
-            const QJsonArray data = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
-            for (const QJsonValue& dv : data)
-            {
-                const QJsonObject d = dv.toObject(), a = d.value(QStringLiteral("attributes")).toObject();
-                const bool external = !a.value(QStringLiteral("externalUrl")).toString().isEmpty();
-                const int pages = a.value(QStringLiteral("pages")).toInt();
-                if (external || pages <= 0) continue;          // no hosted page images for this version
-                const QString id = d.value(QStringLiteral("id")).toString();
-                const QString lang = a.value(QStringLiteral("translatedLanguage")).toString();
-                if (anyHosted.isEmpty()) { anyHosted = id; anyHostedLang = lang; }
-                if (lang == QStringLiteral("en") && englishHosted.isEmpty()) englishHosted = id;
-            }
-        }
-        if (!englishHosted.isEmpty()) { streamLog(QStringLiteral("manga: using English hosted version")); fetchPages(englishHosted); return; }
-        if (!anyHosted.isEmpty()) { streamLog(QStringLiteral("manga: no English pages; using hosted '%1' version").arg(anyHostedLang)); fetchPages(anyHosted); return; }
-        streamLog(QStringLiteral("manga: all versions are external/licensed - no hosted pages anywhere"));
-        cb({}); // nothing has hosted pages (every version is an off-site licensed release)
+    const AddonRequest req = buildRequest(src, QStringLiteral("getPages"), serialArg(chapterId, fam, 0));
+    auto* watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [watcher, cb] {
+        const QString json = watcher->result();
+        watcher->deleteLater();
+        const AddonPageList l = AddonPageList::fromJson(json.toUtf8());
+        streamLog(QStringLiteral("pages: %1 page(s)").arg(l.pages.size()));
+        cb(l.pages);
     });
+    watcher->setFuture(QtConcurrent::run([req] { return executeJsonRequest(req); }));
+}
+
+QVector<AddonChapter> AddonManager::chaptersSync(LoadedAddon* src, const QString& type,
+                                                 const QString& seriesId, int page, bool* hasMore)
+{
+    if (hasMore) *hasMore = false;
+    const QString fam = familyType(type);
+    if (!supportsChapters(src, fam) || seriesId.isEmpty())
+    {
+        logOutdatedOnce(outdatedLogged_, src, QStringLiteral("chapters"));
+        return {};
+    }
+    AddonChapterList l;
+    if (src->transport == LoadedAddon::RemoteHttp)
+        l = AddonChapterList::fromJson(httpGetBlocking(remoteChaptersUrl(src->baseUrl, fam, seriesId, page),
+                                                       remoteConfigHeader(src)));
+    else
+        l = AddonChapterList::fromJson(
+            executeJsonRequest(buildRequest(src, QStringLiteral("getChapters"), serialArg(seriesId, fam, page)))
+                .toUtf8());
+    AddonChapters::sortNaturally(l.chapters);
+    if (hasMore) *hasMore = l.hasMore;
+    return l.chapters;
+}
+
+QVector<AddonPage> AddonManager::pagesSync(LoadedAddon* src, const QString& type, const QString& chapterId)
+{
+    const QString fam = familyType(type);
+    if (!supportsPages(src, fam) || chapterId.isEmpty())
+    {
+        logOutdatedOnce(outdatedLogged_, src, QStringLiteral("pages"));
+        return {};
+    }
+    if (src->transport == LoadedAddon::RemoteHttp)
+        return AddonPageList::fromJson(httpGetBlocking(remotePagesUrl(src->baseUrl, fam, chapterId),
+                                                       remoteConfigHeader(src))).pages;
+    return AddonPageList::fromJson(
+               executeJsonRequest(buildRequest(src, QStringLiteral("getPages"), serialArg(chapterId, fam, 0)))
+                   .toUtf8()).pages;
+}
+
+// A chapter, as a browse row. The label carries the number in a form ChapterOrder::chapterNumber can read
+// back ("Ch. 12"), because the reading run that drives the volume crossing is normalised from these titles.
+static QString chapterRowTitle(const AddonChapter& c)
+{
+    QString label;
+    if (!c.volume.isEmpty()) label += QStringLiteral("Vol. ") + c.volume + QStringLiteral(" · ");
+    label += c.number.isEmpty() ? QObject::tr("Oneshot") : (QStringLiteral("Ch. ") + c.number);
+    if (!c.title.isEmpty()) label += QStringLiteral(" — ") + c.title;
+    return label;
+}
+
+static QString chapterRowSubtitle(const AddonChapter& c)
+{
+    QStringList bits;
+    if (!c.group.isEmpty())    bits << c.group;
+    if (!c.language.isEmpty()) bits << c.language;
+    if (c.pageCount > 0)       bits << QObject::tr("%1 pages").arg(c.pageCount);
+    return bits.join(QStringLiteral(" · "));
+}
+
+// The `chapters` resource, delivered as a MediaCatalog on catalogReady — so a container that answers with
+// chapters reaches the browse grid, the reading run, Recents and the volume crossing through the SAME path
+// a /detail answer does. That is the one-seam rule: the protocol added a supplier, not a second UI.
+int AddonManager::dispatchChapters(LoadedAddon* src, const MediaItem& item, int page)
+{
+    const int reqId = ++reqCounter_;
+    const QString leafType = familyType(item.type) + QStringLiteral("_chapter");
+    requestChapters(src, item.type, item.id, page,
+                    [this, reqId, leafType](const QVector<AddonChapter>& chapters, bool hasMore) {
+        MediaCatalog cat;
+        cat.title = tr("Chapters");
+        cat.hasMore = hasMore;
+        for (const AddonChapter& c : chapters)
+        {
+            MediaItem it;
+            it.id = c.id;
+            it.type = leafType;
+            it.title = chapterRowTitle(c);
+            it.subtitle = chapterRowSubtitle(c);
+            it.expandable = false;   // a chapter is a leaf: it is read, not drilled into
+            cat.items.push_back(it);
+        }
+        emit catalogReady(reqId, cat);
+    });
+    return reqId;
 }
 
 // ---- install / remove ------------------------------------------------------------------------------

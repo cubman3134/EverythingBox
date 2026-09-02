@@ -19,6 +19,32 @@ back to the user's addon settings.
 | `igdb.secrets` | `clientId`, `clientSecret` | IGDB / Twitch developer app credentials. |
 | `steamgriddb.secrets` | `apikey` | SteamGridDB. **Normally left blank** — SteamGridDB issues keys per user account, so a project-wide key is against the grain of their model and this provider stays user-supplied. The slot exists only so a build *may* embed one. |
 
+## Music scrobbling (issue #192)
+
+| File | Keys | Provider |
+| --- | --- | --- |
+| `lastfm.secrets` | `apikey`, `secret` | Last.fm **application** API key + shared secret. Not a user credential and not an addon credential: `core/LastFmClient.cpp` reads these two slots directly, because every Last.fm call — including `auth.getToken`, the *first* step of authorising a user — is signed with the shared secret. There is no user-supplied fallback, because a per-user API key is not the shape Last.fm's desktop-auth flow is built around. |
+
+Example `lastfm.secrets`:
+
+```
+apikey=YOUR_LASTFM_API_KEY
+secret=YOUR_LASTFM_SHARED_SECRET
+```
+
+**To fill this slot** (a one-off, and it is the repository owner's to do): create an API account at
+<https://www.last.fm/api/account/create>, then write the two values it gives you into
+`native/secrets/lastfm.secrets` and re-configure (`cmake -S native -B build`). Nothing else changes: the
+Last.fm row in Settings switches from *"Last.fm is not available in this build"* to a working **Connect to
+Last.fm** button, and the provider is installed beside ListenBrainz.
+
+**With the slot empty** — which is every clone of this repository, and CI — the app is complete and correct:
+the Last.fm provider is not installed at all, the settings row says *"Last.fm is not available in this
+build"* and offers nothing else, and ListenBrainz is unaffected. `probe_scrobble` still exercises the whole
+provider, against a fixture header (`native/tools/fixtures/lastfm/BuiltinSecrets.h`) carrying an obviously
+fake key and an in-process loopback fake service.
+
+
 Example `screenscraper.secrets`:
 
 ```
@@ -29,9 +55,13 @@ devpassword=YOUR_DEV_PASSWORD
 At **configure time**, `native/cmake/GenerateSecrets.cmake` reads each file,
 obfuscates every value (rolling XOR — best-effort, *not* cryptography), and emits
 `BuiltinSecrets.h` into the **build tree** (never the source tree). The app
-de-obfuscates on demand via `AddonContext::builtinCredential()`, and a provider
-picks user-vs-builtin through `AddonContext::selectCredential()` (user always
-wins; else builtin; else the provider stays dormant).
+de-obfuscates on demand — addon credentials via `AddonContext::builtinCredential()`
+(which is allow-listed per addon), the Last.fm application key via
+`LastFmClient::appKey()` / `appSecret()`. Both go through the single runtime
+de-obfuscator in `core/BuiltinSecretBlob.h`; a second copy of that formula would
+drift from this CMake script invisibly. An addon picks user-vs-builtin through
+`AddonContext::selectCredential()` (user always wins; else builtin; else the
+provider stays dormant).
 
 If a file is **absent or blank**, the build still succeeds: that provider's
 header slot holds an empty array, CMake prints a `STATUS` line counting how many

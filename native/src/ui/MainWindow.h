@@ -184,7 +184,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
@@ -385,7 +387,11 @@ private:
     // be in the directory and would order it by filename alone. A multi-file book is therefore an ordinary
     // queue, which is what makes it play continuously and resume across a file boundary with nothing in the
     // player having to know what a book is.
-    void openAudiobook(const QString& bookKey, const QString& startPath);
+    // `startSec` < 0 means "wherever the resume marks say", which is every route but one. The chapter list
+    // (#139 increment 2) is the exception: it knows a position inside `startPath` that no mark holds, and 0
+    // is a real value there — jumping to part three means the TOP of part three, not the spot in it somebody
+    // left months ago.
+    void openAudiobook(const QString& bookKey, const QString& startPath, int startSec = -1);
     // The tail both cross-record queue producers share: turn MusicQueue entries into the paths/titles/album
     // map a PlaybackSession queue is, and start it. Extracted when the reach verbs (#193 increment 2) became
     // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and
@@ -1440,6 +1446,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This

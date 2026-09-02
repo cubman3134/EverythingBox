@@ -156,9 +156,41 @@ public:
     // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
     void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                                std::function<void(const QString& url)> cb);
-    // Resolve a manga chapter item (id "mangadexch:{ids}") to its ordered page image URLs via MangaDex (async).
-    void resolveMangaChapterPages(const QString& chapterItemId,
-                                  std::function<void(const QStringList& pageUrls)> cb);
+    // ---- serial reading: the `chapters` and `pages` resources (issue #188) ---------------------------
+    //
+    // Two protocol resources an addon DECLARES in its manifest, read through the same seam every other
+    // resource uses. There is no provider name anywhere below this line and there must never be one again:
+    // this replaced a hardcoded resolver for one manga site, which is why a source needed a client change
+    // to exist at all.
+    //
+    // THE FAMILY TYPE. Both routes are keyed by the SERIES media type, never the leaf's — a chapter item of
+    // type "manga_chapter" belongs to the "manga" family, and an addon declares both resources for "manga".
+    // One spelling in the manifest then covers the container and its leaves, which is what makes the
+    // manifest example in addon-protocol/README.md the whole declaration.
+    static QString familyType(const QString& type);
+
+    // The never-ask gate. False for a null/disabled source, for a JsLocal addon with no script, and for any
+    // addon whose manifest does not declare the resource for this family. Every request below asks it first,
+    // so an addon that predates #188 is never sent a request it cannot answer.
+    bool supportsChapters(const LoadedAddon* src, const QString& type) const;
+    bool supportsPages(const LoadedAddon* src, const QString& type) const;
+
+    // The ordered chapter list of one series. Ordered by the CLIENT (AddonChapters::sortNaturally) so the
+    // rule is one rule rather than one per source. `page` is passed through for sources that page a long
+    // series; `hasMore` is the source's own answer (false when it returned everything).
+    // The callback fires once, on the GUI thread, with an empty list on any failure.
+    using ChaptersCb = std::function<void(const QVector<AddonChapter>& chapters, bool hasMore)>;
+    void requestChapters(LoadedAddon* src, const QString& type, const QString& seriesId, int page,
+                         ChaptersCb cb);
+    // The ordered page list of one chapter, in READING order as the source gave it (pages are never
+    // reordered — only chapters have a sort rule). Empty on any failure, including "this addon cannot".
+    using PagesCb = std::function<void(const QVector<AddonPage>& pages)>;
+    void requestPages(LoadedAddon* src, const QString& type, const QString& chapterId, PagesCb cb);
+
+    // Blocking variants for the probe / console harness, matching catalog()/meta()'s standing.
+    QVector<AddonChapter> chaptersSync(LoadedAddon* src, const QString& type, const QString& seriesId,
+                                       int page = 1, bool* hasMore = nullptr);
+    QVector<AddonPage> pagesSync(LoadedAddon* src, const QString& type, const QString& chapterId);
     // True if at least one enabled stream source serves this type: a Stremio stream addon, or a non-Stremio
     // remote media-source used as a file provider (e.g. Allarr).
     bool hasStreamProvider(const QString& type) const;
@@ -434,6 +466,9 @@ private:
     int dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                               const QMap<QString, QString>& filters = {});
     int dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, int page);
+    // #188: a container whose addon declares `chapters` answers through that resource instead of /detail,
+    // mapped onto the SAME catalogReady result — one transport-agnostic dispatch for both transports.
+    int dispatchChapters(LoadedAddon* src, const MediaItem& item, int page);
     int dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item);
 
     QString root_;
@@ -443,6 +478,11 @@ private:
     int reqCounter_ = 0;
     QString lastStreamNotice_;                  // /stream "notice" from the last resolveStream (see takeStreamNotice)
     bool lastStreamCurl_ = false;               // /stream "curl" flag from the last resolveStream (see takeStreamCurl)
+    // "<addonId>|<resource>" for every outdated-addon notice already written (#188). Bundled addons are
+    // copy-if-absent, so an install that predates the chapters/pages resources keeps its old main.js
+    // forever and every drill-in would otherwise write the same line again — a per-scroll log flood that
+    // buries the one thing it is there to say.
+    mutable QSet<QString> outdatedLogged_;
 
     // Catalog browse/landing results (e.g. the console list) cached so re-opening a tab is instant instead of
     // re-fetching (a blocking HTTP GET or a JS getCatalog run). Populated from catalogReady for requestCatalog

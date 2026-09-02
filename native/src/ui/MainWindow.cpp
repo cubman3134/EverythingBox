@@ -15,6 +15,7 @@
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
 #include "../emu/RetroParkView.h"   // Slice 2a: the RetroPark backend's play surface
+#include "../ebook/EbookFormats.h"   // the one list of what the book reader opens (#144)
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "../comic/ChapterRecent.h"
@@ -76,6 +77,7 @@
 #include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
 #include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
 #include "../core/ListenBrainzClient.h"  // ...and its first provider behind the seam
+#include "../core/LastFmClient.h"        // ...and its second (#192 increment 2)
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
@@ -574,6 +576,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
+    // ...and Last.fm BESIDE it, not instead of it: two services are not a choice between them, each has its
+    // own queue and its own counter, and someone with a decade of history on one and a new account on the
+    // other wants both. Installed ONLY when this build carries an application key (#81): with no key there is
+    // nothing the provider could ever do, and adding it would put "Last.fm is not connected yet" in the
+    // status line of every clone of this repository for a reason its owner cannot act on. The settings row
+    // says "not available in this build" instead, from LastFmClient::statusFor.
+    if (LastFmClient::availableInThisBuild())
+    {
+        lastfm_ = new LastFmClient(scrobbler_);
+        scrobbler_->addProvider(lastfm_);
+        // The link coming up or going away moves the same one status line every other scrobble change moves.
+        connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); if (scrobbler_) scrobbler_->retryNow(); });
+    }
     // The "scrobbled N tracks" line is the ONE answer to "is this silently doing nothing", so both settings
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
@@ -812,8 +828,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // chapter crossing (landing page + hand-off generation), and a PMF connect compares DECLARED arity, not
     // the arity you can call with — the signal's four arguments would not satisfy its six.
     connect(home_, &HomeView::openImagePages, this,
-            [this](const QString& title, const QString& key, const QStringList& pageUrls, const ChapterRun& run)
-            { openImagePages(title, key, pageUrls, run); });
+            [this](const QString& title, const QString& key, const QVector<AddonPage>& pages, const ChapterRun& run)
+            { openImagePages(title, key, pages, run); });
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -1849,6 +1865,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& m, int ms) { statusBar()->showMessage(m, ms); });
     connect(launcher_, &GameLauncher::notifyUser, this,
             [this](const QString& m, int ms) { notifier_->notify(m, ms); });
+    // #190: a folder game (MS-DOS) holding several plausible programs. Ask once with a nav-kit menu — which
+    // renders in-window over BOTH the themed and the classic surface, so this one call serves both layouts —
+    // record the answer in the game's launch override, and re-open. The connection is QUEUED on purpose: the
+    // signal is emitted from inside the launch, and opening a menu there would run a nested event loop inside
+    // a signal delivery, which is the #28 / #211 crash family. Queued, the launch has fully unwound first.
+    connect(launcher_, &GameLauncher::chooseBootProgram, this,
+            [this](const QString& title, const QStringList& choices, const QString& rom, const QString& thumb,
+                   const QString& key, const QString& systemHint) {
+                const int row = NavMenu::pick(tr("Which program runs “%1”?").arg(title), choices, this);
+                if (row < 0 || row >= choices.size()) return;   // backed out: no launch, nothing remembered
+                // The identity the answer is filed under. A catalog row has a stable id; a game opened
+                // straight off disk has only its path — and it MUST still get an identity here, because
+                // re-opening with nothing remembered would ask the same question again, forever. This is the
+                // same "stable id, else the path" rule LaunchOpts documents, and GameLauncher recomputes it
+                // from these same two values, so both sides agree without a new field on the plan.
+                const QString bootKey = key.isEmpty() ? rom : key;
+                LaunchOpts::Override ov = LaunchOpts::get(bootKey);
+                ov.bootFile = choices.at(row);
+                LaunchOpts::set(bootKey, ov);
+                // Re-open: resolution now finds the stored answer and has nothing left to ask.
+                launcher_->open(rom, title, thumb, key, systemHint);
+            }, Qt::QueuedConnection);
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -2594,6 +2632,17 @@ static void clearMusicMatchOverrides()
 QString MainWindow::scrobbleStatusLine() const
 {
     return scrobbler_ ? scrobbler_->statusLine() : tr("Scrobbling is not set up.");
+}
+
+// #192 increment 2. The URL is ALWAYS shown by the caller; this only tries to save a desktop user the typing.
+// On a TV there is no browser to hand it to and QDesktopServices would either do nothing or throw the user
+// out of the app, so the form factor decides - and the shown URL is the whole affordance there, which is
+// exactly what the Trakt device-code row beside it has always been.
+void MainWindow::openAuthPage(const QString& url)
+{
+    if (url.isEmpty()) return;
+    if (FormFactor::instance().mode() == FormFactor::Mode::Tv) return;
+    QDesktopServices::openUrl(QUrl(url));
 }
 
 QString MainWindow::discordStatusLine() const
@@ -3668,13 +3717,18 @@ void MainWindow::openRemoteChapter(int targetIndex, int dir)
     notify(tr("Loading “%1”…").arg(entry.title), 0);   // sticky: this can take a while
     mwLog(QStringLiteral("chapter: remote advance (%1) -> \"%2\"").arg(dir).arg(entry.title));
 
-    addons_->resolveMangaChapterPages(entry.id, [this, gen, entry, run, dir](const QStringList& pages) {
+    // The addon this run came from, asked for the neighbouring chapter's pages through the protocol (#188).
+    // Both are properties OF THE RUN — the source and the entry type — because a crossing must not assume
+    // what kind of serial it is reading or who serves it.
+    LoadedAddon* src = addons_ ? addons_->sourceById(comicRun_.seriesAddonId) : nullptr;
+    addons_->requestPages(src, comicRun_.entryType, entry.id,
+                          [this, gen, entry, run, dir](const QVector<AddonPage>& pages) {
         if (!chapterHandoffStillOurs(gen)) return;   // superseded, or the reader is gone — already compensated
         if (pages.isEmpty())
         {
             chapterHandoffPending_ = false;          // nothing is in flight: the press may be tried again
-            notify(tr("No readable pages for “%1”. Licensed/official English chapters aren't hosted here — "
-                      "try another chapter or title.").arg(entry.title), kFeedbackLong);
+            notify(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                      "try another chapter, language or title.").arg(entry.title), kFeedbackLong);
             return;   // stay on the last page; the chapter list is one Back away
         }
         openImagePages(entry.title, entry.id, pages, run, /*landOnLastPage*/ dir < 0, /*handoffGen*/ gen);
@@ -6019,7 +6073,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
 // openAudioPath: a folder queue takes whatever else happens to be in the directory (a bonus interview, a
 // stray sample) and orders it by filename alone, while AudiobookLibrary::Book::files is already ordered
 // disc-then-track-then-natural-filename — the order stated once, in the index, and never restated here.
-void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
+void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath, int startSec)
 {
     const AudiobookLibrary::Book* book = AudiobookLibrary::index().book(bookKey);
     if (!book || book->files.isEmpty())
@@ -6057,7 +6111,10 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
         if (f.durationSec <= 0) everyLengthKnown = false;
     }
     int start = startPath.isEmpty() ? 0 : queue.indexOf(startPath);
-    if (start < 0) start = 0;          // a row for a part the rescan dropped still plays the book
+    // A row for a part the rescan dropped still plays the book — but from the top, and WITHOUT the chapter
+    // offset that was measured against a file we are no longer opening. Seeking 40 minutes into part one
+    // because part six went missing is worse than starting the book.
+    if (start < 0) { start = 0; startSec = -1; }
 
     // ONE RESUME POINT FOR THE WHOLE BOOK (#139). PlaybackSession's resume is per FILE and it DROPS a
     // position when a file plays to the end, which is exactly right for a track and wrong for a book: after
@@ -6108,6 +6165,12 @@ void MainWindow::openAudiobook(const QString& bookKey, const QString& startPath)
     startLocalAudioQueue(queue, start, titles, title, by,
                          art.isEmpty() ? QString() : QUrl::fromLocalFile(art).toString(),
                          queue.at(start), title, art);
+    // A CHAPTER PICK, placed AFTER the queue is running and before mpv has finished loading anything (#139
+    // increment 2). setQueue -> playIndex -> beginResume has just queued the STORED position for this part;
+    // this replaces it with the chapter's own start, and mpv's duration callback — which is what applies a
+    // pending seek at all — cannot have fired yet because the load is asynchronous. For a multi-file book
+    // the value is 0, which lands the part at its top exactly as the listener asked.
+    if (startSec >= 0 && session_) session_->overrideResumeSeek(double(startSec));
 }
 
 // Play a MULTI-ALBUM queue: one artist's whole discography, or the whole library, ordered or shuffled.
@@ -7940,8 +8003,9 @@ void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Document"), QString(),
-        tr("Documents (*.epub *.pdf *.cbz *.cb7 *.cbt);;EPUB books (*.epub);;PDF documents (*.pdf);;"
-           "Comics (*.cbz *.cb7 *.cbt);;All files (*.*)"));
+        tr("Documents (*.epub *.fb2 *.fb2.zip *.azw3 *.mobi *.txt *.md *.pdf *.cbz *.cbr *.cb7 *.cbt);;"
+           "Books (*.epub *.fb2 *.fb2.zip *.azw3 *.azw *.mobi);;Text (*.txt *.md);;"
+           "PDF documents (*.pdf);;Comics (*.cbz *.cbr *.cb7 *.cbt);;All files (*.*)"));
     if (f.isEmpty()) return;
     openDocumentPath(f);
 }
@@ -7959,9 +8023,10 @@ bool MainWindow::openDocumentPath(const QString& f)
         // rather than post-accept the way the full-screen readers do in present*.
         supersedePendingExternalLaunch();
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
-        else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
+        else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7")
+                 || ext == QStringLiteral("cbt") || ext == QStringLiteral("cbr"))
             splitTarget_->openComic(f);
-        else splitTarget_->openBook(f); // .epub
+        else splitTarget_->openBook(f); // .epub / .fb2 / .azw3 / .txt / .md — EbookView sniffs which
         PerfTrace::end(QStringLiteral("open.reader"), ext);
         finishSplitOpen();
         return true; // routed into the split target (its own error surfacing handles a bad file)
@@ -7974,7 +8039,8 @@ bool MainWindow::openDocumentPath(const QString& f)
         presentPdf();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
-    else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt"))
+    else if (ext == QStringLiteral("cbz") || ext == QStringLiteral("cb7")
+             || ext == QStringLiteral("cbt") || ext == QStringLiteral("cbr"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return false; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
@@ -16760,10 +16826,77 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
 #endif
     }
 
-    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")),
-                                       { tr("Cancel"), installed ? tr("Play") : tr("Install and play") },
+    // THE LICENCE AND THE TIER, on the card as well as on the Recomps row (#248). A port is somebody else's
+    // program under somebody else's terms, and the terms have to be legible BEFORE 30 MB of it arrives —
+    // psxrecomp's PolyForm Noncommercial, which increment (c) will invoke, is the case that makes this more
+    // than politeness. Only when the catalogue says; an empty licence field means it did not, and a guess
+    // would be worse than the silence.
+    if (!port->port.license.isEmpty())
+        lines << tr("Licence: %1").arg(port->port.license);
+
+    // THE VERB SET, and it is ONE list for both routes into this function — the game row's *Native port* verb
+    // and the Recomps section's row. #248 asked for the second surface, not a second implementation; a fork
+    // here is how the two would come to disagree about what Remove deletes.
+    //
+    // Built conditionally, and the button INDEX is not a constant: an uninstalled port has no Play and no
+    // Remove, so the arms are matched by the verb recorded alongside the label rather than by position.
+    enum class Verb { Cancel, PlayOrInstall, Homepage, Remove };
+    QStringList buttons{ tr("Cancel") };
+    QVector<Verb> verbs{ Verb::Cancel };
+    buttons << (installed ? tr("Play (native)") : tr("Install and play"));
+    verbs   << Verb::PlayOrInstall;
+    if (!port->homepage.isEmpty()) { buttons << tr("Open homepage"); verbs << Verb::Homepage; }
+    if (installed)                 { buttons << tr("Remove");        verbs << Verb::Remove; }
+
+    const int choice = NavConfirm::ask(port->displayName, lines.join(QStringLiteral("\n\n")), buttons,
                                        /*focusIndex*/ 1, /*cancelIndex*/ 0, this);
-    if (choice != 1 || !launcher_) return;
+    if (choice < 0 || choice >= verbs.size()) return;
+
+    switch (verbs.at(choice))
+    {
+        case Verb::Cancel:
+            return;
+
+        case Verb::Homepage:
+            // The project's own page, opened in the system browser. This is also the ONLY route to the port
+            // for an OS it publishes no build for, which is why it is offered whether or not it is installed.
+            QDesktopServices::openUrl(QUrl(port->homepage));
+            return;
+
+        case Verb::Remove:
+        {
+            // Deletes the INSTALL FOLDER and nothing else. Saves are the port's own, in the port's own
+            // per-user location (%LOCALAPPDATA%\<Port>\saves for the one this build ships) — deleting a
+            // program is not consent to delete somebody's game, and re-installing has to find the save where
+            // it left it. Say exactly that, because "Remove" on a game frontend reasonably reads as both.
+            const QString dir = EmulatorManager::installDir(*port);
+            const int sure = NavConfirm::ask(
+                tr("Remove %1?").arg(port->displayName),
+                tr("This deletes %1 from %2. Your saved games are kept — they live in %1's own folder, not in "
+                   "this one, so re-installing picks them up again.").arg(port->displayName, dir),
+                { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (sure != 1) return;
+            // Guarded, not assumed: installDir is "<emulators root>/<id>" and an empty or rootless id would
+            // make this a recursive delete of the emulators folder. isInstalled() was true a moment ago, so
+            // the folder exists; what is checked here is that it is the port's OWN folder.
+            if (dir.isEmpty() || QFileInfo(dir).fileName() != port->id || !QDir(dir).exists())
+            {
+                notify(tr("Couldn't find %1's folder to remove.").arg(port->displayName), 5000);
+                return;
+            }
+            if (QDir(dir).removeRecursively())
+                notify(tr("Removed %1.").arg(port->displayName), 4000);
+            else
+                notify(tr("Couldn't remove %1 — it may still be running. Its files are in %2.")
+                           .arg(port->displayName, dir), 8000);
+            if (home_) home_->refreshRecompsIfShown();   // the row still said "installed" until now
+            return;
+        }
+
+        case Verb::PlayOrInstall:
+            break;   // falls through to the launch below
+    }
+    if (!launcher_) return;
 
     // NO ROM ARGUMENT, and that is the whole of rom mode "menu": the port asks for the file itself and
     // converts whatever format it is handed, so passing a path would be at best ignored. runEmulator's
@@ -18254,12 +18387,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool isGame = (type == QStringLiteral("game")
                              || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
         if (!isGame) supersedePendingExternalLaunch();
-        if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
+        if (type == QStringLiteral("ebook") || EbookFormats::opensInBookReader(lower))
         { splitTarget_->openBook(url); finishSplitOpen(); return; }
         if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
         { splitTarget_->openPdf(url); finishSplitOpen(); return; }
         if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
-            || lower.endsWith(QStringLiteral(".cbt")))
+            || lower.endsWith(QStringLiteral(".cbt")) || lower.endsWith(QStringLiteral(".cbr")))
         { splitTarget_->openComic(url); finishSplitOpen(); return; }
         if (PhotoLibrary::isPhotoFile(url)) // #102: a local image opens in the pane's photo viewer
         { splitTarget_->openPhoto(url); finishSplitOpen(); return; }
@@ -18290,7 +18423,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         RecentStore::add(row);
     };
 
-    if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
+    if (type == QStringLiteral("ebook") || EbookFormats::opensInBookReader(lower))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); pdf_->persist(); comic_->persist();
@@ -18319,7 +18452,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         else { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); }
     }
     else if (lower.endsWith(QStringLiteral(".cbz")) || lower.endsWith(QStringLiteral(".cb7"))
-             || lower.endsWith(QStringLiteral(".cbt"))) // a downloaded/associated comic archive
+             || lower.endsWith(QStringLiteral(".cbt"))
+             || lower.endsWith(QStringLiteral(".cbr"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         partPlaybackForReader(); book_->persist(); pdf_->persist();
@@ -18954,10 +19088,16 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 
-void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+void MainWindow::openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages_,
                                 const ChapterRun& run, bool landOnLastPage, int handoffGen)
 {
-    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
+    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pages_.size()));
+    // The urls on their own, for the two parts of this function that only need a page's ADDRESS: the
+    // empty-page guard, and the extension sniff that names the entry inside the CBZ. Everything that
+    // FETCHES a page reads pages_[i] instead, because a page's headers travel with its request.
+    QStringList pageUrls;
+    pageUrls.reserve(pages_.size());
+    for (const AddonPage& p : pages_) pageUrls << p.url;
     // Every FAILING ending below goes through here. A chapter crossing is still latched and still showing its
     // sticky notice when it reaches this function, and nothing further along would ever release either one:
     // the reader would answer no further boundary press, under a notice for a load that is over.
@@ -19006,7 +19146,12 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(20000);
-        QNetworkReply* reply = docNam_->get(rq);
+        // #188: the request headers the addon declared for THIS page — image CDNs routinely gate on a
+        // Referer, and a page list with nowhere to put one is a page list that 403s. Through NetHeaderApply
+        // rather than setRawHeader, so this fetch gets the same cross-origin + redirect guard the other
+        // three header-carrying fetch sites do: a Referer declared for host A never reaches host B, and a
+        // 302 to another origin is refused rather than silently re-sent with the headers.
+        QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, pages_[i].headers, pages_[i].url);
         connect(reply, &QNetworkReply::finished, this,
                 [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
             reply->deleteLater();
@@ -20702,6 +20847,12 @@ void MainWindow::openGeneralSettings()
         // Empty means the public ListenBrainz service. A URL here transparently covers Maloja and the other
         // servers that implement the same endpoint, which is why it is a setting and not a second provider.
         textf(QStringLiteral("scrobble.lburl"), tr("Custom API URL"), Settings::listenBrainzApiUrl());
+        // LAST.FM (#192 increment 2): a connect/disconnect ACTION rather than a credential field, because
+        // there is no credential for the user to type — the application key is baked in and the account is
+        // authorised in a browser. Its twin lives in the QWidget builder below. Shown even when this build
+        // has no key: the row is what SAYS so, and hiding it would leave "why is Last.fm missing" unanswered.
+        action(QStringLiteral("scrobble.lastfm"), LastFmClient::connectActionLabel());
+        info(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"), LastFmClient::statusText());
         toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
                Settings::scrobbleSpokenAudio());
         // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
@@ -20710,7 +20861,8 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("scrobble.hint"),
              tr("A track is scrobbled once you have played half of it, or four minutes, whichever comes "
                 "first. Leave the custom API URL empty for ListenBrainz itself, or point it at a compatible "
-                "server such as Maloja."), QString());
+                "server such as Maloja. Last.fm is a second destination rather than an alternative: connect "
+                "it as well and every listen goes to both, each with its own queue."), QString());
         info(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
         // --- Discord Rich Presence ---
         // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
@@ -21281,6 +21433,21 @@ void MainWindow::openGeneralSettings()
                     if (scrobbler_) scrobbler_->retryNow();
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
+                else if (id == QStringLiteral("scrobble.lastfm")) {
+                    // NOTHING IS TYPED HERE. The application key is baked in and the account is authorised in
+                    // a browser, so this row is an action with three answers: no key in this build, link, or
+                    // unlink. The URL arrives on the authUrl signal wired below.
+                    if (!LastFmClient::availableInThisBuild() || !lastfm_) {
+                        setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                                LastFmClient::statusText());
+                        return;
+                    }
+                    if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"),
+                            tr("Asking Last.fm for an authorisation link\u2026"));
+                    lastfm_->connectAccount();
+                    return;
+                }
                 // --- Discord presence. Every arm re-reads the status line, and every arm tells the
                 // controller at once: a category silenced mid-film must clear the card now, not at the next
                 // track boundary. The seven arms are spelled out rather than folded into a table because the
@@ -21416,6 +21583,29 @@ void MainWindow::openGeneralSettings()
                         conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
                 setAction(QStringLiteral("trakt.connect"),
                           conn ? MainWindow::tr("Disconnect from Trakt") : MainWindow::tr("Connect to Trakt")); });
+
+        // Live Last.fm status (#192 increment 2), on the same terms as the Trakt block above. The URL is
+        // SHOWN as well as opened: on a TV there is no browser to open it in, and the Trakt device-code row
+        // beside this one has always been read-and-type for exactly that reason.
+        if (lastfm_)
+        {
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::authUrl, this,
+                [setInfo](const QString& url) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            MainWindow::tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                    openAuthPage(url); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectError, this,
+                [setInfo](const QString& m) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"), m); });
+            genSettingsConns_ << connect(lastfm_, &LastFmClient::connectedChanged, this,
+                [this, setInfo, setAction](bool linked) {
+                    setInfo(QStringLiteral("scrobble.lastfmstatus"), MainWindow::tr("Last.fm"),
+                            LastFmClient::statusText());
+                    setAction(QStringLiteral("scrobble.lastfm"),
+                              LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                    setInfo(QStringLiteral("scrobble.status"), MainWindow::tr("Scrobbling"),
+                            scrobbleStatusLine()); });
+        }
 
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
@@ -22940,7 +23130,9 @@ void MainWindow::openGeneralSettings()
                                      "user token from your ListenBrainz profile settings, and paste it below. "
                                      "A track is scrobbled once you have played half of it, or four minutes, "
                                      "whichever comes first. Leave the custom API URL empty for ListenBrainz "
-                                     "itself, or point it at a compatible server such as Maloja."));
+                                     "itself, or point it at a compatible server such as Maloja. Last.fm is a "
+                                     "second destination rather than an alternative: connect it as well and "
+                                     "every listen goes to both, each with its own queue."));
         sbNote->setWordWrap(true);
         sbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(sbNote);
@@ -22956,6 +23148,35 @@ void MainWindow::openGeneralSettings()
         addCredRow(tr("Custom API URL:"), Settings::listenBrainzApiUrl(), false,
                    [this](const QString& t) { Settings::setListenBrainzApiUrl(t);
                                               if (scrobbler_) scrobbler_->retryNow(); });
+        // LAST.FM (#192 increment 2): the twin of the themed builder's "scrobble.lastfm" action and its
+        // status info row. A BUTTON and a label rather than a credential field, because nothing about this
+        // link is typed. Both are built before the connect handler because every arm writes to them.
+        auto* lfStatus = new QLabel(LastFmClient::statusText());
+        lfStatus->setWordWrap(true);
+        lfStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* lfBtn = new QPushButton(LastFmClient::connectActionLabel());
+        lfBtn->setMinimumHeight(32);
+        lfBtn->setEnabled(LastFmClient::availableInThisBuild());
+        auto* lfRow = new QHBoxLayout(); lfRow->addWidget(lfBtn); lfRow->addStretch(1);
+        v->addLayout(lfRow);
+        v->addWidget(lfStatus);
+        connect(lfBtn, &QPushButton::clicked, this, [this, lfStatus] {
+            if (!lastfm_) { lfStatus->setText(LastFmClient::statusText()); return; }
+            if (LastFmClient::connected()) { lastfm_->disconnectAccount(); return; }
+            lfStatus->setText(tr("Asking Last.fm for an authorisation link\u2026"));
+            lastfm_->connectAccount(); });
+        if (lastfm_)
+        {
+            // Wired to THIS panel's widgets, so the connections die with it - the tkStatus idiom above.
+            connect(lastfm_, &LastFmClient::authUrl, lfStatus, [lfStatus](const QString& url) {
+                lfStatus->setText(tr("Open %1 and approve, then this will finish on its own.").arg(url));
+                MainWindow::openAuthPage(url); });
+            connect(lastfm_, &LastFmClient::connectError, lfStatus,
+                    [lfStatus](const QString& m) { lfStatus->setText(m); });
+            connect(lastfm_, &LastFmClient::connectedChanged, lfBtn, [lfBtn, lfStatus](bool linked) {
+                lfBtn->setText(LastFmClient::connectActionLabel(LastFmClient::availableInThisBuild(), linked));
+                lfStatus->setText(LastFmClient::statusText()); });
+        }
         auto* sbSpoken = new QCheckBox(tr("Also scrobble audiobooks and podcasts"));
         sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
         sbSpoken->setChecked(Settings::scrobbleSpokenAudio());

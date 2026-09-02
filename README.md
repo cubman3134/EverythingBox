@@ -11,8 +11,8 @@
 # EverythingBox
 
 A native, cross-platform **media hub** — video, audio (with playlists), libretro
-emulation, EPUB/PDF readers, and a sandboxed JavaScript addon system — built as a
-**Qt 6 / C++** shell (the architecture Kodi/Stremio/RetroArch use).
+emulation, book and comic readers, and a sandboxed JavaScript addon system — built
+as a **Qt 6 / C++** shell (the architecture Kodi/Stremio/RetroArch use).
 
 ## Download
 
@@ -39,7 +39,7 @@ Everything lives under [`native/`](native/):
 - `native/src/` — the app: libmpv video/audio (`video/`), libretro emulation
   (`libretro/`, `emu/`), input (`input/`), readers (`ebook/`, `pdf/`), the JS
   addon system (`addons/`), and the Qt UI (`ui/`).
-- `native/third_party/` — vendored single-file deps (miniz, Duktape).
+- `native/third_party/` — vendored deps (miniz, Duktape, the LZMA SDK, unarr).
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
 
@@ -58,6 +58,27 @@ cmake --build build --config Release
 
 The libretro frontend + its `probe_core` harness build with just CMake + a C++17
 compiler (no Qt); the full app is gated behind `-DEVERYTHINGBOX_BUILD_APP=ON`.
+
+## Reading formats
+
+The reader opens these directly — no conversion step, no external tool:
+
+| | Formats |
+|---|---|
+| **Books** | `.epub` · `.fb2` (and the zipped `.fb2.zip` / `.fbz`) · `.mobi` · `.azw` · `.azw3` (KF8) · `.txt` · `.md` · `.pdf` |
+| **Comics** | `.cbz` · `.cbr` · `.cb7` · `.cbt` (and a bare `.zip` of page images) |
+
+All of them share one reader: the same pagination, font sizing, contents panel, bookmarks, per-book resume
+and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
+open but are not scanned — reaching page one of either costs a whole-archive extraction).
+
+Two limits worth stating plainly:
+
+- **DRM-protected books are not supported and never will be.** A `.mobi`/`.azw3` bought from a store is
+  refused with a message saying so; this is for your own DRM-free files. Nothing here removes DRM.
+- **RAR5 `.cbr` files are not readable yet.** The vendored RAR decoder ([unarr](https://github.com/selmf/unarr))
+  handles RAR 2.9/3.x/4.x; a RAR5 archive is refused by name rather than reported as damaged. Repacking as
+  `.cbz` opens it.
 
 ## Android / Android TV
 
