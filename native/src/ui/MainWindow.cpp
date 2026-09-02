@@ -78,6 +78,7 @@
 #include "../core/RecentStore.h"
 #include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
+#include "../core/LogSafeText.h"        // issue #231: the ONE definition of a url as it may be LOGGED
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
@@ -311,15 +312,9 @@ static void mwLog(const QString& msg)
 
 // A log-safe rendering of a URL: scheme://host[:port]/…/<filename>. Drops the path's middle segments (which
 // can carry an addon access token) and the query string (which can carry debrid keys), so logs never leak secrets.
-static QString logSafeUrl(const QString& url)
-{
-    const QUrl u(url);
-    if (u.scheme().isEmpty()) return QFileInfo(url).fileName(); // a local path
-    const QString file = QFileInfo(u.path()).fileName();
-    return u.scheme() + QStringLiteral("://") + u.host()
-         + (u.port() > 0 ? QStringLiteral(":") + QString::number(u.port()) : QString())
-         + QStringLiteral("/…/") + file;
-}
+// THE RULE ITSELF now lives in core/LogSafeText.h — it was written out identically here, in MainWindow.cpp,
+// DownloadManager.cpp and StreamResolver.cpp, and #231 needed a fourth caller. Same rendering, one definition.
+static QString logSafeUrl(const QString& url) { return LogSafeText::url(url); }
 
 // Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
 static const QStringList kAudioExts = {
