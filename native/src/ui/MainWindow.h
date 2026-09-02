@@ -153,6 +153,9 @@ private slots:
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
+    // #160: "No Jellyfin servers yet." / "2 Jellyfin servers: Attic, Basement (1 switched off)."
+    // One builder, shown by both settings surfaces. Never names a user and never a token.
+    QString jellyfinServerStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -1024,6 +1027,12 @@ private:
     // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
     // without the user reopening anything.
     std::function<void()> presenceStatusUpdate_;
+    // The same idiom again for the JELLYFIN server line (issue #160), and here it is not a nicety: the
+    // connect flow is ASYNCHRONOUS — it returns the moment the address is entered and finishes two network
+    // round trips later — so the line cannot be refreshed by the settings row's own handler the way the
+    // music-server one is. Re-armed from JellyfinServerStore's change hook, so a server that finishes
+    // connecting (or is switched off, or removed) while the panel is up moves the line the user is looking at.
+    std::function<void()> jellyfinStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
