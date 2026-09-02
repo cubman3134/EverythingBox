@@ -193,6 +193,16 @@ bool SettingsTxn::inScope(const QString& key)
     // prefix that covered both would silently make the token undiscardable. probe_scrobble pins both halves.
     if (Scrobble::isBackgroundStateKey(key)) return false;
 
+    // ...with ONE exception inside that other half, and it is the "ra/user" / "ra/token" case above rather
+    // than a new idea: Last.fm's credential (#192 increment 2) is a SESSION KEY the service hands back after
+    // the user approved this app in a browser, not something typed into a row. It arrives from a background
+    // poll reply that can land mid-visit, so in scope it puts "2 setting(s) changed" in the exit prompt for
+    // two values the user never touched — which is what the increment's live drive saw the first time it
+    // connected — and a Discard would unlink an account that took a browser round trip to link. A typed
+    // token can simply be typed again; this cannot. Matched through the pure layer's own predicate, beside
+    // the state one, so neither exclusion can drift from what Settings.cpp writes.
+    if (Scrobble::isAuthorisedCredentialKey(key)) return false;
+
     // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
     // from a settings row, so in principle it could move mid-transaction — but the player page and the
     // settings area are different surfaces the user cannot be on at once, so the write cannot land during a

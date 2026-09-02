@@ -246,6 +246,19 @@ namespace Settings
     QString listenBrainzApiUrl();
     void setListenBrainzApiUrl(const QString& url);
 
+    // LAST.FM (#192 increment 2). The SESSION KEY, and only the session key: the desktop-auth flow has no
+    // password to store, and the request token it is exchanged for is spent the moment it is used. THE
+    // USER'S OWN SECRET, on exactly the terms the ListenBrainz token above is held: read by one caller at
+    // the moment it signs a request, never logged, never echoed into a message, and carved out of every sync
+    // bundle by Scrobble::isDeviceLocalKey (the "scrobble/" prefix already covers it). Per profile.
+    QString lastFmSessionKey();
+    void setLastFmSessionKey(const QString& key);
+    // WHICH account that session belongs to, so the settings row can name it. Not a secret — but it is
+    // written and cleared with the key, because a username left behind after a disconnect claims a link that
+    // is no longer there.
+    QString lastFmAccount();
+    void setLastFmAccount(const QString& name);
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.

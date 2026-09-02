@@ -182,7 +182,7 @@ private:
     void recomputeBookPages(); // tally each chapter's page count for a book-wide "page x / y"
     int  globalPage() const;   // 1-based page within the whole book at the current spot
 
-    std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / PdfTextBook, chosen by file content
+    std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / Fb2Book / TextBook / PdfTextBook, chosen by content then name
     BookPageWidget* page_ = nullptr;
     QFrame* menu_ = nullptr;            // auto-hiding top control bar (overlay)
     QPushButton* streamIssueBtn_ = nullptr; // "Issue with Streaming" (hidden unless a remote book)

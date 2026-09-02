@@ -134,6 +134,18 @@ public:
     static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
     QVariantList categoryItems();
     QVariantList categoryCatalogs(const QString& categoryKey);
+
+    // Custom home rows (issue #161): every row this device could put on a home, in the app's default order —
+    // the "Add row…" catalogue, and the source of the editor's human labels. It deliberately spans BOTH
+    // families, because the two layouts have different homes: the classic home is a list of SHELVES
+    // (continue / Trakt / favourites / downloads / a playlist / a saved filter) and the themed home is a grid
+    // of BUCKETS and CATALOGUES. One list arranges both; a row belonging to the other layout is simply not
+    // producible there, which is the same kept-and-skipped rule a deleted preset takes (see HomeRows.h).
+    //
+    // `cappable` says whether an item cap can change anything: a shelf holds many items, a catalogue tile is
+    // one row. The editor only offers the cap action where it is true.
+    struct HomeRowChoice { QString rowId; QString label; bool cappable = true; };
+    QVector<HomeRowChoice> homeRowCatalogue();
     // Drill the Playlists folder for a category. Reached two ways: nested under a catalogue (asRoot=false, the
     // default — stacks on the catalogue level), or straight from the category-level bucket column (asRoot=true —
     // resets the browse stack so the list is the root, its Back returning to the bucket column). The themed home
@@ -367,8 +379,10 @@ signals:
     void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
-    // manga chapter: the page images to assemble, plus the chapters either side of it in the list it came from
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // A chapter's pages, from whichever addon declared the `pages` resource (#188), plus the chapters either
+    // side of it in the list it came from. AddonPage rather than a bare url list because a page may need
+    // request headers to fetch at all — many image CDNs gate on a Referer, and there was nowhere to put one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run);
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
@@ -427,7 +441,9 @@ signals:
     // queue is built at the play site into the ONE PlaybackSession. A multi-file book is therefore an
     // ordinary queue, which is what makes it resume across a file boundary without a player that knows what
     // a book is.
-    void playAudiobookRequested(const QString& bookKey, const QString& startPath);
+    // `startSec` < 0 is "wherever the marks say" and is what every route but one passes; the chapter list
+    // (#139 increment 2) passes a real offset into `startPath`, and 0 there means the top of that part.
+    void playAudiobookRequested(const QString& bookKey, const QString& startPath, int startSec);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
@@ -513,6 +529,10 @@ private:
     void openAudiobookSeriesLevel(const QString& seriesKey);
     void populateAudiobookSeries(const QString& seriesKey);
     void openAudiobookBookLevel(const QString& bookKey);
+    // The book's CHAPTERS as a NavMenu over the current screen (#139 increment 2) — an .m4b's atoms or a
+    // folder's parts, whichever the book is, with the row the listener is standing in marked and preselected.
+    // Not a level: it is a jump you make and leave. See the definition.
+    void openAudiobookChapters(const QString& bookKey);
     void populateAudiobookBook(const QString& bookKey);
 
     // The synthetic BOOKS category (#134): Authors (plus a Series door) -> that bucket's books, over
@@ -663,6 +683,11 @@ public:
     // merge refresh and does nothing for a console game — using it meant an installed hack stayed invisible
     // until the app was restarted, which reads as "nothing happened".
     void refreshAfterRomInstall();
+    // #248: re-derive the Recomps section's row states, but only while it is the level on screen. PUBLIC
+    // because the verbs that change those states (Remove, and an install that completes) live in MainWindow,
+    // and a row still reading "installed" after the folder was deleted is indistinguishable from a Remove
+    // that silently did nothing. A no-op anywhere else, so the caller never has to ask where it is.
+    void refreshRecompsIfShown();
     // Prompt for a name + playlist URL and save the source; true if one was added. PUBLIC because the Live TV
     // shelf hides itself until a source exists, which would otherwise leave no way to add the first one —
     // Settings calls this, and the shelf appears on the next home rebuild.
@@ -696,6 +721,9 @@ private:
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
+    // ---- Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships ----
+    void openRecompsLevel();                                   // drill Games' "Recomps" folder -> the section
+    void populateRecomps();                                    // (re)build it: a header per system + its ports
     // ---- OPDS book catalogs (#146): saved book servers -> a browsable feed shelf -> download+open a book ----
     void openOpdsCatalogsLevel();                              // drill Reading's "Book Servers" folder -> the shelf
     void populateOpdsCatalogs();                               // (re)build it: one row per catalog + an "add" row
@@ -1042,6 +1070,9 @@ private:
     // items_ rather than derived from it at read time because drilling into a chapter's DETAIL page clears
     // items_, and that is one of the two places a chapter is opened from.
     QVector<ChapterRun::Entry> chapterList_;
+    // The media type of those entries ("manga_chapter"), carried onto the run so a crossing can ask the
+    // addon for the NEXT chapter's pages without knowing what kind of serial it is (#188).
+    QString chapterEntryType_;
     QString chapterSeriesTitle_;   // the container chapterList_ was drilled from — the three facts about
     QString chapterSeriesThumb_;   // it that a run carries (see ChapterRun::seriesTitle): what the Catalog
     QString chapterSeriesAddonId_; // lane searches by, and what a chapter's Recents row is titled/drawn from

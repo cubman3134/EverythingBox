@@ -89,11 +89,26 @@
 //
 // ---- CHAPTERS ---------------------------------------------------------------------------------------------
 //
-// Read AT SCAN TIME, and only their count and their starts. mpv surfaces a file's chapters at play time and
-// that is where chapter NAVIGATION lives (this increment adds no chapter UI, which #139 also rules out); the
-// SHELF wants to say "38 chapters" without opening a twelve-hour file per tile, and re-deriving that per
-// navigation would be one file open per row. So AudioTags::read is asked for them once, here, and the index
-// carries the number. A book whose files carry none says nothing rather than guessing.
+// Read AT SCAN TIME, and only their titles and their starts. mpv surfaces a file's chapters at play time and
+// that is where chapter NAVIGATION during playback lives; the SHELF wants to say "38 chapters" without
+// opening a twelve-hour file per tile, and re-deriving that per navigation would be one file open per row.
+// So AudioTags::read is asked for them once, here, and the index carries them. A book whose files carry none
+// says nothing rather than guessing.
+//
+// INCREMENT 2 RENDERS THAT LIST (chapterRows below) rather than reading anything new. The browse-side
+// chapter surface is the one place the two book shapes meet: an .m4b's atoms and a folder's parts are the
+// same rows, so BookFile now carries the atoms it already had the count of — an in-memory widening of the
+// browse index, with no change to what the scan opens, what the index FILE holds, or the parse stamp. An
+// index written by increment 1 loads with its chapters intact because FileEntry has persisted them all
+// along; nothing has to be re-tagged for this feature to light up.
+//
+// ---- PROGRESS -----------------------------------------------------------------------------------------
+//
+// A BOOK'S PROGRESS IS DERIVED, NOT STORED, and it is derived from the marks the PLAYER already writes —
+// see progressFor below for the rule and why "Finished" needs a mark of its own. The one thing to know at
+// this level is that this file gained no store, no persisted field and no new stamp for it: the durations
+// it divides by are the ones increment 1 already wrote for the "9h 14m" on the shelf, and the positions it
+// sums are the ones openAudiobook already reads to decide where "Play book" resumes.
 #pragma once
 #include "../media/AudioTags.h"   // the ONE tag reader; FileEntry stores what it read
 
@@ -101,6 +116,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 namespace AudiobookLibrary
 {
@@ -162,6 +178,13 @@ namespace AudiobookLibrary
         int     durationSec = 0;
         int     chapterCount = 0;
         bool    hasCover = false;
+        // The chapter atoms themselves, carried up from the FileEntry the scan produced (issue #139
+        // increment 2). The COUNT alone was enough while the shelf only wanted to say "38 chapters"; a
+        // chapter LIST has to name and place them, and the only other way to get that is to open a
+        // twelve-hour file per navigation — the exact cost the scan-time read exists to avoid. Nothing new
+        // is read or persisted: FileEntry::chapters has held this since increment 1 and the index file
+        // already round-trips it.
+        QVector<Chapter> chapters;
     };
 
     struct Book
@@ -219,6 +242,69 @@ namespace AudiobookLibrary
         // there is exactly one answer however the user navigated to it.
         const Book*     book(const QString& bookKey) const;
     };
+
+    // ------------------------------------------------------------------------------------------------
+    // PROGRESS AND CHAPTERS (issue #139, increment 2) — pure, a book in, an answer out.
+    // ------------------------------------------------------------------------------------------------
+
+    // How far into ONE part the listener is, in seconds; <= 0 for a part carrying no position. INJECTED,
+    // for the two reasons everything else in this half of the file is: nothing here may read Settings (the
+    // header's contract), and a computation over a real store is a computation no probe can pin.
+    using PartPositionFn = std::function<double(const QString& partPath)>;
+
+    // Where somebody is in a book, as a number.
+    //
+    // COMPUTED, NEVER STORED, and that is the whole design. The player writes ONE resume mark per FILE and
+    // drops it when a file plays to its end — right for a track, and all a book has, because a book is not
+    // a file. openAudiobook already reads exactly those marks to decide where "Play book" resumes: the LAST
+    // part still carrying a position is where the listener is, and every part before it has been heard.
+    // This turns that same reading into a fraction over the durations the scan already stored, so the tile,
+    // the chapter list and the play verb cannot disagree about where somebody is. No new store, no new mark.
+    struct Progress
+    {
+        // FALSE MEANS SAY NOTHING — not "zero". A book with any part whose length the index does not know
+        // cannot be placed on a bar without inventing the missing piece, and a bar that is wrong about a
+        // twelve-hour book is worse than no bar at all. An index written before a file was ever tagged with
+        // a length reads this way until the next scan re-opens that file; nothing has to be invalidated.
+        bool   known    = false;
+        bool   started  = false;   // some part carries a position, or the book is marked finished
+        bool   finished = false;
+        double fraction = 0.0;     // 0..1; exactly 1.0 when finished
+        int    listenedSec  = 0;
+        int    remainingSec = 0;   // what "14h 20m left" is made of
+        // The part the listener is IN and how far into it — i.e. what openAudiobook would start, restated
+        // nowhere. -1 / 0 when no part carries a position.
+        int    partIndex  = -1;
+        double partPosSec = 0.0;
+    };
+
+    // `completed` is the book's own completion MARK (ItemMarks), passed in for the same reason the position
+    // lookup is: this file reads no store. It is also the ONLY evidence a finished book leaves. The player
+    // DROPS a part's position at that part's end, so "no part carries a mark" is genuinely ambiguous between
+    // "never opened" and "heard to the last second" — and a shelf must not congratulate somebody on a book
+    // they have never pressed. Unmarked-and-unstarted therefore says nothing, which is the honest answer to
+    // both readings; the mark is what makes "Finished" a statement rather than a guess.
+    Progress progressFor(const Book& b, const PartPositionFn& posOf, bool completed = false);
+
+    // ONE ROW OF A BOOK'S CHAPTER LIST, for either book shape — an .m4b's chapter atoms or a folder's parts.
+    // They are the same row because they answer the same question ("take me to that piece of the book"), and
+    // one row type is what lets the surface, the current-row rule and the play verb each be written once.
+    struct ChapterRow
+    {
+        QString title;            // never empty: the atom's title, else "Chapter N", else the part's title
+        QString path;             // WHICH FILE — handed to openAudiobook as its start part
+        int     startSec = 0;     // seconds INTO that file; always 0 on a part row
+        int     durationSec = 0;  // this row's own length; 0 == unknown, and the surface then says nothing
+        int     fileIndex = 0;    // index into Book::files
+        bool    current = false;  // where the listener is, by progressFor's rule and no second copy of it
+    };
+
+    // A book's chapter list, from the INDEX and never by opening a file. Chapters win wherever the files
+    // carry them (an .m4b's atoms, read once at scan time); a book whose files carry none gets ONE ROW PER
+    // PART in the index's order — disc, then track, then NATURAL filename, decided in buildIndex and not
+    // restated here. A chapterless single-file book yields ONE row, which is a list worth nothing: the
+    // surface offers no door when there is only one row to pick.
+    QVector<ChapterRow> chapterRows(const Book& b, const PartPositionFn& posOf);
 
     // ------------------------------------------------------------------------------------------------
     // Pure (probe-tested), root/path explicit.

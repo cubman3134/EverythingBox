@@ -57,7 +57,7 @@
   ],
   "registry": "https://github.com/cubman3134/everythingbox-themes",
   "publishedAgainst": {
-    "unverifiedReason": "the T/Theme help chip is removed: nothing cycles the app theme from a key or button any more; publishes with that change on merge"
+    "unverifiedReason": "documents how a theme's home layout and the user's home row list compose (#161)"
   },
   "publishedThemes": {
     "Channels": {
@@ -77,7 +77,7 @@
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "b67ccd092c9fb4e85eef892c06fa8d1b08cc7d9ea299dfd8d50ab242f9979d69"
+      "sha256": "d66f7eb8a06533a641bb8fbf9ec3b7b05e1eb5bc962a3d37aeed3adc22fa22ee"
     }
   }
 }
