@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -316,6 +316,7 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
     add_subdirectory(third_party/lzma)     # read-only .7z decoder (LZMA SDK) for archived ROMs, all platforms
+    add_subdirectory(third_party/unarr)    # #144: extraction-only RAR decoder (unarr 1.1.1, LGPLv3) for .cbr
 
     # ---------------------------------------------------------------------------
     # librashader (issue #99, SLICE 2): the slang-shader runtime, BUILT FROM RUST SOURCE.
@@ -475,8 +476,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
         src/ebook/EbookSource.h
+        src/ebook/EbookFormats.h  # #144: the ONE list of what the book reader opens (header-only)
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
         src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        # #144: the PalmDB/MOBI/EXTH/KF8 container walk, split out of MobiBook for the reason EpubMeta was
+        # split out of EpubBook - the library scan wants a title and a cover without decompressing a novel,
+        # and two walks over one grammar is how a shelf comes to disagree with the book it opens. Also where
+        # a DRM-protected file is refused BY NAME rather than decoded.
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        # #144: FictionBook 2. Fb2Meta is the <description> walk (reader + scan), Fb2Book maps the bodies
+        # onto EbookSource's chapter model - one renderer, a second format mapped onto it.
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/Fb2Book.cpp     src/ebook/Fb2Book.h
+        # #144: plain text and Markdown through the same chapter model. MarkdownHtml is header-only and
+        # pure so the whole Markdown pass is unit-testable with no file and no widget.
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h    src/ebook/MarkdownHtml.h
         src/ebook/PdfTextBook.cpp src/ebook/PdfTextBook.h
         # #134: the ONE reading of container.xml and of the OPF's <metadata>. EpubBook calls it for the
         # title/author it always read, and the library scan calls it for those plus the series and the
@@ -487,6 +501,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
+        src/comic/RarComic.cpp    src/comic/RarComic.h        # #144 CBR, via the vendored unarr RAR decoder
         # #134: what a comic's FILENAME is allowed to mean. Pure, no filesystem, its own TU so the whole
         # rule can be probed and mutated without a widget anywhere near it.
         src/comic/ComicName.cpp   src/comic/ComicName.h
@@ -791,7 +806,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_compile_options(everythingbox PRIVATE /bigobj)
     endif()
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
-    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z tag Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
+    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z unarr tag Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
@@ -919,7 +934,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_epub PRIVATE Qt6::Core)
 
     # Console harness for the MOBI parser (Qt Core only).
-    add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp)
+    add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp src/ebook/MobiHeader.cpp)
     target_include_directories(probe_mobi PRIVATE src src/ebook)
     target_link_libraries(probe_mobi PRIVATE Qt6::Core)
 
@@ -991,6 +1006,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/ComicPageOrder.h src/comic/Tar.h        # header-only (page collation, the .cbt reader)
+        src/comic/RarComic.cpp    src/comic/RarComic.h    # ComicView's .cbr branch (#144, vendored unarr)
         src/core/SevenZip.cpp     src/core/SevenZip.h     # ComicView's .cb7 branch
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h # ComicView's photo mode (issue #102)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
@@ -1005,7 +1021,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2 third_party)
     target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
-        lzma7z)
+        lzma7z unarr)
 
     # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
     # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
@@ -1040,6 +1056,34 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/NaturalOrder.h)  # header-only units under test (NaturalOrder: the #205 C-locale block)
     target_include_directories(probe_tar PRIVATE src src/comic)
     target_link_libraries(probe_tar PRIVATE Qt6::Core)
+
+    # #144: the .cbr reader (src/comic/RarComic) over the vendored unarr RAR decoder. QtCore-only — the
+    # RAR layer is a pure function over a path, exactly as the CBT one is, and the widget that shows the
+    # pages is probe_readerbookmarks' business. The probe writes its OWN RAR 4 archives byte by byte, so
+    # unarr is under test here rather than merely linked.
+    add_executable(probe_cbr tools/probe_cbr.cpp
+        src/comic/RarComic.cpp src/comic/RarComic.h
+        src/comic/ComicPageOrder.h src/core/NaturalOrder.h   # the shared page collation (#205)
+        tools/BookFixtures.h)                                # the byte placers (no src/ dependency)
+    target_include_directories(probe_cbr PRIVATE src src/comic src/core tools)
+    target_link_libraries(probe_cbr PRIVATE Qt6::Core unarr)
+
+    # #144: the three BOOK formats — FictionBook 2, the Kindle container (MOBI6 + KF8/AZW3 + the DRM
+    # refusal) and plain text / Markdown — plus the one list that routes them. QtCore-only: every unit here
+    # is a parser over bytes or a staging step onto disk, and EbookView (which is the widget) is not linked.
+    # miniz is for the zipped .fb2.zip wire form, and MINIZ_NO_ZLIB_COMPATIBLE_NAMES matches the app build.
+    add_executable(probe_ebookformats tools/probe_ebookformats.cpp
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/Fb2Book.cpp     src/ebook/Fb2Book.h
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h
+        src/ebook/MarkdownHtml.h  src/ebook/EbookFormats.h  # header-only units under test
+        tools/BookFixtures.h                                # the byte placers (no src/ dependency)
+        third_party/miniz.c)
+    target_include_directories(probe_ebookformats PRIVATE src src/ebook third_party tools)
+    target_compile_definitions(probe_ebookformats PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_ebookformats PRIVATE Qt6::Core)
 
     # Chapter-run ordering (src/comic/ChapterRun.h): the number parsed out of a chapter title, the newest-first
     # reversal that turns a provider's display order into reading order, and the natural filename order behind a
@@ -1988,7 +2032,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_pdftext PRIVATE Qt6::Gui Qt6::Pdf)
 
     # Renders a few paginated pages to PNG to verify the reader paginates by line (no cut text).
-    add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp)
+    add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp src/ebook/MobiHeader.cpp)
     target_include_directories(probe_pageview PRIVATE src src/ebook)
     target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
 
@@ -2382,6 +2426,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BookLibrary.cpp  src/core/BookLibrary.h
         src/core/BookMeta.cpp     src/core/BookMeta.h
         src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
+        # #144: the four container readers BookMeta grew - FB2's <description>, the MOBI/AZW3 header walk,
+        # the .txt/.md encoding ladder + Markdown headings, and the RAR page listing (via unarr).
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h    src/ebook/MarkdownHtml.h
+        src/comic/RarComic.cpp    src/comic/RarComic.h
         src/comic/ComicName.cpp   src/comic/ComicName.h
         src/browse/BookCatalogs.cpp src/browse/BookCatalogs.h
         src/addons/AddonModels.cpp src/addons/AddonModels.h
@@ -2391,7 +2441,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_books PRIVATE src src/core src/ebook src/comic src/browse src/addons
         src/theme2 third_party tools)
     target_compile_definitions(probe_books PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf)
+    target_link_libraries(probe_books PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf unarr)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

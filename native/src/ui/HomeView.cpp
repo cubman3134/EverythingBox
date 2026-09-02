@@ -2248,8 +2248,8 @@ browse::BookEmptyNote HomeView::bookEmptyNote() const
     // and "not looked yet" want opposite sentences, and only indexReady() can tell them apart.
     if (!BookLibrary::indexReady())
         return { tr("Scanning your books folder…"), shown };
-    return { tr("No books found. Put .epub, .pdf or .cbz files in this folder, or choose another under "
-                "Settings → Books."), shown };
+    return { tr("No books found. Put .epub, .fb2, .azw3, .txt, .md, .pdf, .cbz or .cbr files in this "
+                "folder, or choose another under Settings → Books."), shown };
 }
 
 // The ONE cover supplier for every book level: the cover the scan extracted out of the file, else a
