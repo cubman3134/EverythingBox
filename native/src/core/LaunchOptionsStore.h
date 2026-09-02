@@ -86,6 +86,25 @@ namespace LaunchOpts
     // extra is a byte-for-byte no-op (empty override == today's launch). No-op'ing here is what keeps the
     // libretro path — which never calls this — and an unset standalone override identical to today.
     QString appendExtraArgs(const QString& resolvedArgs, const QString& extra);
+    // The resolved args STRING -> the argv list a standalone emulator is spawned with (issue #237). This is
+    // EmulatorManager::launch's tokeniser, extracted so it can be pinned as a pure function: "resolved" is the
+    // template with {fs} already substituted and any extra args already appended, "romNative" the ROM path in
+    // the platform's native separators.
+    //
+    // SPLIT FIRST, SUBSTITUTE AFTER, PER TOKEN. That ordering is why a ROM path containing spaces has always
+    // worked without quoting: {rom} lands INSIDE one already-cut token, so its spaces can never become
+    // separators and no quote characters are ever baked into the argument. Every placeholder must keep being
+    // substituted here, after the cut, for that to hold.
+    //
+    // The cut itself is QProcess::splitCommand - Qt's own shell-style tokeniser. A token containing a space is
+    // written in double quotes (--config "My Profile" is TWO arguments), three consecutive double quotes are a
+    // literal quote, and - load-bearing on Windows - a backslash is NOT an escape, so a quoted
+    // "C:\Program Files\..." survives with its backslashes intact. A template with no double quote in it
+    // tokenises byte-for-byte as the plain space-split this replaced.
+    //
+    // An empty token is dropped, which is what makes a blank {fs} (a windowed launch) and a blank {rom}
+    // (opening an emulator's own UI with no game) collapse away instead of becoming an empty argv element.
+    QStringList buildArgs(const QString& resolved, const QString& romNative);
 
     // ---- store (global; husk-on-clear; QtCore-only, same posture as MetaOverrides) ---------------------------
     QString  hashKey(const QString& key);   // md5-hex of the UTF-8 key (ItemMarks/MetaOverrides scheme)

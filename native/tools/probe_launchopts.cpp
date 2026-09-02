@@ -11,6 +11,11 @@
 //         ids; an override naming a retired/removed emulator (not in the valid set) falls back to the default
 //         rather than erroring the launch; an empty override is the default;
 //       - appendExtraArgs joins the extra with exactly one space, and a blank extra is a byte-identical no-op.
+//       - buildArgs (issue #237) tokenises the resolved args string into the argv a standalone emulator is
+//         spawned with: shell-style double quotes make a spaced LITERAL one argument, a quoted Windows path
+//         keeps its backslashes, {rom} is substituted AFTER the cut (so a spaced ROM path needs no quoting and
+//         never carries a quote character), and an UNQUOTED template tokenises byte-for-byte as the plain
+//         space-split it replaced - pinned against an independent oracle over the WHOLE built-in registry.
 //   * STORE — a record round-trips by key (core/emulatorId/extraArgs); an absent key reads back empty; a clear
 //     leaves a HUSK (the row survives for the merge) that still reads as "no override"; clearing a game that
 //     never carried an override writes nothing at all.
@@ -28,6 +33,7 @@
 #include "Settings.h"         // backendFor/setBackendFor/setDefaultBackend — the per-system/global default source
 #include "AppPaths.h"
 #include "AppBrand.h"
+#include "EmulatorRegistry.h" // issue #237: the REAL built-in templates the tokeniser must keep cutting the same
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -124,6 +130,130 @@ int main(int argc, char** argv)
         // An empty base yields just the trimmed extra (no leading space).
         CHECK(LaunchOpts::appendExtraArgs(QString(), QStringLiteral("--foo"))
               == QStringLiteral("--foo"));
+    }
+
+    // ---- 5b. buildArgs: the emulator argv tokeniser (issue #237) -------------------------------------------
+    // A standalone emulator's argsTemplate is one string that is cut into argv. Before #237 the cut was a plain
+    // split on ' ', so a LITERAL argument containing a space could not be expressed at all; it is now
+    // QProcess::splitCommand, which honours shell-style double quotes. Two properties have to hold together:
+    // the new quoting works, and every template that does NOT use it is cut EXACTLY as before.
+    {
+        // A ROM path with spaces (and parentheses) - the case that has always worked because {rom} is
+        // substituted after the cut, and that must keep working with no quoting anywhere.
+        const QString rom = QStringLiteral(R"(C:\ROMs\GameCube\Super Mario Sunshine (USA).iso)");
+
+        // (a) REGRESSION GUARD, hand-written literals: three REAL registry templates, resolved by hand exactly
+        //     as EmulatorManager::launch resolves them ({fs} -> fullscreenArgs/windowedArgs), with the token
+        //     lists captured from the plain-space-split behaviour this replaced. The registry strings are
+        //     asserted too, so these stay assertions about the SHIPPING templates rather than about literals
+        //     that quietly drifted away from them.
+        const ExternalEmulator* dolphin = nullptr;
+        const ExternalEmulator* pcsx2   = nullptr;
+        const ExternalEmulator* rpcs3   = nullptr;
+        for (const ExternalEmulator& e : EmulatorRegistry::builtinEmulators())
+        {
+            if (e.id == QStringLiteral("dolphin")) dolphin = &e;
+            if (e.id == QStringLiteral("pcsx2"))   pcsx2   = &e;
+            if (e.id == QStringLiteral("rpcs3"))   rpcs3   = &e;
+        }
+        CHECK(dolphin && pcsx2 && rpcs3);
+        if (dolphin && pcsx2 && rpcs3)
+        {
+            // Dolphin, full screen: {rom} in the MIDDLE, a multi-token {fs} at the end.
+            CHECK(dolphin->argsTemplate == QStringLiteral("-b -e {rom} {fs}"));
+            CHECK(dolphin->fullscreenArgs == QStringLiteral("-C Dolphin.Display.Fullscreen=True"));
+            CHECK(LaunchOpts::buildArgs(QStringLiteral("-b -e {rom} -C Dolphin.Display.Fullscreen=True"), rom)
+                  == (QStringList{ QStringLiteral("-b"), QStringLiteral("-e"), rom, QStringLiteral("-C"),
+                                   QStringLiteral("Dolphin.Display.Fullscreen=True") }));
+
+            // PCSX2, windowed: {fs} in the middle, a "--" end-of-options marker, {rom} last.
+            CHECK(pcsx2->argsTemplate == QStringLiteral("-batch {fs} -- {rom}"));
+            CHECK(pcsx2->windowedArgs == QStringLiteral("-nofullscreen"));
+            CHECK(LaunchOpts::buildArgs(QStringLiteral("-batch -nofullscreen -- {rom}"), rom)
+                  == (QStringList{ QStringLiteral("-batch"), QStringLiteral("-nofullscreen"),
+                                   QStringLiteral("--"), rom }));
+
+            // RPCS3, windowed: windowedArgs is EMPTY, so the resolved string opens with the blank {fs} and the
+            // run of spaces it leaves must collapse to nothing (not to an empty argv element).
+            CHECK(rpcs3->argsTemplate == QStringLiteral("{fs} {rom}"));
+            CHECK(rpcs3->windowedArgs.isEmpty());
+            CHECK(LaunchOpts::buildArgs(QStringLiteral(" {rom}"), rom) == (QStringList{ rom }));
+            // ...and full screen, where fullscreenArgs is itself TWO tokens.
+            CHECK(rpcs3->fullscreenArgs == QStringLiteral("--no-gui --fullscreen"));
+            CHECK(LaunchOpts::buildArgs(QStringLiteral("--no-gui --fullscreen {rom}"), rom)
+                  == (QStringList{ QStringLiteral("--no-gui"), QStringLiteral("--fullscreen"), rom }));
+        }
+
+        // (b) REGRESSION GUARD, whole registry: for EVERY built-in emulator, in BOTH fullscreen and windowed,
+        //     the tokeniser must agree with an independent oracle that is the pre-#237 code written out here
+        //     (split on ' ' skipping empties, then substitute {rom} per part). This is the audit as a test: it
+        //     fails the moment a built-in template gains a double quote, so nobody can add one without saying
+        //     why in the same change.
+        auto oracle = [](const QString& resolved, const QString& romPath) {
+            QStringList out;
+            const QStringList parts = resolved.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            for (QString a : parts)
+            {
+                if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), romPath);
+                if (!a.isEmpty()) out << a;
+            }
+            return out;
+        };
+        int swept = 0;
+        for (const ExternalEmulator& e : EmulatorRegistry::builtinEmulators())
+        {
+            for (int fs = 0; fs < 2; ++fs)
+            {
+                QString resolved = e.argsTemplate;
+                resolved.replace(QStringLiteral("{fs}"), fs ? e.fullscreenArgs : e.windowedArgs);
+                CHECK(LaunchOpts::buildArgs(resolved, rom) == oracle(resolved, rom));
+            }
+            ++swept;
+        }
+        CHECK(swept >= 10); // the sweep actually ran over the real table, not an empty list
+
+        // (c) NEW: a LITERAL argument containing a space, written in double quotes, is ONE argument - the thing
+        //     #237 says the template could not express. The quotes are consumed by the cut, not passed on.
+        CHECK(LaunchOpts::buildArgs(QStringLiteral(R"(--config "My Profile")"), rom)
+              == (QStringList{ QStringLiteral("--config"), QStringLiteral("My Profile") }));
+
+        // (d) NEW: a quoted WINDOWS path stays one token with its backslashes intact - splitCommand does not
+        //     treat a backslash as an escape, which is the whole reason it is usable here.
+        CHECK(LaunchOpts::buildArgs(QStringLiteral(R"(-L "C:\Program Files\RetroArch\cores\core.dll" {rom})"), rom)
+              == (QStringList{ QStringLiteral("-L"),
+                               QStringLiteral(R"(C:\Program Files\RetroArch\cores\core.dll)"), rom }));
+
+        // (e) NEW: quoting {rom} is harmless and redundant - still ONE token, still the substituted path, and
+        //     with NO quote character anywhere in it (the quotes are cut away BEFORE substitution, so they can
+        //     never be baked into the argument the emulator receives).
+        {
+            const QStringList q = LaunchOpts::buildArgs(QStringLiteral(R"("{rom}")"), rom);
+            CHECK(q == (QStringList{ rom }));
+            CHECK(q.size() == 1 && !q.at(0).contains(QLatin1Char('"')));
+        }
+
+        // (f) NEW: the same through {fs} - a fullscreen flag whose VALUE contains a space. The template is
+        //     resolved first (as EmulatorManager::launch does), so the quotes arrive from fullscreenArgs.
+        {
+            QString t = QStringLiteral("{fs} {rom}");
+            t.replace(QStringLiteral("{fs}"), QStringLiteral(R"(-C "Dolphin.Display.Title=My Game")"));
+            CHECK(LaunchOpts::buildArgs(t, rom)
+                  == (QStringList{ QStringLiteral("-C"), QStringLiteral("Dolphin.Display.Title=My Game"), rom }));
+        }
+
+        // (g) NEW: the per-game extra-args lever (#51) composes - a user typing a quoted spaced value into the
+        //     "Extra arguments:" prompt now gets one argument, because appendExtraArgs feeds buildArgs.
+        CHECK(LaunchOpts::buildArgs(
+                  LaunchOpts::appendExtraArgs(QStringLiteral("-batch {rom}"),
+                                              QStringLiteral(R"(--gamesettings "My Profile")")), rom)
+              == (QStringList{ QStringLiteral("-batch"), rom, QStringLiteral("--gamesettings"),
+                               QStringLiteral("My Profile") }));
+
+        // (h) A blank {rom} (no-game launch: opening the emulator's own UI) still collapses away entirely.
+        CHECK(LaunchOpts::buildArgs(QStringLiteral("-f {rom}"), QString())
+              == (QStringList{ QStringLiteral("-f") }));
+        // ...and an all-placeholder template that resolves to nothing yields NO arguments at all.
+        CHECK(LaunchOpts::buildArgs(QStringLiteral(" {rom}"), QString()).isEmpty());
     }
 
     // ---- 6. Store: a record round-trips by key; an absent key reads back empty -----------------------------

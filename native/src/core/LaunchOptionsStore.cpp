@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QJsonDocument>
+#include <QProcess>       // splitCommand - the shell-style argv tokeniser buildArgs cuts with (issue #237)
 #include <QSettings>
 
 // Shares the portable everythingbox.ini with the other per-item stores (same AppPaths::dataDir() posture).
@@ -156,6 +157,26 @@ QString LaunchOpts::appendExtraArgs(const QString& resolvedArgs, const QString& 
     QString out = resolvedArgs;
     if (!out.endsWith(QLatin1Char(' '))) out += QLatin1Char(' ');
     return out + e;                                 // exactly one space between the template and the extra
+}
+
+QStringList LaunchOpts::buildArgs(const QString& resolved, const QString& romNative)
+{
+    QStringList args;
+    // Shell-style cut (issue #237). QProcess::splitCommand is the same tokeniser Qt uses for
+    // QProcess::startCommand: whitespace separates, a double-quoted run is ONE token, three consecutive
+    // double quotes are a literal quote, and a backslash is NOT an escape (so a quoted Windows path keeps its
+    // separators). With no double quote in the string it is exactly the plain space-split this replaced, which
+    // is why every shipping template tokenises byte-for-byte as before - probe_launchopts pins that against an
+    // independent oracle over the whole built-in registry.
+    const QStringList parts = QProcess::splitCommand(resolved);
+    for (QString a : parts)
+    {
+        // Placeholders are substituted AFTER the cut, per token, so a ROM path containing spaces lands inside
+        // one argument without any quoting and can never pick up a quote character of its own.
+        if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), romNative);
+        if (!a.isEmpty()) args << a; // drop a blank {rom} (a no-game launch, e.g. opening an emulator's own UI)
+    }
+    return args;
 }
 
 // ---- store ------------------------------------------------------------------------------------------------
