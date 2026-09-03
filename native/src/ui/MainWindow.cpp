@@ -86,6 +86,9 @@
 #include "../core/SubsonicClient.h"
 #include "../core/MusicId.h"              // issue #194: the source preference + the match overrides      // issue #193: Subsonic servers, and MusicSupply's key routing
 #include "../core/SubsonicServerStore.h"
+#include "../core/ChannelStore.h"    // #179: the stored channels
+#include "../core/ChannelLineup.h"   // #179: source -> candidates -> the duration-gated lineup
+#include "../core/MediaDurations.h"  // #179: the duration index the lineup is gated on
 #include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
 #include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
 #include "../core/AbsClient.h"              // issue #197: the Audiobookshelf client + AbsSupply key routing
@@ -871,6 +874,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // lend it: the picker's choice and the automatic resolves must read the SAME memory.
     home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
+    // #179: a channel row was activated -> tune it. The view names the channel; this window owns the clock,
+    // the join and the surfing.
+    connect(home_, &HomeView::tuneChannelRequested, this, &MainWindow::tuneChannel);
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
     connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
@@ -1911,6 +1917,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // T2 QueuedConnection precedent), and so no stray goBack/openHome can clear the flag before we read it.
         if (channelActive())
         { QMetaObject::invokeMethod(this, [this] { advanceChannel(); }, Qt::QueuedConnection); return; }
+        // #179: a TUNED scheduled channel owns its natural end the same way, and "advance" is just re-tuning
+        // it — what is on NOW is the next programme, and its offset from the clock is the second or two the
+        // schedule kept running while mpv closed the file, which is exactly right. Deferred for the reason
+        // above (unwind out of the mpv end-of-file callback first) and keyed by the channel ID.
+        if (channelTuned())
+        {
+            const QString tuned = tunedChannelId_;
+            QMetaObject::invokeMethod(this, [this, tuned] { tuneChannel(tuned); }, Qt::QueuedConnection);
+            return;
+        }
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
     });
     connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
@@ -5762,6 +5778,18 @@ bool MainWindow::handlePlayerRowKey(int key)
     const eb::RowAct act = eb::rowKey(key);
     if (act == eb::RowAct::NotOurs) return false;
 
+    // #179 SURFING. While a scheduled channel is on, Up/Down change CHANNEL rather than walking the transport
+    // row — it is the defining gesture of a channel, and the two verbs it displaces (reach the Back overlay,
+    // come back down to the row) stay reachable with Left/Right and Enter. Placed here rather than in
+    // keyPressEvent because BOTH arrow paths funnel through this function: the one that runs when nothing
+    // holds focus, and the event filter's, which carries the far more common key pressed ON a focused control.
+    if (channelTuned() && (key == Qt::Key_Up || key == Qt::Key_Down))
+    {
+        revealMediaControls();
+        surfChannel(key == Qt::Key_Up ? -1 : +1);
+        return true;
+    }
+
     revealMediaControls();   // an arrow is activity: the chrome must not fade out mid-traversal
 
     // WHICH OF THE TWO RINGS the key was pressed in. Left/Right mean "the next control along this row" in
@@ -7230,6 +7258,182 @@ void MainWindow::onChannelPickDetoured(int gen)
 // Every user-stop / Back / queue-clear-to-home path AND the start of any non-channel playback clears the channel,
 // so the next natural end after ANY exit does not chain. Bumping the gen invalidates any in-flight async pick.
 // Idempotent (safe when no channel is live).
+// ---- Personal TV channels: the tuner, join-in-progress, and surfing (issue #179, increment 1) -------------
+//
+// THE WHOLE OF WHAT THIS WINDOW OWNS is the impure half: the wall clock, the player, and the banner. What is
+// on at this second, where in it we are, and what follows are answered by the PURE schedule (channels::), so
+// probe_channels can assert the very number this function seeks to. Nothing below re-derives a timeline.
+
+bool MainWindow::channelTuned() const { return !tunedChannelId_.isEmpty(); }
+
+// Tune (or re-tune) a channel: resolve what is on NOW and its offset, open that programme, and seek there.
+// The join is the defining behaviour — you land at 00:12:34 because that is where the clock is — and it is
+// one call: PlaybackSession::overrideResumeSeek, the same one-shot the audiobook chapter list uses, placed
+// after the open and before mpv's asynchronous duration callback can apply the stored resume position.
+void MainWindow::tuneChannel(const QString& channelId)
+{
+    channels::Channel ch;
+    if (!ChannelStore::get(channelId, ch))
+    { notify(tr("That channel no longer exists."), kFeedbackShort); return; }
+
+    // The lineup, and the ONE log line the duration gate owes. Named items, at BUILD time — never at guide
+    // time, and never by opening a file (Channels.h, rule 4).
+    QStringList skipped;
+    const QVector<channels::LineupItem> lineup = ChannelLineup::build(ch, &skipped);
+    if (!skipped.isEmpty())
+        qInfo("[channels] \"%s\": %d item(s) skipped — no known duration (%s)",
+              qPrintable(ch.name), int(skipped.size()),
+              qPrintable(skipped.mid(0, 5).join(QStringLiteral(", "))));
+
+    const qint64 nowUtc = QDateTime::currentSecsSinceEpoch();
+    const int    tzOff  = QDateTime::currentDateTime().offsetFromUtc();
+    const channels::Schedule sched = channelSchedules_.dayFor(ch, nowUtc, tzOff, lineup);
+    const channels::Airing   air   = channels::whatsOn(sched, nowUtc);
+    if (!air.valid)
+    {
+        notify(lineup.isEmpty()
+                   ? tr("“%1” has nothing to air yet — none of its items has a known length.").arg(ch.name)
+                   : tr("“%1” is off air right now.").arg(ch.name), kFeedbackLong);
+        return;
+    }
+
+    // The surfing ring, snapshotted at tune time: the channels in the order the shelf lists them. Re-read on
+    // every tune (including every surf), so a channel added or deleted on another device between two presses
+    // of Up is in — or out of — the ring by the next one.
+    tunedChannelIds_.clear();
+    for (const channels::Channel& c : ChannelStore::list()) tunedChannelIds_ << c.id;
+    tunedChannelId_ = channelId;
+
+    // The programme, as an ordinary local video leaf — the same MediaItem shape browse::localLibraryCatalog
+    // builds, so it opens through exactly the path a hand-picked file does (and so its measured length lands
+    // in the duration index under the same key the next lineup will look it up by).
+    MediaItem it;
+    it.url   = air.current.playKey;
+    it.mime  = QStringLiteral("local:video");
+    it.type  = QStringLiteral("movie");
+    it.id    = air.current.itemId;
+    it.title = air.current.title;
+    // The latch, across the SYNCHRONOUS play dispatch only (the channelAiring_ shape): openLibraryItem
+    // reaches the play sinks, and those sinks are exactly the paths that untune a channel.
+    channelTuning_ = true;
+    openLibraryItem(it);
+    channelTuning_ = false;
+
+    // JOIN IN PROGRESS. joinOffsetSec is the ONE place the per-channel "start from the beginning" override is
+    // applied, so the banner and the seek cannot disagree about where the programme started.
+    // ...AND IT IS APPLIED EVEN WHEN IT IS ZERO. A first cut wrote `if (off > 0)`, and a live drive on a
+    // channel set to start programmes from the beginning opened its next programme TEN SECONDS IN — because
+    // openLibraryItem's beginResume had already queued that file's stored resume mark, and skipping the
+    // override left it standing. Zero is not "nothing to do": it is the channel saying "start this at its
+    // top", and it has to displace the resume position the same way any other join point does. (This is the
+    // audiobook chapter list's rule, spelled out at openAudiobook's own overrideResumeSeek call: the value is
+    // 0 for a multi-file book and that lands the part at its top exactly as the listener asked.)
+    const int off = channels::joinOffsetSec(air, ch.startFromBeginning);
+    if (session_) session_->overrideResumeSeek(double(off));
+
+    // Recents holds the CHANNEL, not the programme it happened to be airing: re-opening a channel row must
+    // tune the channel (and land wherever the clock now is), not replay an episode that finished hours ago.
+    // Its key is the row-producer key #161 names, which is also what the star files a favourite under.
+    const QString key = channels::rowProducerKey(channelId);
+    RecentStore::add({ key, ch.name, QStringLiteral("video"), QString(), key });
+
+    showChannelBanner(ch, air);
+    prefetchChannelNeighbours();
+}
+
+// Up/Down while tuned. One step through the ring, and a straight re-tune of the neighbour — which resolves
+// ITS what's-on-now from the clock, so surfing lands mid-programme exactly as the first tune did.
+void MainWindow::surfChannel(int delta)
+{
+    if (!channelTuned() || tunedChannelIds_.isEmpty()) return;
+    const int idx = tunedChannelIds_.indexOf(tunedChannelId_);
+    if (idx < 0) { exitTunedChannel(); return; }              // deleted under us: stop pretending we are tuned
+    const int next = channels::surfIndex(tunedChannelIds_.size(), idx, delta);
+    if (next < 0 || next == idx) return;                      // a single-channel ring surfs to itself: do nothing
+    tuneChannel(tunedChannelIds_.at(next));
+}
+
+// The now-playing banner: title, time remaining, next up. A brief, NON-MODAL card in the countdown
+// interstitial's place (centred over the player, same panel colours the nav kit uses), deliberately not a
+// NavConfirm/NavCountdown — those block in a nested event loop, and a surf must not stop being interruptible
+// by the next press of Up. It is a plain child label that raises itself and fades on a timer.
+void MainWindow::showChannelBanner(const channels::Channel& ch, const channels::Airing& air)
+{
+    if (!playerPage_) return;
+    // PARENTED ON THE WINDOW, not on the player page, and centred in the WINDOW rect — which is where the
+    // channel-mode countdown card (a NavConfirm, also a child of this window) appears, and the placement the
+    // issue asks this to reuse. A first cut parented it on playerPage_ and a live drive put it in the middle
+    // of the in-player playlist panel rather than over the picture: playerPage_ is a splitter host whose rect
+    // is not the video's, so "the centre of the page" and "the centre of what you are watching" are not the
+    // same place.
+    if (!channelBanner_)
+    {
+        channelBanner_ = new QLabel(this);
+        channelBanner_->setObjectName(QStringLiteral("channelBanner"));
+        channelBanner_->setAlignment(Qt::AlignCenter);
+        channelBanner_->setTextFormat(Qt::PlainText);
+        channelBanner_->setWordWrap(true);
+        channelBanner_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        channelBanner_->setStyleSheet(QStringLiteral(
+            "QLabel#channelBanner { background: rgba(8,10,16,215); color: #f0f2f6; border: 1px solid "
+            "rgba(255,255,255,40); border-radius: 10px; padding: 14px 22px; font-size: 17px; }"));
+        channelBannerTimer_ = new QTimer(this);
+        channelBannerTimer_->setSingleShot(true);
+        connect(channelBannerTimer_, &QTimer::timeout, this,
+                [this] { if (channelBanner_) channelBanner_->hide(); });
+    }
+    // SECONDS UNDER A MINUTE, minutes above it. Rounding a 40-second tail up to "1 min" is a small lie every
+    // time and a plainly visible one on short content — a live drive read "1 min left" over a ten-second
+    // programme. Above a minute the rounding UP is right: at 90 s "2 min" over-promises by less than "1 min"
+    // under-promises, and a viewer deciding whether to stay is better served by the generous number.
+    //
+    // WHAT "LEFT" MEANS DEPENDS ON THE OVERRIDE, and getting that wrong is not cosmetic. On an ordinary
+    // channel the viewer joined mid-programme, so the schedule's remaining IS their remaining. On a channel
+    // set to start programmes from the beginning they are watching the whole thing from zero, so the
+    // schedule's remaining is a number about a broadcast nobody is watching — a live drive surfed onto such a
+    // channel and read "1 sec left" over a twenty-second programme that had just started. Their remaining is
+    // the programme's own length.
+    const int leftSec = ch.startFromBeginning ? air.current.durationSec : air.remainingSec;
+    const QString left = (leftSec < 60) ? tr("%n sec", "", qMax(1, leftSec))
+                                        : tr("%n min", "", (leftSec + 59) / 60);
+    QString text = tr("%1\n%2 — %3 left").arg(ch.name, air.current.title, left);
+    if (air.hasNext) text += QLatin1Char('\n') + tr("Next: %1").arg(air.next.title);
+    channelBanner_->setText(text);
+    channelBanner_->adjustSize();
+    const QRect r = rect();
+    channelBanner_->move(qMax(0, (r.width() - channelBanner_->width()) / 2),
+                         qMax(0, (r.height() - channelBanner_->height()) / 2));
+    channelBanner_->show();
+    channelBanner_->raise();
+    channelBannerTimer_->start(4000);
+}
+
+// PREFETCH, BOUNDED TO ±1. The bound is the pure function's, not a constant here: prefetchNeighbours returns
+// at most two ids and never the tuned one. What is "prefetched" in increment 1 is the SCHEDULE — the day is
+// cut and frozen for each neighbour, which is the whole cost of answering "what is on" the instant Up is
+// pressed. Warming the neighbour's media itself needs a second decoder and belongs with the guide work.
+void MainWindow::prefetchChannelNeighbours()
+{
+    if (!channelTuned()) return;
+    const qint64 nowUtc = QDateTime::currentSecsSinceEpoch();
+    const int    tzOff  = QDateTime::currentDateTime().offsetFromUtc();
+    for (const QString& id : channels::prefetchNeighbours(tunedChannelIds_, tunedChannelId_))
+    {
+        channels::Channel c;
+        if (!ChannelStore::get(id, c)) continue;
+        channelSchedules_.dayFor(c, nowUtc, tzOff, ChannelLineup::build(c));
+    }
+}
+
+// Leaving the channel: every path that takes playback away from it. Deliberately does NOT clear the schedule
+// cache — today's lineups stay frozen for the rest of the day, which is exactly what tuning back in must find.
+void MainWindow::exitTunedChannel()
+{
+    tunedChannelId_.clear();
+    tunedChannelIds_.clear();
+    if (channelBanner_) channelBanner_->hide();
+}
+
 void MainWindow::exitChannel()
 {
     // #141: a channel window in flight dies WITH the channel, and it has to die here rather than at whatever
@@ -7238,6 +7442,10 @@ void MainWindow::exitChannel()
     // this is called from the top of every play sink. Gated on the pre-resolved path so this only ever ends a
     // CHANNEL window: an ordinary in-queue crossfade is the business of the queue that owns it, and
     // cancelCrossfade is a no-op when no window is running, which is nearly every call.
+    // #179: a TUNED scheduled channel dies on these same paths (Home, Back, a hard stop) and for the same
+    // reason. Guarded by the tuning latch, because tuneChannel's own openLibraryItem reaches a play sink and
+    // that sink is one of the callers — without the guard a tune would untune itself before its first frame.
+    if (!channelTuning_) exitTunedChannel();
     if (!channelNextPath_.isEmpty() && player_) player_->cancelCrossfade();
     channelPlaylistId_.clear();
     channelAiring_ = false;
@@ -7315,6 +7523,9 @@ void MainWindow::notePlaybackStart()
     if (remintNoticeGen_) { remintNoticeGen_ = 0; hideNotice(); }
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
+    // #179: …and supersedes a TUNED scheduled channel too. Its own dispatch is excluded by the same latch
+    // exitChannel uses, so this fires for everything the user chose and for nothing the channel chose.
+    if (channelTuned() && !channelTuning_) exitTunedChannel();
 }
 
 // A non-game play surface — a film, a track, an IPTV channel, a book, a comic, a photo, or any of them in a
@@ -13703,6 +13914,17 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     // device has not been able to re-identify (LiveTvMigrate's third outcome); its url is the only thing that
     // can play it, so it falls through and replays exactly as it did before this change. That is the whole
     // reason the migration keeps such a row rather than rewriting it into something that resolves to nothing.
+    // #179: A CHANNEL IDENTITY NAMES A CHANNEL, NOT A FILE, and it is resolved ahead of the file/link tests
+    // below for the reason the Live TV identity below it is: QFileInfo would call it a missing file and say so
+    // on screen. Recents files a tuned channel under "channel:<id>" — the row-producer key #161 names — and
+    // re-opening that row must TUNE, resolving what is on NOW rather than replaying the programme that
+    // happened to be airing when the row was written. Either field can carry it: a favourite files the
+    // identity in both, exactly as a Live TV channel's does.
+    {
+        const QString chan = channels::isRowProducerKey(resumeKey) ? resumeKey
+                           : channels::isRowProducerKey(path)      ? path : QString();
+        if (!chan.isEmpty()) { tuneChannel(channels::channelIdFromKey(chan)); return; }
+    }
     {
         const QString chan = LiveTvIdentity::isLiveTvId(path)      ? path
                            : LiveTvIdentity::isLiveTvId(resumeKey) ? resumeKey : QString();
@@ -27520,6 +27742,13 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
+    // #179: RECORD THE MEASURED LENGTH, durably. mpv has just told us how long this item is, and that is the
+    // only measurement the app ever takes of it — but the resume group that used to be its only home is
+    // DELETED the moment the file plays to its end (finishResume, issue #150), so the items most likely to be
+    // in a channel were exactly the ones with no length. MediaDurations keeps the number after the position
+    // is gone; it is what channels::withDurations gates a lineup on, and it is device-local (CloudSync).
+    if (seconds > 0 && session_)
+        MediaDurations::note(session_->resumePath(), int(seconds));
     // #218: mpv has just told us exactly how long this PART is, which is the only measurement the book's
     // timeline ever gets. BookTimeline::measure publishes it and absorbs what it changed into the parts not
     // yet heard, so the total does not move and the elapsed reading cannot go backwards at the boundary this

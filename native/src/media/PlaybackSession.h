@@ -172,6 +172,11 @@ public:
     { return trackIdentities_.value(playPath, playPath); }
 
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
+    // The identity beginResume was given — what the position, and the LENGTH, are filed under. Read by the
+    // host's duration callback so a measured runtime can be recorded against the same key the rest of the
+    // app knows the item by (issue #179: a channel's lineup needs lengths that outlive the resume group,
+    // which finishResume deletes). Empty when nothing timed is playing.
+    QString resumePath() const { return resumePath_; }
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
     // A queue boundary was just crossed INTO the current entry: record that it was reached (issue #220).

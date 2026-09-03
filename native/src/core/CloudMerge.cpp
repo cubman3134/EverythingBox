@@ -1112,6 +1112,71 @@ void mergePresets(const QJsonObject& presets)
     }
 }
 
+// ---- personal TV channels (per profile, id-stable, tombstoned deletes) --------------------------------------
+// A channel (issue #179) is eight small fields — a source, an ordering, a start epoch — and the timeline is
+// COMPUTED from them on each device rather than stored, so this is the whole of what has to travel for two
+// devices to agree about what is on at 20:00. Byte-for-byte the preset shape above, and for the same two
+// reasons: identity is the stored `id` (a rename is a mutable-name edit that folds onto one row instead of
+// arriving as a delete+add), and a delete leaves a dated tombstone (ChannelStore::remove) so a peer's stale
+// copy cannot walk the channel back in. There is no legacy row to back-fill — the store shipped with the id
+// field — so, unlike presets, an id-less row here has no deterministic fallback and is simply not merged.
+
+QString channelKey(const QString& p)       { return QStringLiteral("channels/") + p + QStringLiteral("/items"); }
+QString channelTombStore(const QString& p) { return QStringLiteral("channels/") + p; }
+
+void serializeChannels(QJsonObject& channels)
+{
+    for (const QString& p : profilesFor(QStringLiteral("channels")))
+    {
+        const QJsonArray items = QJsonDocument::fromJson(store().value(channelKey(p)).toString().toUtf8()).array();
+        const QJsonArray tombs = tombsToArray(channelTombStore(p));
+        if (items.isEmpty() && tombs.isEmpty()) continue;
+        QJsonObject po;
+        po.insert(QStringLiteral("items"), items);
+        po.insert(QStringLiteral("tombs"), tombs);
+        channels.insert(p, po);
+    }
+}
+
+void mergeChannels(const QJsonObject& channels)
+{
+    for (auto it = channels.begin(); it != channels.end(); ++it)
+    {
+        const QString p = it.key();
+        const QJsonObject po = it.value().toObject();
+
+        // Union local + remote by id, newest ts wins (equal ts -> order-independent value tie-break).
+        QHash<QString, QJsonObject> byId;
+        QStringList order; // stable newest-first order (local first, then remote extras), as favourites
+        auto ingest = [&](const QJsonArray& arr) {
+            for (const QJsonValue& v : arr)
+            {
+                const QJsonObject o = v.toObject();
+                const QString id = o.value(QStringLiteral("id")).toString();
+                if (id.isEmpty()) continue;   // no identity -> not mergeable (see the note above)
+                if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
+                else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
+                                        static_cast<qint64>(byId[id].value(QStringLiteral("ts")).toDouble()),
+                                        o, byId[id]))
+                    byId.insert(id, o);
+            }
+        };
+        ingest(QJsonDocument::fromJson(store().value(channelKey(p)).toString().toUtf8()).array());
+        ingest(po.value(QStringLiteral("items")).toArray());
+
+        const QHash<QString, qint64> tombs = mergeTombs(channelTombStore(p), po.value(QStringLiteral("tombs")).toArray());
+
+        QJsonArray out;
+        for (const QString& id : order)
+        {
+            const QJsonObject o = byId.value(id);
+            const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+            if (tombs.contains(id) && tombs.value(id) >= ts) continue; // a REAL tombstone beats an older/equal copy; a strictly-newer edit resurrects
+            out.append(o);
+        }
+        store().setValue(channelKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+    }
+}
 // ---- custom home rows (per profile; whole-list newest-wins, with a UNION of the row set) --------------------
 // The profile's home arrangement (issue #161). Unlike every store above it, this is not a SET of items that
 // merge one by one — it is an ORDER, and there is no meaningful way to merge two orders: any rule that tried
@@ -1527,7 +1592,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows;
+    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -1537,6 +1602,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializeAudioBookmarks(audiobookmarks);                     // issue #140: per-item audio bookmarks
     serializePlaylists(playlists);
     serializePresets(presets);                                   // issue #184: saved filter presets
+    serializeChannels(channels);                                 // issue #179: personal TV channels
     serializeHomeRows(homerows);                                 // issue #161: the profile's home arrangement
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
@@ -1564,6 +1630,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("audiobookmarks"), audiobookmarks); // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("playlists"), playlists);
     root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
+    root.insert(QStringLiteral("channels"), channels);           // issue #179 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("homerows"), homerows);           // issue #161 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
@@ -1589,6 +1656,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeAudioBookmarks(root.value(QStringLiteral("audiobookmarks")).toObject()); // issue #140: per-item audio bookmarks
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
     mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
+    mergeChannels(root.value(QStringLiteral("channels")).toObject());   // issue #179: personal TV channels
     mergeHomeRows(root.value(QStringLiteral("homerows")).toObject());    // issue #161: the home arrangement
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
