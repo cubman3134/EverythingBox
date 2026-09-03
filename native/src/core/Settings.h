@@ -21,6 +21,14 @@ namespace Settings
     // namespaces the per-device accumulators (T3) so two devices never double-count. Never empty on return.
     QString deviceId();                       // key "device/id"; minted once, stable, device-local
 
+    // What this device CALLS ITSELF on the LAN (issue #143): the name a peer's picker shows as
+    // "EverythingBox on <name>". Defaults to the machine's host name, which is already the name the user
+    // gave this box, so the feature is usable before anyone visits Settings. Device-local like device/id
+    // beside it -- syncing it would rename every box on the account to whatever the last one typed, and the
+    // whole point of the string is to tell them apart. Never empty on return.
+    QString deviceName();                     // key "device/name", default = the machine host name
+    void setDeviceName(const QString& name);
+
     // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
     // 639 code like "eng"; empty = no preference / first available).
     bool subtitlesOnByDefault();
@@ -162,6 +170,26 @@ namespace Settings
     int  audioJumpSeconds();
     void setAudioJumpSeconds(int seconds);
 
+    // Touch gestures over the video player (issue #162). One switch per gesture FAMILY, all default ON: the
+    // recogniser only ever runs on a touch form factor, so an enabled family is invisible on desktop and TV.
+    // gestureEdgeInset is the band along each window edge where a touch is ignored so the OS's own back /
+    // notification swipes are never fought (0..96 px, default 24). The video skip interval is NOT here on
+    // purpose — it is audioJumpSeconds above, shared, exactly as issue #162 asks.
+    bool gestureVolume();
+    void setGestureVolume(bool on);
+    bool gestureBrightness();
+    void setGestureBrightness(bool on);
+    bool gestureSeek();
+    void setGestureSeek(bool on);
+    bool gestureDoubleTap();
+    void setGestureDoubleTap(bool on);
+    bool gestureLongPress();
+    void setGestureLongPress(bool on);
+    bool gesturePinch();
+    void setGesturePinch(bool on);
+    int  gestureEdgeInset();
+    void setGestureEdgeInset(int px);
+
     // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
     // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
     // a button you ignored, and invisible when it is a seek that already happened).
@@ -238,6 +266,19 @@ namespace Settings
     QString listenBrainzApiUrl();
     void setListenBrainzApiUrl(const QString& url);
 
+    // LAST.FM (#192 increment 2). The SESSION KEY, and only the session key: the desktop-auth flow has no
+    // password to store, and the request token it is exchanged for is spent the moment it is used. THE
+    // USER'S OWN SECRET, on exactly the terms the ListenBrainz token above is held: read by one caller at
+    // the moment it signs a request, never logged, never echoed into a message, and carved out of every sync
+    // bundle by Scrobble::isDeviceLocalKey (the "scrobble/" prefix already covers it). Per profile.
+    QString lastFmSessionKey();
+    void setLastFmSessionKey(const QString& key);
+    // WHICH account that session belongs to, so the settings row can name it. Not a secret — but it is
+    // written and cleared with the key, because a username left behind after a disconnect claims a link that
+    // is no longer there.
+    QString lastFmAccount();
+    void setLastFmAccount(const QString& name);
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.
@@ -287,6 +328,24 @@ namespace Settings
     // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
+
+    // FOLLOWING A SERIES (issue #155). How often the background pass asks each followed series' source what
+    // children it has now, in HOURS — one of follow::intervalChoicesHours() (6 / 12 / 24 / 168), or 0 for
+    // MANUAL, where nothing runs until "Check now" is pressed. Default daily.
+    //
+    // Both keys live under "following/" and are ORDINARY SYNCED PREFERENCES that ride the settings bundle: how
+    // often to check and whether to check on a metered link are choices about the user, and someone who set
+    // "weekly" on the TV means it on the phone too. The prefix is deliberately NOT "follow/", which
+    // CloudSync::isPerItemStoreKey claims for the per-item follow marks — "following/" does not start with
+    // "follow/" (the slash is load-bearing), and probe_cloudmerge pins that the two are classified apart.
+    int  followIntervalHours();
+    void setFollowIntervalHours(int hours);
+
+    // Whether the scheduled pass may run on a METERED connection. Off by default, per the issue: a background
+    // refresh over somebody's phone tethering is exactly the thing a polite feature does not do. "Check now"
+    // is a deliberate press and is never gated on it.
+    bool followOnMetered();
+    void setFollowOnMetered(bool on);
 
     // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
     // screenshots without the window needing focus (see core/UiTestServer). Default off.
@@ -358,6 +417,21 @@ namespace Settings
     // was configured.
     QString readingFolder();       // resolved path (never empty)
     void setReadingFolder(const QString& path);
+
+    // PER-SERIES COMIC READING DIRECTION (issue #152). A comic archive's ComicInfo.xml states its direction
+    // in <Manga> and that is the DEFAULT; this is the user's answer for a series, and it beats the document
+    // outright — the same "user edits are above all" rule the whole reading library follows.
+    //
+    // The value is ComicInfo::Direction's persisted spelling, and it is an int here ON PURPOSE: Settings.h is
+    // included by most of the app, and it should not drag the comic layer's headers in behind it for three
+    // numbers. 0 = no override (the document decides), 1 = left to right, 2 = right to left. Setting 0
+    // FORGETS the override rather than storing a third state, so a series the user has never had an opinion
+    // about and one they changed their mind back on are the same thing.
+    //
+    // `seriesKey` is BookLibrary::seriesKeyFor / ComicName::seriesKey — the same folded key the shelf groups
+    // a series by, so an override survives a re-spelling of the series' display name.
+    int  comicDirectionOverride(const QString& seriesKey);
+    void setComicDirectionOverride(const QString& seriesKey, int direction);
 
     // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
     // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
@@ -539,6 +613,14 @@ namespace Settings
     // Key "ps3/autoUpdate".
     bool ps3AutoUpdate();
     void setPs3AutoUpdate(bool on);
+
+    // Install a game's own update and DLC packages into the target emulator before launching it (issue #189):
+    // whatever sits in the `updates/` and `dlc/` folders BESIDE the game, installed per that emulator's recipe
+    // (ContentRecipe.h). Default on — a game whose DLC is silently missing looks broken, and nothing here can
+    // block a launch: every failure is reported and the base game still boots. Off is the master switch for
+    // someone who drives their emulators' content stores entirely by hand. Key "content/autoInstall".
+    bool installGameContent();
+    void setInstallGameContent(bool on);
 
     // Verify ROMs against user-supplied No-Intro / Redump DAT files dropped into <data>/dats/ (issue #97). When
     // on, the detail view lazily hashes a game's PAYLOAD and stamps it Verified / Bad / Unknown. Passive — never

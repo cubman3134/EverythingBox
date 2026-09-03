@@ -1,11 +1,15 @@
 #include "ComicView.h"
+#include "ComicInfo.h"       // #152: the archive's own ComicInfo.xml -> the reading direction
+#include "ComicName.h"       // seriesKey(): the key a per-series direction override is stored under
 #include "ComicPageOrder.h"
+#include "RarComic.h"
 #include "Tar.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/PhotoLibrary.h"
 #include "../core/SevenZip.h"
+#include "../core/Settings.h"
 
 #include <QScrollArea>
 #include <QScrollBar>
@@ -151,7 +155,27 @@ bool ComicView::isComicFile(const QString& path)
 {
     const QString ext = QFileInfo(path).suffix().toLower();
     return ext == QStringLiteral("cbz") || ext == QStringLiteral("zip")
-        || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt");
+        || ext == QStringLiteral("cb7") || ext == QStringLiteral("cbt")
+        || ext == QStringLiteral("cbr");
+}
+
+// CBR (.cbr): a RAR of page images. RarComic.h owns the whole of it - the signature sniff that names RAR5
+// rather than calling it corrupt, the ONE sequential pass that keeps a solid archive's decompression window
+// intact, and the sentence for each way it can fail. All this branch does is order what came back, with the
+// same orderPages() the CB7 and CBT branches use.
+bool ComicView::loadCbrPages(const QString& path, QVector<QByteArray>& pages, QString* error)
+{
+    RarComic::Status st = RarComic::Status::Ok;
+    const QVector<QPair<QString, QByteArray>> imgs = RarComic::imagePages(path, &st);
+    if (st != RarComic::Status::Ok || imgs.isEmpty())
+    {
+        if (error) *error = RarComic::message(st == RarComic::Status::Ok ? RarComic::Status::NoPages : st);
+        return false;
+    }
+
+    pages = orderPages(imgs);
+    if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
+    return true;
 }
 
 // CB7 (.cb7): a 7-Zip of page images. The LZMA SDK behind SevenZip.h decodes into files, so extract the whole
@@ -159,7 +183,8 @@ bool ComicView::isComicFile(const QString& path)
 // temp dir remove itself on the way out (QTemporaryDir auto-removes in its destructor) — nothing is left on disk
 // once the pages are in RAM, so there is no scratch to clean up when the view later closes. A corrupt/empty/
 // image-less archive returns a readable error, never a crash.
-bool ComicView::loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error)
+bool ComicView::loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error,
+                             QByteArray* comicInfoXml)
 {
     QTemporaryDir tmp(QDir::tempPath() + QStringLiteral("/eb-cb7-XXXXXX"));
     if (!tmp.isValid())
@@ -185,6 +210,10 @@ bool ComicView::loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QS
         if (!bytes.isEmpty()) imgs.append({ rel, bytes });
     }
     if (imgs.isEmpty()) { if (error) *error = tr("No page images found in this comic."); return false; }
+
+    // The document, out of the extraction we already made (#152). Before the temp dir goes away with the
+    // end of this function.
+    if (comicInfoXml) *comicInfoXml = ComicInfo::xmlFromDirectory(tmp.path());
 
     pages = orderPages(imgs);
     if (pages.isEmpty()) { if (error) *error = tr("Could not read the comic's pages."); return false; }
@@ -222,14 +251,21 @@ bool ComicView::openComic(const QString& path, QString* error)
 
     const QString ext = QFileInfo(path).suffix().toLower();
     QVector<QByteArray> pages;
+    QByteArray comicInfoXml;   // #152: the archive's own ComicInfo.xml, when it has one
 
     if (ext == QStringLiteral("cb7"))
     {
-        if (!loadCb7Pages(path, pages, error)) return false;
+        // The .cb7 branch hands the document back out of the extraction it makes for the pages; the other
+        // three are cheap enough to ask the seam for directly, below.
+        if (!loadCb7Pages(path, pages, error, &comicInfoXml)) return false;
     }
     else if (ext == QStringLiteral("cbt"))
     {
         if (!loadCbtPages(path, pages, error)) return false;
+    }
+    else if (ext == QStringLiteral("cbr"))
+    {
+        if (!loadCbrPages(path, pages, error)) return false;
     }
     else
     {
@@ -276,6 +312,28 @@ bool ComicView::openComic(const QString& path, QString* error)
 
     pages_ = pages;
     path_ = path;
+
+    // ---- WHICH WAY IT READS (issue #152) -----------------------------------------------------------------
+    // The archive's ComicInfo.xml sets the DEFAULT; the user's per-series override beats it; with neither,
+    // left to right, which is what every comic did before this existed. Read AFTER the pages, so a comic
+    // that failed to open changes nothing about the one still on screen.
+    if (ext != QStringLiteral("cb7")) comicInfoXml = ComicInfo::xmlFromArchive(path);
+    ComicInfo::Info meta;
+    if (!comicInfoXml.isEmpty())
+    {
+        bool wellFormed = true;
+        const ComicInfo::Info parsed = ComicInfo::parse(comicInfoXml, &wellFormed);
+        if (wellFormed) meta = parsed;   // a malformed document is ignored whole (ComicInfo.h)
+    }
+    // The override is keyed by SERIES, so a comic whose document names no series has none to look up — the
+    // document's own answer stands. (#147 owns the toggle that writes these; this reads whatever is there.)
+    const int stored = meta.series.isEmpty()
+                           ? 0
+                           : Settings::comicDirectionOverride(ComicName::seriesKey(meta.series));
+    const ComicInfo::Direction over = stored == 1 ? ComicInfo::Direction::LeftToRight
+                                    : stored == 2 ? ComicInfo::Direction::RightToLeft
+                                                  : ComicInfo::Direction::Unspecified;
+    rtl_ = ComicInfo::resolveDirection(meta.direction, over) == ComicInfo::Direction::RightToLeft;
     // Leaving photo mode. openFolder() clears pages_ on the way in, and this is the same door in the other
     // direction: MainWindow reuses ONE ComicView for both, so a comic opened after a photo folder was viewed
     // kept photoMode_ set and was read as that folder — pageTotal()/decodeAt() answer from photoFiles_, and
@@ -306,6 +364,7 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     { if (error) *error = tr("No photos found in this folder."); return false; }
 
     photoMode_ = true;
+    rtl_ = false;            // a folder of photographs has no reading direction (#152)
     photoFiles_ = files;
     pages_.clear();          // drop any comic archive state; photo pages come from photoFiles_
     path_ = folder;
@@ -424,8 +483,20 @@ void ComicView::rescale()
             canvas.fill(QColor(0x15, 0x17, 0x1c));
             QPainter p(&canvas);
             p.setRenderHint(QPainter::SmoothPixmapTransform);
-            p.drawImage(QRect(x0, y0, lw, outH), l);            // first page on the left
-            p.drawImage(QRect(x0 + lw + g, y0, rw, outH), r);   // next page on the right
+            // WHICH SIDE EACH PAGE IS DRAWN ON is the whole of what right-to-left changes about the render
+            // (issue #152): in a manga spread the EARLIER page is on the right, because that is the one the
+            // eye reaches first. Nothing about the page order, the resume position or the page numbering
+            // moves — only the two rectangles.
+            if (rtl_)
+            {
+                p.drawImage(QRect(x0, y0, lw, outH), r);            // next page on the left
+                p.drawImage(QRect(x0 + lw + g, y0, rw, outH), l);   // first page on the right
+            }
+            else
+            {
+                p.drawImage(QRect(x0, y0, lw, outH), l);            // first page on the left
+                p.drawImage(QRect(x0 + lw + g, y0, rw, outH), r);   // next page on the right
+            }
             p.end();
 
             const QPixmap pm = QPixmap::fromImage(canvas);
@@ -491,8 +562,14 @@ void ComicView::keyPressEvent(QKeyEvent* e)
 {
     switch (e->key())
     {
-    case Qt::Key_Right: case Qt::Key_PageDown: case Qt::Key_Space: nextPage(); return;
-    case Qt::Key_Left:  case Qt::Key_PageUp:                       prevPage(); return;
+    // THE ARROWS FOLLOW THE READING DIRECTION (issue #152); PageDown/PageUp and Space do NOT. Left and
+    // right are SPATIAL — in a right-to-left comic the next page is to the left, and a reader that ignored
+    // that would page backwards through every manga. PageDown is not spatial: it means "onward" in every
+    // document anybody has ever scrolled, and flipping it would be a second, worse surprise.
+    case Qt::Key_Right:  rtl_ ? prevPage() : nextPage(); return;
+    case Qt::Key_Left:   rtl_ ? nextPage() : prevPage(); return;
+    case Qt::Key_PageDown: case Qt::Key_Space:                     nextPage(); return;
+    case Qt::Key_PageUp:                                           prevPage(); return;
     case Qt::Key_Plus:  case Qt::Key_Equal:                        zoomIn();   return;
     case Qt::Key_Minus:                                           zoomOut();  return;
     case Qt::Key_Backspace: case Qt::Key_Escape:                  emit backRequested(); return;

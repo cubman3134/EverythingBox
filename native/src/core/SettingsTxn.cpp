@@ -5,6 +5,7 @@
 #include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 #include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
 #include "Scrobble.h"          // isBackgroundStateKey() - the #192 counter/queue family, out of scope
+#include "Tracker.h"           // isBackgroundStateKey() - the #156 token/queue family, out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -73,6 +74,13 @@ bool SettingsTxn::inScope(const QString& key)
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
         "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
+        "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
+        // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
+        // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
+        // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings
+        // changed that the user never touched, and a Discard would revert the snapshot AFTER the New shelf had
+        // already been rebuilt from it, so the same children would be announced a second time.
+        "followsnap/",
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer
@@ -89,6 +97,12 @@ bool SettingsTxn::inScope(const QString& key)
         // probe_settingstxn §1.
         "addon.remote.manifest.",   // <md5 of the source base URL> -> the cached manifest bytes
         "addon.update.etag.",       // <addon id> -> the last self-update package ETag
+        // "Play on device" pairing tokens (#143). Unlike the passcode-attempt keys below, this family CAN
+        // move during an open settings visit: Settings has a Play-on-device row, and pairing with a peer
+        // from it writes a token while the transaction is live. In scope, the exit prompt would report a
+        // pairing the user deliberately performed as "1 setting changed", and a Discard would silently
+        // un-pair the device they had just walked across the room to enter a code on.
+        "playon/",
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;
@@ -186,6 +200,28 @@ bool SettingsTxn::inScope(const QString& key)
     // which is why the two families have distinct top-level prefixes rather than one with a sub-group: a
     // prefix that covered both would silently make the token undiscardable. probe_scrobble pins both halves.
     if (Scrobble::isBackgroundStateKey(key)) return false;
+    // ANIME/MANGA TRACKERS (#156). Two things, and the split is the trakt/clientId-vs-trakt/access one
+    // above repeated exactly: trackerstate/* (the undelivered progress queue, the per-item debounce
+    // stamps, the last error) is written by PLAYBACK while a settings panel is open - finishing a
+    // chapter with Settings up is ordinary - so in scope it would inflate the exit prompt with changes
+    // the user never made and a Discard would throw away queued progress. And the OAuth TOKENS are
+    // excluded because linking an account is done FROM this panel, so a Discard on the way out would
+    // un-link it. tracker/anilist/clientId and clientSecret are deliberately NOT matched: they are typed
+    // into Settings and pasting the wrong one has to be discardable. probe_tracker pins both halves.
+    if (tracker::isBackgroundStateKey(key)) return false;
+    // The per-item link store, for the reason marks/ and metaoverrides/ are excluded above: it is owned
+    // by the CloudMerge document and is written by the match prompt, not by this panel.
+    if (key.startsWith(tracker::linkKeyPrefix())) return false;
+
+    // ...with ONE exception inside that other half, and it is the "ra/user" / "ra/token" case above rather
+    // than a new idea: Last.fm's credential (#192 increment 2) is a SESSION KEY the service hands back after
+    // the user approved this app in a browser, not something typed into a row. It arrives from a background
+    // poll reply that can land mid-visit, so in scope it puts "2 setting(s) changed" in the exit prompt for
+    // two values the user never touched — which is what the increment's live drive saw the first time it
+    // connected — and a Discard would unlink an account that took a browser round trip to link. A typed
+    // token can simply be typed again; this cannot. Matched through the pure layer's own predicate, beside
+    // the state one, so neither exclusion can drift from what Settings.cpp writes.
+    if (Scrobble::isAuthorisedCredentialKey(key)) return false;
 
     // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
     // from a settings row, so in principle it could move mid-transaction — but the player page and the

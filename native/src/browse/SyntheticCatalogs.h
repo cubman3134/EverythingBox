@@ -383,6 +383,23 @@ namespace browse
     // Both fields hold the ROW-PRODUCER KEY ("channel:<id>"), which is what the tuner resolves; `kind` is
     // "video" so the re-open takes the media route the channel identity is tested on.
     FavoriteItem channelFavorite(const channels::Channel& ch);
+    // ---- The New shelf (issue #155) ----------------------------------------------------------------
+    // The `mime` marker a New-shelf row carries, and the readers for it. Exactly the reason the "You
+    // missed" marker above exists: the row has to carry two things activation needs and a MediaItem has
+    // nowhere else to put them -- WHICH SERIES this child belongs to (so "mark all seen" and "open the
+    // series" have a target) and WHICH SOURCE that series came from (so the series can be re-opened at
+    // all; a follow may be the only place that pairing is still written down once the catalogue has
+    // moved on).
+    //
+    // Format: "new:<addonId>:<seriesId>". The addon id is a manifest id and carries no ':' of its own,
+    // which is what makes the split safe; the series id is EVERYTHING after the second colon, because a
+    // source's item id routinely does carry colons ("itpod:1521578ltd" from the bundled podcasts addon
+    // is the first one anybody will follow). Built and read in ONE place so the two cannot drift;
+    // probe_browse pins the round trip, including an id full of colons.
+    QString newShelfMarker(const QString& addonId, const QString& seriesId);
+    bool    isNewShelfMime(const QString& mime);
+    QString newShelfAddonOf(const QString& mime);    // "" when `mime` is not one of these markers
+    QString newShelfSeriesOf(const QString& mime);   // "" when it is not
 
     // ---- OPDS book catalogs (issue #146) -----------------------------------------------------------------
     // The saved-catalogs shelf: one row per saved OPDS catalog (drilling into its root feed, FETCHED fresh on

@@ -5,6 +5,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QPointer>
+#include <QStringList>
 
 #include <cstdio>
 #include <memory>
@@ -282,12 +283,20 @@ QString UiTestServer::handle(const QString& line)
     }
     if (cmd == QStringLiteral("touch"))
     {
-        // arg is the sub-line ("tap X Y" / "flick X1 Y1 X2 Y2 [MS]" / "pinch CX CY SCALE [MS]"). The gesture
-        // validates its own argument count app-side (MainWindow); here we only route the raw line. The hook
-        // starts a QTimer state machine and returns immediately (no blocking of the pipe handler).
+        // arg is the sub-line ("tap X Y" / "flick ..." / "pinch ..." / "hold X Y [MS]" / "dtap X Y [GAP]").
+        // The gesture validates its own argument count app-side (MainWindow); here we only route the raw line.
+        // The hook starts a QTimer state machine and returns immediately (no blocking of the pipe handler).
+        // The sub-verb list is checked HERE as well as there, so a typo answers with the vocabulary instead of
+        // being silently accepted and delivering nothing — which is indistinguishable from a gesture the app
+        // ignored, and is exactly the shape of a green test that tested nothing.
         const QString sub = arg.section(QLatin1Char(' '), 0, 0).toLower();
-        if (sub != QStringLiteral("tap") && sub != QStringLiteral("flick") && sub != QStringLiteral("pinch"))
-            return QStringLiteral("err usage: touch tap X Y | flick X1 Y1 X2 Y2 [MS] | pinch CX CY SCALE [MS]");
+        static const QStringList kTouchSubs = { QStringLiteral("tap"), QStringLiteral("flick"),
+                                                QStringLiteral("pinch"), QStringLiteral("hold"),
+                                                QStringLiteral("dtap"),
+                                                QStringLiteral("swipeback") };
+        if (!kTouchSubs.contains(sub))
+            return QStringLiteral("err usage: touch tap X Y | flick X1 Y1 X2 Y2 [MS] | pinch CX CY SCALE [MS]"
+                                  " | hold X Y [MS] | dtap X Y [GAP] | swipeback X Y DX [MS]");
         if (!hooks_.touch) return notReady(cmd);
         // false = a sequence is already in flight; reject so overlapping gestures can't corrupt Qt touch state.
         return hooks_.touch(arg) ? QStringLiteral("ok") : QStringLiteral("err busy");

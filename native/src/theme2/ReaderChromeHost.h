@@ -57,6 +57,15 @@ class ReaderBridge : public QObject
     Q_PROPERTY(int themeIndex READ themeIndex NOTIFY changed)
     Q_PROPERTY(QStringList fontFamilies READ fontFamilies CONSTANT)
     Q_PROPERTY(int fontFamilyIndex READ fontFamilyIndex NOTIFY changed)
+    // Read aloud (issue #145). readAloudAvailable is the ONE gate the QML row reads: false and it draws no
+    // read-aloud control at all, which is the state of a build without the Qt TextToSpeech module, a platform
+    // with no engine, and every pdf/comic. The rest describe narration so the row can label itself honestly -
+    // "Stop" while speaking, "Resume" while paused, the speed and the voice it is actually using.
+    Q_PROPERTY(bool readAloudAvailable READ readAloudAvailable NOTIFY changed)
+    Q_PROPERTY(bool readAloudActive READ readAloudActive NOTIFY changed)
+    Q_PROPERTY(bool readAloudPaused READ readAloudPaused NOTIFY changed)
+    Q_PROPERTY(QString readAloudSpeedLabel READ readAloudSpeedLabel NOTIFY changed)
+    Q_PROPERTY(QString readAloudVoiceLabel READ readAloudVoiceLabel NOTIFY changed)
 public:
     explicit ReaderBridge(HostedReader* reader, ReaderKind kind, QObject* parent = nullptr);
 
@@ -81,6 +90,12 @@ public:
     int  themeIndex() const;             // the stored theme, as an index into themeNames()
     QStringList fontFamilies() const;    // "Default" plus the families offered
     int  fontFamilyIndex() const;
+
+    bool readAloudAvailable() const;
+    bool readAloudActive() const;
+    bool readAloudPaused() const;
+    QString readAloudSpeedLabel() const;   // e.g. "1.25x", drawn on the speed control
+    QString readAloudVoiceLabel() const;   // the platform voice's own name, or "Voice" when there is none
 
     void refresh();       // re-emit changed() (page/font/zoom/two-up moved)
     void refreshToc();    // re-emit tocChanged() + changed() (a new document loaded)

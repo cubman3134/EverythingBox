@@ -21,11 +21,13 @@
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
+#include "../core/LaunchRecipe.h"      // per-system launch recipes: options, firmware, content (issue #190)
 #include "../core/PerfTrace.h"
 #include <QTimer>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
+#include <QDirIterator>
 #include <QSet>
 #include <QRegularExpression>
 #include <QDateTime>
@@ -189,6 +191,46 @@ void GameLauncher::firePostHook(const QString& key, const QString& rom)
 // multi-GB game the LZMA decode takes a long time — so open() runs it OFF the GUI thread. Extraction is cached
 // by archive path, so a second (warm) call from prepareCore on the GUI thread returns instantly. Returns the
 // resolved path (a file, or a PS3 game folder); empty + *err on failure. `game` non-archive => returned as-is.
+// ---- #190 launch recipes: the three places a recipe touches a launch ---------------------------------
+// The core a recipe should be read for, WITHOUT the per-game override — the system's configured core, else
+// its built-in default. Used by the archive decision below, which runs before the full resolution (it has no
+// item key). A per-game core override that would change how an ARCHIVE is presented is therefore not honoured
+// on that one decision; every other recipe consumer resolves the core properly first.
+static QString recipeCoreForSystem(const GameSystem* sys)
+{
+    if (!sys) return QString();
+    const QString configured = Settings::coreFor(sys->id);
+    return configured.isEmpty() ? sys->cores.value(0) : configured;
+}
+
+// Does this system's recipe say its core takes an ARCHIVE as it is, rather than extracted? True ONLY for a
+// recipe that says so in as many words: silence, no recipe, and an unreadable spelling all mean "extract",
+// which is what the app has always done. That asymmetry is deliberate — handing a core an unextracted ZIP is
+// a real behaviour change and must never be something a recipe falls into by omission.
+static bool recipeWantsArchiveAsIs(const GameSystem* sys)
+{
+    if (!sys) return false;
+    const LaunchRecipe& r = LaunchRecipes::forSystem(sys->id);
+    if (r.isNull()) return false;
+    const RecipeCore* rc = LaunchRecipes::coreFor(r, recipeCoreForSystem(sys));
+    if (!rc) return false;
+    return LaunchRecipes::presentationFor(*rc, ContentKind::Archive) == Presentation::AsIs;
+}
+
+// Every file under `dir`, as paths relative to it. Bounded: a game folder is small, but a user can point this
+// at anything, so the walk stops after kMaxFolderEntries rather than enumerating a whole drive on the GUI
+// thread. Hitting the cap only costs precision in the executable pick (the caller still has candidates).
+static QStringList relativeFilesUnder(const QString& dir)
+{
+    static const int kMaxFolderEntries = 4000;
+    QStringList out;
+    QDir base(dir);
+    QDirIterator it(dir, QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    while (it.hasNext() && out.size() < kMaxFolderEntries)
+        out << base.relativeFilePath(it.next());
+    return out;
+}
+
 QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err)
 {
     QString game = rom;
@@ -199,6 +241,16 @@ QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString&
         {
             hs = SystemCatalog::byId(systemHint);
             if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
+        }
+        // #190: a core that reads the archive ITSELF must be handed the archive. dosbox-pure mounts a ZIP as
+        // C: without unpacking it and keeps every modification the game makes in a save file beside it —
+        // extracting first throws that away and hands the core one arbitrary file out of the game. There is
+        // no way to detect this from the file, so it is the recipe that says so, per core.
+        if (recipeWantsArchiveAsIs(hs))
+        {
+            glLog(QStringLiteral("game: recipe for %1 takes the archive as it is — not extracting \"%2\"")
+                      .arg(hs->id, QFileInfo(game).fileName()));
+            return game;
         }
         QString extracted, aerr;
         if (hs && hs->externalEmulator == QStringLiteral("rpcs3")) // PS3: a whole game folder tree, not one file
@@ -245,7 +297,11 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         glLog(QStringLiteral("game: resolved \"%1\" from \"%2\"")
                   .arg(QFileInfo(game).fileName(), QFileInfo(rom).fileName()));
 
-    const QString ext = QFileInfo(game).suffix().toLower();
+    // A FOLDER game (#190: a DOS game is a directory of files) has no extension to route on — and a folder
+    // named "Doom 2.0" would otherwise route on "0". Its system comes from the hint, which the library always
+    // carries because the folder it was found in IS the platform declaration (#53).
+    const bool contentIsFolder = QFileInfo(game).isDir();
+    const QString ext = contentIsFolder ? QString() : QFileInfo(game).suffix().toLower();
     // Prefer the console/platform the game was opened from (when known): it disambiguates extensions shared
     // across systems (PSP .iso vs GameCube .iso, PSP .pbp vs PlayStation .pbp). Fall back to the extension.
     const GameSystem* sys = nullptr;
@@ -367,9 +423,74 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         return plan;
     }
 
+    // ---- #190: present a FOLDER game the way this core wants it ------------------------------------------
+    // Applied here, once the core is known, because the presentation is a property of the CORE: dosbox-pure
+    // mounts the directory containing an .EXE/.COM/.BAT as C: and auto-runs that program (verified in the
+    // core's own source), so the useful thing to hand it is the program, not the folder. A recipe that says
+    // nothing leaves plan.launchRom exactly as it was — the folder itself — which is today's behaviour.
+    if (contentIsFolder)
+    {
+        const LaunchRecipe& recipe = LaunchRecipes::forSystem(sys->id);
+        const RecipeCore* rc = recipe.isNull() ? nullptr : LaunchRecipes::coreFor(recipe, core);
+        if (rc && LaunchRecipes::presentationFor(*rc, ContentKind::Folder) == Presentation::Executable)
+        {
+            const QString folderName = QFileInfo(game).fileName();
+            // The user's remembered answer from a previous ambiguous launch wins outright, and is checked
+            // before the folder is walked so the second launch of a picked game costs nothing. Filed under
+            // the stable item id when there is one and the source path otherwise — LaunchOpts' own identity
+            // rule. The path fallback matters: without an identity, a game opened straight off disk would be
+            // asked the same question on every single launch, and the picker would never converge.
+            const QString bootKey = key.isEmpty() ? rom : key;
+            const QString remembered = LaunchOpts::get(bootKey).bootFile.trimmed();
+            if (!remembered.isEmpty() && QFileInfo::exists(game + QStringLiteral("/") + remembered))
+            {
+                plan.launchRom = QDir::cleanPath(game + QStringLiteral("/") + remembered);
+                glLog(QStringLiteral("game: folder \"%1\" boots remembered program \"%2\"")
+                          .arg(folderName, remembered));
+            }
+            else
+            {
+                const auto picked = LaunchRecipes::chooseExecutable(relativeFilesUnder(game), folderName,
+                                                                    recipe.executables);
+                if (!picked.chosen.isEmpty())
+                {
+                    plan.launchRom = QDir::cleanPath(game + QStringLiteral("/") + picked.chosen);
+                    glLog(QStringLiteral("game: folder \"%1\" -> program \"%2\"").arg(folderName, picked.chosen));
+                }
+                else if (picked.ambiguous())
+                {
+                    // Several plausible programs and no basis to choose. Hand the candidates back; open()
+                    // asks once and remembers the answer. The launch does NOT proceed on a guess.
+                    plan.bootChoices = picked.candidates;
+                    plan.bootFolder = game;
+                    glLog(QStringLiteral("game: folder \"%1\" has %2 candidate programs — asking")
+                              .arg(folderName).arg(picked.candidates.size()));
+                }
+                // Nothing that looks like a program: leave the folder as the launch path and let the core's
+                // own start menu deal with it. Strictly better than refusing.
+            }
+        }
+    }
+
     // Resolution only: a missing core is NOT an error here — corePath stays empty with `core` set, and the
     // caller downloads it asynchronously (ensureCoreAsync) so the GUI thread never waits on the buildbot.
     plan.core = core;
+    // #190: firmware the USER has to supply. Checked HERE — before the core is downloaded — for every system
+    // the app has no BIOS fetch of its own for, so a missing Amiga Kickstart is a sentence naming the file
+    // rather than a 20 MB core download followed by a black screen. A system the app CAN fetch for (the
+    // BiosCatalog set) is checked later instead, in the continuation after that fetch has run: reporting a
+    // file as the user's problem while we are still on our way to fetching it would be a lie.
+    if (!BiosCatalog::systemNeedsBios(sys->id))
+    {
+        const QString blocked = firmwareBlocker(plan, QFileInfo(plan.sourceRom.isEmpty() ? launchRom
+                                                                                         : plan.sourceRom).completeBaseName());
+        if (!blocked.isEmpty())
+        {
+            plan.error = blocked;
+            plan.errorMs = kFeedbackLong;
+            return plan;
+        }
+    }
     if (CoreManager::isInstalled(core))
         plan.corePath = CoreManager::corePath(core);
     plan.backend = rl.backend;
@@ -529,6 +650,17 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
         return;
     }
 
+    // #190: a folder game whose program the recipe could not pick. Ask, remember, re-open — nothing is
+    // downloaded or launched on a guess. The picker runs on the HOST via a queued signal, so no nested event
+    // loop is opened inside this emission (the #28 / #211 family); this launch simply ends here.
+    if (!plan.bootChoices.isEmpty())
+    {
+        glLog(QStringLiteral("game: asking which program to boot for \"%1\"").arg(recentTitle));
+        emit waitPageDone();   // clear the "Preparing…" page (no-op if it wasn't showing) before the menu
+        emit chooseBootProgram(recentTitle, plan.bootChoices, rom, thumb, key, systemHint);
+        return;
+    }
+
     // The third launch branch (Slice 2a): a libretro system the user (or its per-system default) opted onto the
     // RetroPark backend runs in RetroParkView, not RetroView + a libretro core. Only libretro systems reach here
     // (standalone-emulator systems returned above), and only when the resolved backend is RetroPark — every other
@@ -559,9 +691,45 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
                 emit notifyUser(s, 8000);
             },
             [this, ready, launchRom, recentTitle, thumb, key] {
+                // #190, second half: the systems the app fetches a BIOS for (the BiosCatalog set — the Atari
+                // ST is the one with a recipe). prepareCore already refused every OTHER system's launch before
+                // the core download; these are checked only now, once our own fetch above has had its turn, so
+                // a file we were on our way to providing is never reported as the user's problem.
+                const QString blocked = firmwareBlocker(ready, recentTitle);
+                if (!blocked.isEmpty())
+                {
+                    glLog(QStringLiteral("game: refusing launch — %1").arg(blocked));
+                    emit waitPageDone();
+                    emit notifyUser(blocked, kFeedbackLong);
+                    return;
+                }
                 finishLibretroLaunch(ready, launchRom, recentTitle, thumb, key);
             });
     });
+}
+
+// #190. The recipe's firmware requirement for THIS plan's core, checked against the libretro system folder.
+// Returns "" — the answer for every system that has no recipe, and every recipe whose firmware is present —
+// or the sentence naming the exact file(s) and the exact folder. Existence is asked per NAME so a requirement
+// may spell a sub-path ("np2kai/bios.rom", "hatari/tos/tos.img"): several cores keep their firmware in a
+// folder of their own under the system directory, and a check that only looked in the root would report a
+// file the user had already put in the right place.
+QString GameLauncher::firmwareBlocker(const CorePlan& plan, const QString& title) const
+{
+    if (plan.systemId.isEmpty() || plan.core.isEmpty()) return QString();
+    const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
+    if (recipe.isNull()) return QString();
+    const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
+    if (!rc || rc->firmware.isEmpty()) return QString();
+
+    const QString sysDir = CoreManager::systemDir();
+    const QList<RecipeFirmware> missing = LaunchRecipes::missingFirmware(*rc, [&sysDir](const QString& f) {
+        return QFileInfo::exists(sysDir + QStringLiteral("/") + f);
+    });
+    if (missing.isEmpty()) return QString();
+    const GameSystem* sys = plan.sys ? plan.sys : SystemCatalog::byId(plan.systemId);
+    return LaunchRecipes::firmwareMessage(title, sys ? sys->name : plan.systemId, missing,
+                                          QDir::toNativeSeparators(sysDir));
 }
 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
@@ -926,7 +1094,12 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
         ? deviceDefault
         : EmuGfx::resolve(EmuGfxStore::get(key),
                           EmuGfx::resolve(EmuGfxStore::systemDefault(system), deviceDefault));
-    emu_->play(em, rom, extraArgs, gfx);
+    // Per-game update/DLC install levers (issue #189), read from the SAME #51 override record the extra args
+    // came from: which update package (if any) and whether DLC is installed into the emulator's own content
+    // store before it boots. Empty for a game with no override — and with no `updates/`/`dlc/` sidecar folders
+    // beside the game, nothing downstream even stats a path, so this is byte-for-byte today's launch.
+    const LaunchOpts::Override contentOv = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
+    emu_->play(em, rom, extraArgs, gfx, contentOv.contentUpdate, contentOv.contentDlc);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 

@@ -6,6 +6,7 @@
 #include "DiscGroup.h"
 #include "RegionCollapse.h"
 #include "RomRouting.h"
+#include "LaunchRecipe.h"   // #190: a recipe may declare that a sub-folder here is ONE game
 
 #include <QLocale>
 
@@ -261,8 +262,16 @@ void RomLibrary::ensureStructure()
                 QStringLiteral("EverythingBox — ROM library\r\n\r\n"
                                "Drop game ROMs into the matching system folder below (RetroBat / EmulationStation\r\n"
                                "Desktop Edition layout). They then appear under \"Local ROMs\" in the Library.\r\n\r\n");
+            // #190: half of zero-config is telling people what to put in the folder. A system with a launch
+            // recipe adds its one-line summary here — "prefer WHDLoad .lha", "a DOS game can be a ZIP or its
+            // own folder" — so the answer is where the user already is instead of in a settings screen.
             for (const GameSystem& s : SystemCatalog::systems())
+            {
                 body += folderFor(s.id) + QStringLiteral("/  —  ") + s.name + QStringLiteral("\r\n");
+                const LaunchRecipe& recipe = LaunchRecipes::forSystem(s.id);
+                if (!recipe.summary.isEmpty())
+                    body += QStringLiteral("      ") + recipe.summary + QStringLiteral("\r\n");
+            }
             f.write(body.toUtf8());
         }
     }
@@ -286,6 +295,38 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         g.systemName = sys->name;
         g.folder = d.fileName();
 
+        // #190: for a system whose launch recipe says so (MS-DOS), an immediate sub-folder holding a program
+        // is ONE game, not a tile per file in it. Without this a DOS game folder scatters into a tile for the
+        // .EXE, one for each .WAD and one for each data file — and the folder itself, which is what the core
+        // actually wants, is unreachable, because the library lists files. Every other system is untouched:
+        // recipes are absent for them, so `folderIsGame` is false and this whole block is skipped.
+        QStringList folderGamePrefixes;
+        {
+            const LaunchRecipe& recipe = LaunchRecipes::forSystem(sys->id);
+            if (recipe.folderIsGame)
+            {
+                const QFileInfoList subs = QDir(d.absoluteFilePath())
+                    .entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDir::Name);
+                for (const QFileInfo& sub : subs)
+                {
+                    QStringList rel;
+                    QDir subDir(sub.absoluteFilePath());
+                    QDirIterator si(sub.absoluteFilePath(),
+                                    QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks,
+                                    QDirIterator::Subdirectories);
+                    while (si.hasNext()) rel << subDir.relativeFilePath(si.next());
+                    if (!LaunchRecipes::folderLooksLikeGame(recipe, rel)) continue; // not a game folder — leave it
+                    Rom r;
+                    r.path = sub.absoluteFilePath();
+                    r.title = sub.fileName();
+                    r.systemId = sys->id;
+                    r.systemName = sys->name;
+                    g.roms.push_back(r);
+                    folderGamePrefixes << sub.absoluteFilePath() + QStringLiteral("/");
+                }
+            }
+        }
+
         // Walk the system folder (and any sub-folders). #53: the FOLDER is the platform declaration, so a
         // file here belongs to this system unless it is a non-ROM sidecar (save / patch / box art / metadata
         // / temp). The extension list is no longer the router — that lets PS2/PSP/Dreamcast/Xbox pick up
@@ -298,8 +339,17 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         while (it.hasNext())
         {
             const QString path = it.next();
+            // A file INSIDE a folder game is part of that game, never a game of its own (#190).
+            bool insideFolderGame = false;
+            for (const QString& pre : folderGamePrefixes)
+                if (path.startsWith(pre)) { insideFolderGame = true; break; }
+            if (insideFolderGame) continue;
             const QString ext = QFileInfo(path).suffix().toLower();
             if (!RomRouting::acceptUnderSystemFolder(ext)) continue;
+            // Issue #189: an `updates/` or `dlc/` folder holds that game's update/DLC PACKAGES, which are
+            // ROM-shaped files the extension filter cannot tell from a game. Left in, every update beside a
+            // game becomes a second, playable-looking tile named after the patch.
+            if (RomRouting::underContentSidecar(QDir(d.absoluteFilePath()).relativeFilePath(path))) continue;
             Rom r;
             r.path = path;
             r.title = QFileInfo(path).completeBaseName();

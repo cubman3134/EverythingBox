@@ -2,7 +2,7 @@
 // scan, kept apart from the grouping half so that neither can be changed by accident while reading the
 // other.
 //
-// Three formats, three completely different places to look, one answer shape:
+// Seven formats, seven completely different places to look, one answer shape:
 //
 //   * .epub  — the OPF, through EpubMeta (which is the walk EpubBook already did for its spine, factored
 //              out; this file adds no XML of its own). Title, author, series, language, year, chapter count
@@ -11,10 +11,33 @@
 //              routinely blank or filled in by whatever produced it; both are taken VERBATIM when present
 //              and left empty when not, because "Microsoft Word - draft3.doc" is a real Title field and the
 //              only honest thing to do with a bad one is show it. There is no series field in a PDF.
-//   * .cbz   — nothing at all. A comic archive is a bag of images: the page COUNT is free (it is the number
-//              of image members) and the cover is page one, and the title/series come from the FILENAME,
-//              which is ComicName's job and not this file's. ComicInfo.xml is issue #152 and deliberately
-//              out of scope here.
+//   * .cbz   — its ComicInfo.xml, if it has one, through comic/ComicInfo (issue #152): series, issue number,
+//              creators, publisher, age rating, reading direction and the rest, IN THE SAME PASS that lists
+//              the archive's members for the page count — the zip is already open, so the document is one
+//              more member off a central directory already walked. The page COUNT stays what was COUNTED
+//              (image members) rather than what <PageCount> claims, and the cover is still page one. A comic
+//              with NO ComicInfo.xml is exactly what it was before: no title, no author, no series, and the
+//              FILENAME is the only source — which is ComicName's job and not this file's.
+//   * .cbr   — the same, through comic/RarComic (the vendored unarr RAR reader, issue #144). The page count
+//              is a walk of RAR's block-header chain and decompresses NOT ONE BYTE, and that same walk now
+//              reports whether a ComicInfo.xml is in there; only when it IS does the file pay one sequential
+//              pass to read it. The cover costs an extraction, and only of the pages up to page one.
+//   * .fb2   — the <description> block, through ebook/Fb2Meta (the same walk Fb2Book makes for the reader,
+//              factored out for the same reason EpubMeta was). Title, author, series + decimal index,
+//              language, year, chapter count and the declared cover binary — all of it, from ONE document,
+//              because FB2 keeps everything including its images in one XML stream. .fb2.zip is the same
+//              book in a zip and is unwrapped first.
+//   * .mobi / .azw / .azw3
+//            — the MOBI header + EXTH block, through ebook/MobiHeader. Title, author and the EXTH cover
+//              record, with NO decompression — which is the whole reason these are scanned at all now
+//              (BookLibrary.h records the refusal this replaced). No page count: a MOBI is one stream of
+//              HTML with no chapter division to count. A DRM-protected file reads as an empty Info and
+//              appears under its own name; it says what it is when you open it, never here.
+//   * .txt   — nothing at all, and there is nothing to find: a plain text file states no title, no author
+//              and no cover. It appears under its filename, exactly as an untagged EPUB does.
+//   * .md    — its top-level (#) headings, which the reader turns into chapters: the first is the nearest
+//              thing Markdown has to a stated title, and the count is the chapter count. No cover — the
+//              same blank a coverless EPUB gets.
 //
 // WHY THE COVER IS A SEPARATE CALL. read() is asked for every file of every scan; coverBytes() is asked
 // only for a book whose cover is not already in the cache, which after the first scan is none of them.
@@ -24,8 +47,10 @@
 // runs off the GUI thread (BookLibrary.h), and everything here is file I/O plus parsing — no Settings, no
 // AppPaths, no widget, no static state. QPdfDocument is used as a plain local object with no view attached.
 #pragma once
+#include "../comic/ComicInfo.h"   // #152: a comic archive's own metadata — the Rating/Direction vocabularies
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 
 namespace BookMeta
 {
@@ -42,6 +67,25 @@ namespace BookMeta
         int     year = 0;
         int     pageCount = 0;    // EPUB: spine documents. PDF: pages. CBZ: page images. 0 == unknown.
         bool    hasCover = false; // a cover coverBytes() would have a real chance of returning
+
+        // ---- WHAT ComicInfo.xml ADDED (issue #152) -------------------------------------------------------
+        // Filled ONLY from a comic archive's embedded document, and only for the fields it carried. The six
+        // fields above are shared: a ComicInfo with a <Series> fills `series` exactly as an OPF does, so
+        // every consumer that already read those keeps working without knowing this format exists.
+        //
+        // A comic with no ComicInfo.xml leaves every one of these at its default, which is what makes "the
+        // shelf is grouped exactly as it was" true by construction rather than by care.
+        QString     number;        // <Number> VERBATIM — "1", "1.5", "Annual 1". seriesIndex is its decimal
+        int         volume = 0;    // <Volume>
+        QString     summary;       // <Summary>
+        int         month = 0;     // <Month> / <Day> beside the shared `year`
+        int         day = 0;
+        QStringList creators;      // every credited role, collapsed; `author` is the first <Writer>
+        QString     publisher;     // <Publisher>
+        QString     genre;         // <Genre>
+        QString     web;           // <Web>
+        ComicInfo::Rating    rating    = ComicInfo::Rating::Unrated;         // <AgeRating>
+        ComicInfo::Direction direction = ComicInfo::Direction::Unspecified;  // <Manga>
 
         // "The container said nothing a shelf could use." Deliberately NOT about pageCount or hasCover: a
         // 300-page PDF with no Title is still an untitled file, and the point of this flag is to tell the

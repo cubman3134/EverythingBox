@@ -1,0 +1,47 @@
+{
+  "system": "amiga",
+  "summary": "Prefer WHDLoad .lha sets — PUAE launches one directly with no setup at all, where a raw .adf means picking a model and swapping disks. The Kickstart ROM is copyrighted and has to come from you.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "puae",
+      "options": {
+        "puae_model": "auto",
+        "puae_use_whdload": "files"
+      },
+      "firmware": [
+        {
+          "purpose": "Amiga Kickstart ROM (3.1 for WHDLoad titles, 1.3 for most floppy games)",
+          "files": [
+            "kick40068.A1200",
+            "kick34005.A500",
+            "kick37175.A500",
+            "kick40063.A600",
+            "kick39106.A1200",
+            "kick40060.CD32",
+            "amiga-os-310-a1200.rom",
+            "amiga-os-130.rom"
+          ],
+          "required": true
+        },
+        {
+          "purpose": "Decryption key for encrypted Amiga Forever ROMs",
+          "files": ["rom.key"],
+          "required": false
+        },
+        {
+          "purpose": "IPF floppy-image support",
+          "files": ["capsimg.dll", "capsimg.so"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

@@ -44,12 +44,16 @@
 #include "PlaylistStore.h"
 #include "Tombstones.h"
 #include "CloudMerge.h"
+#include "Tracker.h"         // issue #156: the credentials/links carve-out split, asserted below
+#include "TrackerLinks.h"
+#include "TrackerRules.h"
 #include "MetaOverrides.h"  // issue #24: the per-item metadata corrections the merge document now carries
 #include "LaunchOptionsStore.h" // issue #51 / RetroPark Slice 2a: the per-game override the merge carries opaquely
 #include "MissedDismiss.h"  // issue #25: the per-show "you missed" dismissal watermarks
 #include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
 #include "CloudSync.h"     // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "Scrobble.h"      // #192: the carve-out is asserted through the writer's own prefixes
+#include "PlayOnDevice.h"  // #143: ...and through PlayOn::tokenKey, the "Play on device" token writer
 #include "ScrobbleQueue.h" // ...and through the real key builders, not hand-typed literals
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
@@ -344,8 +348,7 @@ int main(int argc, char** argv)
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
         for (const char* g : {"marks", "favorites", "bookmarks", "audiobookmarks", "playlists", "filterpresets",
-                              "channels", "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed",
-                              "lyricoffset", "missed"})
+                              "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset", "missed", "follow", "followsnap", "trackerlink", "channels"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -768,7 +771,7 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume",
-                                  "metaoverrides", "speed", "lyricoffset"})
+                                  "metaoverrides", "speed", "lyricoffset", "trackerlink"})
                 raw.remove(QLatin1String(g));
             // device-local (excluded):
             raw.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/roms"));
@@ -885,6 +888,25 @@ int main(int argc, char** argv)
         // OPDS catalog's is, and a synced bundle is a zip in somebody's Drive folder.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subsonic/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("subsonic/profileA/servers")) == false);
+        // jellyfin/* (issue #160): the connected Jellyfin servers, each carrying an ACCESS TOKEN — a bearer
+        // credential for a whole account, usable from anywhere until it is revoked. The strongest of the four
+        // secrets in this family, and the reason #160's per-server tokens are stated as device-local in the
+        // issue itself. Both ways, and the per-server enable flag rides the same blob so it is covered too.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/profileA/servers")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/profileA/servers")) == false);
+        // playon/* (issue #143): the "Play on device" pairing tokens. A token is minted by ANOTHER device for
+        // THIS one and authorises starting playback on that peer -- synced, it would both put a credential in
+        // a zip on somebody's Drive and hand every install on the account the right to take over a device it
+        // never paired with. Asserted through the pure layer's own key builder, so a rename of the prefix
+        // cannot leave this gate green while the writer moves out from under it.
+        CHECK(CloudSync::isDeviceLocalKey(PlayOn::tokenKey(QStringLiteral("dev-b"))) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("playon/anything")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(PlayOn::tokenKey(QStringLiteral("dev-b"))) == false);
+        // audiobookshelf/* (issue #197): saved Audiobookshelf servers. The same carve-out, and the value it
+        // protects is an API TOKEN — a standing grant against that server, with no login screen left in
+        // front of it. Uncarved, it would ride the heavy settings bundle into somebody's Drive folder.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("audiobookshelf/profileA/servers")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("audiobookshelf/profileA/servers")) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's
@@ -943,8 +965,7 @@ int main(int argc, char** argv)
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/",
-                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "channels/", "speed/",
-                               "lyricoffset/"})
+                               "deleted/", "metaoverrides/", "missed/", "filterpresets/", "speed/", "lyricoffset/", "trackerlink/", "channels/"})
         {
             bool anyPerItem = false;
             for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
@@ -1165,7 +1186,8 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some",
-                                  "trakt", "metaoverrides", "speed", "lyricoffset", "missed"})
+                                  "trakt", "tracker", "trackerstate", "trackerlink",
+                                  "metaoverrides", "speed", "lyricoffset", "missed"})
                 raw.remove(QLatin1String(g));
             raw.sync();
             MetaOverrides::invalidate();
@@ -2206,6 +2228,84 @@ int main(int argc, char** argv)
         // reason (the value belongs to the content and should follow the user).
         CHECK(CloudSync::isPerItemStoreKey(lkey) == true);
         CHECK(CloudSync::isDeviceLocalKey(lkey)  == false);
+
+        wipeStores();
+    }
+
+    // ---- 24c3. Per-item TRACKER LINKS (issue #156): rides the document; the CREDENTIALS never do -------
+    //
+    // This feature straddles the carve-out, which is the whole reason it is asserted here rather than only
+    // in probe_tracker. Two classifications that must never be confused with each other:
+    //
+    //   * trackerlink/items/<hash> - WHICH AniList entry an item is. Per-item-synced, the speed/lyricoffset
+    //     shape, because a link costs the user a prompt per item and describes the CONTENT.
+    //   * tracker/anilist/* and trackerstate/* - the OAuth client id, the client SECRET, the tokens, and
+    //     this device's undelivered push queue. Device-local, never in a bundle. An edit that moved these
+    //     into the synced family would start uploading an OAuth secret to a zip on a third party's disk,
+    //     and nothing else in the suite would notice.
+    //
+    // 24c3-d is the one that the no-tombstone shape rests on: UNLINKING writes a HUSK (an empty mediaId with
+    // a fresh timestamp) rather than deleting the row, so a peer still holding the old link is BEATEN by the
+    // husk instead of re-merging its copy back in. A merge that treated the husk as "nothing to carry" would
+    // silently restore a link the user just removed.
+    {
+        const QString k24t = QStringLiteral("title:berserk");
+        const QString h24t = TrackerLinks::hashFor(tracker::Id::AniList, k24t);
+        const QString tkey = QStringLiteral("trackerlink/items/") + h24t;
+        auto injLink = [&](const QString& media, qint64 ts) {
+            QJsonObject o;
+            o[QStringLiteral("media")] = media;
+            o[QStringLiteral("kind")] = QStringLiteral("manga");
+            o[QStringLiteral("updatedAt")] = double(ts);
+            setRaw(tkey, compactO(o));
+        };
+        auto linkVal = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QJsonDocument::fromJson(raw.value(tkey).toString().toUtf8())
+                .object().value(QStringLiteral("media")).toString();
+        };
+
+        // 24c3-a. It rides the document under its own top-level key and its own hash.
+        wipeStores(); injLink(QStringLiteral("30002"), T);
+        const QJsonObject d24t = serializeNow();
+        CHECK(d24t.contains(QStringLiteral("trackerlink")));
+        CHECK(d24t.value(QStringLiteral("trackerlink")).toObject().contains(h24t));
+        CHECK(d24t.value(QStringLiteral("trackerlink")).toObject().value(h24t).toObject()
+                  .value(QStringLiteral("media")).toString() == QStringLiteral("30002"));
+
+        // 24c3-b. Newest updatedAt wins, each direction.
+        wipeStores(); injLink(QStringLiteral("111"), T);        const QJsonObject tNewer = serializeNow();
+        wipeStores(); injLink(QStringLiteral("222"), T - 500);  mergeDoc(tNewer);
+        CHECK(linkVal() == QStringLiteral("111"));              // remote newer replaces
+        wipeStores(); injLink(QStringLiteral("222"), T - 500);  const QJsonObject tOlder = serializeNow();
+        wipeStores(); injLink(QStringLiteral("111"), T);        mergeDoc(tOlder);
+        CHECK(linkVal() == QStringLiteral("111"));              // local newer survives
+
+        // 24c3-c. A series only ONE device has linked is imported, not dropped - which is the point of
+        // syncing links at all: link it on the TV, and the phone does not ask again.
+        wipeStores(); injLink(QStringLiteral("333"), T); const QJsonObject tTheirs = serializeNow();
+        wipeStores(); mergeDoc(tTheirs);
+        CHECK(linkVal() == QStringLiteral("333"));
+
+        // 24c3-d. An UNLINK is a newer husk, and it must travel.
+        wipeStores(); injLink(QString(), T); const QJsonObject tCleared = serializeNow();
+        CHECK(tCleared.value(QStringLiteral("trackerlink")).toObject().contains(h24t));
+        wipeStores(); injLink(QStringLiteral("444"), T - 500); mergeDoc(tCleared);
+        CHECK(linkVal().isEmpty());
+
+        // 24c3-e. The classification split, both halves.
+        CHECK(CloudSync::isPerItemStoreKey(tkey) == true);
+        CHECK(CloudSync::isDeviceLocalKey(tkey)  == false);
+        // ...and the credentials are the exact inverse. THE ASSERTION THIS SECTION EXISTS FOR: the client
+        // SECRET is device-local and is not a per-item store, so it can reach neither the settings bundle
+        // nor the merge document.
+        CHECK(CloudSync::isDeviceLocalKey(tracker::clientSecretKey(tracker::Id::AniList)) == true);
+        CHECK(CloudSync::isPerItemStoreKey(tracker::clientSecretKey(tracker::Id::AniList)) == false);
+        CHECK(CloudSync::isDeviceLocalKey(tracker::clientIdKey(tracker::Id::AniList)) == true);
+        CHECK(CloudSync::isDeviceLocalKey(tracker::accessKey(tracker::Id::AniList)) == true);
+        CHECK(CloudSync::isDeviceLocalKey(tracker::refreshKey(tracker::Id::AniList)) == true);
+        // The undelivered push queue is this DEVICE's: merging two would submit the same chapter twice.
+        CHECK(CloudSync::isDeviceLocalKey(tracker::queueKey(QString(), tracker::Id::AniList)) == true);
 
         wipeStores();
     }
@@ -5311,6 +5411,114 @@ int main(int argc, char** argv)
         CHECK(inDoc39);
 
         wipe39();
+    // ---- 39. Followed series (issue #155): favourites' merge rule, and the two-way carve-out ---------------
+    // The follow mark is a peer of the favourite, so this section is deliberately favourites' section (SS8)
+    // asked again of a different key -- if the two ever answer differently, one of them has grown a rule of its
+    // own, which is exactly what shaping FollowStore as favourites' twin was meant to prevent.
+    //
+    // The carve-out is asserted BOTH ways for the reason SS16 asserts every other one both ways: a mistaken
+    // filing is invisible from one side. And the near-miss is asserted explicitly -- the SETTINGS keys live
+    // under "following/", one letter away from the per-item prefix "follow/", and if the prefix ever loses its
+    // slash the schedule silently stops syncing while every other test stays green.
+    {
+        auto injFollows = [&](const QString& p, const QVector<QPair<QString, qint64>>& items) {
+            QJsonArray a;
+            for (const auto& it : items)
+            {
+                QJsonObject o; o["itemId"] = it.first; o["title"] = it.first;
+                o["addonId"] = QStringLiteral("srcA"); o["type"] = QStringLiteral("series");
+                o["ts"] = double(it.second); a.append(o);
+            }
+            setRaw(QStringLiteral("follow/") + p + QStringLiteral("/items"), compact(a));
+        };
+        auto followIds = [&](const QString& p) {
+            QStringList out;
+            QSettings rawS(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     rawS.value(QStringLiteral("follow/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+                out << v.toObject().value(QStringLiteral("itemId")).toString();
+            out.sort();
+            return out;
+        };
+        auto followTs = [&](const QString& p, const QString& id) -> qint64 {
+            QSettings rawS(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     rawS.value(QStringLiteral("follow/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+                if (v.toObject().value(QStringLiteral("itemId")).toString() == id)
+                    return qint64(v.toObject().value(QStringLiteral("ts")).toDouble());
+            return -1;
+        };
+
+        // 39a. Newer wins, each direction; disjoint sets union.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}});
+        const QJsonObject remFA = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 500}}); mergeDoc(remFA);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("S")) == T - 100);
+
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 500}});
+        const QJsonObject remFB = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}}); mergeDoc(remFB);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("S")) == T - 100);
+
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}});
+        const QJsonObject remFC = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 100}}); mergeDoc(remFC);
+        CHECK(followIds(QStringLiteral("f39")) == (QStringList{QStringLiteral("A"), QStringLiteral("B")}));
+
+        // 39b. An UNFOLLOW travels: the tombstone suppresses a peer's copy stamped at or before it, so the
+        // series does not come back from the device that still holds it.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 400}});
+        const QJsonObject remStale = serializeNow();
+        wipeStores();
+        injFollows(QStringLiteral("f39"), {});
+        Tombstones::record(QStringLiteral("follow/f39"), QStringLiteral("S"), T - 300);
+        mergeDoc(remStale);
+        CHECK(followIds(QStringLiteral("f39")).isEmpty());
+
+        // ...and a strictly NEWER re-follow beats that tombstone, so an unfollow is not permanent.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}});
+        const QJsonObject remFresh = serializeNow();
+        wipeStores();
+        injFollows(QStringLiteral("f39"), {});
+        Tombstones::record(QStringLiteral("follow/f39"), QStringLiteral("S"), T - 300);
+        mergeDoc(remFresh);
+        CHECK(followIds(QStringLiteral("f39")) == (QStringList{QStringLiteral("S")}));
+
+        // 39c. Both merge orders converge -- the property every section here exists to keep.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}, {QStringLiteral("B"), T - 900}});
+        const QJsonObject devFA = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 50}, {QStringLiteral("C"), T - 10}});
+        const QJsonObject devFB = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}, {QStringLiteral("B"), T - 900}});
+        mergeDoc(devFB);
+        const QStringList afterAB = followIds(QStringLiteral("f39"));
+        const qint64 bTsAB = followTs(QStringLiteral("f39"), QStringLiteral("B"));
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 50}, {QStringLiteral("C"), T - 10}});
+        mergeDoc(devFA);
+        CHECK(followIds(QStringLiteral("f39")) == afterAB);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("B")) == bTsAB);
+        CHECK(bTsAB == T - 50);   // the newer of the two stamps for the same series
+
+        // 39d. THE CARVE-OUT, both ways, and the "following/" near-miss.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("follow/default/items")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("follow/default/items"))  == false);
+        // The device-local half is the exact inverse.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("followsnap/default/deadbeef")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("followsnap/default/deadbeef")) == false);
+        // The SCHEDULE settings are ordinary synced preferences: neither carve-out may claim them, or the
+        // interval a user chose on one device silently stops reaching the next.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("following/interval")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("following/interval"))  == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("following/metered"))  == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("following/metered"))   == false);
+
+        // 39e. Both stores are out of SETTINGS-TRANSACTION scope: the snapshot is written by a BACKGROUND
+        // pass that can land mid-visit, and a Discard that reverted it would announce the same children twice.
+        CHECK(SettingsTxn::inScope(QStringLiteral("follow/f39/items")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("followsnap/f39/deadbeef")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("following/interval")) == true);
+
+        wipeStores();
         useProfile(QStringLiteral("cmA"));
     }
 

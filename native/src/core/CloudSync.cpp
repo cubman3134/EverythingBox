@@ -9,7 +9,8 @@
 #include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
 #include "TraktSync.h"        // backfillKeyPrefix() — the per-profile import cursor family, device-local
 #include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
-
+#include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
+#include "Tracker.h"         // isDeviceLocalKey()/linkKeyPrefix() - #156 straddles the carve-out both ways
 #include <QSet>
 #include <QSettings>
 #include <QCryptographicHash>
@@ -258,7 +259,33 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     //     two queues would submit the same listens twice — which is the double-count this feature is otherwise
     //     careful to avoid.
     if (Scrobble::isDeviceLocalKey(key)) return true;
-    // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
+    // "Play on device" (#143): the per-peer PAIRING TOKENS, matched through the pure layer's own predicate so
+    // the carve-out cannot drift from the writer. A token is a credential minted BY another device FOR this
+    // one -- it authorises /open on that peer, and it is meaningless anywhere else. Riding the synced bundle
+    // it would be a credential in a zip in somebody's Drive folder (the reason the ListenBrainz token above
+    // is carved out) AND it would hand every other install on the account the right to start playback on a
+    // device it never paired with. Device-local in both directions, with no syncing sibling under the prefix.
+    if (PlayOn::isDeviceLocalKey(key)) return true;
+    // ANIME/MANGA TRACKERS (#156), both device-local families, matched through the pure layer's own
+    // prefixes so the carve-out cannot drift from the writers. Two different reasons, and the first is
+    // why the split with Trakt is deliberate rather than accidental:
+    //
+    //   * tracker/anilist/{clientId,clientSecret,access,refresh} ARE THE USER'S CREDENTIALS, and unlike
+    //     trakt/clientId the TYPED PAIR is carved out here too. That is the issue's decision, not an
+    //     oversight: an AniList client id and secret are a registered OAuth application belonging to one
+    //     person, the synced bundle is a zip on a third party's disk, and "set it up once and it is set
+    //     up everywhere" is not worth putting an OAuth client secret there. The user re-enters the pair
+    //     on each device; the tokens were always per-device anyway (each machine completes its own
+    //     authorization-code flow), exactly as ra/token and the Trakt tokens beside them are.
+    //   * trackerstate/* is this DEVICE's accumulator: the undelivered progress queue and the per-item
+    //     debounce stamps. Merging two devices' queues would submit the same chapter twice, and merging
+    //     the stamps would suppress a push on the device that had not made it.
+    //
+    // The per-item LINKS are the inverse and are NOT here - they ride the merge document instead; see
+    // isPerItemStoreKey below. probe_cloudmerge asserts both halves, because a later edit that moved the
+    // links into this family would silently stop them syncing, and one that moved the credentials out of
+    // it would silently start uploading a secret.
+    if (tracker::isDeviceLocalKey(key)) return true;    // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
     // must not start broadcasting because presence was switched on for a laptop on the same account.
     if (key.startsWith(QLatin1String("discord/"))) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
@@ -307,6 +334,29 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // put somebody's music-server password in a zip in a third party's Drive folder. Device-local, and
         // SubsonicServerStore keys everything under this prefix.
         || key.startsWith(QStringLiteral("subsonic/"))
+        // jellyfin/* (issue #160): the connected Jellyfin servers. Same family as the three above, and the
+        // credential is the strongest of the four — a Jellyfin ACCESS TOKEN is a bearer credential for a
+        // whole account, usable from anywhere until it is revoked, and it sits beside a url that is often a
+        // private LAN address meaningless on another machine anyway. Left in the heavy settings bundle it
+        // would put that token in a zip in a third party's Drive folder. Device-local, and
+        // JellyfinServerStore keys everything (server list, tokens, per-server enable) under this prefix.
+        // probe_cloudmerge pins the carve-out.
+        || key.startsWith(QStringLiteral("jellyfin/"))
+        // audiobookshelf/* (issue #197): saved Audiobookshelf servers. Same shape and the same hazard as the
+        // three above, with the credential in its most concentrated form — the stored value is an API TOKEN,
+        // which is a standing grant against that server rather than something a login screen still stands
+        // between. Left in the heavy settings bundle it would put that token in a zip in a third party's
+        // Drive folder, for a server the user signed into on one machine. Device-local, and AbsServerStore
+        // keys everything under this prefix. probe_cloudmerge pins the carve-out; probe_absclient byte-scans
+        // a fixture token against everything the feature writes.
+        || key.startsWith(QStringLiteral("audiobookshelf/"))
+        // followsnap/* (issue #155): what THIS device has already seen of each followed series, and which
+        // children it has not shown you yet. The DEVICE-LOCAL half of the follow feature, and the inverse of
+        // the "follow/" carve-out above. Same family and the same argument as #23's backfill watermark: it is
+        // a claim about a fetch this install performed, so synced, one device's completed check would
+        // suppress another device's first one and the second device would show an empty New shelf having
+        // never asked anybody. A peer re-derives its own snapshot silently on its first check.
+        || key.startsWith(QStringLiteral("followsnap/"))
         // emugfx* (issue #103): per-game/per-system standalone-emulator graphics (internal resolution / renderer
         // / …). Explicitly DEVICE-LOCAL — a 6x internal resolution a strong GPU eats will crawl on a weak one, so
         // syncing "run this game at 6x Vulkan" to every device is a footgun (EmuGfxStore.h says so). EmuGfxStore
@@ -342,6 +392,14 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // would write the row raw — bypassing the newest-ts + tombstone merge that keeps a peer from
         // resurrecting a deleted channel.
         || key.startsWith(QStringLiteral("channels/"))
+        // Followed series (issue #155). The SYNCED half of the follow feature: "I follow this show" is a
+        // statement about the user, not about this box, so it rides the merge document exactly as a favourite
+        // does — one follow press must not flip the heavy bundle's stateHash and re-upload the whole zip, and
+        // an inbound bundle would write the row raw, bypassing the newest-ts + tombstone merge that keeps a
+        // peer from resurrecting an unfollowed series. The matched prefix is "follow/" with the slash, which
+        // deliberately does NOT match the schedule settings under "following/" (those are ordinary synced
+        // preferences and must keep riding the bundle) nor the device-local snapshots under "followsnap/".
+        || key.startsWith(QStringLiteral("follow/"))
         // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
         // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
         // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
@@ -366,6 +424,15 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // would write the row raw, bypassing the newest-updatedAt merge that keeps two devices' nudges from
         // clobbering each other. probe_cloudmerge asserts both classifications.
         || key.startsWith(QStringLiteral("lyricoffset/"))
+        // Per-item TRACKER LINKS (issue #156). Which AniList entry a shelf row IS. The INVERSE
+        // classification of the credentials above, and for the reasons speed/ and lyricoffset/ are
+        // per-item-synced: a link is a property of the CONTENT, not of this machine, and it costs the
+        // user a prompt per item to establish, so it should follow them across devices. Riding the heavy
+        // bundle too would make one link flip the stateHash and re-upload the whole zip, and an inbound
+        // bundle would write the blob raw, bypassing the newest-updatedAt merge that keeps two devices'
+        // links (and an unlink husk) from clobbering each other. probe_cloudmerge asserts it is
+        // per-item-synced and NOT device-local.
+        || key.startsWith(QStringLiteral("trackerlink/"))
         // Per-book bookmarks (issue #136). A bookmark is a POSITION the issue explicitly wants to "survive
         // switching devices", so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge
         // document — favourites/playlists shape (union by id, newest-ts, delete tombstone). Riding the heavy

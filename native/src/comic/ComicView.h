@@ -1,7 +1,7 @@
 // Page-by-page comic reader for comic archives — CBZ/ZIP (miniz), CB7 (the vendored 7z/LZMA SDK behind
-// SevenZip.h), and CBT (the in-tree Tar.h reader), each a container of page images. Collects the image
-// entries, sorts them in natural page order, and shows one page at a time with fit-width / zoom and per-file
-// resume - mirroring the PDF reader. (CBR still needs a RAR decoder; CBZ/CB7/CBT cover most comics.)
+// SevenZip.h), CBT (the in-tree Tar.h reader) and CBR (the vendored unarr RAR decoder behind RarComic.h),
+// each a container of page images. Collects the image entries, sorts them in natural page order, and shows
+// one page at a time with fit-width / zoom and per-file resume - mirroring the PDF reader.
 #pragma once
 #include <QWidget>
 #include <QVector>
@@ -51,7 +51,16 @@ public:
     void persist(); // save the current page (called when navigating away)
     void setStreamIssueVisible(bool) {} // no-op stub: a comic has no remote-source swap (chrome uniformity)
 
-    static bool isComicFile(const QString& path); // .cbz/.zip, .cb7, .cbt (archives of page images)
+    static bool isComicFile(const QString& path); // .cbz/.zip, .cb7, .cbt, .cbr (archives of page images)
+
+    // WHICH WAY THIS COMIC READS (issue #152). Set by openComic() from the archive's own ComicInfo.xml
+    // (<Manga>YesAndRightToLeft</Manga>) under the user's per-series override, and false for every comic
+    // that says nothing — which is every comic that opened before this existed, so the reader's behaviour is
+    // unchanged for all of them. Right to left swaps TWO things and nothing else: which arrow key advances,
+    // and which side of an open-book spread each page is drawn on. The PAGE ORDER is untouched — a manga's
+    // pages are numbered in reading order by the people who scanned it, and reversing them here would undo
+    // that (and put the cover last).
+    bool rightToLeft() const { return rtl_; }
 
     // ---- Hosted mode (themed reader chrome, Plan B1 Task 4) ----------------------------------------------
     // Mirrors EbookView/PdfView: setHostedChrome(true) hides the reader's own bottom control bar so the themed
@@ -108,8 +117,13 @@ private slots:
     void zoomOut();
 
 private:
-    bool loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cb7 via SevenZip → temp dir
+    // `comicInfoXml`, when given, is filled with the archive's root ComicInfo.xml (#152) — out of the temp
+    // dir this branch has to create anyway, so the document costs nothing on top of the extraction and the
+    // archive is never decoded a second time to reach it.
+    bool loadCb7Pages(const QString& path, QVector<QByteArray>& pages, QString* error,
+                      QByteArray* comicInfoXml = nullptr); // .cb7 via SevenZip → temp dir
     bool loadCbtPages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cbt via the in-tree Tar reader
+    bool loadCbrPages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cbr via unarr (RarComic.h)
     void showPage(int index);
     void rescale();
     void updateLabel();
@@ -126,6 +140,7 @@ private:
     bool twoUp_ = false;       // viewport is wide enough to pair pages book-style (set during rescale)
     bool twoUpEnabled_ = true; // user preference: allow the spread (default on = the prior auto behaviour)
     bool hosted_ = false;
+    bool rtl_ = false;            // #152: this comic reads right to left (ComicInfo <Manga>, user override wins)
     bool photoMode_ = false;      // true after openFolder(): source is a folder of files, not a ZIP's entries
     QStringList photoFiles_;      // photo mode: the folder's image files, natural order (comic mode: empty)
     QString path_;

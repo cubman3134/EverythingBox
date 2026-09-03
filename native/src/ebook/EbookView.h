@@ -7,6 +7,7 @@
 #include <memory>
 #include "EbookSource.h"
 #include "ReaderTypography.h"
+#include "ReadAloudTarget.h"
 #include "../theme2/HostedReader.h"
 
 class QListWidget;
@@ -60,6 +61,18 @@ public:
     int  topTextPosition() const { return topPos_; }
     void scrollToTextPosition(int pos);
 
+    // ---- Read aloud (issue #145) --------------------------------------------------------------------------
+    // The chapter's text in the SAME document coordinates topTextPosition/scrollToTextPosition speak: the
+    // divider's offsets are therefore reader offsets, and no translation layer sits between what is spoken and
+    // where the reader is.
+    QString plainText() const;
+    // Paint a highlight behind [start, end). An empty or inverted range clears it. Purely visual - the
+    // position is moved by ensurePosVisible below, never by this.
+    void setSpokenRange(int start, int end);
+    // Turn the page if `pos` is not on the one being shown, landing on the line that holds it. A no-op when it
+    // is already visible, so narration inside a page does not shuffle the text under the reader's eye.
+    void ensurePosVisible(int pos);
+
 signals:
     void prevRequested();   // left half clicked
     void nextRequested();   // right half clicked
@@ -99,19 +112,24 @@ private:
     int   lineSpacingPct_ = 100;  // line height as a % of natural leading (#135)
     int   marginPct_ = 6;         // left/right paper margin as a % of the page width (#135)
     bool  justify_ = false;       // justify paragraphs vs. ragged-right (#135)
+    int   spokenStart_ = -1;   // the spoken paragraph's highlight range; -1 = nothing is being narrated (#145)
+    int   spokenEnd_   = -1;
     qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text
     qreal botMargin_  = 40.0; // leaves room for the page-number footer
     QString footer_;
 };
 
-class EbookView : public QWidget, public HostedReader
+class EbookView : public QWidget, public HostedReader, public ReadAloudTarget
 {
     Q_OBJECT
 public:
     explicit EbookView(QWidget* parent = nullptr);
 
     bool openBook(const QString& path, QString* error = nullptr);
-    void persist(); // save reading position (called when navigating away)
+    // Save the reading position (called when navigating away). posOverride >= 0 records THAT document offset
+    // instead of the top of the page - how read-aloud makes the spoken paragraph the reading position without
+    // re-anchoring a page whose text has not needed to move (issue #145).
+    void persist(int posOverride = -1);
     void setStreamIssueVisible(bool on); // show the "Issue with Streaming" button (remote/Allarr books only)
 
     // HostedReader (themed chrome host, Plan B1): the book is the reader widget; font + toc are its settings.
@@ -141,6 +159,35 @@ public:
     // The height (px) the page reserves up top for chrome — the reader inset the widget menu used, which the
     // themed top strip must match so page text sits below it, not under it (spike constraint reconfirmation).
     static int topChromeReserve() { return kMenuHeight; }
+
+    // ---- Read aloud (issue #145) ---------------------------------------------------------------------------
+    // The HostedReader commands the themed chrome fires and the classic bar's buttons call - one set, both
+    // layouts. All of them are inert (and none of the controls are drawn) unless the build has the Qt
+    // TextToSpeech module AND the platform offers an engine, which is what readAloudAvailable() answers.
+    bool readAloudAvailable() const override;
+    bool readAloudActive() const override;
+    bool readAloudPaused() const override;
+    void toggleReadAloud() override;
+    void readAloudTogglePause() override;
+    void readAloudSkip(int paragraphs) override;
+    double readAloudSpeed() const override;
+    void readAloudCycleSpeed() override;
+    QString readAloudVoiceName() const override;
+    void readAloudCycleVoice() override;
+
+    // ReadAloudTarget - the narrow seam the controller drives. The position contract lives in ReadAloudTarget.h:
+    // raShowSpoken is the reader ARRIVING at the spoken paragraph (page turned, highlighted, position persisted
+    // through the same store a page turn writes), so the spoken paragraph IS the reading position.
+    QString raChapterText() const override;
+    int  raChapterIndex() const override { return chapter_; }
+    int  raChapterCount() const override;
+    bool raGotoChapter(int index) override;
+    int  raCurrentOffset() const override;
+    void raShowSpoken(int start, int end) override;
+    void raClearSpoken() override;
+    QString raBookKey() const override;
+    QString raPreferredLanguage() const override;
+    void raNarrationChanged() override;
 
 public slots:
     void nextPage() override;   // advance one page (crossing into the next chapter at a chapter end)
@@ -177,15 +224,26 @@ private slots:
 
 private:
     void loadChapter(int index, bool toLast = false);
+    // The forward-progress edge: consumption stats' high-water page (what #136's furthest-read carries) plus
+    // the Discord presence line. Factored out of nextPage() so narration accrues through exactly the same
+    // reckoning a page turn does, rather than a second one that could drift from it.
+    void accrueReadingProgress();
+    void syncReadAloudButtons();   // classic bar: the labels that mirror narration's state
     void restoreState();
     void layoutOverlays();
     void recomputeBookPages(); // tally each chapter's page count for a book-wide "page x / y"
     int  globalPage() const;   // 1-based page within the whole book at the current spot
 
-    std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / PdfTextBook, chosen by file content
+    std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / Fb2Book / TextBook / PdfTextBook, chosen by content then name
     BookPageWidget* page_ = nullptr;
     QFrame* menu_ = nullptr;            // auto-hiding top control bar (overlay)
     QPushButton* streamIssueBtn_ = nullptr; // "Issue with Streaming" (hidden unless a remote book)
+    // Read-aloud controls on the CLASSIC bar (issue #145). Created only when read-aloud is available, so a
+    // build without the TextToSpeech module shows the bar it always showed.
+    QPushButton* raBtn_      = nullptr;   // Read aloud / Stop
+    QPushButton* raPauseBtn_ = nullptr;   // Pause / Resume
+    QPushButton* raSpeedBtn_ = nullptr;   // the shared #140 speed, stepped
+    QPushButton* raVoiceBtn_ = nullptr;   // the platform voice, stepped
     QListWidget* tocList_ = nullptr;    // contents panel (overlay, toggled)
     QLabel* pageLabel_ = nullptr;
     QTimer* menuTimer_ = nullptr;
@@ -198,5 +256,6 @@ private:
     int    restorePos_ = -1;       // document offset to resume at once the chapter is laid out (-1 = none)
     double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
     bool   hosted_ = false;        // hosted mode: themed chrome drives us; suppress our own menu/toc/reveal
+    class ReadAloudController* readAloud_ = nullptr;  // owned; null when the build has no TextToSpeech module
     static constexpr int kMenuHeight = 38; // overlay menu height; the page reserves this much up top
 };

@@ -16,6 +16,9 @@ Usage:
   uitest.py touch tap 640 360              synthesize a real touch tap at window coords (X, Y)
   uitest.py touch flick 640 600 640 200    a drag/flick from (X1,Y1) to (X2,Y2) [add MS for duration]
   uitest.py touch pinch 640 360 2.0        two fingers around (CX,CY) diverging by SCALE [add MS]
+  uitest.py touch hold 640 360 800         press and HOLD at (X,Y) for MS (default 800) then release
+  uitest.py touch dtap 640 360 200         two taps at (X,Y) GAP ms apart (default 200) as ONE sequence
+  uitest.py touch swipeback 640 360 200    swipe DX from (X,Y) and back to it before lifting [add MS]
                                            (X/Y are LOGICAL window coords, as reported by state's "size";
                                             a touch while a gesture is still in flight replies "err busy" —
                                             wait for the previous gesture to finish, then retry)

@@ -49,6 +49,7 @@
 #include "BookMeta.h"
 #include "BookCatalogs.h"
 #include "ComicName.h"
+#include "ComicInfo.h"   // #152: the Rating / Direction an entry now carries
 #include "EpubMeta.h"
 #include "LeafRoute.h"   // kLocalBookMime — header only; the routing itself is probe_leafroute's job
 #include "AppPaths.h"
@@ -66,6 +67,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "BookFixtures.h"   // #144: the RAR 4 + Palm/MOBI byte placers, shared with probe_cbr
 #include "miniz.h"
 
 static int g_fails = 0;
@@ -234,6 +236,72 @@ static bool writeMinimalPdf(const QString& path, const QString& title, const QSt
 }
 
 // ---------------------------------------------------------------------------------------------------------
+
+// ---- Issue #144: one real file of each format the scan learned ------------------------------------------
+// The RAR and Palm/MOBI byte placers come from tools/BookFixtures.h, which includes nothing from src/ and is
+// shared with probe_cbr and probe_ebookformats - so the container these assertions rest on is the same one
+// those two probes assert the READERS against.
+
+static bool writeFile(const QString& path, const QByteArray& bytes)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    f.write(bytes);
+    return true;
+}
+
+// A FictionBook 2 document: everything a shelf could want, in one XML stream - title, a split author name,
+// a Calibre-style series with a DECIMAL index, a language, a publication year, three chapters and a cover
+// binary that is a REAL PNG (so the cover that comes back out is decodable rather than merely non-empty).
+static QByteArray fb2Fixture(const QString& title = QStringLiteral("The Glass Bead Game"))
+{
+    const QByteArray cover = pngBytes(QColor(20, 90, 160));
+    QByteArray x =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<FictionBook xmlns:l=\"http://www.w3.org/1999/xlink\"><description><title-info>"
+        "<author><first-name>Ivan</first-name><last-name>Sidorov</last-name></author>"
+        "<book-title>";
+    x += title.toUtf8();
+    x += "</book-title><lang>ru</lang>"
+         "<sequence name=\"Bead Cycle\" number=\"2.5\"/>"
+         "<coverpage><image l:href=\"#cover.png\"/></coverpage>"
+         "</title-info><publish-info><year>1943</year></publish-info></description>"
+         "<body><section><title><p>One</p></title><p>The first chapter.</p></section>"
+         "<section><p>The second.</p></section><section><p>The third.</p></section></body>"
+         "<binary id=\"cover.png\" content-type=\"image/png\">";
+    x += cover.toBase64();
+    x += "</binary></FictionBook>";
+    return x;
+}
+
+// A standalone AZW3: record 0 IS the KF8 header (file version 8), its text follows, and the EXTH cover
+// record points at the image record after that.
+static QByteArray azw3Fixture()
+{
+    BookFixtures::MobiSpec s;
+    s.fileVersion = 8;
+    s.fullName = QStringLiteral("A Modern Book");
+    s.author   = QStringLiteral("Ada Lovelace");
+    s.textRecords = 1;
+    s.firstImage  = 2;
+    s.coverOffset = 0;
+    return BookFixtures::buildPalmDb({ BookFixtures::buildMobiHeaderRecord(s),
+                                       QByteArray("<html><body><p>Modern.</p></body></html>"),
+                                       pngBytes(QColor(160, 60, 20)) });
+}
+
+// A .cbr of three REAL PNG pages, stored page10, page2, page1 - so a cover taken from "the first entry"
+// would be page ten and the shelf would show a picture the reader never opens on.
+static QByteArray cbrFixture()
+{
+    return BookFixtures::buildRar4({
+        { QStringLiteral("page10.png"), pngBytes(QColor(10, 10, 10)), false, false },
+        { QStringLiteral("page2.png"),  pngBytes(QColor(120, 120, 120)), false, false },
+        { QStringLiteral("page1.png"),  pngBytes(QColor(240, 240, 240)), false, false },
+    });
+}
+
 
 static const Book* findBook(const Index& idx, const QString& titleWanted)
 {
@@ -535,19 +603,43 @@ int main(int argc, char** argv)
         CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.epub")));
         CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.PDF")));
         CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.cbz")));
+        // The five families issue #144 added. Each is here because BookMeta can now answer for it WITHOUT
+        // the per-file cost the refusals below are about.
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.cbr")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.CBR")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.fb2")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.fbz")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.azw3")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.azw")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/notes.txt")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/notes.md")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/notes.markdown")));
+        // ...and .mobi, whose refusal went with the cost that justified it: the container walk moved into
+        // ebook/MobiHeader and reads a title out of the headers without inflating a single text record.
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.mobi")));
+        // A .fb2.zip is claimed by its whole NAME. Its suffix() is "zip", which is NOT claimed - so this
+        // pair is the difference between reading the name and reading the extension.
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/a.fb2.zip")));
+        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.zip")));
         // Deliberate refusals, each with a cost behind it (BookLibrary.h).
-        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.mobi")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.cb7")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.cbt")));
-        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.zip")));
-        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/notes.txt")));
         // §11: no audio extension is ever claimed, whatever this root is pointed at.
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/track.mp3")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/book.m4b")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/rip.flac")));
         CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.cbz")) == Kind::Comic);
+        CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.cbr")) == Kind::Comic);
         CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.epub")) == Kind::Book);
         CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.pdf")) == Kind::Book);
+        CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.fb2")) == Kind::Book);
+        CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.azw3")) == Kind::Book);
+        CHECK(BookLibrary::kindFor(QStringLiteral("/x/a.txt")) == Kind::Book);
+        // The persisted-cache stamp MUST have moved: a library indexed under the old rules holds none of
+        // the files above, and a scan that reused it would show a folder that had silently lost half of
+        // itself. (Behavioural, not a read of the constant: the OLD stamp is written out here.)
+        CHECK(BookLibrary::parseStamp() != QStringLiteral("1"));
+        CHECK(!BookLibrary::parseStamp().isEmpty());
     }
 
     // ---- The library on disk --------------------------------------------------------------------------
@@ -576,29 +668,53 @@ int main(int argc, char** argv)
             CHECK(f.open(QIODevice::WriteOnly));
             f.write(pngBytes(QColor(10, 10, 10)));   // a loose folder of images is not a comic
         }
-        for (const char* junk : { "/notes.txt", "/old.mobi", "/packed.cb7" })
+        for (const char* junk : { "/packed.cb7", "/tarred.cbt", "/random.zip" })
         {
             QFile f(lib + QString::fromLatin1(junk));
             CHECK(f.open(QIODevice::WriteOnly));
             f.write("x");
         }
+
+        // §13 (issue #144): one real file of each format the scan learned. In their OWN folder, so the
+        // comic-grouping rule sees a lone title rather than a run and nothing here can perturb §3/§4.
+        CHECK(writeFile(lib + QStringLiteral("/newformats/The Glass Bead Game.fb2"), fb2Fixture()));
+        CHECK(writeZip(lib + QStringLiteral("/newformats/Another Bead Book.fb2.zip"),
+                       { { QStringLiteral("inner.fb2"), fb2Fixture(QStringLiteral("Another Bead Book")) } }));
+        CHECK(writeFile(lib + QStringLiteral("/newformats/A Modern Book.azw3"), azw3Fixture()));
+        CHECK(writeFile(lib + QStringLiteral("/newformats/Sunburst 001.cbr"), cbrFixture()));
+        CHECK(writeFile(lib + QStringLiteral("/newformats/field notes.txt"),
+                        QByteArrayLiteral("Chapter One\n\nIt began badly.\n")));
+        CHECK(writeFile(lib + QStringLiteral("/newformats/manuscript.md"),
+                        QByteArrayLiteral("# The First Part\n\nOne.\n\n"
+                                          "# The Second Part\n\nTwo.\n")));
     }
 
     ScanStats s1;
     const QVector<BookLibrary::FileEntry> entries = BookLibrary::scanFolder(lib, {}, &s1);
     const Index idx = BookLibrary::buildIndex(entries);
     {
-        // 2 epubs + 4 pdfs + 6 cbz = 12. The .txt/.mobi/.cb7 and the three loose .jpgs are not files this
-        // library has ever heard of.
-        CHECK(s1.files == 12);
-        CHECK(s1.reread == 12);
+        // 2 epubs + 4 pdfs + 6 cbz = 12, plus §13's six: .fb2, .fb2.zip, .azw3, .cbr, .txt, .md = 18.
+        // The .cb7/.cbt, the bare .zip and the three loose .jpgs are not files this library has heard of.
+        CHECK(s1.files == 18);
+        CHECK(s1.reread == 18);
         CHECK(s1.reused == 0);
-        CHECK(entries.size() == 12);
-        CHECK(idx.bookCount == 6);
-        CHECK(idx.comicCount == 6);
+        CHECK(entries.size() == 18);
+        CHECK(idx.bookCount == 11);      // 6 + fb2 + fb2.zip + azw3 + txt + md
+        CHECK(idx.comicCount == 7);      // 6 + the .cbr
         for (const BookLibrary::FileEntry& e : entries)
-            CHECK(!e.path.endsWith(QStringLiteral(".jpg")) && !e.path.endsWith(QStringLiteral(".txt"))
-                  && !e.path.endsWith(QStringLiteral(".mobi")) && !e.path.endsWith(QStringLiteral(".cb7")));
+            CHECK(!e.path.endsWith(QStringLiteral(".jpg")) && !e.path.endsWith(QStringLiteral(".cbt"))
+                  && !e.path.endsWith(QStringLiteral(".cb7")));
+        // A ZIP IS SCANNED ONLY WHEN ITS NAME SAYS FB2. Both halves are asserted, because a gate that read
+        // the SUFFIX would either take both (a bare .zip becomes a book) or neither (the .fb2.zip wire form
+        // is invisible) — and one assertion alone cannot tell those two apart.
+        int fb2Zips = 0, bareZips = 0;
+        for (const BookLibrary::FileEntry& e : entries)
+        {
+            if (e.path.endsWith(QStringLiteral(".fb2.zip"))) ++fb2Zips;
+            else if (e.path.endsWith(QStringLiteral(".zip"))) ++bareZips;
+        }
+        CHECK(fb2Zips == 1);
+        CHECK(bareZips == 0);
     }
 
     // ---- §2/§5/§6 What the index made of them ---------------------------------------------------------
@@ -682,6 +798,124 @@ int main(int argc, char** argv)
         CHECK(at2 < at10);
     }
 
+    // ---- §13 (issue #144) The five container families the scan learned ------------------------------
+    // Every one of them is a REAL FILE written above, read back through the same BookMeta::read() the scan
+    // calls, and then looked for in the index the scan built. What each format is allowed to SAY differs -
+    // and that is the assertion: a comic archive carries no title, a plain text file carries nothing at all,
+    // and an FB2 carries everything.
+    {
+        const QString fmt = lib + QStringLiteral("/newformats");
+
+        // FB2: the whole of <description>, plus a DECODABLE cover out of its <binary>.
+        const BookMeta::Info fb2 = BookMeta::read(fmt + QStringLiteral("/The Glass Bead Game.fb2"));
+        CHECK(fb2.title == QStringLiteral("The Glass Bead Game"));
+        CHECK(fb2.author == QStringLiteral("Ivan Sidorov"));
+        CHECK(fb2.series == QStringLiteral("Bead Cycle"));
+        CHECK(fb2.seriesIndex == 2.5);        // a decimal, for EpubMeta.h's reason about Calibre's 2.5
+        CHECK(fb2.language == QStringLiteral("ru"));
+        CHECK(fb2.year == 1943);
+        CHECK(fb2.pageCount == 3);            // three top-level <section>s == three chapters
+        CHECK(fb2.hasCover);
+        CHECK(!fb2.isEmpty());
+        {
+            QImage img;
+            CHECK(img.loadFromData(BookMeta::coverBytes(fmt + QStringLiteral("/The Glass Bead Game.fb2"))));
+            CHECK(!img.isNull());
+        }
+
+        // ...and the ZIPPED wire form reads the same way. Its suffix is "zip"; only its whole NAME says FB2.
+        const BookMeta::Info fbz = BookMeta::read(fmt + QStringLiteral("/Another Bead Book.fb2.zip"));
+        CHECK(fbz.title == QStringLiteral("Another Bead Book"));
+        CHECK(fbz.author == fb2.author);
+        CHECK(fbz.series == fb2.series && fbz.seriesIndex == fb2.seriesIndex);
+        CHECK(fbz.pageCount == 3);
+        CHECK(fbz.hasCover);
+        {
+            QImage img;
+            CHECK(img.loadFromData(BookMeta::coverBytes(fmt + QStringLiteral("/Another Bead Book.fb2.zip"))));
+        }
+
+        // AZW3: title and author out of the headers and the EXTH block, with NOTHING decompressed - which is
+        // the whole reason this family is scanned at all now. No page count: a MOBI is one stream of HTML.
+        const BookMeta::Info azw = BookMeta::read(fmt + QStringLiteral("/A Modern Book.azw3"));
+        CHECK(azw.title == QStringLiteral("A Modern Book"));
+        CHECK(azw.author == QStringLiteral("Ada Lovelace"));
+        CHECK(azw.pageCount == 0);
+        CHECK(azw.hasCover);
+        {
+            QImage img;
+            CHECK(img.loadFromData(BookMeta::coverBytes(fmt + QStringLiteral("/A Modern Book.azw3"))));
+        }
+
+        // CBR: the same nothing a CBZ says - a page COUNT and a cover, and no title of its own.
+        const QString cbr = fmt + QStringLiteral("/Sunburst 001.cbr");
+        const BookMeta::Info comic = BookMeta::read(cbr);
+        CHECK(comic.pageCount == 3);
+        CHECK(comic.hasCover);
+        CHECK(comic.isEmpty());               // no title, no author, no series: the filename is all there is
+        {
+            // THE COVER IS PAGE ONE IN THE READER'S ORDER. page1.png is the LAST entry in the archive and is
+            // the LIGHTEST of the three, so a cover taken from "the first entry" is a different picture and
+            // this compares as a different colour.
+            QImage img;
+            CHECK(img.loadFromData(BookMeta::coverBytes(cbr)));
+            CHECK(!img.isNull());
+            if (!img.isNull()) CHECK(qGray(img.pixel(0, 0)) > 200);
+        }
+
+        // Markdown: its own top-level headings, and nothing else. No cover.
+        const BookMeta::Info md = BookMeta::read(fmt + QStringLiteral("/manuscript.md"));
+        CHECK(md.title == QStringLiteral("The First Part"));
+        CHECK(md.pageCount == 2);
+        CHECK(!md.hasCover);
+        CHECK(BookMeta::coverBytes(fmt + QStringLiteral("/manuscript.md")).isEmpty());
+
+        // Plain text says NOTHING, and that is not a failure: it appears under its own filename, exactly as
+        // an untagged EPUB does, with the same blank card a coverless EPUB gets.
+        const BookMeta::Info txt = BookMeta::read(fmt + QStringLiteral("/field notes.txt"));
+        CHECK(txt.isEmpty());
+        CHECK(!txt.hasCover);
+        CHECK(txt.pageCount == 0);
+        CHECK(BookMeta::coverBytes(fmt + QStringLiteral("/field notes.txt")).isEmpty());
+
+        // ---- ...and all six are IN THE INDEX the scan built --------------------------------------------
+        const Book* bead = findBook(idx, QStringLiteral("The Glass Bead Game"));
+        CHECK(bead != nullptr);
+        if (bead)
+        {
+            CHECK(bead->author == QStringLiteral("Ivan Sidorov"));
+            CHECK(bead->series == QStringLiteral("Bead Cycle"));
+            CHECK(bead->seriesIndex == 2.5);
+            CHECK(bead->kind == Kind::Book);
+            CHECK(!bead->titleFromFilename);
+            CHECK(bead->hasCover);
+        }
+        const Book* modern = findBook(idx, QStringLiteral("A Modern Book"));
+        CHECK(modern != nullptr);
+        if (modern) { CHECK(modern->kind == Kind::Book); CHECK(modern->hasCover); }
+        const Book* sunburst = findBook(idx, QStringLiteral("Sunburst 001"));
+        CHECK(sunburst != nullptr);
+        if (sunburst)
+        {
+            CHECK(sunburst->kind == Kind::Comic);      // a .cbr is a COMIC row, not a book row
+            CHECK(sunburst->titleFromFilename);        // ...named by its file, as every comic archive is
+            CHECK(sunburst->pageCount == 3);
+        }
+        const Book* notes = findBook(idx, QStringLiteral("field notes"));
+        CHECK(notes != nullptr);
+        if (notes)
+        {
+            CHECK(notes->kind == Kind::Book);
+            CHECK(notes->titleFromFilename);
+            CHECK(!notes->hasCover);                   // the same blank card a coverless EPUB gets
+        }
+        // The .md is on the shelf under the title IT stated, not under its filename.
+        const Book* script = findBook(idx, QStringLiteral("The First Part"));
+        CHECK(script != nullptr);
+        if (script) CHECK(!script->titleFromFilename);
+        CHECK(findBook(idx, QStringLiteral("manuscript")) == nullptr);
+    }
+
     // ---- §9 Incremental rescan + persistence ----------------------------------------------------------
     const QString indexFile = base + QStringLiteral("/bookindex.json");
     {
@@ -695,8 +929,8 @@ int main(int argc, char** argv)
         ScanStats s2;
         const QVector<BookLibrary::FileEntry> again =
             BookLibrary::scanFolder(lib, BookLibrary::byPath(loaded), &s2);
-        CHECK(s2.files == 12);
-        CHECK(s2.reused == 12);     // NOT ONE FILE RE-OPENED: the whole point of the cache
+        CHECK(s2.files == 18);
+        CHECK(s2.reused == 18);     // NOT ONE FILE RE-OPENED: the whole point of the cache
         CHECK(s2.reread == 0);
         CHECK(s2.dropped == 0);
         // ...and the index built from the round-tripped entries is the same one.
@@ -814,6 +1048,195 @@ int main(int argc, char** argv)
         QString r;
         CHECK(BookLibrary::loadIndexFile(base + QStringLiteral("/missing.json"), &r).isEmpty());
         CHECK(r.isEmpty());
+    }
+
+    // ---- §14 ComicInfo.xml, through the scan and into the index (issue #152) ---------------------------
+    // ITS OWN ROOT, deliberately: the sections above pin exact file counts over `lib`, and a feature that
+    // had to renumber another feature's assertions to be tested would be one nobody could safely change.
+    // The PARSE is probe_comicinfo's; what the LIBRARY does with it is this.
+    {
+        const QString lib2 = base + QStringLiteral("/lib152");
+        auto comicWith = [&](const QString& path, const QByteArray& xml) {
+            QVector<QPair<QString, QByteArray>> m;
+            m.append({ QStringLiteral("page1.png"), pngBytes(QColor(30, 90, 160)) });
+            if (!xml.isEmpty()) m.append({ QStringLiteral("ComicInfo.xml"), xml });
+            m.append({ QStringLiteral("page2.png"), pngBytes(QColor(160, 90, 30)) });
+            return writeZip(path, m);
+        };
+        auto doc = [](const char* series, const char* number, const char* writer,
+                      const char* rating, const char* manga) {
+            QByteArray x = QByteArrayLiteral("<ComicInfo><Series>");
+            x += series; x += "</Series><Number>"; x += number; x += "</Number><Writer>";
+            x += writer; x += "</Writer>";
+            if (rating && *rating) { x += "<AgeRating>"; x += rating; x += "</AgeRating>"; }
+            if (manga && *manga)   { x += "<Manga>";     x += manga;  x += "</Manga>"; }
+            return x + QByteArrayLiteral("</ComicInfo>");
+        };
+
+        // TWO UNTAGGED ISSUES, whose grouping must not move a millimetre.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/Preacher 001.cbz"), {}));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/Preacher 002.cbz"), {}));
+        // TAGGED, and named NOTHING like what they say they are: the filenames would infer a series called
+        // "sandman-vol-issue" or nothing at all, so a shelf that shows "The Sandman" can only have got it
+        // from the document.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/sandman-vol1-issue1.cbz"),
+                        doc("The Sandman", "1", "Neil Gaiman", "Mature 17+", "No")));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/sandman-extra.cbz"),
+                        doc("The Sandman", "Annual 1", "Neil Gaiman", "Teen", "")));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/nausicaa-01.cbz"),
+                        doc("Nausicaa", "1", "Hayao Miyazaki", "Everyone 10+", "YesAndRightToLeft")));
+        // An author whose ONLY book is one a restricted profile hides — so the bucket has to disappear.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/crossed-001.cbz"),
+                        doc("Crossed", "1", "Garth Ennis", "Adults Only 18+", "")));
+
+        ScanStats st;
+        const QVector<BookLibrary::FileEntry> e2 = BookLibrary::scanFolder(lib2, {}, &st);
+        CHECK(st.files == 6);
+        CHECK(e2.size() == 6);
+        const Index idxC = BookLibrary::buildIndex(e2);
+
+        auto byPathSuffix = [](const Index& ix, const QString& suffix) -> const Book* {
+            for (const BookLibrary::Author& a : ix.authors)
+                for (const Book& b : a.books)
+                    if (b.path.endsWith(suffix)) return &b;
+            return nullptr;
+        };
+
+        // (a) THE DOCUMENT BEATS THE FILENAME, dimension by dimension.
+        const Book* sand1 = byPathSuffix(idxC, QStringLiteral("sandman-vol1-issue1.cbz"));
+        CHECK(sand1 != nullptr);
+        if (sand1)
+        {
+            CHECK(sand1->series == QStringLiteral("The Sandman"));
+            CHECK(sand1->number == QStringLiteral("1"));
+            CHECK(sand1->seriesIndex == 1.0);
+            CHECK(sand1->author == QStringLiteral("Neil Gaiman"));
+            CHECK(sand1->creators.contains(QStringLiteral("Neil Gaiman")));
+            CHECK(sand1->rating == ComicInfo::Rating::Mature);
+            CHECK(sand1->kind == Kind::Comic);
+            // No <Title> in the document, so the shelf goes on showing the name the file has — the one
+            // thing about a tagged comic that does NOT change.
+            CHECK(sand1->titleFromFilename);
+            CHECK(sand1->pageCount == 2);       // COUNTED image members; ComicInfo.xml is not a page
+        }
+        const Book* annual = byPathSuffix(idxC, QStringLiteral("sandman-extra.cbz"));
+        CHECK(annual != nullptr);
+        if (annual)
+        {
+            CHECK(annual->series == QStringLiteral("The Sandman"));
+            CHECK(annual->number == QStringLiteral("Annual 1"));   // VERBATIM: no double holds this
+            CHECK(annual->seriesIndex == 0.0);                     // ...and it sorts as unnumbered
+            CHECK(annual->rating == ComicInfo::Rating::Teen);
+        }
+        const Book* nau = byPathSuffix(idxC, QStringLiteral("nausicaa-01.cbz"));
+        CHECK(nau != nullptr);
+        if (nau)
+        {
+            CHECK(nau->direction == ComicInfo::Direction::RightToLeft);
+            CHECK(nau->series == QStringLiteral("Nausicaa"));
+        }
+        // ...and a comic that said "Manga: No" is NOT right to left, which is the assertion that separates
+        // "the field was read" from "the field was found".
+        if (sand1) CHECK(sand1->direction != ComicInfo::Direction::RightToLeft);
+
+        // (b) AN ENTRY WITHOUT A DOCUMENT IS GROUPED EXACTLY AS TODAY. Not "looks right" — IDENTICAL to a
+        // control index built over a folder holding only those two files, so a tagged neighbour cannot have
+        // perturbed the folder-corroborated filename rule.
+        const QString ctrl = base + QStringLiteral("/lib152-control");
+        CHECK(comicWith(ctrl + QStringLiteral("/comics/Preacher 001.cbz"), {}));
+        CHECK(comicWith(ctrl + QStringLiteral("/comics/Preacher 002.cbz"), {}));
+        const Index idxCtrl = BookLibrary::buildIndex(BookLibrary::scanFolder(ctrl));
+        const Book* p1 = byPathSuffix(idxC, QStringLiteral("/comics/Preacher 001.cbz"));
+        const Book* c1 = byPathSuffix(idxCtrl, QStringLiteral("/comics/Preacher 001.cbz"));
+        CHECK(p1 != nullptr);
+        CHECK(c1 != nullptr);
+        if (p1 && c1)
+        {
+            CHECK(p1->series == c1->series);
+            CHECK(p1->seriesIndex == c1->seriesIndex);
+            CHECK(p1->title == c1->title);
+            CHECK(p1->titleFromFilename);
+            CHECK(c1->titleFromFilename);
+            CHECK(p1->number.isEmpty());        // nothing to carry, so nothing carried
+            CHECK(p1->rating == ComicInfo::Rating::Unrated);
+            CHECK(p1->direction == ComicInfo::Direction::Unspecified);
+            CHECK(!p1->series.isEmpty());       // ...and the filename rule DID fire, so this is not vacuous
+        }
+
+        // (c) SERIES ORDER: the numbered issue leads, the "Annual 1" follows as unnumbered, and the row
+        // shows the number the publisher WROTE rather than a decimal invented for it.
+        const MediaCatalog sandShelf =
+            browse::bookSeriesCatalog(idxC, ComicName::seriesKey(QStringLiteral("The Sandman")));
+        CHECK(sandShelf.items.size() == 2);
+        CHECK(sandShelf.title == QStringLiteral("The Sandman"));
+        if (sandShelf.items.size() == 2)
+        {
+            CHECK(sandShelf.items.at(0).subtitle.startsWith(QStringLiteral("#1")));
+            CHECK(sandShelf.items.at(1).subtitle.startsWith(QStringLiteral("#Annual 1")));
+        }
+
+        // (d) THE RESTRICTED PROFILE. Mature and Adults go; Teen, Everyone 10+ and Unrated stay; an author
+        // left with nothing goes with them, and so does a series left with nothing.
+        const Index open = BookLibrary::filterForProfile(idxC, false);
+        CHECK(open.comicCount == idxC.comicCount);
+        CHECK(open.authors.size() == idxC.authors.size());
+        CHECK(open.series.size() == idxC.series.size());
+
+        const Index kids = BookLibrary::filterForProfile(idxC, true);
+        CHECK(kids.comicCount == idxC.comicCount - 2);          // Sandman #1 (Mature) + Crossed (Adults)
+        CHECK(byPathSuffix(kids, QStringLiteral("sandman-vol1-issue1.cbz")) == nullptr);
+        CHECK(byPathSuffix(kids, QStringLiteral("crossed-001.cbz")) == nullptr);
+        CHECK(byPathSuffix(kids, QStringLiteral("sandman-extra.cbz")) != nullptr);   // Teen stays
+        CHECK(byPathSuffix(kids, QStringLiteral("nausicaa-01.cbz")) != nullptr);     // Everyone 10+ stays
+        CHECK(byPathSuffix(kids, QStringLiteral("/comics/Preacher 001.cbz")) != nullptr);  // Unrated stays
+        CHECK(kids.author(BookLibrary::authorKeyFor(QStringLiteral("Garth Ennis"))) == nullptr);
+        CHECK(kids.author(BookLibrary::authorKeyFor(QStringLiteral("Neil Gaiman"))) != nullptr);
+        CHECK(kids.seriesFor(ComicName::seriesKey(QStringLiteral("Crossed"))) == nullptr);
+        CHECK(kids.seriesFor(ComicName::seriesKey(QStringLiteral("The Sandman"))) != nullptr);
+        // ...and the one that survived is a SERIES OF ONE now, rather than a shelf still claiming two.
+        const BookLibrary::Series* keptSand =
+            kids.seriesFor(ComicName::seriesKey(QStringLiteral("The Sandman")));
+        if (keptSand) CHECK(keptSand->books.size() == 1);
+
+        // (e) THE INDEX FILE CARRIES ALL OF IT, so the next launch does not re-open every archive.
+        const QString f2 = base + QStringLiteral("/bookindex152.json");
+        CHECK(BookLibrary::saveIndexFile(f2, e2));
+        QString rules2;
+        const QVector<BookLibrary::FileEntry> back = BookLibrary::loadIndexFile(f2, &rules2);
+        CHECK(back.size() == e2.size());
+        CHECK(rules2 == BookLibrary::parseStamp());
+        const Index idxBack = BookLibrary::buildIndex(back);
+        const Book* sandBack = byPathSuffix(idxBack, QStringLiteral("sandman-extra.cbz"));
+        CHECK(sandBack != nullptr);
+        if (sandBack)
+        {
+            CHECK(sandBack->number == QStringLiteral("Annual 1"));
+            CHECK(sandBack->series == QStringLiteral("The Sandman"));
+            CHECK(sandBack->author == QStringLiteral("Neil Gaiman"));
+            CHECK(sandBack->creators.contains(QStringLiteral("Neil Gaiman")));
+            CHECK(sandBack->rating == ComicInfo::Rating::Teen);
+        }
+        const Book* nauBack = byPathSuffix(idxBack, QStringLiteral("nausicaa-01.cbz"));
+        CHECK(nauBack != nullptr);
+        if (nauBack) CHECK(nauBack->direction == ComicInfo::Direction::RightToLeft);
+        // A rescan over the reloaded cache re-opens NOTHING, which is what makes carrying the fields in the
+        // index worth doing at all.
+        ScanStats s152;
+        BookLibrary::scanFolder(lib2, BookLibrary::byPath(back), &s152);
+        CHECK(s152.reused == 6);
+        CHECK(s152.reread == 0);
+
+        // (f) THE STAMP MOVED, ONCE. A library cached under #144's rules holds no ComicInfo fields at all
+        // and nothing else can supply them (the cache is keyed on mtime+size, which have not changed), so
+        // the caller must see a different stamp and drop the lot. Behavioural: the OLD value is written out
+        // here rather than read from the constant.
+        CHECK(BookLibrary::parseStamp() != QStringLiteral("2"));
+        CHECK(BookLibrary::parseStamp() != QStringLiteral("1"));
+        // ...and only once: a file written by THIS build reads back as current, so the next launch reuses
+        // it rather than re-reading the library for ever.
+        QString rules3;
+        BookLibrary::loadIndexFile(f2, &rules3);
+        CHECK(rules3 == BookLibrary::parseStamp());
     }
 
     QDir(base).removeRecursively();

@@ -1,6 +1,7 @@
 #include "AddonContext.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/BuiltinSecretBlob.h" // the ONE runtime de-obfuscator (shared with the scrobble app key)
 #include "BuiltinSecrets.h" // generated into the build tree by cmake/GenerateSecrets.cmake
 
 #include <QDir>
@@ -54,26 +55,12 @@ QString AddonContext::getConfig(const QString& key) const
 
 namespace {
 
-// Reverse the rolling XOR of one embedded value: join its two split arrays, then de-obfuscate byte by byte.
-// This MUST mirror native/cmake/GenerateSecrets.cmake's obfuscation formula (obf[i] = plain[i] ^ KEY[i%len]
-// ^ (i & 0xFF), i indexed WITHIN this value's blob). Best-effort only — anyone with the binary can recover it.
+// Reverse the rolling XOR of one embedded value. The formula, and the reason there is exactly ONE runtime
+// copy of it, are in core/BuiltinSecretBlob.h — the scrobble app key (#192) de-obfuscates through the same
+// function, and a second copy of the formula would drift from GenerateSecrets.cmake invisibly.
 QString deobfuscateBlob(const unsigned char* a, int aLen, const unsigned char* b, int bLen)
 {
-    const int total = aLen + bLen;
-    if (total <= 0) return QString(); // value absent/blank at build → nothing embedded
-
-    static const unsigned char KEY[] = { 90, 195, 23, 158, 66, 189, 47, 113 };
-    const int keyLen = static_cast<int>(sizeof(KEY));
-
-    QByteArray blob;
-    blob.reserve(total);
-    for (int i = 0; i < total; ++i)
-    {
-        const unsigned char ob = (i < aLen) ? a[i] : b[i - aLen];
-        const unsigned char pb = static_cast<unsigned char>((ob ^ KEY[i % keyLen]) ^ (i & 0xFF));
-        blob.append(static_cast<char>(pb));
-    }
-    return QString::fromUtf8(blob);
+    return BuiltinSecret::join(a, aLen, b, bLen);
 }
 
 // One embedded (addon, key) -> obfuscated blob. This TABLE is the allowlist: the JS global is bound into

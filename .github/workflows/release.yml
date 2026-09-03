@@ -49,7 +49,7 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
 
       - name: Set up MSVC
@@ -176,7 +176,7 @@ jobs:
           host: mac
           target: desktop
           arch: clang_64
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
 
       - name: Configure
@@ -241,7 +241,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: mac
           target: ios
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
 
       - name: Fetch libmpv static stack (MPVKit)
@@ -308,7 +308,7 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
 
       - name: Configure
@@ -420,7 +420,7 @@ jobs:
           arch: linux_gcc_64
           # qtdeclarative (QtQml/QtQuick) is an ESSENTIAL bundled in the Qt base install — aqt rejects it as
           # an add-on module ("packages ['qtdeclarative'] were not found"). Only genuine add-ons go here.
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtspeech'
           cache: true
       - name: Remember host Qt
         run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
