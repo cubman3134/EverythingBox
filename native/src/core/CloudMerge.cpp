@@ -1175,6 +1175,8 @@ void mergeChannels(const QJsonObject& channels)
             out.append(o);
         }
         store().setValue(channelKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+    }
+}
 // ---- custom home rows (per profile; whole-list newest-wins, with a UNION of the row set) --------------------
 // The profile's home arrangement (issue #161). Unlike every store above it, this is not a SET of items that
 // merge one by one — it is an ORDER, and there is no meaningful way to merge two orders: any rule that tried

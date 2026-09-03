@@ -5411,7 +5411,9 @@ int main(int argc, char** argv)
         CHECK(inDoc39);
 
         wipe39();
-    // ---- 39. Followed series (issue #155): favourites' merge rule, and the two-way carve-out ---------------
+    }
+
+    // ---- 40. Followed series (issue #155): favourites' merge rule, and the two-way carve-out ---------------
     // The follow mark is a peer of the favourite, so this section is deliberately favourites' section (SS8)
     // asked again of a different key -- if the two ever answer differently, one of them has grown a rule of its
     // own, which is exactly what shaping FollowStore as favourites' twin was meant to prevent.
