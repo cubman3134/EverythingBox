@@ -15,6 +15,7 @@
 // resolution exhaustively without a socket. parseManifest discipline: a malformed feed is best-effort and
 // NEVER throws — you get whatever entries parsed cleanly, or an empty feed, never a crash.
 #pragma once
+#include "OpdsPse.h"          // OpdsPseLink + the PSE page-streaming rules (#153)
 #include <QByteArray>
 #include <QString>
 #include <QVector>
@@ -27,6 +28,11 @@ struct OpdsLink
     QString rel;   // the Atom link relation ("http://opds-spec.org/acquisition", "subsection", …)
     QString href;  // ABSOLUTE url (resolved against the feed's base url at parse time)
     QString type;  // the mime type ("application/epub+zip", "application/atom+xml;profile=opds-catalog…")
+    // OPDS-PSE (#153) attributes, read verbatim off THIS link's pse:* attributes and left at their
+    // defaults on every link that carries none — which is every link a non-PSE server publishes.
+    int     pseCount = 0;       // pse:count
+    int     pseLastRead = -1;   // pse:lastRead (-1 = the attribute was absent, which is NOT "page 0")
+    QString pseLastReadDate;    // pse:lastReadDate, verbatim
 };
 
 struct OpdsEntry
@@ -38,6 +44,11 @@ struct OpdsEntry
     QString coverHref;            // absolute cover url; a full image is preferred over a thumbnail
     QVector<OpdsLink> acquisition; // downloadable-book links (may be several formats)
     QVector<OpdsLink> navigation;  // drill-into-another-feed links
+    // The OPDS-PSE page-streaming offer, when the entry carries one (#153): the page-image url template
+    // plus pse:count / pse:lastRead. Default-constructed (count 0, isValid() false) on every entry that
+    // carries none — which is every entry from a server that does not speak PSE — so nothing downstream
+    // changes for them. It is NOT an acquisition link: it downloads no book, it streams one page.
+    OpdsPseLink pse;
 };
 
 struct OpdsFeed
@@ -54,12 +65,27 @@ inline QString resolveHref(const QString& base, const QString& href)
 {
     if (href.isEmpty())
         return href;
-    const QUrl h(href);
+    // OPDS-PSE (#153) puts {pageNumber} / {maxWidth} INSIDE a link href, and `{`/`}` are not legal url
+    // characters. Rather than find out per Qt version whether QUrl passes them through, percent-encodes
+    // them or refuses the url outright, swap them for url-safe tokens across the resolve and swap them
+    // back afterwards: a template that came back as %7BpageNumber%7D could never be substituted, and
+    // every page request would then fetch the literal template. Inert for every href without a brace,
+    // which is every href #146 ever resolved.
+    const bool templated = href.contains(QLatin1Char('{'));
+    QString in = href;
+    if (templated)
+        in.replace(QLatin1Char('{'), QLatin1String("ebpseLB")).replace(QLatin1Char('}'), QLatin1String("ebpseRB"));
+    auto restore = [templated](QString out) {
+        if (templated)
+            out.replace(QLatin1String("ebpseLB"), QLatin1String("{")).replace(QLatin1String("ebpseRB"), QLatin1String("}"));
+        return out;
+    };
+    const QUrl h(in);
     if (!h.isRelative())
         return href;                       // already absolute (has a scheme) — leave it alone
     if (base.isEmpty())
         return href;                       // nothing to resolve against
-    return QUrl(base).resolved(h).toString();
+    return restore(QUrl(base).resolved(h).toString());
 }
 
 // Build the HTTP Basic auth header VALUE ("Basic <base64(user:pass)>") for a catalog's credentials, or an
@@ -82,6 +108,22 @@ namespace OpdsDetail {
 // Anything else (self/alternate/start/related/search) is intentionally ignored.
 inline void classifyLink(OpdsEntry& e, const OpdsLink& lk, bool& haveFullCover)
 {
+    // 0. an OPDS-PSE page-stream link (#153). It gets its own branch, ahead of the three below, because
+    //    it is none of them: it downloads no book and drills into no feed, and its rel names neither —
+    //    so before #153 it fell all the way through to "otherwise ignored" and was silently dropped. The
+    //    FIRST valid offer on an entry wins; a second one is a duplicate of the same volume.
+    if (OpdsPse::isStreamRel(lk.rel))
+    {
+        if (!e.pse.isValid())
+        {
+            e.pse.hrefTemplate = lk.href;
+            e.pse.type         = lk.type;
+            e.pse.count        = lk.pseCount;
+            e.pse.lastRead     = lk.pseLastRead;
+            e.pse.lastReadDate = lk.pseLastReadDate;
+        }
+        return;
+    }
     if (lk.rel.contains(QLatin1String("opds-spec.org/image")) || lk.rel.contains(QLatin1String("/thumbnail")))
     {
         const bool isThumb = lk.rel.contains(QLatin1String("/thumbnail"));
@@ -100,6 +142,28 @@ inline void classifyLink(OpdsEntry& e, const OpdsLink& lk, bool& haveFullCover)
         return;
     }
     // otherwise ignored
+}
+
+// Read the pse:* attributes off a <link> element. The PSE namespace is matched by URI where the feed
+// declares it (the correct way) and by the conventional "pse:" prefix where it does not — a feed that
+// forgets the xmlns declaration is malformed, and best-effort is this parser's whole contract.
+//
+// An ABSENT pse:lastRead leaves lastRead at -1 rather than 0, because "the server has no progress for
+// you" and "the server says you are on the first page" are different statements and only one of them
+// should move the reader.
+inline void readPseAttributes(const QXmlStreamAttributes& attrs, OpdsLink& lk)
+{
+    static const QLatin1String kNs("http://vaemendis.net/opds-pse/ns");
+    for (const QXmlStreamAttribute& a : attrs)
+    {
+        const bool isPse = a.namespaceUri() == kNs
+                        || a.qualifiedName().startsWith(QLatin1String("pse:"));
+        if (!isPse) continue;
+        const QStringView n = a.name();
+        if      (n == QLatin1String("count"))        lk.pseCount    = a.value().toInt();
+        else if (n == QLatin1String("lastRead"))     lk.pseLastRead = a.value().toInt();
+        else if (n == QLatin1String("lastReadDate")) lk.pseLastReadDate = a.value().toString();
+    }
 }
 
 } // namespace OpdsDetail
@@ -139,6 +203,7 @@ inline OpdsFeed parseOpds(const QByteArray& xml, const QString& baseUrl = QStrin
                 lk.rel  = a.value(QLatin1String("rel")).toString();
                 lk.type = a.value(QLatin1String("type")).toString();
                 lk.href = resolveHref(baseUrl, a.value(QLatin1String("href")).toString());
+                if (OpdsPse::isStreamRel(lk.rel)) OpdsDetail::readPseAttributes(a, lk);   // #153
                 OpdsDetail::classifyLink(cur, lk, haveFullCover);
             }
             text.clear();

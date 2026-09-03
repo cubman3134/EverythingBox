@@ -67,6 +67,13 @@ public:
     void stop();
     void setPaused(bool paused);
     bool isPaused() const;   // current mpv "pause" flag (OS-lifecycle pause query)
+    // Is anything actually LOADED right now (mpv's own idle-active, inverted). Distinct from isPaused(),
+    // which reports the pause FLAG and is therefore false both while playing and after a stop() -- so a
+    // caller asking "is this playing?" with isPaused() alone says yes to a player holding nothing at all.
+    // Added for #143: a peer's /state drives a remote's transport and the "Continue on this device" pull,
+    // and both read a stopped target as still playing without this. (MEASURED: after stop() the position
+    // freezes at its last value while `playing` stayed true, which is what sent this looking.)
+    bool hasMedia() const;
     void togglePause();
     void seekRelative(double seconds);
     void setPosition(double seconds);

@@ -68,16 +68,22 @@ static Row row(const QString& id, bool visible = true, int cap = 0)
 // ---- 1. default == today ----------------------------------------------------------------------------------
 static void testDefaultIsToday()
 {
-    // The CLASSIC home, exactly as HomeView::renderRecents composed it before #161: the recently-played
-    // groups, "You Missed", "Airing Soon", "★ Favorites". Written out by hand from the pre-change source,
-    // never read back out of the function under test.
-    const QStringList classicToday{ QStringLiteral("continue"), QStringLiteral("trakt:missed"),
+    // The CLASSIC home, exactly as HomeView::renderRecents composes it: the recently-played groups, "New",
+    // "Airing Soon", "★ Favorites". Written out by hand from the source, never read back out of the function
+    // under test.
+    //
+    // "new" (#155) stands where "trakt:missed" stood — the one substitution this sequence has taken since
+    // #161 pinned it, and it is a substitution rather than an addition because the New shelf ABSORBED #25's
+    // "You Missed" rows (HomeView's buildNew unions them with the followed series' unseen children). Same
+    // position, same rows, different header. "trakt:missed" is still known vocabulary with no producer.
+    const QStringList classicToday{ QStringLiteral("continue"), QStringLiteral("new"),
                                     QStringLiteral("trakt:calendar"), QStringLiteral("favorites") };
     CHECK(defaultShelfOrder() == classicToday);
+    CHECK(!defaultShelfOrder().contains(QStringLiteral("trakt:missed")));
 
     // No stored list -> that sequence, in that order, uncapped.
     CHECK(spell(plan(avail(classicToday), {}))
-          == QStringLiteral("continue trakt:missed trakt:calendar favorites"));
+          == QStringLiteral("continue new trakt:calendar favorites"));
 
     // ...and it still holds when the home has fewer rows than the full set (no Trakt account configured),
     // which is the shape most installs actually have.
@@ -215,7 +221,7 @@ static void testStore()
     CHECK(HomeRowStore::list().isEmpty());
     CHECK(!HomeRowStore::isCustomised());
     CHECK(spell(plan(avail(defaultShelfOrder()), HomeRowStore::list()))
-          == QStringLiteral("continue trakt:missed trakt:calendar favorites"));
+          == QStringLiteral("continue new trakt:calendar favorites"));
 
     // A negative cap never reaches a caller.
     HomeRowStore::save({ row(QStringLiteral("continue"), true, -3) });

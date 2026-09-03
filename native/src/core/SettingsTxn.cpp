@@ -73,6 +73,13 @@ bool SettingsTxn::inScope(const QString& key)
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
         "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
+        "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
+        // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
+        // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
+        // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings
+        // changed that the user never touched, and a Discard would revert the snapshot AFTER the New shelf had
+        // already been rebuilt from it, so the same children would be announced a second time.
+        "followsnap/",
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer
@@ -89,6 +96,12 @@ bool SettingsTxn::inScope(const QString& key)
         // probe_settingstxn §1.
         "addon.remote.manifest.",   // <md5 of the source base URL> -> the cached manifest bytes
         "addon.update.etag.",       // <addon id> -> the last self-update package ETag
+        // "Play on device" pairing tokens (#143). Unlike the passcode-attempt keys below, this family CAN
+        // move during an open settings visit: Settings has a Play-on-device row, and pairing with a peer
+        // from it writes a token while the transaction is live. In scope, the exit prompt would report a
+        // pairing the user deliberately performed as "1 setting changed", and a Discard would silently
+        // un-pair the device they had just walked across the room to enter a code on.
+        "playon/",
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;
