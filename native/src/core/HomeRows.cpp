@@ -58,7 +58,13 @@ const QStringList& defaultShelfOrder()
     // Read straight off HomeView::renderRecents as it stood before #161: the recently-played groups, then
     // "You Missed", then "Airing Soon", then "★ Favorites". Changing this line changes what an untouched
     // profile sees, which is the one thing #161 promised not to do.
-    static const QStringList kOrder{ QStringLiteral("continue"), QStringLiteral("trakt:missed"),
+    //
+    // ONE substitution since: issue #155's "new" stands where "trakt:missed" stood. It is not a new row in
+    // the sequence — the New shelf ABSORBED #25's "You Missed" rows (HomeView's buildNew unions them with
+    // the followed-series children), so the position and the content are the ones that were already there
+    // and only the header changed. "trakt:missed" stays accepted vocabulary with no producer in this build,
+    // which the open-vocabulary rule above already covers: a stored list naming it keeps it and skips it.
+    static const QStringList kOrder{ QStringLiteral("continue"), QStringLiteral("new"),
                                      QStringLiteral("trakt:calendar"), QStringLiteral("favorites") };
     return kOrder;
 }

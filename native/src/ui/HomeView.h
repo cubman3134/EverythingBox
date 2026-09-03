@@ -246,6 +246,12 @@ public:
     void downloadThemedLeaf(int browseIndex);      // resolve + queue the browse-item to download (no play)
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;
+    // Following a series (issue #155), the themed twins of the classic long-press menu's rows. Index-keyed
+    // like every other themedLeaf* accessor the detail action row is driven through; both arms end in the
+    // same toggleFollow / markAllSeen the classic menu calls, so the two layouts cannot disagree.
+    bool isThemedLeafFollowed(int browseIndex) const;
+    int  themedLeafNewCount(int browseIndex) const;
+    void runThemedFollowVerb(int browseIndex, const QString& verb);   // "follow" | "markseen"
     void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)
     // The themed DETAIL view's data for the browse-item at `browseIndex`: the rich MediaDetail (title/subtitle/
     // overview/facts + art via MediaArt::writeInto) resolved from the same local sources requestThemedMeta uses
@@ -428,6 +434,11 @@ signals:
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.
     void nativePortRequested(const MediaItem& item, const QString& portId);
+    // "Check for new items now" (issue #155). MainWindow owns the FollowScheduler — it is the only object
+    // that can reach the addon manager, the playback state and the network — so the view asks rather than
+    // runs, the same shape as chooseSourceRequested above. Also fired right after a fresh follow, so the
+    // first (silent) baseline reading is taken while the user is still looking at the thing they followed.
+    void followCheckNowRequested();
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
@@ -832,6 +843,26 @@ private:
     // NavMenu from the nav kit is controller/keyboard/mouse navigable in all of them. Same pattern, and
     // the same reasoning, as the Recent/Downloads game menu below.
     void showTraktMissedMenu(MediaItem it);
+
+    // ---- Following a series (issue #155) ---------------------------------------------------------
+    // The classic layout's verb surface. The THEMED layout carries the same two verbs as detail-row pills
+    // ("follow" / "markseen", built in themedDetailData and dispatched by MainWindow), and BOTH are gated on
+    // the one oracle follow::isFollowable — so the verb cannot appear on a leaf on one layout and not the
+    // other, which is the class of defect the two-layouts rule exists for.
+    void showFollowMenu(MediaItem it);       // long-press/right-click on a series row
+    void toggleFollow(const MediaItem& it);  // the verb itself, called from both layouts
+    // Activating a New-shelf row opens a menu rather than playing, for the "You Missed" row's reason: the
+    // row needs verbs beyond "open it" (mark this seen / mark the series seen / stop following), and a
+    // NavMenu is the only control every one of this app's four layouts reaches with a D-pad.
+    void showNewItemMenu(MediaItem it);
+    // Re-open a followed series' detail page from what a shelf row carries. openFavorite's tail, and it
+    // exists for the same reason: once the row is the only thing on screen, the source has to be
+    // recoverable from the row.
+    void openFollowedSeries(const QString& addonId, const QString& seriesId, const QString& title,
+                            const QString& type, const QString& thumb);
+    // The unread badge on a followed series' tile, counted through the same dealt-with filter the New
+    // shelf's rows use. 0 for anything not followed.
+    int  followUnreadCount(const QString& seriesId) const;
     // The synthetic "Trakt Watchlist" / "Trakt Collection" folders (video category only). Gated exactly as
     // the calendar is: the builder returns an EMPTY catalog whenever Trakt is not configured+connected, and
     // an empty catalog means no folder at all — no row, no placeholder, no "connect Trakt" hint.

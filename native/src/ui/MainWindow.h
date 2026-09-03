@@ -15,6 +15,7 @@
 #include <vector>
 #include "../addons/AddonModels.h"
 #include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
+#include "../core/FollowPlan.h"      // follow::Child is a value in the in-flight fetch map (#155)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
@@ -48,6 +49,7 @@ class BackgroundMusic;
 class HomeView;
 class AddonManager;
 class CatalogPrefetcher;
+class FollowScheduler;      // the followed-series background refresh (issue #155)
 class CloudSync;
 class SaveSync;             // per-file save/state sync — see core/SaveSync.h
 class LocalResolveCache;
@@ -1295,6 +1297,15 @@ private:
     std::unique_ptr<LocalResolveCache> resolveCache_;
     std::unique_ptr<CatalogResolver> resolver_;
     CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
+    // Following a series (issue #155): the polite background refresh (a QObject child of this) and the map
+    // from an in-flight AddonManager request id to the scheduler callback waiting for it. The map is cleared
+    // at every cycle boundary, so a reply that never arrives cannot accumulate.
+    // The display name for one follow interval, in hours. ONE function, called by BOTH settings builders,
+    // so the themed Choice row and the classic combo cannot come to offer differently-worded (or
+    // differently-ordered) versions of the same list — which is exactly the GS_TWINS failure class.
+    static QString followIntervalLabel(int hours);
+    FollowScheduler* followSched_ = nullptr;
+    QHash<int, std::function<void(bool, const QVector<follow::Child>&)>> followFetches_;
     std::unique_ptr<CloudSync> cloud_;
     // Per-file sync of emulator saves and save states (save-sync T5). Declared AFTER cloud_ on purpose: it
     // holds a raw CloudSync* and members are destroyed in reverse declaration order, so this one goes first.

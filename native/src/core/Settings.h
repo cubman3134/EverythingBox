@@ -309,6 +309,24 @@ namespace Settings
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
 
+    // FOLLOWING A SERIES (issue #155). How often the background pass asks each followed series' source what
+    // children it has now, in HOURS — one of follow::intervalChoicesHours() (6 / 12 / 24 / 168), or 0 for
+    // MANUAL, where nothing runs until "Check now" is pressed. Default daily.
+    //
+    // Both keys live under "following/" and are ORDINARY SYNCED PREFERENCES that ride the settings bundle: how
+    // often to check and whether to check on a metered link are choices about the user, and someone who set
+    // "weekly" on the TV means it on the phone too. The prefix is deliberately NOT "follow/", which
+    // CloudSync::isPerItemStoreKey claims for the per-item follow marks — "following/" does not start with
+    // "follow/" (the slash is load-bearing), and probe_cloudmerge pins that the two are classified apart.
+    int  followIntervalHours();
+    void setFollowIntervalHours(int hours);
+
+    // Whether the scheduled pass may run on a METERED connection. Off by default, per the issue: a background
+    // refresh over somebody's phone tethering is exactly the thing a polite feature does not do. "Check now"
+    // is a deliberate press and is never gated on it.
+    bool followOnMetered();
+    void setFollowOnMetered(bool on);
+
     // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
     // screenshots without the window needing focus (see core/UiTestServer). Default off.
     bool uiTestChannel();

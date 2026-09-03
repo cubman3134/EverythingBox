@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.171 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.173 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -312,6 +312,24 @@ if(EVERYTHINGBOX_BUILD_APP)
         message(STATUS "EverythingBox: QML theme engine enabled")
     else()
         message(STATUS "EverythingBox: QML theme engine OFF (qtdeclarative not found)")
+    endif()
+
+    # Read aloud (issue #145). Qt's TextToSpeech module wraps the PLATFORM engine - Windows SAPI here,
+    # AVSpeech on macOS/iOS, the Android TTS service, speech-dispatcher on Linux - so the app carries no
+    # speech synthesiser of its own: no bundled neural engine, no network TTS, and the settings copy says
+    # plainly that the voices are the system's and their quality varies with it.
+    #
+    # OPTIONAL exactly like the QML engine above, and for the same reason: qtspeech is a separate module that
+    # a Qt install (or a CI runner) may simply not have. Without it EB_HAVE_TTS is off, ReadAloudController is
+    # not compiled, and the reader's control row is ReadAloud::bookSettingsRowCount(false) - the five controls
+    # the book has always had, with nothing drawn that cannot act. probe_readaloud pins that count from the
+    # pure side; the source gate in native/tools/run-headless-probes.sh pins the wiring.
+    find_package(Qt6 QUIET OPTIONAL_COMPONENTS TextToSpeech)
+    if(TARGET Qt6::TextToSpeech)
+        set(EB_HAVE_TTS ON)
+        message(STATUS "EverythingBox: read-aloud enabled (Qt TextToSpeech)")
+    else()
+        message(STATUS "EverythingBox: read-aloud OFF (qtspeech not found)")
     endif()
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
@@ -705,9 +723,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/FollowStore.cpp src/core/FollowStore.h       # followed series, per-item-synced (issue #155)
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h # ...and the device-local seen/pending snapshots
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h # ...and the polite background refresh
+        src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
         src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
+        src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h  # pure read-aloud divider/stripper/position map (issue #145)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
         src/core/HomeRows.cpp     src/core/HomeRows.h  # per-profile custom home rows: the list + the pure planner (#161)
@@ -912,6 +935,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_link_libraries(everythingbox PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(everythingbox PRIVATE EB_HAVE_QML)
     endif()
+    # Read aloud: the engine-facing half. ReadAloudController.cpp is added HERE rather than to the source list
+    # above because it cannot compile without <QTextToSpeech> on the include path - the same reason the
+    # librashader TUs are added inside their own guard. The pure half (ReadAloud.cpp) is unconditional: it is
+    # what decides WHAT is spoken, it needs no engine, and probe_readaloud compiles it on every runner.
+    if(EB_HAVE_TTS)
+        target_sources(everythingbox PRIVATE
+            src/ebook/ReadAloudController.cpp src/ebook/ReadAloudController.h)
+        target_link_libraries(everythingbox PRIVATE Qt6::TextToSpeech)
+        target_compile_definitions(everythingbox PRIVATE EB_HAVE_TTS)
+    endif()
     set_target_properties(everythingbox PROPERTIES OUTPUT_NAME "EverythingBox") # the on-disk exe is EverythingBox.exe
     # On macOS, produce an EverythingBox.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE TRUE)
@@ -1010,6 +1043,22 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # Following a series (issue #155): the pure rule layer (FollowPlan.h -- followability, the schedule and its
+    # jitter bound, the per-source politeness predicate, the snapshot diff and the New shelf's union), the SYNCED
+    # follow mark (FollowStore, favourites' shape + tombstones), the DEVICE-LOCAL snapshot store
+    # (FollowSnapshot), and the background scheduler driven against a FAKE CLOCK. QtCore-only -- the scheduler
+    # takes its clock, its fetcher, its follow list and its playing/metered predicates as injected callbacks, so
+    # nothing here needs the addon manager, the network or an event loop.
+    add_executable(probe_follow tools/probe_follow.cpp
+        src/core/FollowPlan.h                          # header-only; the pure rules the probe drives directly
+        src/core/FollowStore.cpp src/core/FollowStore.h
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records the unfollow tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_follow PRIVATE src src/core)
+    target_link_libraries(probe_follow PRIVATE Qt6::Core)
 
     # Per-book reading bookmarks (issue #136): the pure ReaderAnchor model (header-only, in src/ebook) and the
     # BookmarkStore round-trip (add/remove/list-sorted + the delete tombstone). QtCore-only (a QSettings wrapper
@@ -1380,6 +1429,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_readertypography PRIVATE src src/core src/ebook)
     target_link_libraries(probe_readertypography PRIVATE Qt6::Core)
+
+    # Read aloud (issue #145): the PURE half - the utterance divider, the artifact stripper and the
+    # utterance <-> ReaderAnchor position map (src/ebook/ReadAloud.cpp + the header-only ReaderAnchor.h).
+    # QtCore-only and deliberately engine-free: CI has neither the Qt TextToSpeech module nor an audio device,
+    # and this is the half that can be wrong in a way a listener hears. Built WITHOUT EB_HAVE_TTS, so it also
+    # compiles the feature-absent path this repo would otherwise only ever build on a runner by accident.
+    add_executable(probe_readaloud tools/probe_readaloud.cpp
+        src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h
+        src/ebook/ReaderAnchor.h)
+    target_include_directories(probe_readaloud PRIVATE src src/ebook)
+    target_link_libraries(probe_readaloud PRIVATE Qt6::Core)
 
     # Refresh-rate matching Tier 1 (issue #70): the pure toggle->mpv-video-sync map + form-factor default
     # (src/video/RefreshSync.h, header-only) plus the Settings default/round-trip. QtCore-only; Settings.cpp pulls

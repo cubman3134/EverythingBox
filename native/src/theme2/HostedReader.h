@@ -54,4 +54,19 @@ public:
     // book maps the BOOK-WIDE page (the number its chrome shows) back onto a chapter plus a page inside it.
     // Used by a bookmark jump and by the chrome's progress bar, which is a scale over exactly this number.
     virtual void gotoPage(int /*page0*/) {}
+
+    // Read aloud (issue #145). A BOOK narrates; a pdf/comic does not, so every one of these keeps an inert
+    // default and the chrome asks readAloudAvailable() before it draws a single control. That question is
+    // answered false by three separate things — a kind that has no text, a build without the Qt TextToSpeech
+    // module, and a platform with no speech engine — and the row is the row it always was in all three.
+    virtual bool readAloudAvailable() const { return false; }
+    virtual bool readAloudActive() const { return false; }
+    virtual bool readAloudPaused() const { return false; }
+    virtual void toggleReadAloud() {}                  // not narrating -> start here; narrating -> stop
+    virtual void readAloudTogglePause() {}
+    virtual void readAloudSkip(int /*paragraphs*/) {}  // paragraph back / forward
+    virtual double readAloudSpeed() const { return 1.0; }   // the shared #140 per-book speed
+    virtual void readAloudCycleSpeed() {}
+    virtual QString readAloudVoiceName() const { return {}; }
+    virtual void readAloudCycleVoice() {}
 };
