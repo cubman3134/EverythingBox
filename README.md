@@ -43,6 +43,10 @@ Everything lives under [`native/`](native/):
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
 
+Feature notes for things with a server on the other end live in [`docs/`](docs/) —
+see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
+library.
+
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status, and
 **[`native/docs/play-on-device.md`](native/docs/play-on-device.md)** for handing playback
@@ -118,6 +122,29 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Read aloud
+
+The reader can narrate a book. Press **Read aloud** in the reader's controls and it starts from
+where you are; the spoken paragraph is highlighted, the page turns when the narrator leaves it,
+and paragraph back/forward, pause and stop are the page keys and the controls beside it. There
+is no second bookmark: the spoken paragraph *is* your reading position, so stopping leaves you
+on the page it reached, that position is what a restart resumes from, and reading progress
+accrues exactly as it does when you turn the pages yourself.
+
+Speed is the same per-book preference an audiobook uses — set it once for a title and it holds
+whether you are listening to a narrator or to your computer. Pitch is left alone.
+
+**The voices are your operating system's.** EverythingBox bundles no speech engine and downloads
+nothing: it speaks through SAPI on Windows, AVSpeech on macOS and iOS, the Android speech
+service, and speech-dispatcher on Linux. Quality varies a great deal between platforms and
+between the voices installed on one — add more in your system's own speech settings, then step
+through them with the **Voice** control in the reader. If a build of EverythingBox was compiled
+against a Qt without the TextToSpeech module, or the platform offers no engine at all, the
+read-aloud controls are simply not there.
+
+Works wherever the reader has structured text: EPUB, MOBI, FB2, TXT and Markdown, and a PDF read
+in text mode. Comics have nothing to read. Screen-off and background listening are not here yet.
 
 ## Home rows
 

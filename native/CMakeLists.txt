@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.171 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.174 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -312,6 +312,24 @@ if(EVERYTHINGBOX_BUILD_APP)
         message(STATUS "EverythingBox: QML theme engine enabled")
     else()
         message(STATUS "EverythingBox: QML theme engine OFF (qtdeclarative not found)")
+    endif()
+
+    # Read aloud (issue #145). Qt's TextToSpeech module wraps the PLATFORM engine - Windows SAPI here,
+    # AVSpeech on macOS/iOS, the Android TTS service, speech-dispatcher on Linux - so the app carries no
+    # speech synthesiser of its own: no bundled neural engine, no network TTS, and the settings copy says
+    # plainly that the voices are the system's and their quality varies with it.
+    #
+    # OPTIONAL exactly like the QML engine above, and for the same reason: qtspeech is a separate module that
+    # a Qt install (or a CI runner) may simply not have. Without it EB_HAVE_TTS is off, ReadAloudController is
+    # not compiled, and the reader's control row is ReadAloud::bookSettingsRowCount(false) - the five controls
+    # the book has always had, with nothing drawn that cannot act. probe_readaloud pins that count from the
+    # pure side; the source gate in native/tools/run-headless-probes.sh pins the wiring.
+    find_package(Qt6 QUIET OPTIONAL_COMPONENTS TextToSpeech)
+    if(TARGET Qt6::TextToSpeech)
+        set(EB_HAVE_TTS ON)
+        message(STATUS "EverythingBox: read-aloud enabled (Qt TextToSpeech)")
+    else()
+        message(STATUS "EverythingBox: read-aloud OFF (qtspeech not found)")
     endif()
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
@@ -637,6 +655,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
         src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
         src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
+        # AUDIOBOOKSHELF CLIENT (#197 increment 1): an Audiobookshelf server as a supplier of the audiobook
+        # shapes #139's local library uses, plus its podcasts. Audiobookshelf.h/.cpp is the pure half (the
+        # id scheme, the URL rules, the payload readers, the chapter arithmetic, the reporting throttle) and
+        # is what probe_absclient drives; AbsClient is the socket half; AbsCatalogs renders the levels.
+        src/core/Audiobookshelf.cpp      src/core/Audiobookshelf.h
+        src/core/AbsServerStore.cpp      src/core/AbsServerStore.h        # saved servers, device-local
+        src/core/AbsClient.cpp           src/core/AbsClient.h             # the fetches, the cache, AbsSupply
+        src/browse/AbsCatalogs.cpp       src/browse/AbsCatalogs.h         # the thirteen browse levels
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -697,9 +723,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/FollowStore.cpp src/core/FollowStore.h       # followed series, per-item-synced (issue #155)
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h # ...and the device-local seen/pending snapshots
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h # ...and the polite background refresh
+        src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
         src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
+        src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h  # pure read-aloud divider/stripper/position map (issue #145)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
         src/core/HomeRows.cpp     src/core/HomeRows.h  # per-profile custom home rows: the list + the pure planner (#161)
@@ -912,6 +943,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_link_libraries(everythingbox PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(everythingbox PRIVATE EB_HAVE_QML)
     endif()
+    # Read aloud: the engine-facing half. ReadAloudController.cpp is added HERE rather than to the source list
+    # above because it cannot compile without <QTextToSpeech> on the include path - the same reason the
+    # librashader TUs are added inside their own guard. The pure half (ReadAloud.cpp) is unconditional: it is
+    # what decides WHAT is spoken, it needs no engine, and probe_readaloud compiles it on every runner.
+    if(EB_HAVE_TTS)
+        target_sources(everythingbox PRIVATE
+            src/ebook/ReadAloudController.cpp src/ebook/ReadAloudController.h)
+        target_link_libraries(everythingbox PRIVATE Qt6::TextToSpeech)
+        target_compile_definitions(everythingbox PRIVATE EB_HAVE_TTS)
+    endif()
     set_target_properties(everythingbox PROPERTIES OUTPUT_NAME "EverythingBox") # the on-disk exe is EverythingBox.exe
     # On macOS, produce an EverythingBox.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE TRUE)
@@ -1010,6 +1051,22 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # Following a series (issue #155): the pure rule layer (FollowPlan.h -- followability, the schedule and its
+    # jitter bound, the per-source politeness predicate, the snapshot diff and the New shelf's union), the SYNCED
+    # follow mark (FollowStore, favourites' shape + tombstones), the DEVICE-LOCAL snapshot store
+    # (FollowSnapshot), and the background scheduler driven against a FAKE CLOCK. QtCore-only -- the scheduler
+    # takes its clock, its fetcher, its follow list and its playing/metered predicates as injected callbacks, so
+    # nothing here needs the addon manager, the network or an event loop.
+    add_executable(probe_follow tools/probe_follow.cpp
+        src/core/FollowPlan.h                          # header-only; the pure rules the probe drives directly
+        src/core/FollowStore.cpp src/core/FollowStore.h
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records the unfollow tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_follow PRIVATE src src/core)
+    target_link_libraries(probe_follow PRIVATE Qt6::Core)
 
     # Per-book reading bookmarks (issue #136): the pure ReaderAnchor model (header-only, in src/ebook) and the
     # BookmarkStore round-trip (add/remove/list-sorted + the delete tombstone). QtCore-only (a QSettings wrapper
@@ -1380,6 +1437,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_readertypography PRIVATE src src/core src/ebook)
     target_link_libraries(probe_readertypography PRIVATE Qt6::Core)
+
+    # Read aloud (issue #145): the PURE half - the utterance divider, the artifact stripper and the
+    # utterance <-> ReaderAnchor position map (src/ebook/ReadAloud.cpp + the header-only ReaderAnchor.h).
+    # QtCore-only and deliberately engine-free: CI has neither the Qt TextToSpeech module nor an audio device,
+    # and this is the half that can be wrong in a way a listener hears. Built WITHOUT EB_HAVE_TTS, so it also
+    # compiles the feature-absent path this repo would otherwise only ever build on a runner by accident.
+    add_executable(probe_readaloud tools/probe_readaloud.cpp
+        src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h
+        src/ebook/ReaderAnchor.h)
+    target_include_directories(probe_readaloud PRIVATE src src/ebook)
+    target_link_libraries(probe_readaloud PRIVATE Qt6::Core)
 
     # Refresh-rate matching Tier 1 (issue #70): the pure toggle->mpv-video-sync map + form-factor default
     # (src/video/RefreshSync.h, header-only) plus the Settings default/round-trip. QtCore-only; Settings.cpp pulls
@@ -2537,6 +2605,40 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_audiobooks PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_audiobooks PRIVATE Qt6::Core Qt6::Gui tag)
+
+    # The AUDIOBOOKSHELF client (issue #197, increment 1): the pure half (the id scheme, the URL rules, the
+    # payload readers, the chapter rebase, the book timeline, the reporting throttle), the browse levels, the
+    # device-local server store, and the socket half driven against a FIXTURE HTTP STUB the probe itself
+    # starts on a loopback port.
+    #
+    # A REAL SOCKET, because half of what is under test is not a function of the payload: that the token
+    # rides an Authorization HEADER and never a url, that exactly one PATCH leaves the process for two ticks
+    # a second apart, and that a play session's tracks come back in the SERVER's order. Hence Qt6::Network.
+    #
+    # PlaybackSession (and the three stores behind its resume/stats writes) is linked because #197's central
+    # claim - that a server's own item's position is written to the SERVER and NOT into our synced resume
+    # categories - is a claim about what that real object does not write, and a fake would prove only that a
+    # fake writes nothing. MetaCache is AbsClient's cover sink; Settings/FormFactor/ProfileStore are what
+    # ConsumptionStats and the per-profile store key through (probe_playback's link set, for the same reason).
+    add_executable(probe_absclient tools/probe_absclient.cpp
+        src/core/Audiobookshelf.cpp   src/core/Audiobookshelf.h
+        src/core/AbsServerStore.cpp   src/core/AbsServerStore.h
+        src/core/AbsClient.cpp        src/core/AbsClient.h
+        src/browse/AbsCatalogs.cpp    src/browse/AbsCatalogs.h
+        src/core/RemoteAudiobook.h    src/core/NaturalOrder.h   # the part token this queue is built from
+        src/core/MetaCache.cpp        src/core/MetaOverrides.cpp src/core/MetaCache.h
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        src/core/ResumeStore.cpp      src/core/ResumeStore.h
+        src/core/Tombstones.cpp       src/core/Tombstones.h
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/ProfileStore.cpp     src/core/ProfileStore.h
+        src/core/Settings.cpp         src/core/Settings.h
+        src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
+        src/addons/AddonModels.cpp    src/addons/AddonModels.h
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/core/StreamHeaders.h)
+    target_include_directories(probe_absclient PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    target_link_libraries(probe_absclient PRIVATE Qt6::Core Qt6::Network)
 
     # The local READING library (issue #134, increment 1): the container reader (EpubMeta/BookMeta), the
     # comic filename rule (ComicName), the scan and grouping (BookLibrary) and the browse builders over it

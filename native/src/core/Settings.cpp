@@ -6,6 +6,7 @@
 #include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
 #include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include "Scrobble.h"               // the scrobble keys (#192) are built off the prefix the carve-out excludes
+#include "FollowPlan.h"             // followIntervalHours() clamps through the pure layer's own choice list (#155)
 #include <QSettings>
 #include <QCoreApplication>
 #include <QRegularExpression>
@@ -696,6 +697,22 @@ bool Settings::checkUpdatesOnStartup() { return store().value(QStringLiteral("ge
 void Settings::setCheckUpdatesOnStartup(bool on)
 {
     store().setValue(QStringLiteral("general/checkUpdatesOnStartup"), on); store().sync();
+}
+// Issue #155. The stored value is clamped through the PURE layer's own choice list rather than validated
+// here, so the Settings row, the scheduler and probe_follow all agree on what an interval may be; an
+// unrecognised stored number reads back as the daily default rather than as itself.
+int Settings::followIntervalHours()
+{
+    return int(follow::clampIntervalHours(store().value(QStringLiteral("following/interval"), 24).toInt()));
+}
+void Settings::setFollowIntervalHours(int hours)
+{
+    store().setValue(QStringLiteral("following/interval"), int(follow::clampIntervalHours(hours))); store().sync();
+}
+bool Settings::followOnMetered() { return store().value(QStringLiteral("following/metered"), false).toBool(); }
+void Settings::setFollowOnMetered(bool on)
+{
+    store().setValue(QStringLiteral("following/metered"), on); store().sync();
 }
 bool Settings::uiTestChannel() { return store().value(QStringLiteral("debug/uiTestChannel"), false).toBool(); }
 void Settings::setUiTestChannel(bool on)
