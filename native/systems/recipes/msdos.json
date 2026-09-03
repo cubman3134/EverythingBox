@@ -1,0 +1,30 @@
+{
+  "system": "msdos",
+  "summary": "Drop a DOS game here as a ZIP or as its own folder. Nothing else: DOSBox-Pure reads the ZIP without unpacking it, and for a folder EverythingBox finds the program to run.",
+  "firmwareFolder": "system",
+  "folderIsGame": true,
+  "executables": {
+    "extensions": ["bat", "exe", "com"],
+    "prefer": [],
+    "avoid": [
+      "install", "install2", "instalar", "setup", "config", "configur", "setsound",
+      "uvconfig", "univbe", "readme", "read", "unzip", "uninstall", "uninstal",
+      "dos4gw", "cwsdpmi", "deice", "regist", "order"
+    ]
+  },
+  "cores": [
+    {
+      "core": "dosbox_pure",
+      "options": {
+        "dosbox_pure_conf": "inside"
+      },
+      "firmware": [],
+      "content": [
+        { "when": "archive", "present": "asIs" },
+        { "when": "folder",  "present": "executable" },
+        { "when": "file",    "present": "asIs" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

@@ -126,11 +126,24 @@ Rectangle {
                         model: {
                             if (!chrome.br) return []
                             if (chrome.readerType === "book") {
-                                return [{ i: 1, t: "A −" },
-                                        { readout: true, t: String(chrome.br.fontSize) },
-                                        { i: 2, t: "A +" },
-                                        { i: 3, t: chrome.br.themeNames[chrome.br.themeIndex] },
-                                        { i: 4, t: chrome.br.fontFamilies[chrome.br.fontFamilyIndex] }]
+                                var brows = [{ i: 1, t: "A −" },
+                                             { readout: true, t: String(chrome.br.fontSize) },
+                                             { i: 2, t: "A +" },
+                                             { i: 3, t: chrome.br.themeNames[chrome.br.themeIndex] },
+                                             { i: 4, t: chrome.br.fontFamilies[chrome.br.fontFamilyIndex] }]
+                                // Read aloud (issue #145), indices 5..8. Gated on the ONE availability flag, so
+                                // a build without the Qt TextToSpeech module (or a platform with no engine)
+                                // draws the five controls this row has always had - and the host's zone count,
+                                // ReadAloud::bookSettingsRowCount, agrees because it reads the same flag.
+                                if (chrome.br.readAloudAvailable) {
+                                    brows.push({ i: 5, t: chrome.br.readAloudActive ? "■ Stop" : "▶ Read aloud",
+                                                 on: chrome.br.readAloudActive })
+                                    brows.push({ i: 6, t: chrome.br.readAloudPaused ? "Resume" : "Pause",
+                                                 on: chrome.br.readAloudPaused })
+                                    brows.push({ i: 7, t: chrome.br.readAloudSpeedLabel })
+                                    brows.push({ i: 8, t: chrome.br.readAloudVoiceLabel })
+                                }
+                                return brows
                             }
                             var rows = [{ i: 1, t: "−" }, { i: 2, t: "+" }, { i: 3, t: "Fit" }]
                             if (chrome.readerType === "comic")

@@ -52,6 +52,13 @@ namespace StreamHeaders
     //     fixed one from the addon would pin playback to one byte window forever.
     Headers parseProxyHeaders(const QJsonObject& behaviorHints);
 
+    // The same rules, applied to a FLAT name->value object. #188's `pages` resource declares a page's
+    // fetch headers as `"headers": { "Referer": "…" }` — the identical vocabulary, one nesting level up
+    // from behaviorHints.proxyHeaders.request — and there must be exactly one implementation of "which
+    // headers may a source declare": a second copy is a second place for `Range` or a CRLF to get through.
+    // parseProxyHeaders is this function applied to the nested object.
+    Headers parseHeaderMap(const QJsonObject& flat);
+
     // The headers that may accompany a request to `playUrl`, given that the addon declared them for
     // `declaredUrl`. Empty unless the two are the SAME http(s) origin (scheme + host + port).
     //

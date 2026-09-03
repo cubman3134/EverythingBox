@@ -11,6 +11,10 @@
 #include "../core/ConsumptionStats.h"
 #include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
 #include "../core/Settings.h"
+#include "ReadAloud.h"                 // the pure divider/stripper/position map (issue #145)
+#ifdef EB_HAVE_TTS
+#  include "ReadAloudController.h"      // compiled only when the build has Qt TextToSpeech
+#endif
 
 #include <QFile>
 #include <QListWidget>
@@ -32,6 +36,7 @@
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QLocale>
 #include <QImage>
 #include <QSettings>
 #include <QCryptographicHash>
@@ -338,6 +343,41 @@ void BookPageWidget::scrollToTextPosition(int pos)
     update();
 }
 
+// ---- Read aloud (issue #145): the three things narration asks of the page ----------------------------------
+
+// The chapter's text in DOCUMENT coordinates. toPlainText() is length-preserving - it substitutes the block
+// separator with a single newline character rather than removing it - so an offset here is an offset that
+// topTextPosition and scrollToTextPosition speak, and the divider's ranges need no translation at all.
+QString BookPageWidget::plainText() const
+{
+    return doc_ ? doc_->toPlainText() : QString();
+}
+
+void BookPageWidget::setSpokenRange(int start, int end)
+{
+    const int s = (end > start) ? start : -1;
+    const int e = (end > start) ? end   : -1;
+    if (s == spokenStart_ && e == spokenEnd_) return;
+    spokenStart_ = s;
+    spokenEnd_   = e;
+    update();
+}
+
+// Turn the page only when the spoken spot has left it. Checking first is what keeps the text still while a long
+// paragraph is read: re-anchoring on every utterance would shuffle the page under the reader's eye even when
+// nothing needed to move.
+void BookPageWidget::ensurePosVisible(int pos)
+{
+    if (lines_.isEmpty() || !doc_) return;
+    const int startLine = lineIndexForPos(topPos_);
+    const int endLine   = lastFittingLine(startLine);
+    const int pageEnd   = (endLine + 1 < lines_.size()) ? lines_[endLine + 1].pos : doc_->characterCount();
+    if (pos >= topPos_ && pos < pageEnd) return;   // already on the page being shown
+    topPos_ = lines_[lineIndexForPos(qBound(0, pos, lines_.last().pos))].pos;
+    recomputeCurrentPage();
+    update();
+}
+
 int BookPageWidget::countPages(const QString& html, const QString& baseDir) const
 {
     // Count whole-line pages for a chapter in a throwaway document with the live view's font and width -
@@ -413,6 +453,24 @@ void BookPageWidget::paintEvent(QPaintEvent*)
 
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette = palette();                  // text drawn in QPalette::Text
+
+    // The spoken paragraph (issue #145), as a document SELECTION on the one PaintContext both draws below
+    // share - so the highlight is clipped, shifted and page-broken by exactly the same arithmetic as the text
+    // it sits behind, instead of a rectangle drawn over it that a reflow could leave stranded. The tint is the
+    // reading theme's own ink at low alpha, so it lands legibly on paper, sepia, dark and true black alike.
+    if (spokenEnd_ > spokenStart_ && spokenStart_ >= 0)
+    {
+        const int last = qMax(0, doc_->characterCount() - 1);
+        QTextCursor sc(doc_);
+        sc.setPosition(qBound(0, spokenStart_, last));
+        sc.setPosition(qBound(0, spokenEnd_, last), QTextCursor::KeepAnchor);
+        QColor tint = palette().color(QPalette::Text);
+        tint.setAlpha(46);
+        QAbstractTextDocumentLayout::Selection sel;
+        sel.cursor = sc;
+        sel.format.setBackground(tint);
+        ctx.selections.append(sel);
+    }
 
     // First line: drawn shifted by anchorX; the words before the anchor fall left of the clip and vanish.
     p.save();
@@ -600,6 +658,31 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     bar->addWidget(contents);
     bar->addWidget(smaller);
     bar->addWidget(bigger);
+
+    // Read aloud (issue #145), on the classic bar. Built ONLY when this build carries the Qt TextToSpeech
+    // module AND the platform offers an engine: a control that cannot speak is worse than no control, and a
+    // build without the module shows exactly the bar it always showed.
+#ifdef EB_HAVE_TTS
+    if (ReadAloudController::engineAvailable())
+    {
+        readAloud_  = new ReadAloudController(this, this);
+        raBtn_      = new QPushButton(tr("Read aloud"), menu_);
+        raPauseBtn_ = new QPushButton(tr("Pause"), menu_);
+        raSpeedBtn_ = new QPushButton(QStringLiteral("1×"), menu_);
+        raVoiceBtn_ = new QPushButton(tr("Voice"), menu_);
+        for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_ })
+        {
+            b->setFocusPolicy(Qt::NoFocus);   // arrow keys stay with the view, like every other bar button
+            bar->addWidget(b);
+        }
+        connect(raBtn_,      &QPushButton::clicked, this, &EbookView::toggleReadAloud);
+        connect(raPauseBtn_, &QPushButton::clicked, this, &EbookView::readAloudTogglePause);
+        connect(raSpeedBtn_, &QPushButton::clicked, this, &EbookView::readAloudCycleSpeed);
+        connect(raVoiceBtn_, &QPushButton::clicked, this, &EbookView::readAloudCycleVoice);
+        syncReadAloudButtons();
+    }
+#endif
+
     bar->addStretch(1);
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);
@@ -620,6 +703,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
 
 bool EbookView::openBook(const QString& path, QString* error)
 {
+    if (readAloudActive()) toggleReadAloud();   // stop narrating the book we are leaving (issue #145)
     persist(); // save the book we're leaving, if any
 
     book_ = makeSource(path); // EPUB / MOBI / PDF, by file content
@@ -647,6 +731,11 @@ bool EbookView::openBook(const QString& path, QString* error)
     restorePos_ = -1; restoreFrac_ = -1.0;
     recomputeBookPages(); // tally the book's pages, then show "page x / y"
     updatePageLabel();
+#ifdef EB_HAVE_TTS
+    // Read aloud (issue #145): this book's stored speed and the voice, resolved NOW so the controls say what
+    // pressing them would do rather than only finding out once narration starts.
+    if (readAloud_) readAloud_->adoptBook();
+#endif
     revealMenu();      // flash the controls so they're discoverable, then auto-hide
     setFocus();
     return true;
@@ -674,13 +763,18 @@ void EbookView::restoreState()
         : -1.0;
 }
 
-void EbookView::persist()
+// posOverride (-1 = "wherever the page starts") is how read-aloud records the SPOKEN PARAGRAPH as the reading
+// position (issue #145) without disturbing the page: a paragraph already on screen must not re-anchor the page
+// under the reader's eye, but it is still the place to come back to. Everything else passes -1 and the stored
+// position is the top of the page, exactly as before.
+void EbookView::persist(int posOverride)
 {
     if (!book_->isOpen() || chapter_ < 0) return;
     store().setValue(QStringLiteral("ebook/fontSize"), fontPt_);
     const QString k = bookKey(book_->sourcePath());
     store().setValue(k + QStringLiteral("chapter"), chapter_);
-    store().setValue(k + QStringLiteral("pos"), page_->topTextPosition()); // where in the text, not which page
+    store().setValue(k + QStringLiteral("pos"),
+                     posOverride >= 0 ? posOverride : page_->topTextPosition()); // where in the text, not which page
     store().setValue(k + QStringLiteral("title"), book_->title());
     store().sync();
 }
@@ -710,22 +804,34 @@ void EbookView::loadChapter(int index, bool toLast)
 void EbookView::nextPage()
 {
     if (!book_->isOpen()) return;
+    // While narrating, the page follows the narrator, so a page key is a PARAGRAPH move - the reader's twin of
+    // #140's jump controls (issue #145). Paging by hand here would be undone by the very next utterance.
+    if (readAloudActive()) { readAloudSkip(+1); return; }
     if (page_->pageForward())                             { /* moved within the chapter */ }
     else if (chapter_ < book_->chapterFiles().size() - 1)   loadChapter(chapter_ + 1);
     else                                                    return;
     updatePageLabel();
-    // Consumption stats: accrue at the forward page/chapter advance only (NOT updatePageLabel, which also fires
-    // on font repagination that would inflate the global page). High-water keyed by the book path + title; the
-    // store ignores any revisit/regression.
+    accrueReadingProgress();
+    persist();
+}
+
+// Consumption stats: accrue at the forward page/chapter advance only (NOT updatePageLabel, which also fires on
+// font repagination that would inflate the global page). High-water keyed by the book path + title; the store
+// ignores any revisit/regression. Factored out of nextPage() so a page turned BY THE NARRATOR (issue #145)
+// accrues through exactly this reckoning - which is what #136's furthest-read carries - rather than a second
+// one beside it that could drift.
+void EbookView::accrueReadingProgress()
+{
+    if (!book_ || !book_->isOpen()) return;
     ConsumptionStats::addPagesRead(book_->sourcePath(), globalPage(), book_->title());
     emit readingProgress(book_->title(),
                          tr("Reading · p. %1 of %2").arg(globalPage()).arg(pageCount()));
-    persist();
 }
 
 void EbookView::prevPage()
 {
     if (!book_->isOpen()) return;
+    if (readAloudActive()) { readAloudSkip(-1); return; }   // paragraph back while narrating (issue #145)
     if (page_->pageBackward())   { /* moved within the chapter */ }
     else if (chapter_ > 0)         loadChapter(chapter_ - 1, /*toLast*/ true);
     else                           return;
@@ -977,6 +1083,163 @@ void EbookView::updatePageLabel()
                             .arg(chapter_ + 1).arg(book_->chapterFiles().size()));
 
     emit pageInfoChanged(); // hosted chrome mirrors page/chapter/font — refresh it on every label update
+}
+
+// ---- Read aloud (issue #145) ---------------------------------------------------------------------------------
+// The commands both layouts fire. Every one is a no-op when read-aloud is unavailable, which is the state of a
+// build without the Qt TextToSpeech module (the controller type does not even exist there) and of a platform
+// with no speech engine. Nothing below reaches into narration's own decisions: what to speak and where that
+// leaves the reader are ReadAloud's and ReadAloudController's, and this is the wiring between them and a bar.
+
+bool EbookView::readAloudAvailable() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ != nullptr;
+#else
+    return false;
+#endif
+}
+
+bool EbookView::readAloudActive() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ && readAloud_->active();
+#else
+    return false;
+#endif
+}
+
+bool EbookView::readAloudPaused() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ && readAloud_->paused();
+#else
+    return false;
+#endif
+}
+
+void EbookView::toggleReadAloud()
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_ && book_ && book_->isOpen()) readAloud_->toggle();
+#endif
+}
+
+void EbookView::readAloudTogglePause()
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_) readAloud_->togglePause();
+#endif
+}
+
+void EbookView::readAloudSkip(int paragraphs)
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_) readAloud_->skip(paragraphs);
+#else
+    Q_UNUSED(paragraphs);
+#endif
+}
+
+double EbookView::readAloudSpeed() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ ? readAloud_->speed() : 1.0;
+#else
+    return 1.0;
+#endif
+}
+
+void EbookView::readAloudCycleSpeed()
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_) readAloud_->cycleSpeed();
+#endif
+}
+
+QString EbookView::readAloudVoiceName() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ ? readAloud_->voiceNames().value(readAloud_->voiceIndex()) : QString();
+#else
+    return QString();
+#endif
+}
+
+void EbookView::readAloudCycleVoice()
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_) readAloud_->cycleVoice();
+#endif
+}
+
+// The classic bar's labels ARE narration's state - there is no separate indicator, so a label that lies is the
+// whole feedback gone. Re-run on every narration change.
+void EbookView::syncReadAloudButtons()
+{
+#ifdef EB_HAVE_TTS
+    if (!readAloud_ || !raBtn_) return;
+    const bool on = readAloud_->active();
+    raBtn_->setText(on ? tr("Stop") : tr("Read aloud"));
+    raPauseBtn_->setText(readAloud_->paused() ? tr("Resume") : tr("Pause"));
+    raPauseBtn_->setEnabled(on);
+    raSpeedBtn_->setText(QString::number(readAloud_->speed(), 'g', 3) + QString(QChar(0x00D7)));
+    const QString v = readAloud_->voiceNames().value(readAloud_->voiceIndex());
+    raVoiceBtn_->setText(v.isEmpty() ? tr("Voice") : v);
+#endif
+}
+
+// ---- ReadAloudTarget: what the controller is allowed to ask of the reader -------------------------------------
+
+QString EbookView::raChapterText() const { return page_ ? page_->plainText() : QString(); }
+
+int EbookView::raChapterCount() const { return book_ ? int(book_->chapterFiles().size()) : 0; }
+
+bool EbookView::raGotoChapter(int index)
+{
+    if (!book_ || !book_->isOpen()) return false;
+    if (index < 0 || index >= book_->chapterFiles().size()) return false;
+    loadChapter(index);
+    return true;
+}
+
+int EbookView::raCurrentOffset() const { return page_ ? page_->topTextPosition() : 0; }
+
+// THE POSITION UNIFICATION (issue #145's third decision), in one function. The reader ARRIVES at the spoken
+// paragraph: the page turns if the paragraph has left it, the paragraph is highlighted, a page that actually
+// turned accrues through the SAME reckoning a hand-turned page does (so #136's furthest-read carries narration
+// without knowing narration exists), and the position is persisted as the PARAGRAPH - not the top of the page -
+// so stopping leaves you exactly where the narrator was, and a restart resumes there.
+void EbookView::raShowSpoken(int start, int end)
+{
+    if (!page_) return;
+    const int before = page_->topTextPosition();
+    page_->ensurePosVisible(start);
+    page_->setSpokenRange(start, end);
+    if (page_->topTextPosition() > before) accrueReadingProgress();   // a page really turned, and forwards
+    updatePageLabel();      // re-emits pageInfoChanged() so the themed chrome mirrors the move
+    persist(start);         // the spoken paragraph IS the reading position
+}
+
+// Narration ended. The highlight goes; the POSITION stays exactly where it reached - there is no second
+// bookmark to restore and nothing to put back.
+void EbookView::raClearSpoken()
+{
+    if (page_) page_->setSpokenRange(-1, -1);
+}
+
+QString EbookView::raBookKey() const { return itemKey(); }
+
+// The book's own dc:language is not reachable through EbookSource, and adding it would mean editing the format
+// parsers - which issue #144 owns this cycle. The system locale stands in: it is right for the overwhelming
+// majority of a library, and every installed voice is still one press of the Voice control away, so a book in
+// another language is never stuck with the wrong narrator.
+QString EbookView::raPreferredLanguage() const { return QLocale::system().name(); }
+
+void EbookView::raNarrationChanged()
+{
+    syncReadAloudButtons();
+    emit pageInfoChanged();   // the themed chrome mirrors narration through the refresh it mirrors paging with
 }
 
 void EbookView::keyPressEvent(QKeyEvent* e)

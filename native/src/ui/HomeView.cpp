@@ -49,6 +49,7 @@
 #include "../core/GameFilter.h"        // pure filter model/evaluator for saved-filter shelves (#63)
 #include "../core/FilterPresetStore.h" // per-profile saved filter presets (#63)
 #include "../core/TraktClient.h"   // calendarAvailable()/cachedCalendar() — the Trakt shelf's only gate (#23)
+#include "../core/HomeRows.h"   // issue #161: the per-profile home row list + the pure planner
 #include "CarouselView.h"
 #include "XmbView.h"
 #include <QHash>
@@ -84,6 +85,9 @@
 #include "../core/LiveTvMigrate.h"     // #203: re-identify legacy livetv: rows when a channel list arrives
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
+#include "../core/Jellyfin.h"            // #160: the server-qualified id and the transport verdicts
+#include "../core/JellyfinClient.h"      // #160: /System/Info/Public + the sign-in
+#include "../core/JellyfinServerStore.h" // #160: the connected servers (tokens device-local)
 #include "../core/SubsonicClient.h"      // ...their fetches, cache and MusicSupply (#193)
 #include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
 #include "../core/MusicMerge.h"          // ...and the merged view every music level renders
@@ -147,11 +151,19 @@ static QString retroSystemFor(const MediaItem& it, const QString& consoleName = 
 
 static const QSize kPoster(140, 200);
 
-// A specific chapter/issue leaf that we can resolve to readable page images. Its detail page gets a
-// "Read" button. (Manga chapters resolve via MangaDex; comic issues are metadata-only for now.)
+// A chapter leaf of a serial work — one entry of something read in installments. Its detail page gets a
+// "Read" button, and opening it asks the owning addon for the chapter's pages (#188).
+//
+// A TYPE SHAPE, not a list of providers and not a list of media types. "{family}_chapter" is the leaf type
+// of a family that answers the `chapters` resource, which is how AddonManager::familyType reads it back;
+// a source serving light novels as "novel_chapter" is readable here with no change to this file. Whether
+// the addon can actually supply the pages is a separate question, asked of its manifest at open time —
+// this predicate only says what KIND of thing was pressed. (Comic issues are metadata-only; they reach a
+// file provider by a different route below.)
 static bool isReadableChapter(const QString& t)
 {
-    return t == QStringLiteral("manga_chapter");
+    static const QString kSuffix = QStringLiteral("_chapter");
+    return t.size() > kSuffix.size() && t.endsWith(kSuffix);   // a bare "_chapter" names no family
 }
 
 // Per-profile settings store (shared ini); used here to read media resume progress.
@@ -1724,6 +1736,86 @@ static QVariantMap categoryMeta(const QString& key)
 }
 
 // The buckets that actually have a catalog, in a fixed friendly order (skips Home).
+// Every row this device could put on a home, in the app's default order (issue #161). See HomeView.h for why
+// it spans both layouts' families at once.
+//
+// Built from navTargets_ and the stores DIRECTLY, never from categoryItems()/systemItems(): those two now run
+// the row list themselves, so asking them would hand the editor a catalogue with the hidden rows already
+// missing — and "Add row…" would then be unable to offer back the one row the user just hid.
+QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
+{
+    if (navTargets_.isEmpty()) refresh();
+    QVector<HomeRowChoice> out;
+
+    // The classic home's built-in shelves, in the order it produces them.
+    out.push_back({ QStringLiteral("continue"), tr("Continue watching"), true });
+    out.push_back({ QStringLiteral("trakt:missed"), tr("You Missed"), true });
+    out.push_back({ QStringLiteral("trakt:calendar"), tr("Airing Soon"), true });
+    out.push_back({ QStringLiteral("favorites"), tr("★ Favorites"), true });
+    // ...and the opt-in ones, offered whether or not they currently hold anything: this is the ADD list, and a
+    // producer that is empty today is exactly the row a user wants to place before it fills up.
+    out.push_back({ QStringLiteral("downloads"), tr("⬇ Downloaded"), true });
+    for (const QString& cat : { QStringLiteral("video"), QStringLiteral("audio"),
+                                QStringLiteral("game"), QStringLiteral("reading") })
+        for (const Playlist& p : PlaylistStore::forCategory(cat))
+            out.push_back({ QStringLiteral("playlist:") + p.id, tr("Playlist: %1").arg(p.name), true });
+    for (const FilterPreset& p : FilterPresetStore::list())
+        out.push_back({ QStringLiteral("preset:") + p.name, tr("Saved filter: %1").arg(p.name), true });
+
+    // The themed home's rows: the media-type buckets, then the catalogue tiles. Not cappable — each is a
+    // single tile, so a cap has nothing to truncate.
+    QSet<QString> buckets;
+    for (const NavTarget& t : navTargets_)
+        if (!t.isHome) buckets.insert(mediaCategory(t.type));
+    for (const QString& key : { QStringLiteral("video"), QStringLiteral("game"), QStringLiteral("audio"),
+                                QStringLiteral("reading"), QStringLiteral("photos") })
+        if (buckets.contains(key))
+            out.push_back({ QStringLiteral("category:") + key,
+                            tr("Category: %1").arg(categoryMeta(key).value(QStringLiteral("title")).toString()),
+                            false });
+    for (const NavTarget& t : navTargets_)
+        if (!t.isHome && !t.navKey.isEmpty())
+            out.push_back({ QStringLiteral("source:") + t.navKey, tr("Catalogue: %1").arg(t.name), false });
+    return out;
+}
+
+// ---- Custom home rows on the THEMED home (issue #161) ------------------------------------------------------
+// The themed home's rows are the media-type BUCKETS and the CATALOGUE tiles, not the classic home's shelves,
+// so this is the surface the `category:<key>` / `source:<navKey>` half of the row vocabulary orders and hides.
+// One helper serves all three producers below.
+//
+// `rowIdOf` names a row's producer. A row that has no id is NOT addressable and passes through untouched at
+// the end — that is the trailing "Playlists" folder, which is a door rather than a shelf and must never be
+// arranged away. With no stored list this returns `rows` VERBATIM, so an untouched profile's themed home is
+// byte-for-byte the home it had before #161 — the guarantee probe_homerows pins on the planner, and that this
+// early return keeps at the call site.
+//
+// The list ORDERS and HIDES here; it does not cap. A catalogue tile is one row, so a cap has nothing to
+// truncate, which is why the editor only offers the cap action where a cap can change something.
+static QVariantList applyHomeRowList(const QVariantList& rows,
+                                     const std::function<QString(const QVariantMap&)>& rowIdOf)
+{
+    const QVector<homerows::Row> list = HomeRowStore::list();
+    if (list.isEmpty()) return rows;      // the default: today's home, untouched
+    QVector<homerows::Available> available;
+    QHash<QString, QVariantMap> byId;
+    QVariantList unaddressable;
+    for (const QVariant& v : rows)
+    {
+        const QVariantMap m = v.toMap();
+        const QString id = rowIdOf(m);
+        if (id.isEmpty()) { unaddressable << v; continue; }
+        if (byId.contains(id)) continue;
+        byId.insert(id, m);
+        available.push_back({ id, 1 });
+    }
+    QVariantList out;
+    for (const homerows::Planned& p : homerows::plan(available, list))
+        if (byId.contains(p.rowId)) out << byId.value(p.rowId);
+    out += unaddressable;
+    return out;
+}
+
 QVariantList HomeView::categoryItems()
 {
     if (navTargets_.isEmpty()) refresh();
@@ -1735,7 +1827,11 @@ QVariantList HomeView::categoryItems()
                                 QStringLiteral("audio"), QStringLiteral("reading"),
                                 QStringLiteral("photos") })   // #102 — see categoryMeta
         if (present.contains(key)) out << categoryMeta(key);
-    return out;
+    // #161: the profile's row list orders/hides the buckets ("category:<key>").
+    return applyHomeRowList(out, [](const QVariantMap& m) {
+        const QString k = m.value(QStringLiteral("key")).toString();
+        return k.isEmpty() ? QString() : QStringLiteral("category:") + k;
+    });
 }
 
 // The catalogs inside one bucket, as a column the themed XMB can show and drill into via activateNav(navKey).
@@ -1756,7 +1852,12 @@ QVariantList HomeView::categoryCatalogs(const QString& categoryKey)
     if (!out.isEmpty())
         out << QVariantMap{ { QStringLiteral("title"), tr("Playlists") }, { QStringLiteral("type"), QStringLiteral("_playlists") },
                             { QStringLiteral("playlistsCategory"), categoryKey }, { QStringLiteral("accent"), QStringLiteral("#6A6E78") } };
-    return out;
+    // #161: the profile's row list orders/hides the catalogues ("source:<navKey>"). The Playlists folder
+    // carries no navKey, so it is unaddressable and stays where it is — see applyHomeRowList.
+    return applyHomeRowList(out, [](const QVariantMap& m) {
+        const QString nk = m.value(QStringLiteral("navKey")).toString();
+        return nk.isEmpty() ? QString() : QStringLiteral("source:") + nk;
+    });
 }
 
 QVariantList HomeView::systemItems()
@@ -1772,7 +1873,11 @@ QVariantList HomeView::systemItems()
                             { QStringLiteral("overview"), tr("Browse the %1 catalog. Press Enter to open it.").arg(t.name) },
                             { QStringLiteral("accent"), typeColor(t.type).name() } };
     }
-    return out;
+    // #161: the profile's row list orders/hides the catalogue tiles ("source:<navKey>").
+    return applyHomeRowList(out, [](const QVariantMap& m) {
+        const QString nk = m.value(QStringLiteral("navKey")).toString();
+        return nk.isEmpty() ? QString() : QStringLiteral("source:") + nk;
+    });
 }
 
 // The current level's items as data for the themed browse view. Skips synthetic rows (the "open a file"
@@ -4714,6 +4819,164 @@ void HomeView::removeMusicServerInteractive(const QString& serverId, const QStri
     populateMusicServers();                  // on the servers level -> refresh
 }
 
+// ---- JELLYFIN, N SERVERS (issue #160) -----------------------------------------------------------------
+//
+// ONE manager for the whole list, because add / switch off / remove are three verbs about one list and
+// three separate settings rows would put the list itself nowhere. Every leaf goes through the nav kit
+// (NavMenu / Osk / NavConfirm), so it is controller-, keyboard- and mouse-reachable with no separate window.
+//
+// Both callers reach this a QUEUED TURN past their own activation (the themed settings row defers with
+// invokeMethod; the classic button is an ordinary widget signal), so blocking on the nav kit's nested loops
+// here is safe — the #28 / #211 discipline. Where a nested loop would otherwise open INSIDE a network
+// reply's emission, it is deferred again; connectJellyfinServerInteractive says so at each site.
+void HomeView::manageJellyfinServersInteractive()
+{
+    const QList<JellyfinServer> servers = JellyfinServerStore::list();
+    QStringList rows;
+    rows << tr("➕ Connect a Jellyfin server…");
+    for (const JellyfinServer& s : servers)
+    {
+        const QString name = s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name;
+        // The URL is shown because it is how a person tells two servers apart when both are called
+        // "Jellyfin". The token is not shown, and there is no row that could reveal it.
+        rows << (s.enabled ? tr("%1 — %2").arg(name, s.url)
+                           : tr("%1 — %2  (switched off)").arg(name, s.url));
+    }
+    const int pick = NavMenu::pick(tr("Jellyfin servers"), rows, window());
+    if (pick < 0) return;                                     // Back
+    if (pick == 0) { connectJellyfinServerInteractive(); return; }
+
+    const JellyfinServer& s = servers.at(pick - 1);
+    const QString name = s.name.trimmed().isEmpty() ? tr("(unnamed)") : s.name;
+    const int action = NavMenu::pick(name,
+        { s.enabled ? tr("⏸ Switch this server off") : tr("▶ Switch this server on"),
+          tr("🗑 Remove this server") }, window());
+    if (action == 0)
+    {
+        // SWITCHING OFF IS NOT A REMOVAL. Its rows disappear from the merged library and its sign-in stays
+        // exactly where it is, which is what makes "get the friend's 8,000 films out of the way for this
+        // evening" a one-press decision the user can undo.
+        JellyfinServerStore::setEnabled(s.id, !s.enabled);
+    }
+    else if (action == 1)
+    {
+        const int go = NavConfirm::ask(tr("Remove Jellyfin server"),
+            tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed, and anything "
+               "you have already watched from it stays remembered in case you connect it again.").arg(name),
+            { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;
+        JellyfinServerStore::remove(s.id);      // fires the change hook -> the merged library rebuilds
+    }
+}
+
+// THE ORDER OF THE QUESTIONS IS THE DESIGN. Address first, then "who is this server?" against
+// /System/Info/Public, and ONLY THEN a username and a password:
+//   * a server whose identity cannot be read is never asked for a password, because there would be nothing
+//     to qualify its rows with — adding it would write ids nothing can ever resolve (Jellyfin.h);
+//   * and the plain-HTTP question is asked BEFORE anything is sent, not after, because a Jellyfin sign-in
+//     POSTs the password.
+void HomeView::connectJellyfinServerInteractive()
+{
+    const QString url = Osk::getText(tr("Server address (https://...):"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;                 // covers backed-out (null) too
+
+    bool allowPlainHttp = false;
+    if (Jellyfin::checkUrl(url, false) == Jellyfin::UrlVerdict::InsecureRefused)
+    {
+        // The explicit choice, phrased as the risk it is. Backing out ADDS NOTHING: no half-configured
+        // server, and no password sent.
+        const int go = NavConfirm::ask(tr("Send the password unencrypted?"),
+            tr("That address is plain HTTP, so your username and password will be sent over the network "
+               "unencrypted. Use https:// instead if your server supports it."),
+            { tr("Cancel"), tr("Send unencrypted") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;
+        allowPlainHttp = true;
+    }
+    if (Jellyfin::checkUrl(url, allowPlainHttp) != Jellyfin::UrlVerdict::Ok)
+    {
+        NavConfirm::ask(tr("Jellyfin"), tr("That is not a server address."), { tr("OK") }, 0, 0, window());
+        return;
+    }
+
+    QPointer<HomeView> self(this);
+    JellyfinClient::instance().fetchPublicInfo(url, allowPlainHttp, /*budgetMs*/ 10000,
+        [self, url, allowPlainHttp](const Jellyfin::PublicInfo& info, const QString& error) {
+            if (!self) return;
+            // WE ARE INSIDE QNetworkReply::finished's EMISSION. Osk and NavConfirm each spin a nested event
+            // loop, and a nested loop inside an outer emission is the #28 / #211 crash family — so the rest
+            // of the flow is deferred a turn past it, exactly as the themed settings row defers into here.
+            QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, info, error] {
+                if (!self) return;
+                if (!error.isEmpty() || !info.ok)
+                {
+                    // The error is one of OUR sentences (JellyfinClient renders them from the NetworkError
+                    // enum), never Qt's — which would embed the url, and this app's Jellyfin urls carry a
+                    // credential.
+                    NavConfirm::ask(tr("Jellyfin"),
+                                    error.isEmpty() ? tr("That address answered, but it is not a Jellyfin "
+                                                         "server.") : error,
+                                    { tr("OK") }, 0, 0, self->window());
+                    return;
+                }
+
+                const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal,
+                                                  self->window()).trimmed();
+                if (user.isEmpty()) return;
+                // NEVER ECHOED, NEVER TRIMMED, NEVER LOGGED. Not trimmed because leading and trailing spaces
+                // are significant in a password and eating them silently produces a sign-in that fails for a
+                // reason nobody can see; entered as QLineEdit::Password so it is not readable over somebody's
+                // shoulder on a television. It goes to the transport and is not held.
+                const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password,
+                                                  self->window());
+                if (pass.isEmpty()) return;
+
+                JellyfinClient::instance().authenticate(url, allowPlainHttp, user, pass, /*budgetMs*/ 20000,
+                    [self, url, allowPlainHttp, info](const Jellyfin::AuthResult& res,
+                                                      const QString& authError) {
+                        if (!self) return;
+                        // Deferred past the reply's emission again, for the same reason.
+                        QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, info, res, authError] {
+                            if (!self) return;
+                            if (!authError.isEmpty() || !res.ok)
+                            {
+                                NavConfirm::ask(tr("Jellyfin"),
+                                                authError.isEmpty() ? tr("That server refused the sign-in.")
+                                                                    : authError,
+                                                { tr("OK") }, 0, 0, self->window());
+                                return;
+                            }
+                            JellyfinServer s;
+                            // THE SERVER'S OWN Id, not a uuid we mint and not the url — see
+                            // JellyfinServerStore.h. It is what every row from this server is qualified with.
+                            s.id             = info.serverId;
+                            // The server's own name by default, which is what the user calls it everywhere
+                            // else; they never have to invent one.
+                            s.name           = info.serverName.trimmed().isEmpty()
+                                                   ? tr("Jellyfin") : info.serverName;
+                            s.url            = url;
+                            s.allowPlainHttp = allowPlainHttp;
+                            s.userId         = res.userId;
+                            s.userName       = res.userName;
+                            s.token          = res.token;   // device-local, under "jellyfin/"; never synced
+                            if (!JellyfinServerStore::add(s))
+                            {
+                                NavConfirm::ask(tr("Jellyfin"),
+                                    tr("That server did not give an identity this app can use, so its "
+                                       "items could not be told apart from another server's."),
+                                    { tr("OK") }, 0, 0, self->window());
+                                return;
+                            }
+                            NavConfirm::ask(tr("Jellyfin"),
+                                tr("“%1” is connected. Its library appears alongside your own, with each "
+                                   "row labelled by the server it came from.").arg(s.name),
+                                { tr("OK") }, 0, 0, self->window());
+                        }, Qt::QueuedConnection);
+                    });
+            }, Qt::QueuedConnection);
+        });
+}
+
 void HomeView::openOpdsBook(const MediaItem& it)
 {
     // Attach this catalog's device-local auth to THIS open only (built here via opdsBasicAuth, never logged),
@@ -5671,6 +5934,10 @@ ChapterRun HomeView::chapterRunFor(const QString& currentId, bool catalogLane) c
     run.seriesTitle = chapterSeriesTitle_;
     run.seriesThumb = chapterSeriesThumb_;
     run.seriesAddonId = chapterSeriesAddonId_;
+    // The entry TYPE, so a crossing can ask the addon for the next chapter's pages without assuming what
+    // kind of serial this is (#188). Only meaningful on the Chapters lane; the Catalog lane's entries are
+    // comic issues, which reach a file provider instead.
+    if (!catalogLane) run.entryType = chapterEntryType_;
     if (catalogLane) run.lane = ChapterRun::Lane::Catalog;
     return run;
 }
@@ -5706,14 +5973,106 @@ void HomeView::renderRecents()
         h->setSizeHint(QSize(0, 30));
     };
 
-    // Favourites: a per-profile, starred-media section. Rendered AFTER the recents (below them) so the list
-    // leads with what was recently played and favourites are their own section at the bottom.
-    auto renderFavorites = [&]() {
-        const QVector<FavoriteItem> favs = FavoritesStore::list();
-        // Build the (hidden-filtered) favourite rows first so the header is skipped when every favourite is
-        // hidden (an empty "★ Favorites" divider would otherwise linger).
-        QVector<MediaItem> favItems;
-        for (const FavoriteItem& f : favs)
+    // ---- The home as a SEQUENCE OF SHELVES (issue #161) --------------------------------------------------
+    // Every shelf below is BUILT first and DRAWN second, because the profile's row list decides the order,
+    // which shelves appear and how many items each may show — and none of that can be decided while widgets
+    // are already going onto the list. Nothing about what a shelf CONTAINS changed here; the builders are the
+    // bodies that used to run inline, moved behind a rowId.
+    //
+    // The default is load-bearing: with no stored list, `available` is built by walking
+    // homerows::defaultShelfOrder() and the planner hands it straight back, so an untouched profile gets the
+    // exact sequence — recently-played groups, "You Missed", "Airing Soon", "★ Favorites" — this function
+    // produced before #161. probe_homerows pins both halves of that.
+    struct Group { QString header; QVector<MediaItem> items; };  // a shelf's rows, under an optional divider
+    enum RowStyle { StyleResume, StyleWhen, StylePlain };         // how a row's label/icon is drawn
+    struct Shelf { QString rowId; RowStyle style = StylePlain; QVector<Group> groups; int count = 0; };
+    QVector<Shelf> shelves;
+    auto pushShelf = [&shelves](const QString& rowId, RowStyle style, QVector<Group> groups) {
+        int n = 0;
+        for (const Group& g : groups) n += int(g.items.size());
+        if (n == 0) return;   // an empty producer is not an available row — exactly today's "no rows, no header"
+        shelves.push_back({ rowId, style, std::move(groups), n });
+    };
+
+    // "continue" — the recently-played shelf, bucketed into groups (media type, per-console for games) and
+    // kept in newest-first group order. Its per-group dividers are the reason a shelf is a list of groups.
+    auto buildContinue = [this]() {
+        QVector<Group> out;
+        QStringList order;
+        QHash<QString, QVector<RecentItem>> groups;
+        for (const RecentItem& r : RecentStore::list())
+        {
+            const QString key = recentGroupKey(r);
+            if (!groups.contains(key)) order << key;
+            groups[key].push_back(r);
+        }
+        for (const QString& key : order)
+        {
+            // Map the group's recents to MediaItems and drop the hidden ones first, so a group whose every item
+            // is hidden contributes no orphan header (same rule as the Favorites section).
+            Group g;
+            g.header = recentGroupLabel(key);
+            for (const RecentItem& r : groups[key])
+            {
+                MediaItem it;
+                it.url = r.path;                         // re-open target
+                it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
+                it.mime = r.kind;                        // routing kind (video/audio/document/game)
+                it.type = browse::iconTypeForKind(r.kind); // drives the placeholder icon
+                // The real poster (streamed media records it), else a placeholder — the locally cached copy
+                // (saved when the item was downloaded) wins so the shelf renders offline. Scraped-side read:
+                // correctedRow below puts the user's corrected poster on top and keeps this as its baseline.
+                it.thumbnailUrl = MetaCache::scrapedImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
+                it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
+                if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
+                // RecentStore holds the title as it was when the item was played, so a recents row is a scraped
+                // source too — and this is the surface the app LANDS on. Without the ingress composite Home
+                // showed a corrected poster beside an uncorrected title, on both the list and the XMB column
+                // (fillXmbFromItems reads items_).
+                g.items.push_back(correctedRow(it));
+            }
+            if (!g.items.isEmpty()) out.push_back(g);
+        }
+        return out;
+    };
+
+    // "trakt:missed" — Trakt "You Missed" (#25): the episodes of your followed shows that already aired and
+    // you have not seen. COMPLETELY ABSENT unless a Trakt account is configured AND connected — the catalog is
+    // empty otherwise, and an empty shelf is never pushed, so an install that never heard of Trakt renders
+    // exactly the rows it rendered before this existed. No shelf, no header, no placeholder, no hint. BOUNDED
+    // at trakt::kMissedShelfMax: this is the one shelf whose length is driven by how long the user has been
+    // away, and a strip you have to scroll has stopped being a glance. The folder under the video catalogue is
+    // where the whole backlog lives.
+    auto buildTraktMissed = [this]() {
+        QVector<Group> out;
+        Group g;
+        g.header = tr("You Missed");
+        for (const MediaItem& raw : traktMissedItems(trakt::kMissedShelfMax).items)
+            g.items.push_back(correctedRow(raw));   // Trakt's title is a scrape like any other
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
+    // "trakt:calendar" — Trakt "Airing Soon" (#23): the episodes of your followed shows still to air this
+    // week. Same absent-unless-there-is-something rule as the shelf above, for the same reason, and a calendar
+    // whose every episode has already aired leaves no orphan divider.
+    auto buildTraktCalendar = [this]() {
+        QVector<Group> out;
+        Group g;
+        g.header = tr("Airing Soon");
+        for (const MediaItem& raw : traktCalendarItems().items)
+            g.items.push_back(correctedRow(raw));   // Trakt's own copy of the title is a scrape like any other
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
+    // "favorites" — the per-profile, starred-media shelf. Its rows are built (and hidden-filtered) before the
+    // header is decided, so a profile whose every favourite is hidden gets no lingering "★ Favorites" divider.
+    auto buildFavorites = [this]() {
+        QVector<Group> out;
+        Group g;
+        g.header = tr("★ Favorites");
+        for (const FavoriteItem& f : FavoritesStore::list())
         {
             MediaItem it;
             it.id = f.itemId;
@@ -5728,123 +6087,161 @@ void HomeView::renderRecents()
             // shelf is a scraped source like any other and needs the same ingress composite the catalog rows
             // get — otherwise Home showed a corrected poster (displayImage already ran it) beside an
             // uncorrected title, on the screen the app lands on.
-            favItems.push_back(correctedRow(it));
+            g.items.push_back(correctedRow(it));
         }
-        if (favItems.isEmpty()) return;
-        addHeader(tr("★ Favorites"));
-        for (const MediaItem& it : favItems)
-        {
-            items_.push_back(it);
-            auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title, grid_);
-            w->setSizeHint(QSize(0, 52));
-            w->setIcon(defaultIcon(it.type, iconSz));
-        }
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
     };
 
-    // Trakt "Airing Soon": the episodes of your followed shows still to air this week. COMPLETELY ABSENT
-    // unless a Trakt account is configured AND connected — traktCalendarItems() is an empty catalog
-    // otherwise, and an empty one returns here before the header is added, so an install that never heard
-    // of Trakt renders exactly the rows it rendered before this existed. No shelf, no header, no
-    // placeholder, no hint. Same "build the rows, then skip the header if there are none" rule the
-    // Favorites section uses, so a calendar whose every episode has already aired leaves no orphan divider.
-    auto renderTraktCalendar = [&]() {
-        const MediaCatalog cal = traktCalendarItems();
-        if (cal.items.isEmpty()) return;
-        addHeader(tr("Airing Soon"));
-        for (const MediaItem& raw : cal.items)
+    // "downloads" — the fully-downloaded items, the DownloadsStore rows the per-catalogue "Downloaded" folder
+    // is built from. An OPT-IN shelf (homerows::isOptInShelf): it is only built when the row list asks for it,
+    // because the planner appends any producible row the list has not heard of, and an always-available
+    // producer here would grow a Downloads shelf on every untouched profile in the world. A row whose file is
+    // gone is skipped for the same reason the Downloaded folder skips it — the entry outlives the file.
+    auto buildDownloads = [this]() {
+        QVector<Group> out;
+        Group g;
+        g.header = tr("⬇ Downloaded");
+        for (const DownloadedItem& d : DownloadsStore::list())
         {
-            // Trakt's own copy of the episode's title/subtitle is a scrape like any other — same ingress.
-            const MediaItem it = correctedRow(raw);
-            items_.push_back(it);
-            // The air day/episode code rides in the row text: the Home list is a list, not a poster grid,
-            // and "Show S01E04" alone does not say WHEN, which is the entire point of this shelf.
-            auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title
-                                          + QStringLiteral("    ·  ") + it.subtitle, grid_);
-            w->setSizeHint(QSize(0, 52));
-            w->setIcon(defaultIcon(it.type, iconSz));
-        }
-    };
-
-    // Trakt "You Missed" (#25): the episodes of your followed shows that already aired and you have not
-    // seen. Same absent-unless-there-is-something rule as the shelf above — an empty catalog returns before
-    // the header, so an install with no Trakt account, or one with nothing missed, renders exactly what it
-    // rendered before this existed. BOUNDED at trakt::kMissedShelfMax: this is the one shelf whose length
-    // is driven by how long the user has been away, and a strip you have to scroll has stopped being a
-    // glance. The folder under the video catalogue is where the whole backlog lives.
-    auto renderTraktMissed = [&]() {
-        const MediaCatalog missed = traktMissedItems(trakt::kMissedShelfMax);
-        if (missed.items.isEmpty()) return;
-        addHeader(tr("You Missed"));
-        for (const MediaItem& raw : missed.items)
-        {
-            const MediaItem it = correctedRow(raw);   // Trakt's title is a scrape like any other
-            items_.push_back(it);
-            // The episode code, the day and the backlog size ride the row text for the calendar shelf's
-            // reason: the Home list is a list, and "Show" alone says neither which episode nor how far behind.
-            auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title
-                                          + QStringLiteral("    ·  ") + it.subtitle, grid_);
-            w->setSizeHint(QSize(0, 52));
-            w->setIcon(defaultIcon(it.type, iconSz));
-        }
-    };
-
-    const QVector<RecentItem> recents = RecentStore::list();
-
-    // Bucket recents into groups (media type, per-console for games), keeping newest-first group order.
-    QStringList order;
-    QHash<QString, QVector<RecentItem>> groups;
-    for (const RecentItem& r : recents)
-    {
-        const QString key = recentGroupKey(r);
-        if (!groups.contains(key)) order << key;
-        groups[key].push_back(r);
-    }
-
-    for (const QString& key : order)
-    {
-        // Map the group's recents to MediaItems and drop the hidden ones first, so a group whose every item is
-        // hidden contributes no orphan header (same rule as the Favorites section below).
-        QVector<MediaItem> rows;
-        for (const RecentItem& r : groups[key])
-        {
+            if (d.path.isEmpty() || !QFileInfo::exists(d.path)) continue;
             MediaItem it;
-            it.url = r.path;                         // re-open target
-            it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
-            it.mime = r.kind;                        // routing kind (video/audio/document/game)
-            it.type = browse::iconTypeForKind(r.kind); // drives the placeholder icon
-            // The real poster (streamed media records it), else a placeholder — the locally cached copy
-            // (saved when the item was downloaded) wins so the shelf renders offline. Scraped-side read:
-            // correctedRow below puts the user's corrected poster on top and keeps this as its baseline.
-            it.thumbnailUrl = MetaCache::scrapedImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
-            it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
-            if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
-            // RecentStore holds the title as it was when the item was played, so a recents row is a scraped
-            // source too — and this is the surface the app LANDS on. Without the ingress composite Home
-            // showed a corrected poster beside an uncorrected title, on both the list and the XMB column
-            // (fillXmbFromItems reads items_).
-            rows.push_back(correctedRow(it));
+            it.url = d.path;
+            it.id = d.key.isEmpty() ? d.path : d.key;
+            it.mime = d.kind;
+            it.type = browse::iconTypeForKind(d.kind);
+            it.systemHint = d.system;
+            it.thumbnailUrl = MetaCache::scrapedImage(it.id, d.thumb);
+            it.title = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
+            if (isHiddenItem(it)) continue;
+            g.items.push_back(correctedRow(it));
         }
-        if (rows.isEmpty()) continue;
-        addHeader(recentGroupLabel(key));
-        for (const MediaItem& it : rows)
-        {
-            items_.push_back(it);
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
 
-            // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
-            const double frac = rowFraction(it);
-            QString label = QStringLiteral("  ") + it.title;
-            if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
-            auto* w = new QListWidgetItem(label, grid_);
-            w->setSizeHint(QSize(0, 52));
-            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), frac));
+    // "playlist:<id>" — one saved playlist, rendered from the SAME builder its own level uses
+    // (browse::playlistItemsCatalog), so a row picked here is byte-identical to the one that level would
+    // activate and opens through the entry's own add-on (activateItem falls back to MediaItem::sourceAddonId
+    // when the level names none). Opt-in, for the reason spelled out on Downloads above.
+    auto buildPlaylist = [this](const QString& id) {
+        QVector<Group> out;
+        Playlist p;
+        if (!PlaylistStore::get(id, p)) return out;   // deleted here: no producer, so the entry is skipped
+        Group g;
+        g.header = p.name;
+        for (const MediaItem& raw : browse::playlistItemsCatalog(p).items)
+        {
+            const MediaItem it = correctedRow(raw);
+            if (isHiddenItem(it)) continue;
+            g.items.push_back(it);
+        }
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
+    const QVector<homerows::Row> rowList = HomeRowStore::list();
+
+    // The built-in shelves, in the order the home has always produced them. The order comes from
+    // homerows::defaultShelfOrder() rather than from four calls in sequence, so the sequence a probe pins is
+    // literally the sequence drawn here.
+    for (const QString& id : homerows::defaultShelfOrder())
+    {
+        if (id == QStringLiteral("continue"))            pushShelf(id, StyleResume, buildContinue());
+        else if (id == QStringLiteral("trakt:missed"))   pushShelf(id, StyleWhen,   buildTraktMissed());
+        else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
+        else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
+    }
+    // The opt-in shelves — built ONLY for a row the list actually names (see homerows::isOptInShelf). Their
+    // position on screen comes from the list, not from the order they are built in here.
+    for (const homerows::Row& r : rowList)
+    {
+        if (!r.visible || !homerows::isOptInShelf(r.rowId)) continue;
+        if (r.rowId == QStringLiteral("downloads")) pushShelf(r.rowId, StylePlain, buildDownloads());
+        else if (r.rowId.startsWith(QStringLiteral("playlist:")))
+            pushShelf(r.rowId, StylePlain, buildPlaylist(r.rowId.mid(QStringLiteral("playlist:").size())));
+    }
+    // "preset:<name>" — a #63 saved filter as a home shelf, evaluated over the rows the home ALREADY holds.
+    // That corpus is deliberate and it is the whole reason this is cheap: the preset shelves inside a games
+    // console filter that console's items, and a home shelf that fetched a console to filter it would turn the
+    // landing screen into a network wait. So a preset row here answers "of what is on my home screen, which
+    // matches this filter?" — which is what the pinned-preset request on #161 asks for — and it is documented
+    // as that. Built last so every other shelf's rows are in the corpus.
+    {
+        QVector<MediaItem> corpus;
+        for (const Shelf& s : shelves)
+            for (const Group& g : s.groups) corpus << g.items;
+        for (const homerows::Row& r : rowList)
+        {
+            if (!r.visible || !r.rowId.startsWith(QStringLiteral("preset:"))) continue;
+            const QString name = r.rowId.mid(QStringLiteral("preset:").size());
+            if (!FilterPresetStore::exists(name)) continue;   // deleted: no producer, the entry is skipped
+            const FilterPreset p = FilterPresetStore::get(name);
+            Group g;
+            g.header = QStringLiteral("▦ ") + name;
+            QSet<QString> seen;
+            for (const MediaItem& it : corpus)
+            {
+                const QString k = MetaCache::keyFor(it);
+                if (seen.contains(k)) continue;
+                if (!gamefilter::matches(p.filter, gameFactsFor(it))) continue;
+                seen.insert(k);
+                g.items.push_back(it);
+            }
+            if (!g.items.isEmpty()) pushShelf(r.rowId, StylePlain, { g });
         }
     }
 
-    // Past before future, and both after what you were actually watching. "You Missed" leads "Airing Soon"
-    // because it is the one of the two you can act on right now — anticipation can wait a row.
-    renderTraktMissed();   // "You Missed" (Trakt), the aired-and-unwatched backlog (#25)
-    renderTraktCalendar(); // "Airing Soon" (Trakt), between what you watched and what you starred
-    renderFavorites();     // the Favorites section, below the recently-played groups
+    // Order / hide / cap, then draw. `available` is in the app's own order; the planner returns the render
+    // plan (see HomeRows.h for every rule it applies).
+    QVector<homerows::Available> available;
+    available.reserve(shelves.size());
+    for (const Shelf& s : shelves) available.push_back({ s.rowId, s.count });
+    for (const homerows::Planned& p : homerows::plan(available, rowList))
+    {
+        const Shelf* shelf = nullptr;
+        for (const Shelf& s : shelves) if (s.rowId == p.rowId) { shelf = &s; break; }
+        if (!shelf) continue;
+        int shown = 0;
+        for (const Group& g : shelf->groups)
+        {
+            // The cap counts ITEMS across the whole shelf, so a capped "continue" keeps its newest group
+            // whole rather than taking N from each console. A group the cap empties takes its divider with
+            // it — the same rule an all-hidden group has always followed.
+            QVector<MediaItem> take;
+            for (const MediaItem& it : g.items)
+            {
+                if (p.cap > 0 && shown >= p.cap) break;
+                take.push_back(it);
+                ++shown;
+            }
+            if (take.isEmpty()) continue;
+            if (!g.header.isEmpty()) addHeader(g.header);
+            for (const MediaItem& it : take)
+            {
+                items_.push_back(it);
+                QString label = QStringLiteral("  ") + it.title;
+                if (shelf->style == StyleResume)
+                {
+                    // "Continue watching": a percentage in the row text and a resume bar on the (small) icon.
+                    const double frac = rowFraction(it); // "how far in" — a movie/episode by its key, an audiobook by its own carried fraction (#139 inc 2)
+                    if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
+                }
+                else if (shelf->style == StyleWhen)
+                {
+                    // The air day / episode code rides in the row text: the Home list is a list, not a poster
+                    // grid, and "Show S01E04" alone does not say WHEN, which is the entire point of the shelf.
+                    label += QStringLiteral("    ·  ") + it.subtitle;
+                }
+                auto* w = new QListWidgetItem(label, grid_);
+                w->setSizeHint(QSize(0, 52));
+                if (shelf->style == StyleResume)
+                    w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), rowFraction(it)));
+                else
+                    w->setIcon(defaultIcon(it.type, iconSz));
+            }
+        }
+    }
 
     loadThumbnails(0); // load posters for recents/favourites that have one (else the placeholder stays)
     updateChrome();
@@ -7465,20 +7862,34 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         emit openItem(it);
         return;
     }
-    if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
+    if (isReadableChapter(it.type)) // a chapter leaf -> ask its addon for the pages, then open the reader
     {
-        showToast(tr("Loading “%1”…").arg(it.title), 20000);
+        // WHICH ADDON, and whether it has said it can answer. An addon that does not declare the `pages`
+        // resource is never asked for one (requestPages enforces that, and writes the outdated-addon line
+        // once) — but it is still CALLED here, through the one path, so the answer and the log come from
+        // the same place. All this flag decides is what to SAY about an empty result: "this source doesn't
+        // supply page images" and "this chapter has none" are different facts, and a silent empty answer
+        // reads as the second when it is usually the first.
+        const bool supplies = mgr_->supportsPages(addon, it.type);
+        const QString sourceName = addon && !addon->manifest.name.isEmpty() ? addon->manifest.name
+                                                                           : tr("this source");
+        if (supplies) showToast(tr("Loading “%1”…").arg(it.title), 20000);
         if (playBtn_) playBtn_->setEnabled(false);
-        const QString key = it.id, title = it.title;
+        const QString key = it.id, title = it.title, type = it.type;
         // Captured NOW, not read back in the callback: the run is "the list this chapter was opened from",
         // and browsing on during the resolve would leave the callback reading a different level's list.
         const ChapterRun run = chapterRunFor(key);
-        mgr_->resolveMangaChapterPages(it.id, [this, key, title, run](const QStringList& pages) {
+        mgr_->requestPages(addon, type, it.id,
+                           [this, key, title, run, supplies, sourceName](const QVector<AddonPage>& pages) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (pages.isEmpty())
-                showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
-                             "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
-            else { hideToast(); emit openImagePages(title, key, pages, run); }
+            if (!pages.isEmpty()) { hideToast(); emit openImagePages(title, key, pages, run); }
+            else if (!supplies)
+                showToast(tr("“%1” can't be read here: %2 doesn't supply page images. A built-in add-on "
+                             "that predates this is updated by reinstalling the app.")
+                              .arg(title, sourceName), kFeedbackLong);
+            else
+                showToast(tr("No readable pages for “%1”. The source has no images for this chapter — "
+                             "try another chapter, language or title.").arg(title), kFeedbackLong);
         });
         return;
     }
@@ -9001,7 +9412,8 @@ void HomeView::requestMeta(const MediaItem& item)
 
     // Show an action button for launchable leaves from a remote addon (Stremio, or a library like Allarr):
     // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
-    // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
+    // on click. A serial's chapter leaf also gets "Read" (its pages come from the addon's `pages` resource,
+    // #188). Steam games get "▶ Play". Containers get none.
     // The gates themselves live in classicActionGates() — shared with the themed detail action row.
     // Steam's store API is keyed on an appid, which a merged PC game has only inside its Steam SOURCE. Hand
     // that source's id over so a merged game's info page still gets the synopsis/genres/Metacritic the Steam
@@ -10049,6 +10461,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // holds for any provider: a non-empty stack, at a detail drill-in, whose container is a real item rather
     // than one of the synthetic levels (their types start with '_' — a cross-addon search is "_search").
     chapterList_.clear();
+    chapterEntryType_.clear();
     chapterSeriesTitle_.clear();
     chapterSeriesThumb_.clear();
     chapterSeriesAddonId_.clear();
@@ -10061,7 +10474,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         // unrelated series sit together, is never remembered as a run.
         for (const MediaItem& it : items_)
             if (isReadableChapter(it.type) || it.type == QStringLiteral("comic_issue"))
+            {
                 chapterList_.append({ it.id, it.title });
+                // The type of the entries, taken from the FIRST chapter leaf rather than assumed: a level
+                // is one container, so its chapters are all one type, and that type is what the pages
+                // route is keyed by (#188). Comic issues do not set it — they are not read that way.
+                if (chapterEntryType_.isEmpty() && isReadableChapter(it.type)) chapterEntryType_ = it.type;
+            }
         // The container itself, which this level IS ("Fairy Tail") where its children are the volumes: the
         // title the Catalog lane searches a file provider by, the cover a chapter's Recents row is drawn
         // with (a chapter carries no artwork of its own), and the addon that answered for all of it, so a

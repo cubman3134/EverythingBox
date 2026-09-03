@@ -53,6 +53,7 @@
 #include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
 #include "CloudSync.h"     // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "Scrobble.h"      // #192: the carve-out is asserted through the writer's own prefixes
+#include "PlayOnDevice.h"  // #143: ...and through PlayOn::tokenKey, the "Play on device" token writer
 #include "ScrobbleQueue.h" // ...and through the real key builders, not hand-typed literals
 #include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
@@ -887,6 +888,20 @@ int main(int argc, char** argv)
         // OPDS catalog's is, and a synced bundle is a zip in somebody's Drive folder.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subsonic/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("subsonic/profileA/servers")) == false);
+        // jellyfin/* (issue #160): the connected Jellyfin servers, each carrying an ACCESS TOKEN — a bearer
+        // credential for a whole account, usable from anywhere until it is revoked. The strongest of the four
+        // secrets in this family, and the reason #160's per-server tokens are stated as device-local in the
+        // issue itself. Both ways, and the per-server enable flag rides the same blob so it is covered too.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/profileA/servers")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/profileA/servers")) == false);
+        // playon/* (issue #143): the "Play on device" pairing tokens. A token is minted by ANOTHER device for
+        // THIS one and authorises starting playback on that peer -- synced, it would both put a credential in
+        // a zip on somebody's Drive and hand every install on the account the right to take over a device it
+        // never paired with. Asserted through the pure layer's own key builder, so a rename of the prefix
+        // cannot leave this gate green while the writer moves out from under it.
+        CHECK(CloudSync::isDeviceLocalKey(PlayOn::tokenKey(QStringLiteral("dev-b"))) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("playon/anything")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(PlayOn::tokenKey(QStringLiteral("dev-b"))) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's

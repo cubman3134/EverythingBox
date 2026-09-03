@@ -1,4 +1,5 @@
 #include "CloudMerge.h"
+#include "HomeRows.h"   // issue #161: the home row list is one document, merged by its own rule
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "Tombstones.h"
@@ -1039,6 +1040,46 @@ void mergePresets(const QJsonObject& presets)
     }
 }
 
+// ---- custom home rows (per profile; whole-list newest-wins, with a UNION of the row set) --------------------
+// The profile's home arrangement (issue #161). Unlike every store above it, this is not a SET of items that
+// merge one by one — it is an ORDER, and there is no meaningful way to merge two orders: any rule that tried
+// would produce a third arrangement neither device asked for. So the whole list is one value, last-writer-wins
+// on its own `updatedAt`, with two properties that make that safe:
+//   * NEVER A LOST ROW. Rows the loser knows and the winner does not are appended, so two devices that each
+//     added a different row end up with both. That is why there are no tombstones here: a row is never removed
+//     by absence, only by an explicit newer arrangement that does not contain it.
+//   * A RESET PROPAGATES. "Reset to default" writes a dated EMPTY document — a husk, exactly as a metadata
+//     reset does below — and an empty WINNER clears rather than unioning, or the reset could never travel.
+// The rule itself lives in HomeRows.cpp beside the planner (and is pinned by probe_homerows); this is only the
+// document plumbing.
+
+QString homeRowsKey(const QString& p) { return QStringLiteral("homerows/") + p + QStringLiteral("/list"); }
+
+void serializeHomeRows(QJsonObject& out)
+{
+    for (const QString& p : profilesFor(QStringLiteral("homerows")))
+    {
+        const QJsonObject doc =
+            QJsonDocument::fromJson(store().value(homeRowsKey(p)).toString().toUtf8()).object();
+        if (doc.isEmpty()) continue;
+        out.insert(p, doc);
+    }
+}
+
+void mergeHomeRows(const QJsonObject& in)
+{
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QString p = it.key();
+        const homerows::Doc local = homerows::fromJson(
+            QJsonDocument::fromJson(store().value(homeRowsKey(p)).toString().toUtf8()).object());
+        const homerows::Doc merged = homerows::merge(local, homerows::fromJson(it.value().toObject()));
+        store().setValue(homeRowsKey(p), QString::fromUtf8(
+            QJsonDocument(homerows::toJson(merged)).toJson(QJsonDocument::Compact)));
+        store().sync();
+    }
+}
+
 // ---- metadata overrides (global, newest-updatedAt per item; a reset is a husk, never a deletion) ------------
 // The user's corrections to a wrong scrape (issue #24). GLOBAL, not per profile — a mis-scrape is wrong for
 // the whole household — so the shape is a flat { "<hash>": <blob> }, the same shape as resume.
@@ -1414,8 +1455,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed;
-    serializeResumeRecent(resume, recent);
+    QJsonObject resume, recent, recentTombs, marks, favorites, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows;    serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
     serializeFavorites(favorites);
@@ -1423,6 +1463,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializeAudioBookmarks(audiobookmarks);                     // issue #140: per-item audio bookmarks
     serializePlaylists(playlists);
     serializePresets(presets);                                   // issue #184: saved filter presets
+    serializeHomeRows(homerows);                                 // issue #161: the profile's home arrangement
     serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
     serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
     serializePad2Key(pad2key);                                   // per-game pad-to-keyboard records (issue #105)
@@ -1448,6 +1489,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("audiobookmarks"), audiobookmarks); // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("playlists"), playlists);
     root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
+    root.insert(QStringLiteral("homerows"), homerows);           // issue #161 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("metaoverrides"), metaoverrides);
     root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("pad2key"), pad2key);             // issue #105 — a new root key; old builds ignore it (mergeAll reads by name)
@@ -1471,6 +1513,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeAudioBookmarks(root.value(QStringLiteral("audiobookmarks")).toObject()); // issue #140: per-item audio bookmarks
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
     mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
+    mergeHomeRows(root.value(QStringLiteral("homerows")).toObject());    // issue #161: the home arrangement
     mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
     mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
     mergePad2Key(root.value(QStringLiteral("pad2key")).toObject());         // issue #105: per-game pad2key records

@@ -99,7 +99,8 @@ set(_eb_secret_files
     "${EB_SECRETS_DIR}/screenscraper.secrets"
     "${EB_SECRETS_DIR}/thegamesdb.secrets"
     "${EB_SECRETS_DIR}/igdb.secrets"
-    "${EB_SECRETS_DIR}/steamgriddb.secrets")
+    "${EB_SECRETS_DIR}/steamgriddb.secrets"
+    "${EB_SECRETS_DIR}/lastfm.secrets")
 foreach(_f IN LISTS _eb_secret_files)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_f}")
 endforeach()
@@ -111,6 +112,10 @@ _eb_read_secret("${EB_SECRETS_DIR}/thegamesdb.secrets"    "apikey"       _v_tgdb
 _eb_read_secret("${EB_SECRETS_DIR}/igdb.secrets"          "clientId"     _v_igdb_id)
 _eb_read_secret("${EB_SECRETS_DIR}/igdb.secrets"          "clientSecret" _v_igdb_secret)
 _eb_read_secret("${EB_SECRETS_DIR}/steamgriddb.secrets"   "apikey"       _v_sgdb_key)
+# Last.fm (#192): the APPLICATION identity, not a user credential. Both halves are required — a key with no
+# secret cannot sign a single call, so the provider treats "either missing" as "not available in this build".
+_eb_read_secret("${EB_SECRETS_DIR}/lastfm.secrets"       "apikey"       _v_lastfm_key)
+_eb_read_secret("${EB_SECRETS_DIR}/lastfm.secrets"       "secret"       _v_lastfm_secret)
 
 # Obfuscate each into the template's @VARS@.
 _eb_obf_value("${_v_ss_devid}"    EB_SS_DEVID_ARRAY_A    EB_SS_DEVID_ARRAY_B    EB_SS_DEVID_LEN_A    EB_SS_DEVID_LEN_B)
@@ -119,16 +124,19 @@ _eb_obf_value("${_v_tgdb_key}"    EB_TGDB_KEY_ARRAY_A    EB_TGDB_KEY_ARRAY_B    
 _eb_obf_value("${_v_igdb_id}"     EB_IGDB_ID_ARRAY_A     EB_IGDB_ID_ARRAY_B     EB_IGDB_ID_LEN_A     EB_IGDB_ID_LEN_B)
 _eb_obf_value("${_v_igdb_secret}" EB_IGDB_SECRET_ARRAY_A EB_IGDB_SECRET_ARRAY_B EB_IGDB_SECRET_LEN_A EB_IGDB_SECRET_LEN_B)
 _eb_obf_value("${_v_sgdb_key}"    EB_SGDB_KEY_ARRAY_A    EB_SGDB_KEY_ARRAY_B    EB_SGDB_KEY_LEN_A    EB_SGDB_KEY_LEN_B)
+_eb_obf_value("${_v_lastfm_key}"    EB_LASTFM_KEY_ARRAY_A    EB_LASTFM_KEY_ARRAY_B    EB_LASTFM_KEY_LEN_A    EB_LASTFM_KEY_LEN_B)
+_eb_obf_value("${_v_lastfm_secret}" EB_LASTFM_SECRET_ARRAY_A EB_LASTFM_SECRET_ARRAY_B EB_LASTFM_SECRET_LEN_A EB_LASTFM_SECRET_LEN_B)
 
 # Count embedded slots for a loud-but-secret-free STATUS line. NEVER print any credential material.
 set(_eb_embedded 0)
-foreach(_v "${_v_ss_devid}" "${_v_ss_devpw}" "${_v_tgdb_key}" "${_v_igdb_id}" "${_v_igdb_secret}" "${_v_sgdb_key}")
+foreach(_v "${_v_ss_devid}" "${_v_ss_devpw}" "${_v_tgdb_key}" "${_v_igdb_id}" "${_v_igdb_secret}" "${_v_sgdb_key}"
+           "${_v_lastfm_key}" "${_v_lastfm_secret}")
     if(NOT _v STREQUAL "")
         math(EXPR _eb_embedded "${_eb_embedded} + 1")
     endif()
 endforeach()
 if(_eb_embedded GREATER 0)
-    message(STATUS "Builtin provider credentials embedded (obfuscated): ${_eb_embedded} of 6 slots filled.")
+    message(STATUS "Builtin provider credentials embedded (obfuscated): ${_eb_embedded} of 8 slots filled.")
 else()
     message(STATUS "Builtin provider credentials NOT embedded — no secrets files; providers fall back to user settings.")
 endif()
