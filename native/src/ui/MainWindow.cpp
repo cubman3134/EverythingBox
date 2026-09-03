@@ -22013,7 +22013,15 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("gest.doubletap"))  Settings::setGestureDoubleTap(on);
                 else if (id == QStringLiteral("gest.longpress"))  Settings::setGestureLongPress(on);
                 else if (id == QStringLiteral("gest.pinch"))      Settings::setGesturePinch(on);
-                else if (id == QStringLiteral("gest.edge")) {
+                // ---- THIS CHAIN IS SPLIT IN TWO ON PURPOSE (MSVC C1061) -----------------------------
+                // Every branch above and below compares the SAME `id` against a distinct string literal and
+                // there is no trailing `else`, so two independent chains behave exactly as one long one.
+                // It is split because MSVC counts each `else if` as a nested block and refuses at ~128:
+                // this handler had reached 125 branches, so the next feature to add a settings row simply
+                // would not compile. Do not "tidy" this back into one chain — add new rows to the lower
+                // half, and split again around 120. The real fix is issue #186, breaking up MainWindow.cpp;
+                // this is the stop-gap that keeps the file compiling until then.
+                if (id == QStringLiteral("gest.edge")) {
                     for (const auto& p : gestEdgePairs) if (p.first == val) { Settings::setGestureEdgeInset(p.second); break; }
                 }
                 else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
