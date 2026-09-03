@@ -75,6 +75,9 @@
 #include "../core/BingeStore.h"
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
+#include "../core/AniListTracker.h"  // issue #156: the AniList tracker (the only Tracker so far)
+#include "../core/TrackerLinks.h"    // ...and which tracker entry each item is (per-item, synced)
+#include "../core/TrackerRules.h"    // ...and the pure rules: chapter numbering, reconciliation
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
 #include "../core/PresenceController.h" // Discord Rich Presence: what is showing, and when
 #include "../core/DiscordPresence.h"    // ...and the IPC socket it shows it on
@@ -573,6 +576,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     trakt_ = new TraktClient(this);
     connect(trakt_, &TraktClient::log, this, [this](const QString& l) { mwLog(l); });
 
+    // ANIME/MANGA TRACKERS (issue #156). Constructed unconditionally and dormant until the user pastes an
+    // AniList client id/secret and links: every entry point checks configured() && connected() first, so an
+    // unconfigured install pays for one QObject and nothing else. Constructed HERE rather than lazily so the
+    // queue drain below can run at startup - an offline reading session delivers on the next launch without
+    // the user having to open anything.
+    anilist_ = new AniListTracker(this);
+    connect(anilist_, &AniListTracker::log, this, [this](const QString& l) { mwLog(l); });
+    connect(anilist_, &AniListTracker::queueChanged, this,
+            [this] { if (anilistStatusUpdate_) anilistStatusUpdate_(); });
+    // ...and on the link CHANGING, for a reason the live drive found: the status line is built from
+    // configured/connected/queue-depth, so a fresh sign-in changes what it says - but connecting fires only
+    // connectedChanged, and each settings builder's own handler updates its ACTION row and its Status row,
+    // not this line. Without this, linking an account left "Set up, but not connected." on screen beside a
+    // Status row reading "Connected".
+    connect(anilist_, &AniListTracker::connectedChanged, this,
+            [this](bool) { if (anilistStatusUpdate_) anilistStatusUpdate_(); });
+    anilist_->flushQueue();   // deliver anything an offline session left behind
+
     // MUSIC SCROBBLING (issue #192). Constructed with its ListenBrainz provider already installed, so a launch
     // that follows an offline stretch delivers what is queued without anything else having to happen. Dormant
     // and free until the user switches it on AND pastes a token: with either missing, trackStarted() computes
@@ -854,6 +875,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
     connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
     connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
+    // The classic detail page's "Track…" button (issue #156). Deferred a turn for the reason every other
+    // verb that opens a NavMenu is: this runs inside a clicked() delivery and trackerLinkVerb spins a nested
+    // event loop, which is the #28/#211 family. Every value it needs is resolved to a plain string HERE.
+    connect(home_, &HomeView::trackerRequested, this, [this](const MediaItem& it, bool manga) {
+        const QString key = tracker::itemKeyFor(it.imdbStreamId, it.title);
+        if (key.isEmpty()) return;
+        const QString title = it.title;
+        const tracker::Kind kind = manga ? tracker::Kind::Manga : tracker::Kind::Anime;
+        deferPastQmlEmission([this, key, title, kind] { trackerLinkVerb(key, title, 0, kind); });
+    });
     // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
     // generation inline, and this is the same rule for the classic/browse stack pops.
 
@@ -1907,6 +1938,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // same complaint the marks sync exists to answer. The store only fires this when a dismissal actually
     // RAISED a stamp, so pressing it twice arms nothing.
     MissedDismiss::setChangeHook(armProgressSync);
+    // issue #156: a tracker LINK is user data and rides the merge document (CloudSync::isPerItemStoreKey),
+    // so establishing one on the TV has to arm the push that carries it to the phone. The store fires this
+    // only when a blob actually changed, so a re-link to the same entry arms nothing. The CREDENTIALS are
+    // device-local and are deliberately not part of this.
+    TrackerLinks::setChangeHook(armProgressSync);
 
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
@@ -3891,6 +3927,21 @@ void MainWindow::onComicReachedLastPage()
     // still describes the previous comic. Arming re-syncs the two and re-asks (see armComicRun).
     if (comic_ && comic_->itemKey() != comicRunKey_) return;
     chapterHintShown_ = true;
+    // ANIME/MANGA TRACKERS (#156): the last page of a chapter IS the chapter being read, and this is the
+    // one place the reader says so. Guarded by chapterHintShown_ above, so paging back and forth over the
+    // boundary reports it once per chapter rather than once per page turn.
+    //
+    // The chapter NUMBER comes from the entry's TITLE, not from its index in the run: a run captured from a
+    // partial listing starts wherever the provider's first page did, so the index would report chapter 1
+    // for chapter 340. The index is only the fallback (TrackerRules::chapterNumberFromTitle).
+    if (!comicRun_.seriesTitle.isEmpty())
+    {
+        const ChapterRun::Entry& cur = comicRun_.entries[comicRun_.index];
+        const int chapter = tracker::chapterNumberFromTitle(cur.title, comicRun_.index + 1);
+        // The link is keyed on the SERIES, so every chapter of one manga shares one link and one prompt.
+        trackerNoteProgress(tracker::itemKeyFor(QString(), comicRun_.seriesTitle), comicRun_.seriesTitle, 0,
+                            tracker::Kind::Manga, chapter, /*completes=*/!comicRun_.hasNext());
+    }
     notify(tr("End of “%1” — page forward for “%2”.")
                .arg(comicRun_.entries[comicRun_.index].title,
                     comicRun_.entries[comicRun_.index + 1].title), kFeedbackShort);
@@ -10317,6 +10368,15 @@ void MainWindow::runThemedDetailAction(const QString& verb)
         if (key.isEmpty()) return;
         deferPastQmlEmission([this, key] { themedDetailEditTags(key); });
     }
+    // "Track…" (issue #156). Same discipline, one difference: the target is NOT themedDetailKey_ but the
+    // TRACKER key, which is a different string (the show id or a normalised title, shared with the comic
+    // reader and the player) and is resolved from the row INDEX here, while the index is still valid.
+    else if (verb == QStringLiteral("tracker"))
+    {
+        const HomeView::TrackerLeaf t = home_->themedLeafTracker(idx);
+        if (t.key.isEmpty()) return;
+        deferPastQmlEmission([this, t] { trackerLinkVerb(t.key, t.title, 0, t.kind); });
+    }
     // "Select…" (issue #65): enter bulk edit. Snapshot the INDEX (not the key) here while it is valid — the
     // checklist enumerates the current level's leaves BY INDEX (home_->themedLeaf* accessors are index-keyed,
     // as the XMB inline chooser uses them), and re-resolves each to its stable key only at apply time. Deferred
@@ -15933,7 +15993,190 @@ void MainWindow::stopScrobble()
     if (scrobbleImdb_.isEmpty()) return;
     const double pct = duration_ > 0.0 ? qBound(0.0, session_->position() / duration_ * 100.0, 100.0) : 0.0;
     trakt_->scrobbleStop(scrobbleImdb_, pct); // Trakt marks it watched when the stop is past ~80%
+    // ANIME TRACKERS (#156): the same stop, at the same threshold, is also "this episode was watched". It
+    // hangs off THIS site rather than a new one so the two integrations can never disagree about what
+    // counts as watched, and so an episode that Trakt did not count is not counted here either.
+    //
+    // The stream id ("ttShow:season:episode") is the whole identity: the SERIES part keys the link (one
+    // prompt per show, not per episode) and the EPISODE part is the progress number. A movie id has
+    // neither, so a film simply never reaches the tracker - which is correct, this owns anime and manga.
+    if (pct >= 80.0)
+    {
+        const int ep = tracker::episodeFromStreamId(scrobbleImdb_);
+        if (ep > 0)
+            trackerNoteProgress(tracker::itemKeyFor(scrobbleImdb_, trackerVideoTitle_), trackerVideoTitle_, 0,
+                                tracker::Kind::Anime, ep, /*completes=*/false);
+    }
     scrobbleImdb_.clear();
+    trackerVideoTitle_.clear();
+}
+
+// ================= ANIME / MANGA TRACKERS (issue #156) ======================================================
+// Everything below is the thin impure layer between the app's completion paths and AniListTracker. The rules
+// are all in TrackerRules (pure, probe_tracker pins them); what lives here is the prompting, the marks write
+// and the two hooks that decide WHEN a progress event happened.
+
+// The AniList status line, shared by both settings builders. Everything in it is on disk, so it is static and
+// either surface can call it without a live object.
+QString MainWindow::anilistStatusLine()
+{
+    if (!AniListTracker::isConfigured()) return tr("Not set up. Paste a Client ID and Secret to begin.");
+    if (!AniListTracker::isConnected())  return tr("Set up, but not connected.");
+    const int queued = AniListTracker::queuedCount();
+    const QString err = AniListTracker::lastError();
+    // The queue depth is the ONLY thing that distinguishes "connected and delivering" from "connected and
+    // silently accumulating" - without it a broken push looks exactly like nothing to push.
+    QString s = queued > 0 ? tr("Connected. %n update(s) waiting to be sent.", nullptr, queued)
+                           : tr("Connected. Everything has been sent.");
+    if (!err.isEmpty()) s += QStringLiteral("  ") + err;   // never a credential: see AniListTracker.h
+    return s;
+}
+
+void MainWindow::trackerNoteProgress(const QString& itemKey, const QString& title, int year,
+                                     tracker::Kind kind, int unit, bool completes)
+{
+    if (!anilist_ || itemKey.isEmpty() || unit <= 0) return;
+    if (!AniListTracker::isConfigured() || !AniListTracker::isConnected()) return;  // the feature is off
+
+    const TrackerLinks::Link link = TrackerLinks::get(tracker::Id::AniList, itemKey);
+    if (link.linked())
+    {
+        // The app's own side of the reconciliation moves first, and monotonically: if this push cannot go
+        // out for an hour, the next pull must still know we are ahead.
+        TrackerLinks::noteLocalProgress(tracker::Id::AniList, itemKey, unit);
+        tracker::Update u;
+        u.itemKey = itemKey;
+        u.mediaId = link.mediaId;
+        u.kind = link.kind;
+        u.unit = unit;
+        u.completes = completes;
+        anilist_->pushProgress(u);   // debounced + queued inside; this call is cheap and never blocks
+        return;
+    }
+    // No link. Ask ONCE - and only once, ever, unless the user asks us to (TrackerLinks::decline).
+    if (!TrackerLinks::shouldPrompt(tracker::Id::AniList, itemKey)) return;
+    tracker::Update pending;
+    pending.itemKey = itemKey;
+    pending.kind = kind;
+    pending.unit = unit;
+    pending.completes = completes;
+    // DEFERRED A TURN (issues #28 / #211). Both callers are inside a signal delivery - a page-changed
+    // emission from the comic reader, a stop from the player - and the prompt spins NavMenu::pick, a nested
+    // event loop. Every value it needs is captured BY VALUE here, at the boundary, so nothing it reads a
+    // turn later can have been cleared underneath it.
+    const QString t = title;
+    deferPastQmlEmission([this, itemKey, t, year, kind, pending] {
+        trackerPromptLink(itemKey, t, year, kind, pending);
+    });
+}
+
+void MainWindow::trackerPromptLink(QString itemKey, QString title, int year, tracker::Kind kind,
+                                   tracker::Update pending)
+{
+    if (!anilist_ || itemKey.isEmpty() || title.trimmed().isEmpty()) return;
+    // Re-checked after the deferral: the user may have declined this very item from the detail view in the
+    // turn between the progress event and this call.
+    if (!TrackerLinks::shouldPrompt(tracker::Id::AniList, itemKey) && pending.unit > 0) return;
+    anilist_->search(title, year, kind, [this, itemKey, title, kind, pending](QVector<tracker::Match> ms) {
+        if (ms.isEmpty())
+        {
+            notify(tr("AniList had nothing matching \u201C%1\u201D.").arg(title), kFeedbackShort);
+            return;
+        }
+        QStringList rows;
+        for (const tracker::Match& m : ms)
+        {
+            QString row = m.title;
+            if (m.year > 0) row += QStringLiteral(" (%1)").arg(m.year);
+            if (!m.altTitle.isEmpty()) row += QStringLiteral("  \u00B7  ") + m.altTitle;
+            rows << row;
+        }
+        // The refusal is a ROW, not a Back: Back means "not now" and asks again next chapter, this means
+        // "never" and is remembered. Two different answers, so two different ways to give them.
+        const int declineRow = rows.size();
+        rows << tr("This is not on AniList \u2014 stop asking");
+        const int pick = NavMenu::pick(tr("Track \u201C%1\u201D on AniList").arg(title), rows, this);
+        if (pick < 0) return;                                  // Back: ask again next time
+        if (pick == declineRow) { TrackerLinks::decline(tracker::Id::AniList, itemKey); return; }
+        if (pick >= ms.size()) return;
+        const tracker::Match& m = ms[pick];
+        TrackerLinks::set(tracker::Id::AniList, itemKey, m.mediaId, m.kind, m.title, m.totalUnits);
+        notify(tr("Linked to \u201C%1\u201D on AniList.").arg(m.title), kFeedbackShort);
+        // PULL FIRST, then replay the progress that triggered the prompt. In that order because the pull is
+        // what tells us whether the account is already ahead of this chapter - reversing it would push a
+        // lower number at an account that had read further, and then have to be corrected by the pull.
+        trackerRefreshItem(itemKey);
+        if (pending.unit > 0)
+            trackerNoteProgress(itemKey, title, 0, m.kind, pending.unit, pending.completes);
+    });
+}
+
+void MainWindow::trackerRefreshItem(QString itemKey)
+{
+    if (!anilist_ || itemKey.isEmpty()) return;
+    const TrackerLinks::Link link = TrackerLinks::get(tracker::Id::AniList, itemKey);
+    if (!link.linked()) return;
+    anilist_->fetchEntry(link.mediaId, link.kind, [this, itemKey](bool ok, tracker::Entry e) {
+        if (!ok) { notify(tr("Couldn't read your AniList progress."), kFeedbackShort); return; }
+        const TrackerLinks::Link l = TrackerLinks::get(tracker::Id::AniList, itemKey);
+        if (!l.linked()) return;   // unlinked while the request was in flight
+        switch (tracker::reconcile(l.localUnits, e.progress))
+        {
+        case tracker::Reconcile::AdvanceLocal:
+            // The tracker is ahead: take its number, and mark the series finished locally when the tracker
+            // says it is. NEVER the other way - nothing here ever clears or lowers a local mark.
+            TrackerLinks::noteLocalProgress(tracker::Id::AniList, itemKey, e.progress);
+            if (e.status == tracker::Status::Completed
+                || (e.totalUnits > 0 && e.progress >= e.totalUnits))
+                ItemMarks::setCompletion(itemKey, ItemMarks::Completion::Finished);
+            notify(tr("AniList was ahead \u2014 caught up to %1.").arg(e.progress), kFeedbackShort);
+            break;
+        case tracker::Reconcile::PushRemote:
+        {
+            // We are ahead: send what we have. Queued and debounced like any other push.
+            tracker::Update u;
+            u.itemKey = itemKey;
+            u.mediaId = l.mediaId;
+            u.kind = l.kind;
+            u.unit = l.localUnits;
+            u.completes = (l.totalUnits > 0 && l.localUnits >= l.totalUnits);
+            anilist_->pushProgress(u);
+            notify(tr("AniList was behind \u2014 sending your progress."), kFeedbackShort);
+            break;
+        }
+        case tracker::Reconcile::Nothing:
+            notify(tr("AniList already matches."), kFeedbackShort);
+            break;
+        }
+    });
+}
+
+void MainWindow::trackerLinkVerb(QString itemKey, QString title, int year, tracker::Kind kind)
+{
+    if (!anilist_ || itemKey.isEmpty()) return;
+    if (!AniListTracker::isConfigured() || !AniListTracker::isConnected())
+    {
+        notify(tr("Connect an AniList account in Settings first."), kFeedbackLong);
+        return;
+    }
+    const TrackerLinks::Link link = TrackerLinks::get(tracker::Id::AniList, itemKey);
+    if (!link.linked())
+    {
+        // The ESCAPE HATCH the issue calls not optional: a user who declined, or whose auto-match never
+        // fired, reaches the same prompt from here. No pending progress to replay.
+        trackerPromptLink(itemKey, title, year, kind, tracker::Update{});
+        return;
+    }
+    const QStringList rows = { tr("Refresh from AniList"), tr("Link to a different entry\u2026"),
+                               tr("Unlink") };
+    const int pick = NavMenu::pick(tr("Tracking \u201C%1\u201D").arg(link.title), rows, this);
+    if (pick == 0) { trackerRefreshItem(itemKey); return; }
+    if (pick == 1) { trackerPromptLink(itemKey, title, year, kind, tracker::Update{}); return; }
+    if (pick == 2)
+    {
+        TrackerLinks::clear(tracker::Id::AniList, itemKey);
+        notify(tr("No longer tracking this on AniList."), kFeedbackShort);
+    }
 }
 
 // Decide whether the video about to play should get an auto-downloaded subtitle, and stash the match hints
@@ -19117,6 +19360,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
+        // #156: the tracker needs a TITLE to search AniList with, and scrobbleImdb_ carries only an id.
+        // Captured here, beside the id it belongs to, rather than looked up later from a member that by
+        // then describes whatever is playing now.
+        trackerVideoTitle_ = item.title;
         // #Discord: the same seam, but the id comes from the ITEM rather than from scrobbleImdb_ -
         // startScrobble() early-returns when Trakt is not connected, so reading the member back would hand
         // the IMDb button to Trakt users only. Everything else here is already on the item; nothing is
@@ -21526,6 +21773,26 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine());
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
                                                                                      : tr("Not connected"));
+        // --- AniList (issue #156): anime + manga progress. Trakt above keeps film and general TV; this
+        // keeps anime and manga, and the two never write to each other. Every row has a twin in the
+        // QWidget builder below - a setting in one builder is unreachable in the other mode. ---
+        sep(tr("AniList (anime and manga)"));
+        info(QStringLiteral("anilist.help"),
+             tr("Sync chapters read and episodes watched to your AniList list. Create a free API client at "
+                "anilist.co (Settings > Developer > Create New Client), set its redirect URL to "
+                "the loopback address 127.0.0.1 , paste the Client ID + Secret below, then Connect."), QString());
+        textf(QStringLiteral("anilist.id"), tr("Client ID"), AniListTracker::clientId());
+        // MASKED. It is the user's own OAuth secret and the row must not read it back out on a TV in a
+        // living room. It is also carved out of the sync bundle entirely (CloudSync::isDeviceLocalKey).
+        textf(QStringLiteral("anilist.secret"), tr("Client secret"), AniListTracker::clientSecret(),
+              /*masked=*/true);
+        action(QStringLiteral("anilist.connect"), AniListTracker::isConnected()
+                   ? tr("Disconnect from AniList") : tr("Connect to AniList"));
+        // The queue depth is the only thing that distinguishes "connected and delivering" from "connected
+        // and silently accumulating"; without it a broken push looks exactly like nothing to push.
+        info(QStringLiteral("anilist.data"), tr("AniList"), anilistStatusLine());
+        info(QStringLiteral("anilist.status"), tr("Status"), AniListTracker::isConnected()
+                   ? tr("Connected") : tr("Not connected"));
         // --- Music scrobbling (issue #192) ---
         // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
         // unreachable in the other mode. OFF by default and gated on a token: this sends what somebody listens
@@ -21634,6 +21901,11 @@ void MainWindow::openGeneralSettings()
         // and the host itself outlives every presentation.
         traktStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("trakt.data"), tr("Trakt data"), traktStatusLine()); };
+
+        // ...and the same for the AniList line (#156), which moves on its own: a queued chapter delivered
+        // by the retry timer while this panel is up must move the number the user is looking at.
+        anilistStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("anilist.data"), tr("AniList"), anilistStatusLine()); };
 
         // ...and the same for the scrobble line (#192), which moves on its own: a listen delivered by the
         // background pump while this panel is up must move the number the user is looking at.
@@ -22182,6 +22454,21 @@ void MainWindow::openGeneralSettings()
                     setInfo(QStringLiteral("trakt.status"), tr("Status"), tr("Requesting a code from Trakt…"));
                     trakt_->connectAccount();
                 }
+                // --- AniList (#156). The two credential rows write through AniListTracker rather than
+                // Settings, so the #81 BuiltinSecrets follow-up has ONE place to change what "the client
+                // id" means. ---
+                else if (id == QStringLiteral("anilist.id"))     AniListTracker::setClientId(val);
+                else if (id == QStringLiteral("anilist.secret")) AniListTracker::setClientSecret(val);
+                else if (id == QStringLiteral("anilist.connect")) {
+                    if (AniListTracker::isConnected()) { anilist_->disconnectAccount(); return; }
+                    if (!AniListTracker::isConfigured()) {
+                        setInfo(QStringLiteral("anilist.status"), tr("Status"),
+                                tr("Enter your Client ID and Secret first.")); return;
+                    }
+                    setInfo(QStringLiteral("anilist.status"), tr("Status"),
+                            tr("Opening AniList in your browser…"));
+                    anilist_->connectAccount();
+                }
                 // --- Music scrobbling (#192). Every arm re-reads the status line afterwards: the answer to
                 // "is this on and working" changes with each of them, and a line that still says "Scrobbling
                 // is off" after the toggle was flipped is the same silence the line exists to break.
@@ -22379,7 +22666,23 @@ void MainWindow::openGeneralSettings()
                     setInfo(QStringLiteral("scrobble.status"), MainWindow::tr("Scrobbling"),
                             scrobbleStatusLine()); });
         }
-
+        // Live AniList status (#156), same lifetime and same genSettingsConns_ teardown. authUrlReady is
+        // shown as TEXT rather than assumed to have opened: on a TV the browser may have opened somewhere
+        // the user cannot see, and the URL carries no secret (the client id is public and there is no
+        // token in it), so it is safe to put on screen.
+        genSettingsConns_ << connect(anilist_, &AniListTracker::authUrlReady, this,
+            [setInfo](const QString& url) {
+                setInfo(QStringLiteral("anilist.status"), MainWindow::tr("Status"),
+                        MainWindow::tr("Sign in at: %1").arg(url)); });
+        genSettingsConns_ << connect(anilist_, &AniListTracker::connectError, this,
+            [setInfo](const QString& m) { setInfo(QStringLiteral("anilist.status"), MainWindow::tr("Status"), m); });
+        genSettingsConns_ << connect(anilist_, &AniListTracker::connectedChanged, this,
+            [setInfo, setAction](bool conn) {
+                setInfo(QStringLiteral("anilist.status"), MainWindow::tr("Status"),
+                        conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
+                setAction(QStringLiteral("anilist.connect"),
+                          conn ? MainWindow::tr("Disconnect from AniList")
+                               : MainWindow::tr("Connect to AniList")); });
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
         updateBackgroundMusic();
@@ -24105,6 +24408,69 @@ void MainWindow::openGeneralSettings()
             if (!TraktClient::configured()) { tkStatus->setText(tr("Enter your Client ID and Secret first.")); return; }
             tkStatus->setText(tr("Requesting a code from Trakt…"));
             trakt_->connectAccount();
+        });
+
+        // --- AniList (issue #156): the twins of the themed builder's anilist.* rows. A user-facing setting
+        // has to exist in BOTH surfaces or it is simply unreachable in one mode. ---
+        v->addSpacing(12);
+        auto* alHeading = new QLabel(tr("AniList (anime and manga)"));
+        alHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(alHeading);
+        auto* alNote = new QLabel(tr("Sync chapters read and episodes watched to your AniList list. Create a "
+                                     "free API client at anilist.co (Settings, Developer, Create New Client), "
+                                     "set its redirect URL to the loopback address 127.0.0.1 , paste the "
+                                     "Client ID and "
+                                     "Secret below, then Connect. Trakt above keeps film and general TV; this "
+                                     "keeps anime and manga. Your AniList credentials stay on this device and "
+                                     "are never included in cloud sync."));
+        alNote->setWordWrap(true);
+        alNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(alNote);
+        // The labels are qualified with "AniList" rather than reusing Trakt's "Client ID:" so the two pairs
+        // are distinguishable on a form that now carries both - and so the parity gate's twin patterns name
+        // exactly one control each.
+        addCredRow(tr("AniList Client ID:"), AniListTracker::clientId(), false,
+                   [](const QString& t) { AniListTracker::setClientId(t); });
+        addCredRow(tr("AniList Client secret:"), AniListTracker::clientSecret(), true,
+                   [](const QString& t) { AniListTracker::setClientSecret(t); });
+
+        auto* alStatus = new QLabel(AniListTracker::isConnected() ? tr("\u2713 Connected to AniList.")
+                                                                  : tr("Not connected."));
+        alStatus->setWordWrap(true);
+        alStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* alBtn = new QPushButton(AniListTracker::isConnected() ? tr("Disconnect")
+                                                                    : tr("Connect to AniList"));
+        alBtn->setMinimumHeight(32);
+        auto* alRow = new QHBoxLayout(); alRow->addWidget(alBtn); alRow->addStretch(1);
+        v->addLayout(alRow);
+        v->addWidget(alStatus);
+        // ...and the twin of "anilist.data": the same line from the same builder, so the two surfaces
+        // cannot tell the user different things about the same queue.
+        auto* alData = new QLabel(anilistStatusLine());
+        alData->setWordWrap(true);
+        alData->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(alData);
+        {
+            // While THIS panel is up it owns the refresh hook; the themed builder installs its own when it
+            // presents. Guarded by a QPointer so a delivery landing after the panel is destroyed writes
+            // nowhere - the traktStatusUpdate_ idiom above, for the same reason.
+            QPointer<QLabel> guard(alData);
+            anilistStatusUpdate_ = [guard] { if (guard) guard->setText(MainWindow::anilistStatusLine()); };
+        }
+        // The panel's own connections; they die with the labels, which are its children.
+        connect(anilist_, &AniListTracker::authUrlReady, alStatus, [alStatus](const QString& url) {
+            alStatus->setText(tr("Sign in at: %1").arg(url)); });
+        connect(anilist_, &AniListTracker::connectError, alStatus,
+                [alStatus](const QString& m) { alStatus->setText(m); });
+        connect(anilist_, &AniListTracker::connectedChanged, alBtn, [alBtn, alStatus](bool on) {
+            alBtn->setText(on ? tr("Disconnect") : tr("Connect to AniList"));
+            alStatus->setText(on ? tr("\u2713 Connected to AniList.") : tr("Not connected.")); });
+        connect(alBtn, &QPushButton::clicked, this, [this, alStatus] {
+            if (AniListTracker::isConnected()) { anilist_->disconnectAccount(); return; }
+            if (!AniListTracker::isConfigured())
+            { alStatus->setText(tr("Enter your Client ID and Secret first.")); return; }
+            alStatus->setText(tr("Opening AniList in your browser\u2026"));
+            anilist_->connectAccount();
         });
 
         // --- Music scrobbling (issue #192): the twins of the themed builder's rows. A user-facing setting has

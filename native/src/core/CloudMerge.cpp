@@ -1347,6 +1347,52 @@ void mergeLyricOffset(const QJsonObject& in)
     }
 }
 
+// ---- per-item TRACKER LINKS (global, newest-updatedAt per item; no tombstones) ----------------------------
+// Which AniList entry a shelf row IS (issue #156). A link is established by answering a prompt, one item at
+// a time, and it describes the CONTENT rather than this machine -- so it is GLOBAL, not per profile, and it
+// takes the flat { "<hash>": <blob> } shape of speed/lyricoffset above, for the same reasons: newest
+// updatedAt wins per hash, equal timestamps break on the canonical bytes.
+//
+// NO TOMBSTONES, and the reason is worth stating because unlinking really is a deletion in the user's terms:
+// TrackerLinks::clear writes a HUSK (an empty mediaId, a fresh updatedAt) instead of removing the row. A
+// removed row would simply be re-merged back in from any peer that still held the old link, and the user
+// would find an item they unlinked linked again after a sync. The husk beats it on timestamp instead, which
+// is the MetaOverrides argument applied to a smaller blob.
+//
+// THE CREDENTIALS ARE NOT HERE and must never be. tracker/* and trackerstate/* are device-local
+// (CloudSync::isDeviceLocalKey); only trackerlink/* rides this document. probe_cloudmerge asserts both.
+
+QString trackerLinkItemsGroup() { return QStringLiteral("trackerlink/items"); }
+
+void serializeTrackerLink(QJsonObject& out)
+{
+    QSettings& s = store();
+    s.beginGroup(trackerLinkItemsGroup());
+    const QStringList hashes = s.childKeys();
+    for (const QString& h : hashes)
+        out.insert(h, QJsonDocument::fromJson(s.value(h).toString().toUtf8()).object());
+    s.endGroup();
+}
+
+void mergeTrackerLink(const QJsonObject& in)
+{
+    QSettings& s = store();
+    for (auto it = in.begin(); it != in.end(); ++it)
+    {
+        const QJsonObject rblob = it.value().toObject();
+        const qint64 rTs = static_cast<qint64>(rblob.value(QStringLiteral("updatedAt")).toDouble());
+        const QString ikey = trackerLinkItemsGroup() + QLatin1Char('/') + it.key();
+        const QByteArray localRaw = s.value(ikey).toString().toUtf8();
+        if (!localRaw.isEmpty())
+        {
+            const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+            const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+            if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue; // equal ts -> order-independent tie-break
+        }
+        s.setValue(ikey, QString::fromUtf8(canon(rblob)));
+    }
+}
+
 // ---- "you missed" dismissals (issue #25) — per profile, per show, merged by MAX ---------------------------
 // The simplest section in this document, and deliberately so: the store it carries is a set of per-show
 // high-water marks whose only mutation is being RAISED, so the merge is `max` and nothing else.
@@ -1481,7 +1527,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, missed, homerows;
+    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -1497,6 +1543,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializePad2Key(pad2key);                                   // per-game pad-to-keyboard records (issue #105)
     serializeSpeed(speed);                                       // per-item playback-speed memory (issue #140)
     serializeLyricOffset(lyricoffset);                           // per-item lyric offset memory (issue #142)
+    serializeTrackerLink(trackerlink);                           // per-item tracker links (issue #156)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
@@ -1523,6 +1570,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("pad2key"), pad2key);             // issue #105 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("speed"), speed);                 // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("lyricoffset"), lyricoffset);     // issue #142 — a new root key; old builds ignore it (mergeAll reads by name)
+    root.insert(QStringLiteral("trackerlink"), trackerlink);     // issue #156 - a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("missed"), missed);
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
@@ -1547,6 +1595,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergePad2Key(root.value(QStringLiteral("pad2key")).toObject());         // issue #105: per-game pad2key records
     mergeSpeed(root.value(QStringLiteral("speed")).toObject());             // issue #140: per-item speed memory
     mergeLyricOffset(root.value(QStringLiteral("lyricoffset")).toObject()); // issue #142: per-item lyric offset
+    mergeTrackerLink(root.value(QStringLiteral("trackerlink")).toObject()); // issue #156: per-item tracker links
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);

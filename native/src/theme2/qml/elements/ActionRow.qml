@@ -29,6 +29,10 @@ Item {
     // nothing on any screen to distinguish corrected data from scraped data — and "reset to scraped" would
     // be an option with no visible reason to reach for it.
     readonly property bool edited: !!(sel && sel.edited)
+    // Is this series linked to a tracker entry (issue #156)? The pill says so, because otherwise a tracked
+    // series and an untracked one look identical and "unlink" is an option with no visible reason to reach
+    // for it. Supplied by themedDetailData only when a tracker is configured at all.
+    readonly property bool tracked: !!(sel && sel.tracked)
     function statusLabel(c) {
         if (c === "inProgress") return "In progress"
         if (c === "finished")   return "Finished"
@@ -85,6 +89,9 @@ Item {
         if (verb === "status")   return { label: "◐  " + statusLabel(completion),
                                           color: (completion === "none" ? "#E7EBF2" : "#CFE3D2"), textColor: "#33405A" }
         if (verb === "tags")     return { label: "🏷  Tags",                              color: "#E7EBF2", textColor: "#33405A" }
+        // The AniList link for this series: link, re-link, refresh or unlink (issue #156).
+        if (verb === "tracker")  return { label: (tracked ? "📈  Tracking" : "📈  Track…"),
+                                          color: (tracked ? "#CFE0F5" : "#E4F0FF"), textColor: "#1B3A63" }
         if (verb === "editmeta") return { label: (edited ? "✎  Info edited" : "✎  Fix info…"),
                                           color: (edited ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         // Per-game launch overrides (issue #51): which core / standalone emulator / extra args THIS game runs on.

@@ -31,6 +31,7 @@
 #include "../core/RomhackClient.h"   // PendingRomhack holds a chosen hack + its stated target by value
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
+#include "../core/Tracker.h"         // tracker::Kind / tracker::Update - the #156 seam's value types
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 #include "../video/PlayerGestures.h" // issue #162: the touch gesture recogniser is a value member
@@ -1582,6 +1583,40 @@ private:
     QString scrobbleImdb_;
     void startScrobble(const QString& imdbStreamId); // begin scrobbling a video (stops any prior one)
     void stopScrobble();                             // stop + mark-watched the current scrobble
+
+    // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
+    // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
+    // the same seam in later increments, and nothing below names AniList except the construction.
+    class AniListTracker* anilist_ = nullptr;
+
+    // THE ONE ENTRY POINT from the app's own completion paths - a comic chapter reaching its last page,
+    // a video stopping past the watched threshold. It decides, in this order: tracker off -> nothing;
+    // item linked -> raise the local mark and queue a push; item unlinked and not declined -> open the
+    // match prompt (deferred a turn, because the caller is inside a signal delivery and the prompt spins
+    // a nested loop - the #28/#211 family); item declined -> nothing, for ever, until the user asks.
+    //
+    // `itemKey` is the app's marks key for the SERIES, not the episode: one link and one prompt per show.
+    void trackerNoteProgress(const QString& itemKey, const QString& title, int year,
+                             tracker::Kind kind, int unit, bool completes);
+    // The title of the video being scrobbled, captured at the play site because the tracker needs a title
+    // to SEARCH with and scrobbleImdb_ carries only an id. Cleared with the scrobble.
+    QString trackerVideoTitle_;
+    // The match prompt. BY VALUE throughout and run past the deferral, for themedDetailPickStatus's
+    // reason: it re-enters NavMenu::pick after an async search, by which time no index or member is safe.
+    // `pending` is the progress event that triggered it, replayed once a match is chosen.
+    void trackerPromptLink(QString itemKey, QString title, int year, tracker::Kind kind,
+                           tracker::Update pending);
+    // The detail-view verb, both layouts. Linked -> a small menu (what it is linked to / Refresh from
+    // AniList / Unlink); unlinked -> the same match prompt with no pending progress to replay.
+    void trackerLinkVerb(QString itemKey, QString title, int year, tracker::Kind kind);
+    // Pull and reconcile ONE item, furthest wins (#136's rule): a tracker that is ahead advances the
+    // local completion mark, one that is behind is pushed to, and neither side is ever regressed.
+    void trackerRefreshItem(QString itemKey);
+    // The AniList status line, shared by BOTH settings builders so the two cannot tell the user different
+    // things about the same state - the traktStatusLine posture. Static: everything in it is on disk.
+    static QString anilistStatusLine();
+    // Re-read that line into whichever settings surface is on screen; unset when neither is.
+    std::function<void()> anilistStatusUpdate_;
 
     // ---- MUSIC scrobbling (issue #192) ------------------------------------------------------------
     // The counterpart to the Trakt block above, and deliberately NOT an extension of it: film and TV go to

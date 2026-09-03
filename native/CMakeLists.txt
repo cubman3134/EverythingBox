@@ -631,6 +631,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktSync.cpp  src/core/TraktSync.h  # Trakt read layer 2: the lists + the watched backfill (#23)
         src/core/TraktMissed.cpp   src/core/TraktMissed.h    # "You missed": the pure selection rule (#25)
         src/core/MissedDismiss.cpp src/core/MissedDismiss.h  # ...and the per-show dismissal watermarks it reads
+        # ANIME/MANGA TRACKERS (#156). Tracker.h is the pure seam (no QObject, so a probe can link it
+        # against Qt6::Core alone) and TrackerRules is every AniList wire format plus the debounce, the
+        # queue and the furthest-wins reconciliation. AniListTracker is the only part that owns a socket.
+        src/core/Tracker.h                                        # the seam: MAL/Kitsu slot in behind it
+        src/core/TrackerRules.cpp  src/core/TrackerRules.h        # the AniList wire + push/pull rules (pure)
+        src/core/TrackerLinks.cpp  src/core/TrackerLinks.h        # which tracker entry an item is (per-item-synced)
+        src/core/AniListTracker.cpp src/core/AniListTracker.h     # OAuth loopback + the queued push
         # MUSIC SCROBBLING (#192). Scrobble.h / ScrobbleProvider.h are header-only (the pure rules and the
         # seam) and are listed so they show up in an IDE beside the two units that need a TU.
         src/core/Scrobble.h              # the threshold, what counts, the accumulator - pure (probe_scrobble)
@@ -1894,6 +1901,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
         src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — SettingsTxn/CloudSync exclude the family
         src/core/PendingPush.cpp     src/core/PendingPush.h        # #34: the pending-push record + retry policy (§19-22)
+        # #156: the tracker feature straddles the carve-out - the credentials are device-local and the
+        # per-item links are synced through this very document - so BOTH halves are asserted here, where
+        # CloudSync and CloudMerge are already linked. Tracker.h is header-only; TrackerLinks is the
+        # writer whose blobs the trackerlink round trip merges.
+        src/core/Tracker.h
+        src/core/TrackerRules.cpp    src/core/TrackerRules.h
+        src/core/TrackerLinks.cpp    src/core/TrackerLinks.h
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
@@ -2134,6 +2148,23 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
+
+    # Headless test of the ANIME/MANGA TRACKER seam (issue #156): the AniList OAuth bodies and token
+    # reply, the three GraphQL documents, the 30-second debounce (on a fake clock), the offline queue
+    # and the furthest-wins reconciliation - all pure, all in TrackerRules - plus the per-item link
+    # store, which is a QSettings unit and is linked whole so the round trip, the unlink husk and the
+    # "do not ask about this item" memory are asserted against a real ini rather than a mock. That ini
+    # is the per-process scratch one every probe target gets (EB_ISOLATED_DATA_DIR), which is also what
+    # makes the credential BYTE-SCAN in section 3 possible: write the whole feature's state, then read
+    # the file back and assert the client secret occurs exactly once, under the device-local key.
+    # AppPaths.h and AppBrand.h are header-only, so this stays Qt6::Core with no socket in sight.
+    add_executable(probe_tracker tools/probe_tracker.cpp
+        src/core/Tracker.h
+        src/core/TrackerRules.cpp src/core/TrackerRules.h
+        src/core/TrackerLinks.cpp src/core/TrackerLinks.h
+        src/core/AppPaths.h src/core/AppBrand.h)
+    target_include_directories(probe_tracker PRIVATE src src/core)
+    target_link_libraries(probe_tracker PRIVATE Qt6::Core)
 
     # Headless test for PC-game identity + source selection (the merged PC Games folder), and for the
     # remap that moves the user's per-item records onto the merged id (pc-games T3). PcGameRemap works at
