@@ -801,6 +801,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        # #248 (b): the self-compiled tier's card. A MainWindow member in its OWN TU (the #186
+        # direction) - MainWindow.cpp is one giant object that a dozen branches edit at once.
+        src/ui/MainWindowRecomps.cpp
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
@@ -827,6 +830,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/HomebrewClient.cpp src/core/HomebrewClient.h
         src/core/HashVerify.cpp src/core/HashVerify.h  # #97: DAT dump verification (HomeView badge links it)
         src/core/NativePorts.h                         # #233: the native-port catalog (header-only, qrc below)
+        # #248 (b): the RetComM catalogue as a second feed. RecompFeed.cpp is the parse/merge/cache
+        # (QtCore + miniz, and probe_ports links exactly it); RecompFeedFetch.cpp is the one
+        # network-touching function, kept in its own TU so the probe never links Qt6::Network.
+        src/core/RecompFeed.cpp src/core/RecompFeed.h
+        src/core/RecompFeedFetch.cpp
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -1615,10 +1623,18 @@ if(EVERYTHINGBOX_BUILD_APP)
     qt_add_resources(EB_PORTS_RCC_PROBE resources/ports.qrc)
     add_executable(probe_ports tools/probe_ports.cpp src/core/NativePorts.h src/core/EmulatorRegistry.h
         src/core/RecompRows.h
+        # #248 (b): the RetComM feed's parse/merge/cache. miniz.c comes with it for two reasons -- the reader
+        # unpacks catalog.zip, and the probe's fixture catalogues are WRITTEN with miniz in-process, so no
+        # binary fixture is committed and each malformed case can differ from the last by one byte. The
+        # network half (RecompFeedFetch.cpp) is deliberately NOT here: this probe links Qt6::Core only, and a
+        # probe that could make a request is a probe that can fail because somebody's DNS did.
+        src/core/RecompFeed.cpp src/core/RecompFeed.h
+        third_party/miniz.c
         ${EB_PORTS_RCC_PROBE})
-    target_include_directories(probe_ports PRIVATE src src/core)
+    target_include_directories(probe_ports PRIVATE src src/core third_party)
     target_link_libraries(probe_ports PRIVATE Qt6::Core)
     target_compile_definitions(probe_ports PRIVATE
+        MINIZ_NO_ZLIB_COMPATIBLE_NAMES                      # matches the app build
         EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
 
     # Launch recipes (src/core/LaunchRecipe.h, issue #190): the per-system launch knowledge - core options to

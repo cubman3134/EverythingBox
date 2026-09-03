@@ -37,6 +37,8 @@
 #include "../core/SystemCatalog.h"
 #include "../core/DecorationInstall.h"   // #187: decoration-pack zip -> bezels/<system>/<packId>/
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
+#include "../core/RecompFeed.h" // issue #248 (b): the RetComM feed, for a feed-only row's entry
+#include "../core/RecompRows.h" // issue #248: the tier a catalogue entry belongs to
 #include "../core/Settings.h"
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
@@ -17224,6 +17226,11 @@ static QString describeTarget(const RomhackTarget& target)
 void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
 {
     const ExternalEmulator* port = NativePorts::byId(portId);
+    // #248 (b): a row from the RETCOMM feed is not in the in-tree catalogue, so the id resolves there instead.
+    // Held BY VALUE in this frame on purpose — the card below runs a nested event loop, during which a feed
+    // refresh can replace the whole cached list, and a pointer into it would not survive that.
+    ExternalEmulator feedPort;
+    if (!port && RecompFeed::findById(portId, &feedPort)) port = &feedPort;
     if (!port || !port->isNativePort())
     {
         // The catalogue is data and can be overridden from <data>/ports — an id resolved a moment ago can
@@ -17231,6 +17238,12 @@ void MainWindow::showNativePort(const MediaItem& item, const QString& portId)
         notify(tr("That native port is no longer in the catalogue."), 5000);
         return;
     }
+
+    // #248 (b): the SELF-COMPILED tier goes no further. There is nothing to download for one of these — the
+    // port is produced here, from the recompiler the entry names plus the user's own dump — so every sentence
+    // below it (a release download, an unsigned binary, Defender) would be about an operation that does not
+    // happen. Its own card says what it is and what it needs, and offers the engine's page.
+    if (recomps::tierOf(*port) != recomps::Tier::PreBuilt) { showSelfCompiledPort(*port); return; }
 
     // Increment 1 honours ONE way of getting the game file to a port: the port asks for it in its own menu.
     // An entry declaring a mode this build cannot perform is still a valid entry and still matched its game —

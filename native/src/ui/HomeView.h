@@ -228,6 +228,8 @@ public:
     QVariant dumpStatusFact(const MediaItem& it);
     void scheduleRomVerify(const MediaItem& it, const QString& romPath);
     QSet<QString> romVerifyInFlight_;   // ROM paths whose background verification is running (dedupe)
+    QSet<QString> recompHashInFlight_;  // #248: ROM paths being hashed for the recomp ROM-identity gate
+    bool          recompFeedFetching_ = false;   // one catalogue fetch at a time, whatever the navigation
     // Composite an item's miximage card on the thread pool (compose+PNG-encode is 100-400ms — synchronous on
     // the display path it WAS the themed shelf's per-row scroll hitch). Plans on the GUI thread (MetaCache is
     // not thread-safe), composes on a worker, then records the role + refreshes the panel if the row is still
@@ -774,6 +776,13 @@ private:
     // ---- Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships ----
     void openRecompsLevel();                                   // drill Games' "Recomps" folder -> the section
     void populateRecomps();                                    // (re)build it: a header per system + its ports
+    // #248 inc b: the RetComM feed, refreshed at most once a day, off-thread, when the section is opened.
+    // The rows are drawn from the LAST GOOD COPY immediately and re-drawn if the fetch brings a newer one, so
+    // opening the section never waits on a network round trip.
+    void refreshRecompFeedAsync();
+    // ...and the ROM-identity gate's one-off hashing. A row is `checking dumps…` while these run; each path is
+    // hashed once, on the pool, into the shared HashVerify cache, and the section re-derives when it lands.
+    void scheduleRecompHashes(const QStringList& paths, const QHash<QString, QString>& systemHints);
     // ---- OPDS book catalogs (#146): saved book servers -> a browsable feed shelf -> download+open a book ----
     void openOpdsCatalogsLevel();                              // drill Reading's "Book Servers" folder -> the shelf
     void populateOpdsCatalogs();                               // (re)build it: one row per catalog + an "add" row
