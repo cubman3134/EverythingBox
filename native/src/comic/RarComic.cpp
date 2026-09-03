@@ -64,7 +64,9 @@ namespace
             const bool sane = size > 0 && size <= size_t(256) * 1024 * 1024;
             if (!sane) continue;                    // nothing to walk the window with; unarr skips it too
 
-            const bool keep = ComicPages::isImageName(name) && (wanted.isEmpty() || name == wanted);
+            // A NAMED member is kept whether or not it is a page image — that is the ComicInfo.xml door
+            // (#152). With no name asked for, the rule is what it always was: every image member.
+            const bool keep = wanted.isEmpty() ? ComicPages::isImageName(name) : (name == wanted);
 
             QByteArray bytes(int(size), '\0');
             if (!ar_entry_uncompress(ar, bytes.data(), size)) continue;   // damaged entry: skip, keep going
@@ -108,9 +110,10 @@ QString message(Status s)
     return QString();
 }
 
-QStringList imageNames(const QString& path, Status* status)
+QStringList imageNames(const QString& path, Status* status, QStringList* otherNames)
 {
     QStringList out;
+    if (otherNames) otherNames->clear();
     auto done = [&](Status s) { if (status) *status = s; return out; };
 
     const Status sig = signatureOf(path);
@@ -130,7 +133,9 @@ QStringList imageNames(const QString& path, Status* status)
         const char* raw = ar_entry_get_name(ar);
         if (!raw) continue;
         const QString name = QString::fromUtf8(raw);
-        if (ar_entry_get_size(ar) > 0 && ComicPages::isImageName(name)) out.append(name);
+        if (ar_entry_get_size(ar) <= 0) continue;
+        if (ComicPages::isImageName(name)) out.append(name);
+        else if (otherNames)              otherNames->append(name);
     }
 
     ar_close_archive(ar);
@@ -162,6 +167,19 @@ QByteArray coverBytes(const QString& path, Status* status)
               [&coll](const QString& a, const QString& b) { return ComicPages::lessThan(coll, a, b); });
 
     const QVector<QPair<QString, QByteArray>> one = readPass(path, names.first(), status);
+    return one.isEmpty() ? QByteArray() : one.first().second;
+}
+
+QByteArray memberBytes(const QString& path, const QString& name, Status* status)
+{
+    if (name.isEmpty())
+    {
+        // An empty name means "every image member" to readPass, which is emphatically not what a caller
+        // asking for a named member wants back.
+        if (status) *status = Status::NoPages;
+        return QByteArray();
+    }
+    const QVector<QPair<QString, QByteArray>> one = readPass(path, name, status);
     return one.isEmpty() ? QByteArray() : one.first().second;
 }
 

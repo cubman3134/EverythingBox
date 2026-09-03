@@ -1,4 +1,5 @@
 #include "BookMeta.h"
+#include "../comic/ComicInfo.h"        // ComicInfo.xml — the comic world's own metadata standard (#152)
 #include "../comic/ComicPageOrder.h"   // the reader's own page order + image-member rule (#205 / #134)
 #include "../comic/RarComic.h"         // .cbr — the same unarr reader ComicView opens one with (#144)
 #include "../ebook/EpubMeta.h"
@@ -53,6 +54,40 @@ namespace
         return imgs;
     }
 
+    // What a comic archive's embedded ComicInfo.xml puts on an Info. Shared by the CBZ and CBR branches
+    // because the DOCUMENT is the same document however it got out of the container (#152) — the two
+    // branches differ only in how they hand over the bytes.
+    //
+    // pageCount is NOT taken from <PageCount>: the scan COUNTED the image members a moment ago, and a
+    // counted number cannot disagree with the archive the way a tagger's claim can (a re-packed comic with
+    // an advert page removed keeps its old <PageCount> for ever). It is read into the Info only when the
+    // count came back zero, which is the case where we have nothing else to say.
+    void applyComicInfo(Info& i, const ComicInfo::Info& c)
+    {
+        if (c.isEmpty() && c.rating == ComicInfo::Rating::Unrated
+            && c.direction == ComicInfo::Direction::Unspecified && c.pageCount == 0)
+            return;   // an absent or empty document changes nothing at all
+
+        i.title       = c.title;
+        i.author      = c.author;
+        i.series      = c.series;
+        i.number      = c.number;
+        i.seriesIndex = ComicInfo::numberAsIndex(c.number);
+        i.volume      = c.volume;
+        i.summary     = c.summary;
+        i.language    = c.language;
+        i.year        = c.year;
+        i.month       = c.month;
+        i.day         = c.day;
+        i.creators    = c.creators;
+        i.publisher   = c.publisher;
+        i.genre       = c.genre;
+        i.web         = c.web;
+        i.rating      = c.rating;
+        i.direction   = c.direction;
+        if (i.pageCount <= 0) i.pageCount = c.pageCount;
+    }
+
     Info readComic(const QString& path)
     {
         Info i;
@@ -60,11 +95,44 @@ namespace
         std::memset(&zip, 0, sizeof(zip));
         if (!mz_zip_reader_init_file(&zip, path.toUtf8().constData(), 0)) return i;
         const QVector<QPair<QString, mz_uint>> pages = comicPages(&zip);
+
+        // THE SAME PASS. The central directory is walked once for the pages; the document is one more member
+        // out of the handle that walk left open, so a CBZ that carries one costs one extra extract and a
+        // CBZ that does not costs a string compare per member.
+        QByteArray xml;
+        const mz_uint count = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint n = 0; n < count; ++n)
+        {
+            if (mz_zip_reader_is_file_a_directory(&zip, n)) continue;
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip, n, &st)) continue;
+            if (!ComicInfo::isComicInfoName(QString::fromUtf8(st.m_filename))) continue;
+            size_t sz = 0;
+            void* p = mz_zip_reader_extract_to_heap(&zip, n, &sz, 0);
+            if (p) { xml = QByteArray(static_cast<const char*>(p), int(sz)); mz_free(p); }
+            break;      // first match at the root wins
+        }
         mz_zip_reader_end(&zip);
+
         i.pageCount = int(pages.size());
         i.hasCover  = !pages.isEmpty();
-        // No title, no author, no series: a CBZ carries none of them, and the FILENAME is the only source —
-        // which is ComicName's judgement to make, folder by folder, and not this file's to guess at.
+        // WITHOUT a ComicInfo.xml: no title, no author, no series, exactly as before — the FILENAME is the
+        // only source, which is ComicName's judgement to make, folder by folder, and not this file's to
+        // guess at. WITH one: it says all of that outright, and it wins (#152).
+        if (!xml.isEmpty())
+        {
+            bool wellFormed = true;
+            const ComicInfo::Info c = ComicInfo::parse(xml, &wellFormed);
+            // A DOCUMENT THAT WILL NOT PARSE IS IGNORED WHOLE, not applied as far as it got. Half a
+            // ComicInfo is a comic filed under a series with no number and an author that may belong to the
+            // issue after it; the filename inference it would displace is at least self-consistent. One log
+            // line, and the shelf is what it was.
+            if (!wellFormed)
+                qWarning("ComicInfo.xml in \"%s\" is malformed; ignoring it and using the file name.",
+                         qPrintable(QFileInfo(path).fileName()));
+            else
+                applyComicInfo(i, c);
+        }
         return i;
     }
 
@@ -93,11 +161,30 @@ namespace
     {
         Info i;
         RarComic::Status st = RarComic::Status::Ok;
-        const QStringList pages = RarComic::imageNames(path, &st);
+        QStringList others;
+        const QStringList pages = RarComic::imageNames(path, &st, &others);
         if (st != RarComic::Status::Ok) return i;   // RAR5, damaged, encrypted: the shelf shows the filename
         i.pageCount = int(pages.size());
         i.hasCover  = !pages.isEmpty();
-        return i;   // no title/author/series: a comic archive carries none — see readComic()
+
+        // THE HEADER WALK ALREADY TOLD US whether the document is in there, so an archive without one pays
+        // nothing at all — and only one WITH it pays the single sequential pass a solid RAR forces
+        // (RarComic.h). That is what keeps a .cbr inside the cost rule that lets it into the scan.
+        for (const QString& n : others)
+        {
+            if (!ComicInfo::isComicInfoName(n)) continue;
+            const QByteArray xml = RarComic::memberBytes(path, n);
+            if (xml.isEmpty()) break;
+            bool wellFormed = true;
+            const ComicInfo::Info c = ComicInfo::parse(xml, &wellFormed);
+            if (!wellFormed)
+                qWarning("ComicInfo.xml in \"%s\" is malformed; ignoring it and using the file name.",
+                         qPrintable(QFileInfo(path).fileName()));
+            else
+                applyComicInfo(i, c);
+            break;
+        }
+        return i;
     }
 
     // ---- FB2 ------------------------------------------------------------------------------------------

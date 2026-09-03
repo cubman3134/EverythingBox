@@ -37,13 +37,22 @@ namespace HashVerify
     QString statusToken(Status s);   // "verified" / "bad" / "unknown" — the stable stamp string
     Status  statusFromToken(const QString& t);
 
-    // A ROM's payload hashes. All lower-case hex; crc is 8 chars, md5 32, sha1 40. Any may be empty (e.g. the
-    // CHD path fills only sha1).
+    // A ROM's payload hashes. All lower-case hex; crc is 8 chars, md5 32, sha1 40, sha256 64. Any may be empty
+    // (e.g. the CHD path fills only sha1).
+    //
+    // SHA-256 IS HERE FOR A CONSUMER OUTSIDE #97 (issue #248): a recomp catalogue entry publishes whichever
+    // digest kinds its author's own gate uses, and sha256 is one of the four the RetComM schema defines. A DAT
+    // never carries it, so classify() ignores it and the DatDb indexes do not hold it — it is computed and
+    // cached so that the recomp row's ROM-identity gate has the kind it may need, rather than making that
+    // feature open the same multi-gigabyte file a second time to compute one more digest.
     struct Hashes
     {
-        QString crc;   // CRC32, zlib polynomial, 8 hex chars
-        QString md5;   // 32 hex chars
-        QString sha1;  // 40 hex chars
+        QString crc;     // CRC32, zlib polynomial, 8 hex chars
+        QString md5;     // 32 hex chars
+        QString sha1;    // 40 hex chars
+        QString sha256;  // 64 hex chars
+        // Deliberately NOT widened to include sha256: every caller of this predicate is asking "did the
+        // hashing fail", and the one path that produces a partial result (a CHD, sha1 only) is not a failure.
         bool isEmpty() const { return crc.isEmpty() && md5.isEmpty() && sha1.isEmpty(); }
     };
 
@@ -127,6 +136,12 @@ namespace HashVerify
         QString sha1;          // the payload sha1 we computed (identity anchor across renames — issue #97)
         QString datGame;       // the canonical DAT name when Verified ("" otherwise)
         bool    valid = false; // false = never verified (distinct from a real Unknown result)
+        // The other three digests of the same payload, cached beside the sha1 for #248's ROM-identity gate.
+        // A stamp written before this existed carries none of them, which reads as "not hashed for that
+        // purpose yet" and is a cache MISS there while remaining a perfectly valid #97 verdict here.
+        QString crc;
+        QString md5;
+        QString sha256;
     };
     Stamp cachedStamp(const QString& path);                       // cheap read for the badge (path+mtime gated)
     // Compute + persist a stamp for `path`. The bytes hashed come from `hashSourcePath` when it is non-empty
@@ -136,4 +151,25 @@ namespace HashVerify
     Stamp verifyAndCache(const QString& path, const QString& systemHint, const DatDb& db,
                          const QString& hashSourcePath = QString());
     void  clearCache();                                           // drop all stamps (e.g. DATs changed)
+
+    // ---- the hash cache read as a HASH cache (issue #248) --------------------------------------------------
+    // #97 asks the stamp "is this dump good?"; the recomp section asks it "what are this dump's digests?".
+    // Same record, same path+mtime+size gate, two questions — and keeping them in ONE record is the point: two
+    // caches of the same four numbers drift, and the one a caller reads is then the stale one.
+    //
+    // cachedHashes() NEVER hashes. An un-hashed (or stale, or partially-filled legacy) record returns empty
+    // fields, which the caller is required to read as "not known yet" and to schedule off-thread — the recomp
+    // row model is built on that distinction, because hashing a 660 MB disc image while somebody is scrolling
+    // a list is the failure this rule exists to prevent.
+    Hashes cachedHashes(const QString& path);
+
+    // Compute this file's payload digests and persist them into the same record, WITHOUT touching the #97
+    // verdict: a file hashed for the recomp gate on a machine with no DAT must not thereby acquire a
+    // "we checked it and know nothing" stamp that stops the #97 pass ever running. Blocking, and for a disc
+    // image expensive — call it from a worker thread only. Returns the digests (empty on an unreadable file).
+    // `hashSourcePath`, when non-empty, is the file whose BYTES are hashed (the ArchiveRom-extracted temp),
+    // while the record stays keyed and mtime/size-gated on `path` — verifyAndCache's arrangement, for the
+    // same reason.
+    Hashes hashAndCache(const QString& path, const QString& systemHint,
+                        const QString& hashSourcePath = QString());
 }

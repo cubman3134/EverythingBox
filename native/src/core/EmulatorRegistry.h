@@ -53,8 +53,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <functional>
 #include "AppPaths.h"
+#include "ContentRecipe.h"   // issue #189: the per-emulator update/DLC install recipes carried on each entry
 
 // ---- the NATIVE-PORT game binding (issue #233) -----------------------------------------------------------
 // A native port (a static recompilation of one N64 title into a PC executable — Zelda64Recomp and its
@@ -199,6 +201,13 @@ struct ExternalEmulator
     // built-in emulator table; filled only by the port catalog (NativePorts.h), which is a SEPARATE registry.
     NativePortBinding port;
 
+    // How this emulator ingests a game UPDATE or DLC package (issue #189) — see ContentRecipe.h. Empty for
+    // every emulator that has no such concept (a cartridge system has nothing to install), and DECLARED LAST
+    // so the positional aggregate initialisers of the built-in table above stay untouched: the built-in
+    // recipes are attached by id in builtinEmulators(), from the same JSON schema a user's own
+    // <data>/emulators/*.json writes.
+    ContentRecipe::Spec contentInstall;
+
     // A port is exactly "an ExternalEmulator carrying a game binding". One spelling, so no caller invents a
     // second test (an empty `systems` does NOT mean port — most user entries have none either).
     bool isNativePort() const { return !port.name.isEmpty(); }
@@ -213,17 +222,107 @@ inline bool operator==(const ExternalEmulator& a, const ExternalEmulator& b)
         && a.updateJsonUrl == b.updateJsonUrl && a.winArtifact == b.winArtifact && a.macArtifact == b.macArtifact
         && a.linuxArtifact == b.linuxArtifact && a.flatpakAppId == b.flatpakAppId
         && a.winUpdateUrl == b.winUpdateUrl && a.macUpdateUrl == b.macUpdateUrl && a.linuxUpdateUrl == b.linuxUpdateUrl
-        && a.extensions == b.extensions && a.systems == b.systems && a.port == b.port;
+        && a.extensions == b.extensions && a.systems == b.systems && a.port == b.port
+        && a.contentInstall == b.contentInstall;   // issue #189
 }
 inline bool operator!=(const ExternalEmulator& a, const ExternalEmulator& b) { return !(a == b); }
 
 namespace EmulatorRegistry
 {
+    // ---- the built-in CONTENT-INSTALL recipes (issue #189) ----------------------------------------------
+    // Written as JSON rather than as C++ initialisers, and that is the point: this is the SAME schema a
+    // <data>/emulators/*.json override writes, so what ships and what a user may add are one thing rather
+    // than two that drift. Attached to the table by id in builtinEmulators() below, which leaves that table's
+    // positional aggregate initialisers untouched.
+    //
+    // PER-EMULATOR STATUS (increment 1):
+    //   ryujinx  WIRED  — its updates.json / dlc.json per-title indexes are edited in place.
+    //   cemu     WIRED  — content is copied into mlc01/usr/title/<high>/<low>. The high half is a CONSTANT per
+    //                     slot on Wii U (0005000E = update, 0005000C = DLC; the base game is 00050000), which
+    //                     is why the destination names it literally instead of using {titleIdHigh}.
+    //   rpcs3    DESCRIBED — the PS3 chain in native/src/core/ps3/ already performs exactly this, and keeps
+    //                     doing so. probe_contentinstall asserts the recipe and that code still agree.
+    //   vita3k   WRITTEN, NOT WIRED — the paths are Vita3K's documented ux0 layout; unverified on a real install.
+    //   azahar   WRITTEN, NOT WIRED — deliberately "emulatorUpdater": a 3DS content store is keyed by THIS
+    //                     machine's movable.sed (sdmc/Nintendo 3DS/<id0>/<id1>/…), so there is no path a
+    //                     frontend can compute, and Azahar/Citra expose no CLI install. Saying so is the
+    //                     honest recipe; inventing a path would not be.
+    inline const QHash<QString, ContentRecipe::Spec>& builtinContentInstall()
+    {
+        static const QHash<QString, ContentRecipe::Spec> map = [] {
+            static const char kJson[] = R"JSON({
+  "ryujinx": {
+    "dataDirs": ["{emuDir}/portable", "{appData}/Ryujinx"],
+    "updates": {
+      "kind": "jsonRegistry",
+      "path": "{data}/games/{titleId}/updates.json",
+      "container": "object",
+      "entry": { "paths": ["{file}"], "selected": "{file}" }
+    },
+    "dlc": {
+      "kind": "jsonRegistry",
+      "path": "{data}/games/{titleId}/dlc.json",
+      "container": "array",
+      "entry": { "path": "{file}", "dlc_nca_list": [] }
+    }
+  },
+  "cemu": {
+    "dataDirs": ["{appData}/Cemu", "{emuDir}"],
+    "updates": { "kind": "copyTree", "dest": "{data}/mlc01/usr/title/0005000E/{titleIdLow}" },
+    "dlc":     { "kind": "copyTree", "dest": "{data}/mlc01/usr/title/0005000C/{titleIdLow}" }
+  },
+  "rpcs3": {
+    "dataDirs": ["{emuDir}"],
+    "updates": {
+      "kind": "cli",
+      "args": "--headless --installpkg {file}",
+      "note": "RPCS3 installs a PKG itself. EverythingBox's PS3 chain (native/src/core/ps3/) already drives this exact command line; this recipe describes it, it does not replace it."
+    },
+    "dlc": {
+      "kind": "cli",
+      "args": "--headless --installpkg {file}",
+      "note": "The same --installpkg entry point takes a DLC PKG."
+    }
+  },
+  "vita3k": {
+    "dataDirs": ["{emuDir}", "{appData}/Vita3K/Vita3K"],
+    "updates": {
+      "kind": "copyTree",
+      "dest": "{data}/ux0/patch/{titleId}",
+      "note": "A Vita game patch lives in ux0/patch/<titleId>. Written as data in increment 1 and not wired: unverified against a real Vita3K install."
+    },
+    "dlc": {
+      "kind": "copyTree",
+      "dest": "{data}/ux0/addcont/{titleId}",
+      "note": "Vita add-on content lives in ux0/addcont/<titleId>. Written as data in increment 1 and not wired."
+    }
+  },
+  "azahar": {
+    "updates": {
+      "kind": "emulatorUpdater",
+      "note": "Azahar (and Citra/Lime3DS before it) installs an update CIA through its own File ▸ Install CIA flow. Its content store lives under sdmc/Nintendo 3DS/<id0>/<id1>/, both derived from THIS console dump's movable.sed, so no path can be computed ahead of time and there is no CLI install entry point."
+    },
+    "dlc": {
+      "kind": "emulatorUpdater",
+      "note": "3DS DLC is installed as a CIA through the same in-app flow."
+    }
+  }
+})JSON";
+            QHash<QString, ContentRecipe::Spec> m;
+            const QJsonObject root = QJsonDocument::fromJson(QByteArray(kJson)).object();
+            for (auto it = root.constBegin(); it != root.constEnd(); ++it)
+                m.insert(it.key(), ContentRecipe::specFromJson(it.value()));
+            return m;
+        }();
+        return map;
+    }
+
     // The BUILT-IN table. all() below is this merged with any <data>/emulators/*.json. Kept as its own
     // accessor so the probe (and the merge) can name the base explicitly.
     inline const QList<ExternalEmulator>& builtinEmulators()
     {
-        static const QList<ExternalEmulator> list = {
+        static const QList<ExternalEmulator> list = [] {
+        QList<ExternalEmulator> table = {
             {
                 QStringLiteral("dolphin"), QStringLiteral("Dolphin"),
                 QStringLiteral("-b -e {rom} {fs}"),   // -b: quit when emulation stops; -e: boot this file
@@ -532,6 +631,13 @@ namespace EmulatorRegistry
                 { QStringLiteral("n64") },
             },
         };
+        // Issue #189: attach each emulator's content-install recipe by id. Done here rather than inside the
+        // initialisers above so adding a recipe never touches the positional table (and never has to restate
+        // extensions/systems/port to reach a trailing field).
+        for (ExternalEmulator& e : table)
+            e.contentInstall = builtinContentInstall().value(e.id);
+        return table;
+        }();
         return list;
     }
 
@@ -587,6 +693,14 @@ namespace EmulatorRegistry
         putStr("winUpdateUrl", e.winUpdateUrl);
         putStr("macUpdateUrl", e.macUpdateUrl);
         putStr("linuxUpdateUrl", e.linuxUpdateUrl);
+        // The content-install recipes (#189). Unlike `port` below, this one IS part of the emulator schema:
+        // it describes how THIS emulator ingests content, it is meaningless without the emulator, and a user
+        // adding their own emulator must be able to declare it — so it round-trips here, omitted when empty
+        // like every other field.
+        {
+            const QJsonObject ci = ContentRecipe::toJson(e.contentInstall);
+            if (!ci.isEmpty()) o.insert(QStringLiteral("contentInstall"), ci);
+        }
         // NO `port` KEY, deliberately (#233). The native-port binding has its OWN schema — RetComM's, in
         // NativePorts.h — and this one is the emulator schema; writing the binding here would mint a second,
         // divergent spelling of it and let a <data>/emulators/*.json file declare a port, which is the one
@@ -639,6 +753,12 @@ namespace EmulatorRegistry
         if (o.contains(QStringLiteral("winUpdateUrl")))   e.winUpdateUrl = o.value(QStringLiteral("winUpdateUrl")).toString().trimmed();
         if (o.contains(QStringLiteral("macUpdateUrl")))   e.macUpdateUrl = o.value(QStringLiteral("macUpdateUrl")).toString().trimmed();
         if (o.contains(QStringLiteral("linuxUpdateUrl"))) e.linuxUpdateUrl = o.value(QStringLiteral("linuxUpdateUrl")).toString().trimmed();
+        // The content-install recipes (#189). Whole-field, like the string arrays: naming `contentInstall`
+        // replaces the emulator's whole spec, so an override that means "this build of Cemu keeps its mlc01
+        // somewhere else" restates the spec rather than half of it. An UNKNOWN recipe kind parses and is
+        // carried; it is ignored (with one logged line) at launch, never at parse — see ContentRecipe.h.
+        if (o.contains(QStringLiteral("contentInstall")))
+            e.contentInstall = ContentRecipe::specFromJson(o.value(QStringLiteral("contentInstall")));
         // No `port` key here either — see the note in toJson above. `e.port` is carried through unchanged, so
         // an override of a port's EMULATOR fields (should one ever be written by hand) keeps its binding.
         return e;

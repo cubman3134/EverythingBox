@@ -42,6 +42,13 @@ Everything lives under [`native/`](native/):
 - `native/third_party/` — vendored deps (miniz, Duktape, the LZMA SDK, unarr).
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
+- `native/docs/` — feature notes, including
+  [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
+  and `dlc/` sidecar convention and what each emulator does with them).
+
+Feature notes for things with a server on the other end live in [`docs/`](docs/) —
+see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
+library.
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status, and
@@ -94,6 +101,45 @@ the volume instead; a part-downloaded volume is thrown away rather than cached, 
 re-fetch. A volume you have read once is cached whole, so re-opening it works with the server switched
 off. PSE is a comics extension: EPUB and PDF from an OPDS catalog are downloaded and then opened.
 
+### ComicInfo.xml
+
+A comic archive that carries a **`ComicInfo.xml`** at its root — the de facto standard written by ComicRack,
+Mylar, Komga, Kavita and essentially every comic tagging tool — is read from it rather than guessed at from
+its filename. All four container types are read the same way (`.cbz`, `.cbr`, `.cb7`, `.cbt`), and the
+document is picked up in the same pass that already counts the archive's pages, so a tagged library costs no
+extra scan.
+
+Honoured: `Series`, `Number`, `Volume`, `Title`, `Summary`, `Year`/`Month`/`Day`, the creator roles
+(`Writer`, `Penciller`, `Inker`, `Colorist`, `Letterer`, `CoverArtist` — collapsed into one credit list, with
+the **writer** as the primary author), `Publisher`, `Genre`, `LanguageISO`, `PageCount`, `Web`, `AgeRating`
+and `Manga`. `<Pages>` (per-page spread hints) is read past; nothing here ever *writes* a ComicInfo.xml —
+that is a tagger's job, not a reader's.
+
+**Precedence** is the same everywhere in the library: embedded metadata beats a sidecar, which beats filename
+inference, which beats online enrichment — and your own edits beat all of them. It applies per dimension: a
+document that names a `Series` decides the series and the issue number together; one with no `Title` leaves
+the shelf showing the file's own name, exactly as before. A comic with **no** ComicInfo.xml is grouped
+precisely as it always was, by the folder-corroborated filename rule.
+
+`Manga` = `YesAndRightToLeft` opens the comic **right to left**: the left/right keys swap and a two-page
+spread puts the earlier page on the right. The page order, numbering and your saved place do not move. A
+per-series override you set wins over the document.
+
+`AgeRating` feeds the restricted (kids) profile, which hides anything at **Mature** or above:
+
+| ComicInfo `AgeRating` | Level | Hidden on a kids profile |
+|---|---|---|
+| *absent*, `Unknown`, `Rating Pending`, anything unrecognised | Unrated | no |
+| `Early Childhood`, `Everyone`, `G`, `Kids to Adults` | Everyone | no |
+| `Everyone 10+`, `PG` | Everyone 10+ | no |
+| `Teen` | Teen | no |
+| `MA15+`, `Mature 17+`, `M` | Mature | **yes** |
+| `R18+`, `Adults Only 18+`, `X18+` | Adults | **yes** |
+
+A rating this table does not recognise is **Unrated**, never the nearest-looking rung — a comic nobody rated
+is never certified as rated for children. Unrated comics are shown, because every comic tagged before this
+existed is one and hiding them would empty the shelf.
+
 Two limits worth stating plainly:
 
 - **DRM-protected books are not supported and never will be.** A `.mobi`/`.azw3` bought from a store is
@@ -138,6 +184,29 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Read aloud
+
+The reader can narrate a book. Press **Read aloud** in the reader's controls and it starts from
+where you are; the spoken paragraph is highlighted, the page turns when the narrator leaves it,
+and paragraph back/forward, pause and stop are the page keys and the controls beside it. There
+is no second bookmark: the spoken paragraph *is* your reading position, so stopping leaves you
+on the page it reached, that position is what a restart resumes from, and reading progress
+accrues exactly as it does when you turn the pages yourself.
+
+Speed is the same per-book preference an audiobook uses — set it once for a title and it holds
+whether you are listening to a narrator or to your computer. Pitch is left alone.
+
+**The voices are your operating system's.** EverythingBox bundles no speech engine and downloads
+nothing: it speaks through SAPI on Windows, AVSpeech on macOS and iOS, the Android speech
+service, and speech-dispatcher on Linux. Quality varies a great deal between platforms and
+between the voices installed on one — add more in your system's own speech settings, then step
+through them with the **Voice** control in the reader. If a build of EverythingBox was compiled
+against a Qt without the TextToSpeech module, or the platform offers no engine at all, the
+read-aloud controls are simply not there.
+
+Works wherever the reader has structured text: EPUB, MOBI, FB2, TXT and Markdown, and a PDF read
+in text mode. Comics have nothing to read. Screen-off and background listening are not here yet.
 
 ## Home rows
 
