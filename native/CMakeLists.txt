@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.174 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.175 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -740,6 +740,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LaunchHooksStore.cpp src/core/LaunchHooksStore.h       # per-game pre-launch/post-exit hooks, device-local (issue #64)
         src/core/EmuSettings.h                                          # pure cross-emulator graphics quartet + per-emulator INI mapping (issue #103, header-only)
         src/core/EmuGfxStore.cpp src/core/EmuGfxStore.h                 # per-game standalone-emulator graphics override, device-local (issue #103)
+        src/core/ContentRecipe.h                                        # pure per-emulator update/DLC install recipe schema (issue #189, header-only)
+        src/core/ContentInstall.cpp src/core/ContentInstall.h           # sidecar update/DLC discovery + install record + appliers (issue #189)
         src/core/ShaderPreset.h                                         # pure slang-shader preset model + curated registry + scope resolution (issue #99, header-only)
         src/core/ShaderPresetStore.cpp src/core/ShaderPresetStore.h     # per-game/per-system slang-shader preset override, device-local (issue #99)
         src/core/DeviceProfile.h                                        # pure device identification + tuned per-emulator defaults table (issue #119, header-only)
@@ -1208,6 +1210,28 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_launchopts PRIVATE src src/core src/theme2)
     target_link_libraries(probe_launchopts PRIVATE Qt6::Core)
+
+    # Game updates and DLC (issue #189): the per-emulator content-install recipes carried in the registry, the
+    # sidecar updates/ and dlc/ convention, the hash-tracked install record and the two RESTRAINT verdicts. Drives
+    # ContentRecipe.h (header-only schema) + ContentInstall.cpp (discovery/record/appliers) against real fixture
+    # data dirs under the probe's isolated data dir. LaunchOptionsStore.cpp links because the per-game version
+    # pin / DLC lever live in the SAME #51 override record (Settings.cpp + FormFactor.cpp follow it, exactly as
+    # probe_launchopts spells out); EmulatorRegistry.h is header-only and supplies the SHIPPED recipes so the
+    # probe asserts what actually ships, not a fixture of it. HashVerify.cpp links for ONE assertion: that
+    # ContentInstall::fileSha1's streaming digest is byte-identical to #97's own hasher over the same bytes.
+    # EB_CONTENTINSTALL_SRC_DIR points at src/ so the RPCS3 "described only" case can assert the recipe and
+    # EmulatorManager's real --installpkg call still agree.
+    add_executable(probe_contentinstall tools/probe_contentinstall.cpp
+        src/core/ContentInstall.cpp src/core/ContentInstall.h src/core/ContentRecipe.h
+        src/core/EmulatorRegistry.h src/core/RomRouting.h
+        src/core/HashVerify.cpp src/core/HashVerify.h
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_contentinstall PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_contentinstall PRIVATE Qt6::Core)
+    target_compile_definitions(probe_contentinstall PRIVATE
+        EB_CONTENTINSTALL_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
     # Unified Emulation Picker Task 1: the pure emulation-target model (src/core/EmulationTarget.h, header-only)
     # — enumeration (SystemCatalog + EmulatorRegistry), applyTargetToOverride, and resolveEmulationTarget, which

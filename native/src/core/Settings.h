@@ -579,6 +579,14 @@ namespace Settings
     bool ps3AutoUpdate();
     void setPs3AutoUpdate(bool on);
 
+    // Install a game's own update and DLC packages into the target emulator before launching it (issue #189):
+    // whatever sits in the `updates/` and `dlc/` folders BESIDE the game, installed per that emulator's recipe
+    // (ContentRecipe.h). Default on — a game whose DLC is silently missing looks broken, and nothing here can
+    // block a launch: every failure is reported and the base game still boots. Off is the master switch for
+    // someone who drives their emulators' content stores entirely by hand. Key "content/autoInstall".
+    bool installGameContent();
+    void setInstallGameContent(bool on);
+
     // Verify ROMs against user-supplied No-Intro / Redump DAT files dropped into <data>/dats/ (issue #97). When
     // on, the detail view lazily hashes a game's PAYLOAD and stamps it Verified / Bad / Unknown. Passive — never
     // a nag, Unknown is neutral — so default true; the toggle is for users who never intend to add DATs.

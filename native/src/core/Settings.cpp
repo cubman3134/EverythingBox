@@ -993,6 +993,9 @@ void Settings::setAutoApplyRomPatches(bool on) { store().setValue(QStringLiteral
 bool Settings::ps3AutoUpdate() { return store().value(QStringLiteral("ps3/autoUpdate"), true).toBool(); }
 void Settings::setPs3AutoUpdate(bool on) { store().setValue(QStringLiteral("ps3/autoUpdate"), on); store().sync(); }
 
+bool Settings::installGameContent() { return store().value(QStringLiteral("content/autoInstall"), true).toBool(); }
+void Settings::setInstallGameContent(bool on) { store().setValue(QStringLiteral("content/autoInstall"), on); store().sync(); }
+
 bool Settings::verifyRoms() { return store().value(QStringLiteral("roms/verifyDats"), true).toBool(); }
 void Settings::setVerifyRoms(bool on) { store().setValue(QStringLiteral("roms/verifyDats"), on); store().sync(); }
 

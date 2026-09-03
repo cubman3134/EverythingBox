@@ -10784,6 +10784,70 @@ void MainWindow::presentEmuGfxPanel(const QString& systemId, const QString& emul
     }
 }
 
+// ---- Per-game GAME UPDATES / DLC (issue #189) --------------------------------------------------------------
+// The two levers #189 puts on a single game: which update package installs into the emulator's own content
+// store before it boots (the newest one found, none at all, or a pinned version), and whether its DLC installs.
+// ONE implementation, called from BOTH per-game surfaces — the themed detail's "Launch options…" editor and the
+// Start-menu emulation panel, which is the route the classic grid has to per-game settings — so the rows are
+// reachable on both layouts through one write path (LaunchOptionsStore, husk-on-clear, like every other lever).
+QString MainWindow::contentLeverValue(const LaunchOpts::Override& ov, bool dlc)
+{
+    if (dlc) return ContentRecipe::dlcEnabled(ov.contentDlc) ? tr("On") : tr("Off");
+    if (ov.contentUpdate.isEmpty()) return tr("Newest available");
+    if (ContentRecipe::pinIsNone(ov.contentUpdate)) return tr("None");
+    return ov.contentUpdate;
+}
+
+bool MainWindow::emulatorHasContentRecipes(const QString& emulatorId)
+{
+    if (emulatorId.isEmpty()) return false;
+    const ExternalEmulator* e = EmulatorRegistry::byId(emulatorId);
+    return e && !e->contentInstall.isEmpty();
+}
+
+void MainWindow::editContentLever(QString key, bool dlc)
+{
+    if (key.isEmpty()) return;
+    const LaunchOpts::Override cur = LaunchOpts::get(key);
+    LaunchOpts::Override next = cur;
+    if (dlc)
+    {
+        // Two states, so the picker IS the two states — no toggle-in-place, because this surface is also
+        // driven by a d-pad and a two-row menu says what the choice is.
+        const bool on = ContentRecipe::dlcEnabled(cur.contentDlc);
+        const QStringList rows{ (on ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("Install this game's DLC"),
+                                (on ? QStringLiteral("     ") : QStringLiteral("✓  ")) + tr("Don't install DLC") };
+        const int pick = NavMenu::pick(tr("Downloadable content"), rows, this);
+        if (pick < 0) return;
+        next.contentDlc = (pick == 0) ? QString() : ContentRecipe::dlcOff();   // "" is the default (= on)
+    }
+    else
+    {
+        const bool isNone = ContentRecipe::pinIsNone(cur.contentUpdate);
+        const bool isPin  = !cur.contentUpdate.isEmpty() && !isNone;
+        QStringList rows;
+        rows << ((!isNone && !isPin ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("Install the newest update found"));
+        rows << ((isNone ? QStringLiteral("✓  ") : QStringLiteral("     ")) + tr("Don't install any update"));
+        rows << ((isPin ? QStringLiteral("✓  ") : QStringLiteral("     "))
+                 + (isPin ? tr("Pinned to \"%1\"  (change…)").arg(cur.contentUpdate) : tr("Pin a version…")));
+        const int pick = NavMenu::pick(tr("Game updates"), rows, this);
+        if (pick < 0) return;
+        if (pick == 0)      next.contentUpdate.clear();
+        else if (pick == 1) next.contentUpdate = ContentRecipe::pinNone();
+        else
+        {
+            // Free text, because no vendor's version spelling is ours to enumerate: the value is matched
+            // case-insensitively as a SUBSTRING of the package's file name, so "v65536" or "1.0.3" both work.
+            const QString typed = Osk::getText(tr("Install only the update whose file name contains:"),
+                                               isPin ? cur.contentUpdate : QString(), QLineEdit::Normal,
+                                               this, currentThemedGraph());
+            if (typed.isNull()) return;                       // Back out of the OSK: no write
+            next.contentUpdate = typed.trimmed();             // empty clears the pin (back to "newest found")
+        }
+    }
+    LaunchOpts::set(key, next);
+}
+
 // The per-game launch-options editor (issue #51): a NavMenu re-presented until Back, over the levers this
 // game's system actually has. A LIBRETRO system offers a Core pick (its candidate cores, plus "System
 // default"); a STANDALONE system offers an Emulator pick (the emulators registered for it) and an Extra
@@ -10825,6 +10889,17 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             kinds << QStringLiteral("emulation");
             rows << tr("Extra arguments:  %1").arg(ov.extraArgs.isEmpty() ? tr("(none)") : ov.extraArgs);
             kinds << QStringLiteral("args");
+
+            // Game updates / DLC (issue #189) — offered only when the emulator this game resolves to actually
+            // declares a content-install recipe, so the row is never a lever with nothing behind it. Twin rows
+            // live on the Start-menu emulation panel (the classic grid's route to per-game settings).
+            if (curTarget.engine == EmuEngine::Standalone && emulatorHasContentRecipes(curTarget.ref))
+            {
+                rows << tr("Game updates:  %1").arg(contentLeverValue(ov, false));
+                kinds << QStringLiteral("contentupd");
+                rows << tr("Downloadable content:  %1").arg(contentLeverValue(ov, true));
+                kinds << QStringLiteral("contentdlc");
+            }
 
             // Graphics quartet (issue #103): internal resolution / aspect / vsync / renderer, written into the
             // emulator's own config before launch (per-game, over the per-system default). The rows + labels are
@@ -10962,6 +11037,10 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             LaunchOpts::Override next = LaunchOpts::get(key);
             next.extraArgs = typed.trimmed();                         // empty clears the args override
             LaunchOpts::set(key, next);
+        }
+        else if (kind == QStringLiteral("contentupd") || kind == QStringLiteral("contentdlc"))
+        {
+            editContentLever(key, kind == QStringLiteral("contentdlc"));   // issue #189 — one shared handler
         }
         else if (kind.startsWith(QStringLiteral("gfx-")))
         {
@@ -21027,6 +21106,11 @@ void MainWindow::openGeneralSettings()
         // never blocks the launch. Twin below in the QWidget builder.
         toggle(QStringLiteral("ps3.autoupdate"), tr("Auto-install PS3 game updates"),
                Settings::ps3AutoUpdate());
+        // Install a game's own update/DLC packages — whatever sits in the `updates/` and `dlc/` folders beside
+        // the game — into the target emulator before it boots (issue #189). Default on; a failed install is
+        // reported and the base game still launches. Twin below in the QWidget builder.
+        toggle(QStringLiteral("content.autoinstall"), tr("Install game updates and DLC before launch"),
+               Settings::installGameContent());
         // --- Save states (#93) ---
         sep(tr("Save states"));
         toggle(QStringLiteral("emu.autoinc"), tr("Quick-save to the next free slot (keep a history)"),
@@ -21796,6 +21880,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.collapseregions")) Settings::setCollapseRegionalDuplicates(on);
                 else if (id == QStringLiteral("roms.keepdownloads")) Settings::setKeepDownloadsInRoms(on);
                 else if (id == QStringLiteral("ps3.autoupdate")) Settings::setPs3AutoUpdate(on);
+                else if (id == QStringLiteral("content.autoinstall")) Settings::setInstallGameContent(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 // ReplayGain (issue #141). Both rows re-apply live so a mode/preamp change is audible on the
@@ -22573,6 +22658,18 @@ void MainWindow::openGeneralSettings()
                                      "unpatched disc version. A failed update never stops the game from launching."));
         connect(ps3AutoUpdate, &QCheckBox::toggled, this, [](bool c) { Settings::setPs3AutoUpdate(c); });
         v->addWidget(ps3AutoUpdate);
+
+        // Classic twin of content.autoinstall (issue #189). Same key + setter as the themed row, one write path.
+        auto* contentInstall = new QCheckBox(tr("Install game updates and DLC before launch"));
+        contentInstall->setStyleSheet(QStringLiteral("font-size:15px;"));
+        contentInstall->setChecked(Settings::installGameContent());
+        contentInstall->setToolTip(tr("Put a game's update and DLC packages in \"updates\" and \"dlc\" folders "
+                                      "beside the game file, and they are installed into that emulator's own "
+                                      "content store before it launches. Content you installed yourself is never "
+                                      "replaced, and a failed install never stops the game from starting. "
+                                      "Per-game control lives in that game's launch options."));
+        connect(contentInstall, &QCheckBox::toggled, this, [](bool c) { Settings::setInstallGameContent(c); });
+        v->addWidget(contentInstall);
 
         // Save states (#93): auto-increment quick-save + save-on-exit resume mode. Classic twins of the themed
         // emu.autoinc / emu.resume rows.
@@ -26070,6 +26167,19 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
         PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("settings");
         r.label = tr("%1 settings").arg(target.displayName); rows << r;
     }
+
+    // Rows 4/5 — GAME UPDATES and DLC (issue #189). PER-GAME levers, so they appear only at ThisGame scope, and
+    // only when the selected emulator declares a content-install recipe. These are the CLASSIC layout's route to
+    // #189's override: the themed detail reaches the same two levers (and the same editContentLever handler)
+    // through "Launch options…", which the classic grid has no equivalent of.
+    if (isGame && thisGame && target.engine == EmuEngine::Standalone && emulatorHasContentRecipes(target.ref))
+    {
+        const LaunchOpts::Override cov = LaunchOpts::get(ctx.gameKey);
+        PanelRow u; u.kind = PanelRow::Action; u.id = QStringLiteral("contentupd");
+        u.label = tr("Game updates:  %1").arg(contentLeverValue(cov, false)); rows << u;
+        PanelRow d; d.kind = PanelRow::Action; d.id = QStringLiteral("contentdlc");
+        d.label = tr("Downloadable content:  %1").arg(contentLeverValue(cov, true)); rows << d;
+    }
     // (No "Controller mapping" row — that is v2.)
 
     auto onAct = [this, ctx, active, thisGame, returnTo, kThisGame, kSystemDefault](const QString& id, const QString& val) {
@@ -26147,6 +26257,23 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
                     }
             }
             presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the settings row tracks the new engine
+            return;
+        }
+        if (id == QStringLiteral("contentupd") || id == QStringLiteral("contentdlc"))
+        {
+            // issue #189. editContentLever runs a BLOCKING NavMenu/Osk loop and this onAct is inside the pad
+            // timer (sendNavKey), so it opens DEFERRED off the timer — the same re-entrancy discipline the
+            // "settings" row below follows, and the #28/#211 crash family's rule. The prior override is captured
+            // for the panel's Apply/Discard session before the editor can write.
+            const QString k = ctx.gameKey;
+            const bool had = LaunchOpts::has(k);
+            const LaunchOpts::Override prior = LaunchOpts::get(k);
+            emuEditRecord([k, had, prior]{ if (had) LaunchOpts::set(k, prior); else LaunchOpts::reset(k); });
+            const bool dlcRow = (id == QStringLiteral("contentdlc"));
+            QTimer::singleShot(0, this, [this, ctx, active, returnTo, k, dlcRow]{
+                editContentLever(k, dlcRow);
+                presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the row shows the new value
+            });
             return;
         }
         if (id == QStringLiteral("settings"))

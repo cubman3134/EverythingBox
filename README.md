@@ -42,6 +42,9 @@ Everything lives under [`native/`](native/):
 - `native/third_party/` — vendored deps (miniz, Duktape, the LZMA SDK, unarr).
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
+- `native/docs/` — feature notes, including
+  [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
+  and `dlc/` sidecar convention and what each emulator does with them).
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
