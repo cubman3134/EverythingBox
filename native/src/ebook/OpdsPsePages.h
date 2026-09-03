@@ -21,12 +21,12 @@ namespace OpdsPse
 // One AddonPage per page of the volume, in READING order (the seam packs by index, so this vector is the
 // book's order; PageSupplyOptions::fetchOrder is the asking order and a different thing entirely).
 //
-// `maxWidth` is the server-side resize hint, used only where the template accepts one. `auth` is the
+// `maxWidth` is the server-side resize hint, used only where the template accepts one. `authHeaders` is the
 // catalog's device-local request headers — the same ones the feed fetch carried, put on the page requests
 // unchanged, because a page behind HTTP Basic is behind it exactly as its feed was. They go in the
 // HEADERS and never into the url: a url is logged in a dozen places, a header is logged in none.
 inline QVector<AddonPage> pageList(const OpdsPseLink& link, int maxWidth,
-                                   const StreamHeaders::Headers& auth)
+                                   const StreamHeaders::Headers& authHeaders)
 {
     QVector<AddonPage> pages;
     if (!link.isValid()) return pages;
@@ -35,7 +35,7 @@ inline QVector<AddonPage> pageList(const OpdsPseLink& link, int maxWidth,
     {
         AddonPage p;
         p.url     = pageUrl(link, i, maxWidth);
-        p.headers = auth;
+        p.headers = authHeaders;
         pages.push_back(p);
     }
     return pages;
