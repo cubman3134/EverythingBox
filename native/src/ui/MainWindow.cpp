@@ -21033,6 +21033,16 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("reader.hint"),
              tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the page but keep your place."),
              QString());
+        // Read aloud (issue #145). An INFO row, not a control: the things you actually set — start, speed,
+        // voice — belong in the reader, where you are when you want them. What belongs here is the one thing
+        // the reader cannot tell you in a button, and the thing users are otherwise left to discover by being
+        // disappointed: the voices are the operating system's, and how good they are is the operating
+        // system's business, not this app's. Its classic twin is readAloudNote below.
+        info(QStringLiteral("readaloud.hint"),
+             tr("Read aloud (in the reader's controls) speaks with your system's own voices — add more in your "
+                "operating system's speech settings. Quality varies a lot by platform; nothing is downloaded "
+                "and no voice is bundled."),
+             QString());
         // --- Trakt.tv ---
         sep(tr("Trakt.tv"));
         textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
@@ -23373,6 +23383,15 @@ void MainWindow::openGeneralSettings()
         readerNote->setWordWrap(true);
         readerNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(readerNote);
+        // Read aloud (issue #145) — the classic twin of the themed readaloud.hint info row. Same words, same
+        // point: the voices come from the system, and their quality is the system's to answer for.
+        auto* readAloudNote = new QLabel(tr("Read aloud (in the reader's controls) speaks with your system's own "
+                                            "voices — add more in your operating system's speech settings. "
+                                            "Quality varies a lot by platform; nothing is downloaded and no "
+                                            "voice is bundled."));
+        readAloudNote->setWordWrap(true);
+        readAloudNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(readAloudNote);
 
         // --- Auto-download subtitles (OpenSubtitles.com). When a movie/episode has no subtitle in the chosen
         // language, fetch one automatically. Needs a free API key + the user's account (login is required to
