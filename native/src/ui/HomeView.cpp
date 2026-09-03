@@ -5488,7 +5488,33 @@ void HomeView::openOpdsBook(const MediaItem& it)
         const QString auth = opdsBasicAuth(cat.username, cat.password);
         if (!auth.isEmpty()) book.requestHeaders.insert(QStringLiteral("Authorization"), auth);
     }
+    // #153: a server that advertises OPDS-PSE for this volume is offering TWO things, and the issue is
+    // explicit that streaming never REPLACES the download — keeping a volume offline stays one press
+    // away. So ask, through the nav kit, which means one implementation serves the classic grid and the
+    // themed surface alike. A volume with no PSE offer is untouched and opens exactly as it always did.
+    //
+    // Deferred a turn: the picker spins a nested event loop and this is reachable from inside a QML
+    // delegate's own `activated` emission, which is crash #28 — the same reason "_newopds" above defers.
+    if (book.pse.isValid())
+    {
+        QMetaObject::invokeMethod(this, [this, book] { chooseOpdsBookAction(book); }, Qt::QueuedConnection);
+        return;
+    }
     emit openItem(book);
+}
+
+// The two verbs of a PSE-capable OPDS book. Reading online is the FIRST row and the focused one: it is
+// the verb the server went to the trouble of advertising, and it is the one that does not spend 400 MB
+// to reach page one. Backing out (-1) does nothing, which is what Back means everywhere else here.
+void HomeView::chooseOpdsBookAction(const MediaItem& book)
+{
+    const QString title = book.title.isEmpty() ? tr("Book") : book.title;
+    const int pick = NavMenu::pick(title,
+                                   { tr("📖  Read online (%1 pages)").arg(book.pse.count),
+                                     tr("⬇  Download") },
+                                   window());
+    if (pick == 0)      emit readOpdsPseRequested(book);
+    else if (pick == 1) emit openItem(book);
 }
 
 // Saved filter presets (#63) — the "＋ New filter…" row on a games surface opens this manager: create a new

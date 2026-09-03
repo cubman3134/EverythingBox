@@ -936,6 +936,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::openImagePages, this,
             [this](const QString& title, const QString& key, const QVector<AddonPage>& pages, const ChapterRun& run)
             { openImagePages(title, key, pages, run); });
+    // "Read online" on an OPDS book whose server speaks OPDS-PSE (#153) — the third supplier of the page
+    // seam above. Defined in ui/MainWindowOpdsPse.cpp.
+    connect(home_, &HomeView::readOpdsPseRequested, this, &MainWindow::readOpdsPse);
 
     // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
     // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
@@ -19624,7 +19627,8 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 
 
 void MainWindow::openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages_,
-                                const ChapterRun& run, bool landOnLastPage, int handoffGen)
+                                const ChapterRun& run, bool landOnLastPage, int handoffGen,
+                                const PageSupplyOptions& opt)
 {
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pages_.size()));
     // The urls on their own, for the two parts of this function that only need a page's ADDRESS: the
@@ -19662,8 +19666,25 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     // The ending every arrival shares — a packed manga chapter here, a downloaded comic volume in the
     // catalog lane. It is one function because the two must agree on all of it: what a failed open says,
     // which run is armed, where a backwards crossing lands, and which of them is allowed a toast.
-    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen] {
+    auto openCbz = [this, cbzPath, title, run, landOnLastPage, handoffGen, opt] {
         openCrossedComic(cbzPath, title, run, landOnLastPage, handoffGen);
+        // #153: land where the SUPPLIER said to. For a server-owned volume the reading position belongs
+        // to the server (the #83 rule), and that answer arrives with the feed rather than from this
+        // device's resume store — so it has to overrule what openComic just restored. Guarded on the
+        // reader being the one that just opened: openCrossedComic can fail or be superseded, and both
+        // leave the user somewhere this jump has no business touching.
+        if (opt.startPage0 >= 0 && comic_ && comicOnScreen() && comic_->itemKey() == cbzPath)
+            comic_->gotoPage(opt.startPage0);
+    };
+
+    // WHO OWNS A FAILED FETCH. A supplier that named an owner gets it (#153 offers a retry and "download
+    // the volume instead", which a toast cannot); everyone else gets the toast this function always
+    // showed. Gated exactly as endHandoff is, and for the same two reasons it states above.
+    auto endIncomplete = [this, handoffGen, opt, endHandoff](const QString& msg, int added, int expected) {
+        if (!opt.onIncomplete) { endHandoff(msg); return; }
+        if (!chapterHandoffStillOurs(handoffGen)) return;
+        if (handoffGen >= 0) chapterHandoffPending_ = false;
+        opt.onIncomplete(added, expected);
     };
 
     if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached
@@ -19675,8 +19696,20 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     // one finishes, pack them into the CBZ and open it.
     auto pages = std::make_shared<QVector<QByteArray>>(pageUrls.size());
     auto remaining = std::make_shared<int>(pageUrls.size());
-    for (int i = 0; i < pageUrls.size(); ++i)
+    // THE ORDER THEY ARE ASKED FOR (#153), which is not the order they are packed in. A supplier that
+    // named one gets it; anything else — including a malformed one — falls back to plain reading order,
+    // which is what this loop always did. See PageSupplyOptions::fetchOrder for why an order is enough
+    // to be a prefetch.
+    QVector<int> order = opt.fetchOrder;
+    if (order.size() != pageUrls.size())
     {
+        order.clear();
+        order.reserve(pageUrls.size());
+        for (int i = 0; i < pageUrls.size(); ++i) order.push_back(i);
+    }
+    for (int oi = 0; oi < order.size(); ++oi)
+    {
+        const int i = order[oi];
         QNetworkRequest rq{QUrl(pageUrls[i])};
         rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -19688,7 +19721,8 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         // 302 to another origin is refused rather than silently re-sent with the headers.
         QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, pages_[i].headers, pages_[i].url);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff, handoffGen] {
+                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz, endHandoff,
+                 endIncomplete, opt, handoffGen] {
             reply->deleteLater();
             if (reply->error() == QNetworkReply::NoError) (*pages)[i] = reply->readAll();
             if (--*remaining != 0) return; // wait for every page
@@ -19717,8 +19751,20 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             mz_zip_writer_end(&zip);
 
             mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
-            if (added == 0)
-            { QFile::remove(partPath); endHandoff(tr("Couldn't download any pages for “%1”.").arg(title)); return; }
+            // Nothing arrived — or, for a supplier that refuses a volume with holes in it (#153: the
+            // packed CBZ is also the offline copy, so a partial one would be cached and then served
+            // from cache for ever), not all of it did. Either way the part file is thrown away rather
+            // than promoted, so a retry genuinely re-fetches.
+            const int expected = pages->size();
+            if (added == 0 || (opt.requireAllPages && added < expected))
+            {
+                QFile::remove(partPath);
+                endIncomplete(added == 0
+                                  ? tr("Couldn't download any pages for “%1”.").arg(title)
+                                  : tr("Couldn't download every page of “%1”.").arg(title),
+                              added, expected);
+                return;
+            }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
             { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); endHandoff(tr("Couldn't save “%1”.").arg(title)); return; }

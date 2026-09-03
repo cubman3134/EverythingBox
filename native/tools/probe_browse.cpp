@@ -1537,6 +1537,27 @@ int main(int argc, char** argv)
                 && c.items[0].url == QStringLiteral("http://x/b.epub"),
                 "opds: an entry with BOTH nav and acquisition is treated as a book"); }
 
+        // An OPDS-PSE offer (#153) rides onto the row, and takes NOTHING away from it: the download url
+        // and its content-type are exactly what they would be without the offer, because "Read online" is
+        // presented BESIDE "Download" and never instead of it. A row with no offer carries an invalid one,
+        // which is what makes the second verb appear on exactly the rows a server advertised it for.
+        { OpdsFeed f; OpdsEntry e; e.title = QStringLiteral("Saga, Vol. 1"); e.id = QStringLiteral("urn:0A1");
+          e.acquisition << acq(QStringLiteral("application/vnd.comicbook+zip"), QStringLiteral("http://x/s1.cbz"));
+          e.pse.hrefTemplate = QStringLiteral("http://x/books/0A1/pages/{pageNumber}?zero_based=true");
+          e.pse.count = 160; e.pse.lastRead = 7;
+          f.entries << e;
+          const MediaCatalog c = browse::opdsCatalog(f);
+          CHECK(c.items.size() == 1 && c.items[0].pse.isValid() && c.items[0].pse.count == 160
+                && c.items[0].pse.lastRead == 7
+                && c.items[0].pse.hrefTemplate
+                     == QStringLiteral("http://x/books/0A1/pages/{pageNumber}?zero_based=true"),
+                "opds: a PSE page-stream offer is carried onto the book row (#153)");
+          CHECK(c.items[0].url == QStringLiteral("http://x/s1.cbz")
+                && c.items[0].mime == QStringLiteral("application/vnd.comicbook+zip"),
+                "opds: the PSE offer takes nothing away from the download - Read online sits BESIDE it"); }
+        CHECK(!cat.items[1].pse.isValid(),
+              "opds: a row the server offered no page stream for carries no offer");
+
         // An empty feed -> an empty catalog, never a crash.
         CHECK(browse::opdsCatalog(OpdsFeed()).items.isEmpty(), "opds: an empty feed -> an empty catalog");
 
