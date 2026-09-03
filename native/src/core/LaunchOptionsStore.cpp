@@ -64,6 +64,7 @@ bool contentEqual(const Override& a, const Override& b)
     return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs
         && a.backend == b.backend    // Slice 2a: the backend is a lever like the others
         && a.contentUpdate == b.contentUpdate && a.contentDlc == b.contentDlc;   // issue #189
+        && a.bootFile == b.bootFile; // #190: which program inside a folder game this row boots
 }
 
 } // namespace
@@ -74,6 +75,7 @@ bool Override::isEmpty() const
     // husk — otherwise ensureCache() would drop it and get() would lose the choice on the next read.
     return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty()
         && contentUpdate.isEmpty() && contentDlc.isEmpty();   // issue #189: both content levers are full levers
+        && bootFile.isEmpty();
 }
 
 // ---- pure: canonical record <-> JSON ----------------------------------------------------------------------
@@ -87,6 +89,7 @@ Override LaunchOpts::fromJson(const QJsonObject& o)
     ov.backend    = o.value(QStringLiteral("backend")).toString();
     ov.contentUpdate = o.value(QStringLiteral("contentUpdate")).toString();   // issue #189
     ov.contentDlc    = o.value(QStringLiteral("contentDlc")).toString();
+    ov.bootFile   = o.value(QStringLiteral("bootFile")).toString();
     ov.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return ov;
 }
@@ -100,6 +103,7 @@ Override LaunchOpts::normalized(const Override& ov)
     n.backend    = ov.backend.trimmed();
     n.contentUpdate = ov.contentUpdate.trimmed();          // issue #189: the update version pin ("" / "none" / a pin)
     n.contentDlc    = ov.contentDlc.trimmed().toLower();   // one spelling per state: "off" / "on", never "Off"
+    n.bootFile   = ov.bootFile.trimmed();
     n.updatedAt  = ov.updatedAt;
     return n;
 }
@@ -117,6 +121,7 @@ QJsonObject LaunchOpts::toJson(const Override& in)
     if (!ov.backend.isEmpty())    o.insert(QStringLiteral("backend"), ov.backend);
     if (!ov.contentUpdate.isEmpty()) o.insert(QStringLiteral("contentUpdate"), ov.contentUpdate);   // issue #189
     if (!ov.contentDlc.isEmpty())    o.insert(QStringLiteral("contentDlc"), ov.contentDlc);
+    if (!ov.bootFile.isEmpty())   o.insert(QStringLiteral("bootFile"), ov.bootFile);
     o.insert(QStringLiteral("updatedAt"), static_cast<double>(ov.updatedAt));
     return o;
 }

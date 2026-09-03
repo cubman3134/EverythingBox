@@ -46,8 +46,14 @@ Everything lives under [`native/`](native/):
   [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
   and `dlc/` sidecar convention and what each emulator does with them).
 
+Feature notes for things with a server on the other end live in [`docs/`](docs/) —
+see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
+library.
+
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
-and current status.
+and current status, and
+**[`native/docs/play-on-device.md`](native/docs/play-on-device.md)** for handing playback
+between two EverythingBoxes on the same network.
 
 ## Quick build
 
@@ -119,6 +125,48 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Read aloud
+
+The reader can narrate a book. Press **Read aloud** in the reader's controls and it starts from
+where you are; the spoken paragraph is highlighted, the page turns when the narrator leaves it,
+and paragraph back/forward, pause and stop are the page keys and the controls beside it. There
+is no second bookmark: the spoken paragraph *is* your reading position, so stopping leaves you
+on the page it reached, that position is what a restart resumes from, and reading progress
+accrues exactly as it does when you turn the pages yourself.
+
+Speed is the same per-book preference an audiobook uses — set it once for a title and it holds
+whether you are listening to a narrator or to your computer. Pitch is left alone.
+
+**The voices are your operating system's.** EverythingBox bundles no speech engine and downloads
+nothing: it speaks through SAPI on Windows, AVSpeech on macOS and iOS, the Android speech
+service, and speech-dispatcher on Linux. Quality varies a great deal between platforms and
+between the voices installed on one — add more in your system's own speech settings, then step
+through them with the **Voice** control in the reader. If a build of EverythingBox was compiled
+against a Qt without the TextToSpeech module, or the platform offers no engine at all, the
+read-aloud controls are simply not there.
+
+Works wherever the reader has structured text: EPUB, MOBI, FB2, TXT and Markdown, and a PDF read
+in text mode. Comics have nothing to read. Screen-off and background listening are not here yet.
+
+## Home rows
+
+The home screen's rows are yours to arrange. **Settings ▸ Home screen ▸ Choose home rows** opens a list of
+the rows your home can show; each one can be moved up, moved down, hidden, or capped to the first *N* items,
+and **Add row…** offers the ones that are not on it yet. It is driven entirely with a D-pad or the arrow
+keys — there is no drag-and-drop to reach for.
+
+- **Nothing changes until you change it.** A profile that has never opened the editor sees exactly the home
+  it saw before, in the order the app ships with. **Reset to default** puts it back at any time.
+- **It is per profile, and it syncs.** The arrangement rides the same profile sync as your favourites and
+  playlists, so a new device inherits it. If two devices are edited apart, the most recent arrangement wins
+  and rows only one of them knew about are kept, never dropped.
+- **Your theme still decides what it can show.** The list orders and hides rows among the ones the active
+  home actually draws; it cannot add a row a theme has no place for. The classic home arranges its shelves
+  (Continue watching, Airing Soon, You Missed, Favorites, and — once you add them — Downloaded, a playlist,
+  or a saved filter); a themed home arranges its media-type categories and catalogue tiles. Rows that belong
+  to the other layout are kept in your list and simply skipped, so switching layouts never loses them. Theme
+  authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
 
 ## After a crash
 

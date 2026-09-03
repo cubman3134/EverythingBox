@@ -15,9 +15,12 @@
 #include <vector>
 #include "../addons/AddonModels.h"
 #include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
+#include "../core/FollowPlan.h"      // follow::Child is a value in the in-flight fetch map (#155)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
+#include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
@@ -47,6 +50,7 @@ class BackgroundMusic;
 class HomeView;
 class AddonManager;
 class CatalogPrefetcher;
+class FollowScheduler;      // the followed-series background refresh (issue #155)
 class CloudSync;
 class SaveSync;             // per-file save/state sync — see core/SaveSync.h
 class LocalResolveCache;
@@ -153,6 +157,9 @@ private slots:
     // #193: "No music servers yet." / "2 music servers: Navidrome, Basement. They appear under Music."
     // One builder, shown by both settings surfaces.
     QString musicServerStatusLine() const;
+    // #160: "No Jellyfin servers yet." / "2 Jellyfin servers: Attic, Basement (1 switched off)."
+    // One builder, shown by both settings surfaces. Never names a user and never a token.
+    QString jellyfinServerStatusLine() const;
     void refreshTraktSettingsStatus();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
@@ -185,7 +192,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
@@ -558,7 +567,31 @@ private:
     // reaches part forty days after part one was signed, so each part's link is minted when the app reaches
     // it, at the playRequested choke point. `firstPartUrl` is part one's, already resolved by the search the
     // user was waiting on, so the common case costs no extra round trip.
-    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl);
+    //
+    // `startIndexOverride` (#197) is the part to begin on when somebody OTHER than the resume marks knows
+    // the answer — which for an Audiobookshelf book is the server, whose position is the one every client
+    // of it agrees on. -1, the default, is the unchanged behaviour: the last part carrying a mark.
+    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl,
+                             int startIndexOverride = -1);
+    // ---- Audiobookshelf (issue #197) --------------------------------------------------------------------
+    // Open an Audiobookshelf item: a book (multi-file or single), or one podcast episode. `startPart` is the
+    // part to begin on, or -1 for "wherever the server says" — which is the ordinary case, because the play
+    // session the server answers with CARRIES its own resume position, so seeding a resume from the server
+    // costs no request this open did not already have.
+    void openAbsItem(const QString& qualifiedId, int startPart);
+    // The chapter list the player should be navigating: the SERVER'S, rebased onto the part that is open,
+    // when an Audiobookshelf book is playing; mpv's own otherwise. One reader, because the sleep timer, the
+    // per-book speed memory and the segment stack each ask this question and three answers would be three
+    // features that disagreed about whether the thing playing has chapters.
+    QVector<MediaSegments::Chapter> currentChapters() const;
+    // The Settings line that says whether any audiobook servers are set up. The twin of
+    // musicServerStatusLine, and the ONE place either builder says it.
+    QString audiobookServerStatusLine() const;
+    // The queue index of one entry, or -1. Both hooks below need it and neither may guess.
+    int absQueueIndexOf(const QString& identity) const;
+    // Install the two PlaybackSession seams a server that owns its own progress needs. Called once, at
+    // construction, beside the rest of the session wiring.
+    void installAbsProgressHooks();
     // Mint the link for the part `token` names and play it — the choke point's answer for a part token.
     // Async, guarded by remoteBookGen_ so an answer for a part the listener has already skipped past is
     // dropped rather than played over the one they chose.
@@ -629,6 +662,39 @@ private:
     class RemoteServer* remoteServer_ = nullptr;
     void updateRemoteServer();
     QString curPlayTitle_;
+
+    // ---- "Play on device" (issue #143). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowPlayOn.cpp ----
+    // Not in MainWindow.cpp, and deliberately: that file is the busiest merge surface in the repository, and
+    // this feature reaches the rest of the class only through members that already existed, so it costs it
+    // four short insertions instead of four hundred lines. See the header comment there for the whole shape.
+    class PlayOnHost*   playOnHost_ = nullptr;     // pairing tokens, both directions; device-local
+    class PlayOnClient* playOnClient_ = nullptr;   // the source side of a peer's #76 surface
+    bool         playOnRemoteActive_ = false;      // this instance is acting as a remote for a peer
+    PlayOn::Peer playOnRemotePeer_;
+    class PlayOnClient* playOnClient();            // lazily built; never null
+
+    void updatePlayOnAdvert();                     // reconcile the mDNS advert with the #76 server's state
+
+    // As a SOURCE: what is playing here, as a reference a peer could resolve (ok=false => unnameable).
+    PlayOn::Handoff playOnCurrentHandoff(bool* ok) const;
+    // As a TARGET: what this device knows about an arriving reference, and the answer it returns.
+    PlayOn::OpenEnv    playOnClassify(const PlayOn::Handoff& h) const;
+    PlayOn::OpenResult playOnOpen(const PlayOn::Handoff& h);   // the /open hook; DEFERS the actual open
+    void               playOnPerformOpen(const PlayOn::Handoff& h);
+    bool          playOnPairBegin();                           // put a code on THIS screen
+    QString       playOnPairRedeem(const QString& code);       // "" on refusal; never logs either side
+    QSet<QString> playOnIssuedTokens() const;
+
+    QList<PlayOn::Target> playOnTargets() const;               // the merged picker: three kinds, never self
+    PlayOn::Peer          playOnPeerById(const QString& instanceId) const;
+    void playOnHandOffTo(const PlayOn::Peer& peer);
+    void playOnRedeemAndHandOff(const PlayOn::Peer& peer, const QString& code, const PlayOn::Handoff& h);
+    void playOnSendHandoff(const PlayOn::Peer& peer, const QString& token, const PlayOn::Handoff& h);
+    void playOnShowRemote(const PlayOn::Peer& peer);
+    void playOnRemoteMenu(const PlayOn::Peer& peer, const PlayOn::RemoteView& v);
+    void playOnContinueHere(const PlayOn::Peer& peer);
+    void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
+    void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.
@@ -985,10 +1051,21 @@ private:
     // builders hold that line in different things, and the caller only ever wants "show the value again".
     // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
     std::function<void()> scrobbleStatusUpdate_;
+    // #197: the same idiom for the audiobook-server status line. Adding a server is ASYNCHRONOUS — the
+    // sign-in is a round trip — so the row that says how many are set up cannot be refreshed on the line
+    // after the call the way the music one is. Whichever settings surface is up owns this hook, and the
+    // store's change hook fires it once the add has actually landed.
+    std::function<void()> absServerStatusUpdate_;
     // The same idiom again for the DISCORD presence line. Re-armed from PresenceController::statusChanged,
     // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
     // without the user reopening anything.
     std::function<void()> presenceStatusUpdate_;
+    // The same idiom again for the JELLYFIN server line (issue #160), and here it is not a nicety: the
+    // connect flow is ASYNCHRONOUS — it returns the moment the address is entered and finishes two network
+    // round trips later — so the line cannot be refreshed by the settings row's own handler the way the
+    // music-server one is. Re-armed from JellyfinServerStore's change hook, so a server that finishes
+    // connecting (or is switched off, or removed) while the panel is up moves the line the user is looking at.
+    std::function<void()> jellyfinStatusUpdate_;
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
@@ -996,6 +1073,9 @@ private:
     // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
+    // Custom home rows (issue #161): the D-pad editor for the profile's home row list. Reached from BOTH
+    // settings builders (themed "home.rows" / classic "Choose home rows…"), so there is one editor.
+    void openHomeRowsEditor();
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
     // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
     // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
@@ -1229,6 +1309,15 @@ private:
     std::unique_ptr<LocalResolveCache> resolveCache_;
     std::unique_ptr<CatalogResolver> resolver_;
     CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
+    // Following a series (issue #155): the polite background refresh (a QObject child of this) and the map
+    // from an in-flight AddonManager request id to the scheduler callback waiting for it. The map is cleared
+    // at every cycle boundary, so a reply that never arrives cannot accumulate.
+    // The display name for one follow interval, in hours. ONE function, called by BOTH settings builders,
+    // so the themed Choice row and the classic combo cannot come to offer differently-worded (or
+    // differently-ordered) versions of the same list — which is exactly the GS_TWINS failure class.
+    static QString followIntervalLabel(int hours);
+    FollowScheduler* followSched_ = nullptr;
+    QHash<int, std::function<void(bool, const QVector<follow::Child>&)>> followFetches_;
     std::unique_ptr<CloudSync> cloud_;
     // Per-file sync of emulator saves and save states (save-sync T5). Declared AFTER cloud_ on purpose: it
     // holds a raw CloudSync* and members are destroyed in reverse declaration order, so this one goes first.
@@ -1453,6 +1542,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This
@@ -1643,6 +1740,11 @@ private:
     // port is and what it will ask them for, then install (if it is not there yet) and launch it. `portId`
     // is a NativePorts catalog id. See core/NativePorts.h for why a port is not an emulator.
     void showNativePort(const MediaItem& item, const QString& portId);
+    // The SELF-COMPILED tier's card (issue #248 increment b), defined in MainWindowRecomps.cpp. A catalogue
+    // entry that names a recompiler is built ON THIS MACHINE from that engine plus the user's own dump, and
+    // this build does not build anything yet — so the row lists, states its engine and licence, and its
+    // Install says so and offers the engine's own page instead of starting something that cannot finish.
+    void showSelfCompiledPort(const ExternalEmulator& port);
     // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
     // the flow that chose it has returned by the time this is used, and a download can outlive the page the
     // game was picked from.
@@ -1836,6 +1938,27 @@ private:
     // Bumped by every new queue and every jump. A mint that comes back carrying a stale generation is
     // dropped: a slow answer for a part the listener skipped past must not play over the one they chose.
     quint64 remoteBookGen_ = 0;
+    // ---- The Audiobookshelf book the queue is currently playing (#197) -----------------------------------
+    // The qualified id of the book/episode the queue belongs to, empty when the queue is not one of ours.
+    // It is what the progress hook reports under and what partStreamUrl mints from; the queue itself still
+    // holds only part tokens, exactly as #214 requires.
+    QString absBookId_;
+    // The book's tracks, so a position in the PART that is playing can be turned into a position in the
+    // BOOK — which is the only time base the server speaks. Exact (each track's real start and length),
+    // never the byte estimate #218's BookTimeline has to make for a torrent release.
+    QVector<Abs::Track> absTracks_;
+    // The server's chapter list for the whole book, and the rebased slice of it for the part that is open.
+    // currentChapters() hands the second to everything that asks; it is empty for every other kind of media,
+    // which is what keeps mpv's own list the answer everywhere else.
+    QVector<Abs::Chapter> absChapters_;
+    QVector<MediaSegments::Chapter> serverChapters_;
+    // The position the server gave us for THIS open, and the part it falls in. Consumed once by the resume
+    // hook (a second entry must not be seeded to the same offset), which is why it is cleared when read.
+    int    absSeedPart_ = -1;
+    double absSeedWithin_ = 0.0;
+    // The book's whole length, as the server gives it. Reported alongside the position, because a fraction
+    // computed from the PART that is playing would tell the server this book is six minutes long.
+    double absDuration_ = 0.0;
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)

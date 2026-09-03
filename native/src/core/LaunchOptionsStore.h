@@ -66,6 +66,13 @@ namespace LaunchOpts
                                // (speedruns, mod setups, "that patch broke it"); anything else is a VERSION
                                // PIN, matched case-insensitively as a substring of the package's file name.
         QString contentDlc;    // "" / "on" = install the game's DLC; "off" = do not.
+        // #190: for a FOLDER game (MS-DOS), which program inside the folder boots — a path RELATIVE to the
+        // game folder ("START.BAT", "BIN/GAME.EXE"), never absolute. Set only when the folder held several
+        // plausible programs and the user picked one; the autodetect resolves the ordinary case with nothing
+        // stored. Relative because it has to survive the folder being moved, renamed or synced to another
+        // machine — which is also why it belongs in THIS store (per game, cloud-merged) rather than beside
+        // the files.
+        QString bootFile;
         qint64  updatedAt = 0;
 
         // No lever set. Ignores updatedAt, so a clear husk is empty (= "no override") while still being a real,

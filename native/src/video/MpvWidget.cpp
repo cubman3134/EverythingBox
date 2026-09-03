@@ -878,6 +878,18 @@ bool MpvWidget::isPaused() const
     return flag != 0;
 }
 
+bool MpvWidget::hasMedia() const
+{
+    if (!mpv) return false;
+    int idle = 0;
+    // A read that FAILS is answered "no media" rather than "yes": the caller uses this to decide whether a
+    // position and a title mean anything, and guessing yes there is how a stopped player goes on reporting
+    // the last thing it played. idle-active is 0 from the moment a load starts, so a still-loading file is
+    // correctly media.
+    if (mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &idle) < 0) return false;
+    return idle == 0;
+}
+
 void MpvWidget::togglePause()
 {
     // #141: inside a window this becomes an explicit set of BOTH decks rather than a per-deck "cycle" — two

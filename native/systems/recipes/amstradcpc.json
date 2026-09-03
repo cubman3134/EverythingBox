@@ -1,0 +1,22 @@
+{
+  "system": "amstradcpc",
+  "summary": "cap32 carries the CPC firmware itself, so nothing has to be supplied, and it auto-runs disk and tape content.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "cap32",
+      "options": {
+        "cap32_autorun": "enabled",
+        "cap32_model": "6128"
+      },
+      "firmware": [],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

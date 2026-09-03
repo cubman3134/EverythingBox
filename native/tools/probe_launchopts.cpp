@@ -360,6 +360,37 @@ int main(int argc, char** argv)
         CHECK(blob.value(QStringLiteral("backend")).toString() == QStringLiteral("retropark"));
     }
 
+    // ---- 10b. #190: the REMEMBERED EXECUTABLE of a folder game round-trips the same way ------------------
+    //         When a DOS folder holds several plausible programs the app asks once and stores the answer HERE,
+    //         so the second launch never asks again. Three properties, and the feature is broken without any
+    //         one of them: a bootFile-only override is a real record (not a husk ensureCache would drop), the
+    //         value survives set()/get() verbatim, and it reaches the ini blob under its own key so a cloud
+    //         merge carries it to the next machine. The stored path is RELATIVE to the game folder — an
+    //         absolute one would not survive the folder moving, which is the whole reason it is stored per
+    //         GAME rather than beside the files.
+    {
+        const QString key = QStringLiteral("romlib:C:/roms/dos/Compilation");
+        Override ov; ov.bootFile = QStringLiteral("ZOOL.EXE");
+        LaunchOpts::set(key, ov);
+
+        const Override got = LaunchOpts::get(key);
+        CHECK(got.bootFile == QStringLiteral("ZOOL.EXE"));
+        CHECK(!got.isEmpty());                       // a bootFile-only override is a real record
+        CHECK(LaunchOpts::has(key));
+        CHECK(got.core.isEmpty() && got.emulatorId.isEmpty() && got.backend.isEmpty()); // no other lever moved
+
+        QSettings s2(iniPath, QSettings::IniFormat);
+        const QString leaf = QStringLiteral("launchopts/items/") + md5hex(key);
+        const QJsonObject blob = QJsonDocument::fromJson(s2.value(leaf).toString().toUtf8()).object();
+        CHECK(blob.value(QStringLiteral("bootFile")).toString() == QStringLiteral("ZOOL.EXE"));
+
+        // Clearing it leaves a husk that reads as "no remembered program" — so the app asks again, rather
+        // than the clear being indistinguishable from a device that never saw this game.
+        LaunchOpts::reset(key);
+        CHECK(LaunchOpts::get(key).bootFile.isEmpty());
+        CHECK(LaunchOpts::get(key).isEmpty());
+    }
+
     // ---- 11. Task 3 wiring: the EXACT composition GameLauncher::prepareCore threads into CorePlan::backend for a
     //          libretro system — `LaunchOpts::resolveBackend(Settings::backendFor(sysId), ov)`. prepareCore itself
     //          isn't headless-reachable (it constructs no GameLauncher without a RetroView + full app state), so this

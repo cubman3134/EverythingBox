@@ -1,0 +1,22 @@
+{
+  "system": "vic20",
+  "summary": "VICE autostarts VIC-20 cartridges and .prg files itself. Many titles need a RAM expansion; 'auto' sizes it from the file where it can.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "vice_xvic",
+      "options": {
+        "vice_autostart": "enabled",
+        "vice_vic20_memory_expansions": "auto"
+      },
+      "firmware": [],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

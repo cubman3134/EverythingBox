@@ -21,6 +21,14 @@ namespace Settings
     // namespaces the per-device accumulators (T3) so two devices never double-count. Never empty on return.
     QString deviceId();                       // key "device/id"; minted once, stable, device-local
 
+    // What this device CALLS ITSELF on the LAN (issue #143): the name a peer's picker shows as
+    // "EverythingBox on <name>". Defaults to the machine's host name, which is already the name the user
+    // gave this box, so the feature is usable before anyone visits Settings. Device-local like device/id
+    // beside it -- syncing it would rename every box on the account to whatever the last one typed, and the
+    // whole point of the string is to tell them apart. Never empty on return.
+    QString deviceName();                     // key "device/name", default = the machine host name
+    void setDeviceName(const QString& name);
+
     // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
     // 639 code like "eng"; empty = no preference / first available).
     bool subtitlesOnByDefault();
@@ -238,6 +246,19 @@ namespace Settings
     QString listenBrainzApiUrl();
     void setListenBrainzApiUrl(const QString& url);
 
+    // LAST.FM (#192 increment 2). The SESSION KEY, and only the session key: the desktop-auth flow has no
+    // password to store, and the request token it is exchanged for is spent the moment it is used. THE
+    // USER'S OWN SECRET, on exactly the terms the ListenBrainz token above is held: read by one caller at
+    // the moment it signs a request, never logged, never echoed into a message, and carved out of every sync
+    // bundle by Scrobble::isDeviceLocalKey (the "scrobble/" prefix already covers it). Per profile.
+    QString lastFmSessionKey();
+    void setLastFmSessionKey(const QString& key);
+    // WHICH account that session belongs to, so the settings row can name it. Not a secret — but it is
+    // written and cleared with the key, because a username left behind after a disconnect claims a link that
+    // is no longer there.
+    QString lastFmAccount();
+    void setLastFmAccount(const QString& name);
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.
@@ -287,6 +308,24 @@ namespace Settings
     // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
+
+    // FOLLOWING A SERIES (issue #155). How often the background pass asks each followed series' source what
+    // children it has now, in HOURS — one of follow::intervalChoicesHours() (6 / 12 / 24 / 168), or 0 for
+    // MANUAL, where nothing runs until "Check now" is pressed. Default daily.
+    //
+    // Both keys live under "following/" and are ORDINARY SYNCED PREFERENCES that ride the settings bundle: how
+    // often to check and whether to check on a metered link are choices about the user, and someone who set
+    // "weekly" on the TV means it on the phone too. The prefix is deliberately NOT "follow/", which
+    // CloudSync::isPerItemStoreKey claims for the per-item follow marks — "following/" does not start with
+    // "follow/" (the slash is load-bearing), and probe_cloudmerge pins that the two are classified apart.
+    int  followIntervalHours();
+    void setFollowIntervalHours(int hours);
+
+    // Whether the scheduled pass may run on a METERED connection. Off by default, per the issue: a background
+    // refresh over somebody's phone tethering is exactly the thing a polite feature does not do. "Check now"
+    // is a deliberate press and is never gated on it.
+    bool followOnMetered();
+    void setFollowOnMetered(bool on);
 
     // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
     // screenshots without the window needing focus (see core/UiTestServer). Default off.

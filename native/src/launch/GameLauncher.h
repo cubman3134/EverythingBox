@@ -64,7 +64,14 @@ public:
                       // RetroParkView::openGame so the runtime graphics API is chosen (rpapi::runtimeApiForCore)
                       // BEFORE the core loads. Only meaningful when backend==RetroPark; false for every other plan
                       // (incl. every driven/NES RetroPark plan), so the 2b caller is byte-behaviourally unchanged.
-                      bool retroparkPresenting = false; };
+                      bool retroparkPresenting = false;
+                      // #190 (folder games, MS-DOS): the folder held SEVERAL plausible programs and the
+                      // recipe gave no basis to choose one, so the launch stops here and asks. Non-empty =>
+                      // `bootFolder` is the game folder and these are the candidate programs, relative to it,
+                      // in the order to offer them. Empty on every other launch, which is every launch that
+                      // is not a folder game with an unresolved pick — so nothing else changes shape.
+                      QStringList bootChoices;
+                      QString bootFolder; };
     // `key` is the game's stable id (the same one open() carries). When non-empty its per-game launch override
     // (LaunchOptionsStore, issue #51) is consulted: the preferred core (libretro) / emulator (standalone) is
     // applied to the resolved plan. Empty key => no override, byte-for-byte today's resolution — which is what
@@ -115,6 +122,15 @@ signals:
     void playSessionEnded();
     void statusMessage(const QString& text, int ms); // status-bar message (ms 0 = no timeout)
     void notifyUser(const QString& text, int ms);    // user-facing notice (→ Notifier)
+    // #190: a folder game whose program could not be picked automatically. The host shows a nav-kit menu of
+    // `choices` (paths relative to the game folder), records the answer in the game's launch override, and
+    // re-opens the game — which then resolves with nothing to ask. Emitted QUEUED from the host's connect, so
+    // the menu is never opened inside this emission (the #28 / #211 nested-loop family); the launch that
+    // emitted it simply ends. The original open() arguments travel with it because re-opening is how the
+    // answer is applied — there is no half-finished launch parked anywhere waiting to be resumed.
+    void chooseBootProgram(const QString& title, const QStringList& choices,
+                           const QString& rom, const QString& thumb, const QString& key,
+                           const QString& systemHint);
     // Standalone-emulator install stream (Settings ▸ Emulators), forwarded from the private EmulatorManager so
     // the themed panel can tick the emulator's status row in place. pct < 0 = indeterminate (extract phase).
     void emulatorInstallProgress(const QString& text, int pct);
@@ -139,6 +155,11 @@ private:
     void openResolved(const QString& rom, const QString& title, const QString& thumb,
                       const QString& key, const QString& systemHint);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
+    // #190: the recipe's firmware check for a resolved plan — "" when everything the core needs is present
+    // (which is every system without a recipe, and every recipe whose firmware is there), otherwise the
+    // message naming the exact file(s) and the folder they go in. Called AFTER the BIOS fetch, so a file the
+    // app can legitimately fetch for itself is never reported as the user's problem.
+    QString firmwareBlocker(const CorePlan& plan, const QString& title) const;
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     // `emulatorId` is the resolved standalone-emulator id — sys->externalEmulator by default, or a per-game
