@@ -1631,6 +1631,7 @@ int main(int argc, char** argv)
         CHECK(f.kind == QStringLiteral("video"), "channels: the routing kind takes the media path");
         CHECK(f.title == QStringLiteral("90s Saturday"), "channels: the favourite carries the channel name");
         CHECK(!f.path.contains(QStringLiteral("/")), "channels: a favourite never stores a path or a url");
+    }
     // ---- The New shelf's row marker (issue #155) --------------------------------------------------------
     // A New-shelf row has to say which SERIES it belongs to and which SOURCE that series came from, and a
     // MediaItem has nowhere to put either but `mime` -- the "You missed" marker's problem and its answer.
