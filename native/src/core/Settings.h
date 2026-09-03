@@ -398,6 +398,21 @@ namespace Settings
     QString readingFolder();       // resolved path (never empty)
     void setReadingFolder(const QString& path);
 
+    // PER-SERIES COMIC READING DIRECTION (issue #152). A comic archive's ComicInfo.xml states its direction
+    // in <Manga> and that is the DEFAULT; this is the user's answer for a series, and it beats the document
+    // outright — the same "user edits are above all" rule the whole reading library follows.
+    //
+    // The value is ComicInfo::Direction's persisted spelling, and it is an int here ON PURPOSE: Settings.h is
+    // included by most of the app, and it should not drag the comic layer's headers in behind it for three
+    // numbers. 0 = no override (the document decides), 1 = left to right, 2 = right to left. Setting 0
+    // FORGETS the override rather than storing a third state, so a series the user has never had an opinion
+    // about and one they changed their mind back on are the same thing.
+    //
+    // `seriesKey` is BookLibrary::seriesKeyFor / ComicName::seriesKey — the same folded key the shelf groups
+    // a series by, so an override survives a re-spelling of the series' display name.
+    int  comicDirectionOverride(const QString& seriesKey);
+    void setComicDirectionOverride(const QString& seriesKey, int direction);
+
     // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
     // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
     // used ONLY when the container gave one string; a repeated Vorbis field or a NUL-separated ID3v2.4 frame

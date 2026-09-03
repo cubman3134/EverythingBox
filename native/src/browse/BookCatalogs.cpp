@@ -19,6 +19,18 @@ QString fmtIndex(double idx)
                         : QObject::tr("#%1").arg(QString::number(idx, 'g', 6));
 }
 
+// THE ISSUE AS THE PUBLISHER WROTE IT, when the file said so (ComicInfo.xml's <Number>, issue #152) —
+// "Annual 1" and "½" are real issue numbers and there is no double that holds either. Verbatim, because
+// re-spelling somebody's number is the whole class of wrongness this feature exists to stop; the derived
+// decimal is still what ORDERS the shelf, and is all that is left for a book whose number came from a
+// filename.
+QString fmtNumber(const BookLibrary::Book& b)
+{
+    const QString n = b.number.trimmed();
+    if (n.isEmpty()) return fmtIndex(b.seriesIndex);
+    return n.startsWith(QLatin1Char('#')) ? n : QObject::tr("#%1").arg(n);
+}
+
 QString joinDot(const QStringList& parts)
 {
     QStringList kept;
@@ -111,13 +123,13 @@ MediaCatalog booksCatalog(const BookLibrary::Author* bucket, const QString& fall
             // Standing inside an AUTHOR, the fact a row is missing is which series it belongs to and where
             // in it — "Foundation · #2". A standalone book says nothing rather than an empty separator.
             const QString s = b.series.trimmed();
-            line = s.isEmpty() ? QString() : joinDot({ s, fmtIndex(b.seriesIndex) });
+            line = s.isEmpty() ? QString() : joinDot({ s, fmtNumber(b) });
         }
         else
         {
             // Standing inside a SERIES, the shelf is already in order, so the number leads and the author
             // follows it — the one fact a series shelf cannot show any other way.
-            line = joinDot({ fmtIndex(b.seriesIndex), b.author.trimmed() });
+            line = joinDot({ fmtNumber(b), b.author.trimmed() });
         }
         cat.items.push_back(bookRow(b, line, cover));
     }
