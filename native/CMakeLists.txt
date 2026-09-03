@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.176 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.177 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -487,6 +487,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/video/MpvHeaderApply.h
+        # Issue #162: the video player's touch gesture recogniser. Header-only and PURE (no widgets, no
+        # Settings), with the Settings/FormFactor binding split into its own header so the arithmetic stays
+        # probeable on its own. Headers, so there is no .cpp to also add here (the issue-#182 trap).
+        src/video/PlayerGestures.h
+        src/video/PlayerGestureConfig.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
         src/emu/RetroParkView.cpp src/emu/RetroParkView.h  # Slice 2a: the RetroPark driven play surface (sibling of RetroView)
         src/emu/RetroParkOptions.cpp src/emu/RetroParkOptions.h  # Task B2: v9 core-options JSON->CoreOption bridge + headless harvest
@@ -806,6 +811,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        # Issue #162's host side: every MainWindow member the touch-gesture feature adds lives in its own TU
+        # rather than in the MainWindow.cpp monolith (the #186 direction), so a feature branch touching
+        # gestures does not collide with every other branch's hunks.
+        src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
         # #248 (b): the self-compiled tier's card. A MainWindow member in its OWN TU (the #186
@@ -3129,6 +3138,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/PlayerBarNav.h)
     target_include_directories(probe_playerbar PRIVATE src src/ui)
     target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
+
+    # The video player's touch gesture recogniser (issue #162): the half-screen split, the thirds, the seek
+    # arithmetic and its cancel-by-returning rule, the OS edge band, the double-tap window, the long-press
+    # threshold, the pinch -> fit cycle, and the three total-suppression gates (form factor, lock, open
+    # overlay). PlayerGestures.h is header-only and pure; PlayerGestureConfig.h is the one place stored
+    # preferences become a Config, which is why Settings and FormFactor come along — the same pair, and the
+    # same QtCore-only link, as probe_formfactor.
+    add_executable(probe_playergestures tools/probe_playergestures.cpp
+        src/video/PlayerGestures.h
+        src/video/PlayerGestureConfig.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/LifecyclePolicy.h)
+    target_include_directories(probe_playergestures PRIVATE src src/video src/core src/theme2)
+    target_link_libraries(probe_playergestures PRIVATE Qt6::Core)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
     # Header-only unit; links nothing but Qt6::Core.

@@ -33,6 +33,7 @@
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
+#include "../video/PlayerGestures.h" // issue #162: the touch gesture recogniser is a value member
 #include "../comic/PageSupply.h"    // PageSupplyOptions — what a page supplier may ask of openImagePages
 #include "../ebook/OpdsPse.h"       // OpdsPseLink — pseLink_ is a value member (#153)
 
@@ -751,8 +752,28 @@ private:
     void positionSkipChip();
     void hideMediaControls();               // hide the transport chrome now (shared by the idle timer + touch tap)
     void togglePlayerChrome();              // touch tap: hide if shown / reveal (+re-arm) if hidden
-    bool handlePlayerTouch(class QTouchEvent* te); // player tap-toggle + double-tap ±10 s seek (touch only)
-    void onPlayerTap(const QPointF& pos);   // pending-tap resolver: single = toggle, double(<350ms) = seek
+    bool handlePlayerTouch(class QTouchEvent* te); // the player's touch filter; routes into the #162 recogniser
+    // ---- Touch gestures over the video player (issue #162) -----------------------------------------------
+    // Every definition below lives in MainWindowGestures.cpp, not in the MainWindow.cpp monolith.
+    // applyGestureConfig() is the ONE place the recogniser is told what it may do: it rebuilds Config from
+    // Settings and the form-factor authority, so a desktop or TV build leaves it permanently inert and the
+    // D-pad path is untouched by construction rather than by a check at each call site.
+    void applyGestureConfig();
+    void handleGestureEvents(const QVector<PlayerGestures::Event>& evs);
+    void setGestureLocked(bool on);              // the overlay's lock: suspends every gesture (pocket safety)
+    void placeGestureLockButton(bool show);      // create-on-first-use, position, show/hide the lock control
+    void applyVideoFit(PlayerGestures::VideoFit fit); // pinch -> fit / fill / stretch on the live player
+    QString gestureTimeText(double seconds) const;    // h:mm:ss for the scrub readout
+    // What the player's touch handling was BEFORE #162, kept for a NON-touch form factor: a desktop machine
+    // with a touchscreen had this and must not lose it just because the gesture vocabulary is off there.
+    bool handleLegacyPlayerTouch(class QTouchEvent* te);
+    PlayerGestures::Recognizer gestures_;
+    PlayerGestures::VideoFit   videoFit_ = PlayerGestures::VideoFit::Fit;
+    QTimer*      gestureHoldTimer_ = nullptr;    // the long-press deadline (the recogniser owns the decision)
+    QPushButton* gestureLockBtn_ = nullptr;      // a plain child of player_, like skipChip_ — never an overlay
+    QTimer*      gestureLockTimer_ = nullptr;    // its OWN 4 s life, like skipChipTimer_
+    double       gestureSpeedBefore_ = 1.0;      // the speed to restore when a long-press is released
+    QElapsedTimer gestureClock_;                 // the recogniser's injected clock (started on first touch)
     void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
     void stepPlayerFocus(int dir); // arrow-key focus across the transport controls (dir +1/-1, or 0 = enter row)
     // The same job for the player's TOP BAND: the ‹ Back overlay and the "Issue with Streaming" chip beside
@@ -2007,8 +2028,8 @@ private:
     QTimer* liveSeekTimer_ = nullptr;
     QElapsedTimer liveSeekClock_;
     QTimer* controlsHideTimer_ = nullptr;
-    QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap within 350ms upgrades it to a seek
-    QPointF playerTouchStart_;          // TouchBegin pos, for the tap-vs-drag discriminator
+    QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap inside the window upgrades it to a skip
+    QPointF playerTouchStart_;          // TouchBegin pos, for the pre-#162 tap-vs-drag discriminator
     bool    playerTouchTap_ = false;    // the in-flight touch is still a tap candidate (small travel, 1 finger)
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
