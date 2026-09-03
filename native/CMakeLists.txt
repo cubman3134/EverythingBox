@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.173 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.174 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2618,7 +2618,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp     src/core/ProfileStore.h
         src/core/Settings.cpp         src/core/Settings.h
         src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
-        src/addons/AddonModels.cpp    src/addons/AddonModels.h)
+        src/addons/AddonModels.cpp    src/addons/AddonModels.h
+        src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
+        src/core/StreamHeaders.h)
     target_include_directories(probe_absclient PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_absclient PRIVATE Qt6::Core Qt6::Network)
 
