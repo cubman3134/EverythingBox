@@ -4404,28 +4404,44 @@ void HomeView::editChannelInteractive(const QString& channelId)
     }
     if (sourceLabel.isEmpty()) sourceLabel = channels::label(ch.sourceKind) + QStringLiteral(" · ") + ch.sourceId;
 
+    // Rows are addressed by ID, not by index. The set is not fixed — a new channel has no Delete and no
+    // Favourite row — and an index-keyed switch over a variable list is the defect that is only ever found by
+    // somebody deleting a channel they meant to rename.
     for (;;)
     {
-        QStringList rows;
-        rows << tr("Name: %1").arg(ch.name)
-             << tr("Source: %1").arg(sourceLabel)
-             << tr("Ordering: %1").arg(channels::label(ch.ordering))
-             << tr("Start programmes from the beginning: %1").arg(ch.startFromBeginning ? tr("On") : tr("Off"))
-             << (isNew ? tr("Create channel") : tr("Save"));
-        if (!isNew) rows << tr("Delete channel");
+        QStringList rows, ids;
+        auto row = [&](const char* id, const QString& text) { ids << QLatin1String(id); rows << text; };
+        row("name",   tr("Name: %1").arg(ch.name));
+        row("source", tr("Source: %1").arg(sourceLabel));
+        row("order",  tr("Ordering: %1").arg(channels::label(ch.ordering)));
+        row("beg",    tr("Start programmes from the beginning: %1")
+                          .arg(ch.startFromBeginning ? tr("On") : tr("Off")));
+        // The star lives HERE rather than on the grid's own favourite verb, and it is the same row on both
+        // layouts. A channel is not a game and not an addon leaf, so the generic star would have filed it with
+        // neither a `path` nor a `kind` — the exact shape #203 fixed for a Live TV channel, where the star
+        // "worked", the row appeared on Home, and pressing it said the favourite's source addon was missing.
+        // What it stores is the ROW-PRODUCER KEY in both fields, so openFavorite's re-open (which emits
+        // openRecent with the path) lands on the channel route and TUNES.
+        const QString favKey = channels::rowProducerKey(ch.id);
+        const bool starred = !isNew && FavoritesStore::isFavorite(favKey);
+        if (!isNew) row("fav", starred ? tr("★ Remove from Favorites") : tr("☆ Add to Favorites"));
+        row("save",   isNew ? tr("Create channel") : tr("Save"));
+        if (!isNew) row("delete", tr("Delete channel"));
+
         const int pick = NavMenu::pick(isNew ? tr("New channel") : tr("Edit channel"), rows, window());
-        if (pick < 0) return;                                   // Back discards the pending edits
-        if (pick == 0)
+        if (pick < 0 || pick >= ids.size()) return;             // Back discards the pending edits
+        const QString id = ids.at(pick);
+        if (id == QLatin1String("name"))
         {
             const QString n = Osk::getText(tr("Channel name:"), ch.name, QLineEdit::Normal, window());
             if (!n.isNull() && !n.trimmed().isEmpty()) ch.name = n.trimmed();
         }
-        else if (pick == 1)
+        else if (id == QLatin1String("source"))
         {
             channels::SourceKind k = ch.sourceKind; QString sid = ch.sourceId, lab;
             if (pickChannelSource(k, sid, lab)) { ch.sourceKind = k; ch.sourceId = sid; sourceLabel = lab; }
         }
-        else if (pick == 2)
+        else if (id == QLatin1String("order"))
         {
             // A two-value cycle, not a picker: the only orderings increment 1 implements are in-order and
             // shuffle (TimeBlocked is reserved and channels::isImplemented rejects it), and a picker over two
@@ -4433,8 +4449,16 @@ void HomeView::editChannelInteractive(const QString& channelId)
             ch.ordering = (ch.ordering == channels::Ordering::InOrder) ? channels::Ordering::Shuffle
                                                                        : channels::Ordering::InOrder;
         }
-        else if (pick == 3) ch.startFromBeginning = !ch.startFromBeginning;
-        else if (pick == 4)
+        else if (id == QLatin1String("beg")) ch.startFromBeginning = !ch.startFromBeginning;
+        else if (id == QLatin1String("fav"))
+        {
+            if (starred) FavoritesStore::remove(favKey);
+            else         FavoritesStore::add(browse::channelFavorite(ch));
+            emit browseItemsChanged(false);
+            showToast(starred ? tr("Removed from Favorites.") : tr("Added “%1” to Favorites.").arg(ch.name),
+                      kFeedbackShort);
+        }
+        else if (id == QLatin1String("save"))
         {
             if (isNew) { if (ChannelStore::add(ch).isEmpty()) return; }
             else if (!ChannelStore::update(ch)) return;
@@ -4443,12 +4467,15 @@ void HomeView::editChannelInteractive(const QString& channelId)
             showToast(isNew ? tr("Created “%1”.").arg(ch.name) : tr("Saved “%1”.").arg(ch.name), kFeedbackShort);
             return;
         }
-        else if (pick == 5)
+        else if (id == QLatin1String("delete"))
         {
             const int c = NavConfirm::ask(tr("Delete channel"), tr("Delete “%1”?").arg(ch.name),
                                           { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0,
                                           window());
             if (c != 1) continue;                                // back to the editor, nothing written
+            // The star goes with it. A favourite left behind would sit on Home pointing at a channel that no
+            // longer exists, and its re-open would be the one thing a favourite must never be: a dead row.
+            FavoritesStore::remove(favKey);
             ChannelStore::remove(ch.id);
             populateChannels();
             emit browseItemsChanged(false);
@@ -8398,6 +8425,22 @@ void HomeView::favoriteThemedLeaf(int idx)
                 f.kind = QStringLiteral("livetv");
                 FavoritesStore::add(f);
             }
+        }
+    }
+    else if (it.type == QStringLiteral("_channel"))
+    {
+        // A CHANNEL (#179), called out here for exactly the reason the Live TV arm above is, and against
+        // exactly the same failure: the generic row below stamps neither `path` nor `kind`, and a channel
+        // favourite needs both — openFavorite re-opens a row by its path and `kind` routes it, so without
+        // this the star would work, the row would appear on Home, and pressing it would say the favourite's
+        // source addon was missing. browse::channelFavorite is the ONE builder (the editor's own star row
+        // calls it too), so the two surfaces cannot drift.
+        if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
+        else
+        {
+            channels::Channel ch;
+            if (ChannelStore::get(channels::channelIdFromKey(it.id), ch))
+                FavoritesStore::add(browse::channelFavorite(ch));
         }
     }
     else if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);

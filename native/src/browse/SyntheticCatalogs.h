@@ -376,6 +376,14 @@ namespace browse
     //   create row:  type "_newchannel", mime "newchannel"       (activation opens the editor)
     MediaCatalog channelsCatalog(const QList<channels::Channel>& all);
 
+    // The FavoriteItem for starring a CHANNEL. Mirrors liveTvChannelFavorite, and for the identical reason
+    // that one exists (#203): the generic star stamps neither `path` nor `kind`, and both are load-bearing —
+    // openFavorite re-opens a row by its PATH and `kind` is what routes it, so without them the star appears
+    // to work, the row shows up on Home, and pressing it says the favourite's source addon is missing.
+    // Both fields hold the ROW-PRODUCER KEY ("channel:<id>"), which is what the tuner resolves; `kind` is
+    // "video" so the re-open takes the media route the channel identity is tested on.
+    FavoriteItem channelFavorite(const channels::Channel& ch);
+
     // ---- OPDS book catalogs (issue #146) -----------------------------------------------------------------
     // The saved-catalogs shelf: one row per saved OPDS catalog (drilling into its root feed, FETCHED fresh on
     // open), plus a trailing "add a catalog" row — the liveTvSourcesCatalog shape. An empty list yields JUST

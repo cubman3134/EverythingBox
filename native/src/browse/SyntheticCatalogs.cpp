@@ -379,6 +379,20 @@ MediaCatalog channelsCatalog(const QList<channels::Channel>& all)
     return cat;
 }
 
+FavoriteItem channelFavorite(const channels::Channel& ch)
+{
+    FavoriteItem f;
+    f.itemId       = channels::rowProducerKey(ch.id);
+    f.title        = ch.name;
+    f.subtitle     = channels::label(ch.ordering);
+    f.type         = QStringLiteral("_channel");
+    // The identity in BOTH fields, and a media `kind` — see the header. Never a file path and never a url:
+    // what a channel is playing right now is a property of the clock, not of the star.
+    f.path         = f.itemId;
+    f.kind         = QStringLiteral("video");
+    return f;
+}
+
 // ---- OPDS book catalogs (issue #146) ---------------------------------------------------------------------
 
 MediaCatalog opdsCatalogsList(const QList<OpdsCatalog>& catalogs)

@@ -1569,6 +1569,49 @@ int main(int argc, char** argv)
               "opds: an empty catalog list still offers the add row");
     }
 
+    // ---- Personal TV channels (#179 inc 1): the shelf builder + the favourite -------------------------------
+    // The two things about a channel row that are NOT obvious and that a live drive punished: its id is the
+    // ROW-PRODUCER KEY (one string shared by the star, Recents and a #161 home row), and it is NOT a folder —
+    // activating it tunes. Plus the trailing create row, present even when the list is empty.
+    {
+        channels::Channel a;
+        a.id = QStringLiteral("aaa"); a.name = QStringLiteral("90s Saturday");
+        a.sourceKind = channels::SourceKind::LocalFolder; a.sourceId = QStringLiteral("name:the show");
+        a.ordering = channels::Ordering::Shuffle; a.startFromBeginning = true;
+        channels::Channel b;
+        b.id = QStringLiteral("bbb"); b.name = QStringLiteral("Movie Night");
+        b.ordering = channels::Ordering::InOrder;
+
+        const MediaCatalog cat = browse::channelsCatalog({ a, b });
+        CHECK(cat.items.size() == 3, "channels: two channels + the trailing create row");
+        CHECK(cat.items[0].id == QStringLiteral("channel:aaa"), "channels: the row id IS the row-producer key");
+        CHECK(cat.items[0].mime == QStringLiteral("channel:aaa"), "channels: ...and so is the mime activation reads");
+        CHECK(cat.items[0].type == QStringLiteral("_channel"), "channels: the row type");
+        CHECK(cat.items[0].title == QStringLiteral("90s Saturday"), "channels: the row title is the channel name");
+        CHECK(!cat.items[0].expandable, "channels: a channel TUNES, it is not a folder");
+        // The subtitle says what the channel IS — never what is on it, which would mean computing a schedule
+        // per channel on every navigation into this folder.
+        CHECK(cat.items[0].subtitle.contains(QStringLiteral("Shuffle"))
+              && cat.items[0].subtitle.contains(QStringLiteral("start")),
+              "channels: the subtitle carries the ordering + the from-the-start flag");
+        CHECK(cat.items[1].subtitle == QStringLiteral("In order"),
+              "channels: a join-in-progress channel's subtitle is just its ordering");
+        CHECK(cat.items[2].type == QStringLiteral("_newchannel")
+              && cat.items[2].mime == QStringLiteral("newchannel"), "channels: the trailing create row");
+        CHECK(browse::channelsCatalog({}).items.size() == 1
+              && browse::channelsCatalog({}).items[0].type == QStringLiteral("_newchannel"),
+              "channels: an empty channel list still offers the create row");
+
+        // THE FAVOURITE. #203's lesson, restated for a channel: the generic star stamps neither `path` nor
+        // `kind`, and openFavorite re-opens by PATH while `kind` routes it — so both must carry the identity.
+        const FavoriteItem f = browse::channelFavorite(a);
+        CHECK(f.itemId == QStringLiteral("channel:aaa"), "channels: the favourite is keyed by the identity");
+        CHECK(f.path == QStringLiteral("channel:aaa"), "channels: ...and re-opens by it, never by a file");
+        CHECK(f.kind == QStringLiteral("video"), "channels: the routing kind takes the media path");
+        CHECK(f.title == QStringLiteral("90s Saturday"), "channels: the favourite carries the channel name");
+        CHECK(!f.path.contains(QStringLiteral("/")), "channels: a favourite never stores a path or a url");
+    }
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }
