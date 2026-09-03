@@ -416,6 +416,11 @@ MediaCatalog opdsCatalog(const OpdsFeed& feed)
             it.url          = best->href;   // the acquisition href — downloaded (with auth) at activation
             it.mime         = best->type;   // its content-type — names the download's file extension
             it.id           = e.id.isEmpty() ? best->href : e.id;
+            // The server's OPDS-PSE offer (#153), carried onto the row so activation can present "Read
+            // online" BESIDE the download rather than instead of it. Default-constructed (isValid()
+            // false) when the entry advertised none, and the download stays exactly what it was in
+            // either case — `url` and `mime` above are untouched by this.
+            it.pse          = e.pse;
             cat.items.push_back(it);
             continue;
         }
@@ -1099,6 +1104,32 @@ qint64 traktMissedThroughOf(const QString& mime)
     // store's "never dismissed" and therefore a press that does nothing rather than one that dismisses a
     // show through the epoch. Failing closed is the only safe direction for a value that drives a write.
     return mime.section(QLatin1Char(':'), 3, 3).toLongLong();
+}
+
+// ---- The New shelf (issue #155) ---------------------------------------------------------------------
+// One builder, three readers, no literal anywhere else -- the "You missed" marker's rule, for the same
+// reason. See the header for what the row has to carry and why the split lands where it does.
+static const QLatin1String kNewShelfPrefix("new:");
+
+QString newShelfMarker(const QString& addonId, const QString& seriesId)
+{
+    return kNewShelfPrefix + addonId + QLatin1Char(':') + seriesId;
+}
+
+bool isNewShelfMime(const QString& mime) { return mime.startsWith(kNewShelfPrefix); }
+
+QString newShelfAddonOf(const QString& mime)
+{
+    if (!isNewShelfMime(mime)) return QString();
+    return mime.section(QLatin1Char(':'), 1, 1);
+}
+
+QString newShelfSeriesOf(const QString& mime)
+{
+    if (!isNewShelfMime(mime)) return QString();
+    // section(..., 2) with no end index takes the REST of the string, colons and all. That is the whole
+    // point: "new:com.everythingbox.podcasts:itpod:1521578" must yield "itpod:1521578", not "itpod".
+    return mime.section(QLatin1Char(':'), 2);
 }
 
 MediaCatalog traktMissedCatalog(const QVector<trakt::MissedRow>& rows, int maxRows)

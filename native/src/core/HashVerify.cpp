@@ -177,6 +177,11 @@ Hashes hashBytes(const QByteArray& payload)
     h.crc = QString::asprintf("%08x", c);
     h.md5  = hex(QCryptographicHash::hash(payload, QCryptographicHash::Md5));
     h.sha1 = hex(QCryptographicHash::hash(payload, QCryptographicHash::Sha1));
+    // The fourth digest is for #248's recomp ROM-identity gate, not for #97: no Logiqx DAT publishes sha256,
+    // so classify() and the DatDb indexes never look at it. It is computed HERE, in the one place a ROM's
+    // bytes are already in hand, because the alternative is a second full read of the same multi-gigabyte
+    // file the moment a catalogue entry happens to publish only that kind.
+    h.sha256 = hex(QCryptographicHash::hash(payload, QCryptographicHash::Sha256));
     return h;
 }
 
@@ -255,6 +260,9 @@ Stamp cachedStamp(const QString& path)
     st.status  = statusFromToken(store().value(base + QStringLiteral("/status")).toString());
     st.sha1    = store().value(base + QStringLiteral("/sha1")).toString();
     st.datGame = store().value(base + QStringLiteral("/game")).toString();
+    st.crc     = store().value(base + QStringLiteral("/crc")).toString();
+    st.md5     = store().value(base + QStringLiteral("/md5")).toString();
+    st.sha256  = store().value(base + QStringLiteral("/sha256")).toString();
     st.valid   = true;
     return st;
 }
@@ -282,14 +290,69 @@ Stamp verifyAndCache(const QString& path, const QString& systemHint, const DatDb
         if (idx >= 0 && idx < db.entries.size()) st.datGame = db.entries[idx].game;
     }
 
+    st.crc    = h.crc;
+    st.md5    = h.md5;
+    st.sha256 = h.sha256;
+
     const QString base = stampKey(path);
     store().setValue(base + QStringLiteral("/status"), statusToken(st.status));
     store().setValue(base + QStringLiteral("/sha1"),   st.sha1);
     store().setValue(base + QStringLiteral("/game"),   st.datGame);
+    // The other three digests of the same payload, so a later ROM-identity question (#248) is answered from
+    // this record rather than by opening the file again.
+    store().setValue(base + QStringLiteral("/crc"),    st.crc);
+    store().setValue(base + QStringLiteral("/md5"),    st.md5);
+    store().setValue(base + QStringLiteral("/sha256"), st.sha256);
     store().setValue(base + QStringLiteral("/mtime"),  fi.lastModified().toSecsSinceEpoch());
     store().setValue(base + QStringLiteral("/size"),   fi.size());
     store().sync();
     return st;
+}
+
+// ---- the same record, read and written as a HASH cache (issue #248) ------------------------------------------
+// See the header note: #97 asks this record for a verdict, the recomp section asks it for digests, and they
+// share one record so the two answers cannot drift apart.
+Hashes cachedHashes(const QString& path)
+{
+    Hashes h;
+    const QFileInfo fi(path);
+    if (!fi.exists()) return h;
+    const QString base = stampKey(path);
+    // Gated on the DIGESTS being present, not on the verdict: a record written before sha256 existed, and a
+    // record written by hashAndCache on a machine with no DATs, are both legitimate here and neither has the
+    // shape the #97 read tests for.
+    if (!store().contains(base + QStringLiteral("/sha1"))) return h;
+    const qint64 mtime = store().value(base + QStringLiteral("/mtime")).toLongLong();
+    const qint64 size  = store().value(base + QStringLiteral("/size")).toLongLong();
+    if (mtime != fi.lastModified().toSecsSinceEpoch() || size != fi.size()) return h;   // the file moved on
+    h.crc    = store().value(base + QStringLiteral("/crc")).toString();
+    h.md5    = store().value(base + QStringLiteral("/md5")).toString();
+    h.sha1   = store().value(base + QStringLiteral("/sha1")).toString();
+    h.sha256 = store().value(base + QStringLiteral("/sha256")).toString();
+    return h;
+}
+
+Hashes hashAndCache(const QString& path, const QString& systemHint, const QString& hashSourcePath)
+{
+    const QFileInfo fi(path);
+    if (!fi.exists()) return {};
+
+    QString err;
+    const Hashes h = hashRomFile(hashSourcePath.isEmpty() ? path : hashSourcePath, systemHint, &err);
+    if (h.isEmpty()) return {};   // unreadable / unparseable — write nothing, so the next open tries again
+
+    const QString base = stampKey(path);
+    store().setValue(base + QStringLiteral("/sha1"),   h.sha1);
+    store().setValue(base + QStringLiteral("/crc"),    h.crc);
+    store().setValue(base + QStringLiteral("/md5"),    h.md5);
+    store().setValue(base + QStringLiteral("/sha256"), h.sha256);
+    store().setValue(base + QStringLiteral("/mtime"),  fi.lastModified().toSecsSinceEpoch());
+    store().setValue(base + QStringLiteral("/size"),   fi.size());
+    // NO `/status` and no `/game`. Writing "unknown" here would make cachedStamp() report a valid verdict for
+    // a file no DAT has ever been consulted about, and the #97 pass — which only runs on an INVALID stamp —
+    // would then never look at it again. An absent verdict is the honest record of "nobody asked yet".
+    store().sync();
+    return h;
 }
 
 void clearCache()

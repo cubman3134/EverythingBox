@@ -46,12 +46,31 @@
 // has no series field. A PDF whose Title says "Microsoft Word - draft3.doc" shows that, verbatim: it is what
 // the file says, and inventing a rule to detect a bad one is the class of guess this feature refuses.
 //
-// COMICS HAVE NO METADATA AT ALL in this increment (ComicInfo.xml is #152 and explicitly not ours), so their
-// series comes from the FILENAME through comic/ComicName — a normaliser, in a repository with a documented
-// history of normalisers that matched more than they meant. Read that header; the rule it lands on is that a
-// BARE trailing number only becomes an issue number when another file in the SAME FOLDER agrees, which is
-// why a comic's series is derived HERE, in buildIndex, and never stored on a scanned entry: the evidence for
-// it is the folder's contents, and a cached verdict would go stale the moment a file was added.
+// A COMIC WITH A ComicInfo.xml IN IT SAYS ALL THREE OUTRIGHT (issue #152) — series, issue number, creators
+// and more besides — and what it says WINS, because it is a statement the publisher's tagger made and the
+// filename is a guess this app made. comic/ComicInfo reads it in the same archive pass that counts the
+// pages, and core/BookMeta hands it up like any other container's metadata.
+//
+// A COMIC WITHOUT ONE HAS NO METADATA AT ALL, which is most of them, so their series comes from the FILENAME
+// through comic/ComicName — a normaliser, in a repository with a documented history of normalisers that
+// matched more than they meant. Read that header; the rule it lands on is that a BARE trailing number only
+// becomes an issue number when another file in the SAME FOLDER agrees, which is why a comic's series is
+// derived HERE, in buildIndex, and never stored on a scanned entry: the evidence for it is the folder's
+// contents, and a cached verdict would go stale the moment a file was added.
+//
+// THE PRECEDENCE IS PER DIMENSION, not per file, and each dimension is settled the same way: what the
+// document SAID beats what the filename SUGGESTS, and a field the document did not carry leaves that
+// dimension exactly where it was.
+//
+//   * SERIES + NUMBER: the document's when it names either; ComicName's folder-corroborated reading of the
+//     filename when it names neither. Never half of each — a series from one source and a number from the
+//     other would put an issue in the right shelf at the wrong place in it.
+//   * TITLE: the document's <Title> when it has one. Most issues have none (the series and the number ARE
+//     the identification), and those keep showing exactly the name they showed before this existed.
+//   * AUTHOR: the document's first <Writer>. A comic never had one before, so there is nothing to displace.
+//
+// AND THE CORROBORATION COUNT IS COMPUTED OVER THE WHOLE FOLDER EITHER WAY, so tagging one file changes
+// nothing about how its untagged neighbours are grouped.
 //
 // AND WHEN THERE IS NOTHING AT ALL, THE FILENAME IS THE ANSWER. A book with no metadata still appears —
 // under its own file name, in the unknown-author bucket, opening exactly as it always did. That is not a
@@ -93,6 +112,7 @@
 //   * Online enrichment (the AIO catalog / #73 pattern) for bare PDFs. Local metadata always wins, so this
 //     is blank-filling and strictly additive — a second increment, not a rule buried in this one.
 #pragma once
+#include "../comic/ComicInfo.h"   // #152: the Rating / Direction vocabularies an entry carries
 #include <QHash>
 #include <QString>
 #include <QStringList>
@@ -128,6 +148,23 @@ namespace BookLibrary
         int     pageCount = 0;
         bool    hasCover = false;
         bool    untagged = false;   // BookMeta::Info::isEmpty() as it read at scan time
+
+        // ---- ComicInfo.xml (issue #152) --------------------------------------------------------------
+        // A comic archive's embedded document, carried through the persisted index so the next launch does
+        // not re-open every archive to learn it again. All defaulted for an entry that had none, which is
+        // every entry of every library that existed before this build — and the parse stamp below is what
+        // makes those get read once.
+        QString     number;      // <Number> VERBATIM ("Annual 1"); seriesIndex holds its decimal, or 0
+        int         volume = 0;
+        QString     summary;
+        int         month = 0;
+        int         day = 0;
+        QStringList creators;    // all credited roles, writers first; `author` is the first writer
+        QString     publisher;
+        QString     genre;
+        QString     web;
+        ComicInfo::Rating    rating    = ComicInfo::Rating::Unrated;
+        ComicInfo::Direction direction = ComicInfo::Direction::Unspecified;
     };
 
     // ------------------------------------------------------------------------------------------------
@@ -147,6 +184,21 @@ namespace BookLibrary
         QString folder;             // where a cover.*/folder.* sibling would live
         bool    titleFromFilename = false;   // untagged: the shelf is showing the file's own name
         bool    hasCover = false;   // the container has a cover the extractor could get at
+
+        // ---- ComicInfo.xml (issue #152), rendered ----------------------------------------------------
+        // `number` is the issue as the publisher WRITES it and is what a row shows; seriesIndex is its
+        // sortable decimal and is 0 for the ones that have none ("Annual 1"), which sort last among their
+        // series and are then separated from each other in natural order — see sortBooks.
+        QString     number;
+        int         volume = 0;
+        QString     summary;
+        QStringList creators;       // the full credit list; `author` is still the primary (the writer)
+        QString     publisher;
+        QString     genre;
+        QString     language;
+        QString     web;
+        ComicInfo::Rating    rating    = ComicInfo::Rating::Unrated;
+        ComicInfo::Direction direction = ComicInfo::Direction::Unspecified;
     };
 
     // The two top-level buckets. Identical in shape on purpose: the browse renders both with one builder,
@@ -218,6 +270,20 @@ namespace BookLibrary
     // The grouping. See the header for the rules; this is where they are applied — INCLUDING the comic
     // filename grouping, which is folder-scoped and therefore cannot live on a cached entry.
     Index buildIndex(const QVector<FileEntry>& entries);
+
+    // WHAT A RESTRICTED (kids) PROFILE SEES. A pure filter over a built index: every book whose ComicInfo
+    // AgeRating landed on Mature or Adults is dropped, author buckets left empty by that are dropped with
+    // it, and the series view is rebuilt from what is left so a series does not go on advertising books that
+    // are no longer in it. `restricted == false` returns the index unchanged, field for field.
+    //
+    // IT IS A FILTER RATHER THAN A SCAN RULE because a profile switch must not need a rescan: the index on
+    // disk is the whole library, and which of it a person sees is decided at the moment they look. The
+    // surface calls this on every navigation, which costs one copy of a structure it was already copying.
+    //
+    // An UNRATED book is shown — ComicInfo.h says at length why hiding the untagged would empty a kids
+    // shelf on the first launch of this build, and why "unrated is never mistaken for Everyone" is the part
+    // that actually matters.
+    Index filterForProfile(const Index& idx, bool restricted);
 
     // The grouping keys, exposed because the probe asserts on them and because a surface needs to be able to
     // ask "which bucket does this file belong to" without re-deriving the rule.

@@ -74,6 +74,13 @@ bool SettingsTxn::inScope(const QString& key)
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
         "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
+        "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
+        // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
+        // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
+        // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings
+        // changed that the user never touched, and a Discard would revert the snapshot AFTER the New shelf had
+        // already been rebuilt from it, so the same children would be announced a second time.
+        "followsnap/",
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer

@@ -42,6 +42,13 @@ Everything lives under [`native/`](native/):
 - `native/third_party/` — vendored deps (miniz, Duktape, the LZMA SDK, unarr).
 - `native/tools/` — console probe harnesses that verify each subsystem headlessly.
 - `native/addons/` — a bundled sample media-source addon.
+- `native/docs/` — feature notes, including
+  [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
+  and `dlc/` sidecar convention and what each emulator does with them).
+
+Feature notes for things with a server on the other end live in [`docs/`](docs/) —
+see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
+library.
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status, and
@@ -73,6 +80,65 @@ The reader opens these directly — no conversion step, no external tool:
 All of them share one reader: the same pagination, font sizing, contents panel, bookmarks, per-book resume
 and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
+
+### Book servers (OPDS)
+
+Point the reader at a self-hosted book server that speaks OPDS 1.2 — Calibre-web, Komga, Kavita,
+Ubooquity — and browse its shelves as ordinary rows. Sign-in is HTTP Basic, and the credentials stay on
+the device: they are never synced and never logged.
+
+**Read online (OPDS-PSE).** Where the server advertises the Page Streaming Extension for a comic — Komga
+and Kavita both do — a volume offers **Read online** beside **Download**, never instead of it. Reading
+online fetches the volume's pages as images rather than pulling a 100–500 MB archive to reach page one,
+asks the server to size them for the screen where it can, and starts with the page the server says you
+reached. The reader is the same one every comic opens in: the same zoom, the same double-page spread, the
+same bookmarks. Your position goes back to the server, so the same library read on a phone and on a TV
+stays in step — the server owns the progress for its own books, exactly as it does for other kinds of
+server-held media.
+
+If the stream stalls or a page never arrives, the reader says so and offers to try again or to download
+the volume instead; a part-downloaded volume is thrown away rather than cached, so a retry really does
+re-fetch. A volume you have read once is cached whole, so re-opening it works with the server switched
+off. PSE is a comics extension: EPUB and PDF from an OPDS catalog are downloaded and then opened.
+
+### ComicInfo.xml
+
+A comic archive that carries a **`ComicInfo.xml`** at its root — the de facto standard written by ComicRack,
+Mylar, Komga, Kavita and essentially every comic tagging tool — is read from it rather than guessed at from
+its filename. All four container types are read the same way (`.cbz`, `.cbr`, `.cb7`, `.cbt`), and the
+document is picked up in the same pass that already counts the archive's pages, so a tagged library costs no
+extra scan.
+
+Honoured: `Series`, `Number`, `Volume`, `Title`, `Summary`, `Year`/`Month`/`Day`, the creator roles
+(`Writer`, `Penciller`, `Inker`, `Colorist`, `Letterer`, `CoverArtist` — collapsed into one credit list, with
+the **writer** as the primary author), `Publisher`, `Genre`, `LanguageISO`, `PageCount`, `Web`, `AgeRating`
+and `Manga`. `<Pages>` (per-page spread hints) is read past; nothing here ever *writes* a ComicInfo.xml —
+that is a tagger's job, not a reader's.
+
+**Precedence** is the same everywhere in the library: embedded metadata beats a sidecar, which beats filename
+inference, which beats online enrichment — and your own edits beat all of them. It applies per dimension: a
+document that names a `Series` decides the series and the issue number together; one with no `Title` leaves
+the shelf showing the file's own name, exactly as before. A comic with **no** ComicInfo.xml is grouped
+precisely as it always was, by the folder-corroborated filename rule.
+
+`Manga` = `YesAndRightToLeft` opens the comic **right to left**: the left/right keys swap and a two-page
+spread puts the earlier page on the right. The page order, numbering and your saved place do not move. A
+per-series override you set wins over the document.
+
+`AgeRating` feeds the restricted (kids) profile, which hides anything at **Mature** or above:
+
+| ComicInfo `AgeRating` | Level | Hidden on a kids profile |
+|---|---|---|
+| *absent*, `Unknown`, `Rating Pending`, anything unrecognised | Unrated | no |
+| `Early Childhood`, `Everyone`, `G`, `Kids to Adults` | Everyone | no |
+| `Everyone 10+`, `PG` | Everyone 10+ | no |
+| `Teen` | Teen | no |
+| `MA15+`, `Mature 17+`, `M` | Mature | **yes** |
+| `R18+`, `Adults Only 18+`, `X18+` | Adults | **yes** |
+
+A rating this table does not recognise is **Unrated**, never the nearest-looking rung — a comic nobody rated
+is never certified as rated for children. Unrated comics are shown, because every comic tagged before this
+existed is one and hiding them would empty the shelf.
 
 Two limits worth stating plainly:
 
@@ -199,6 +265,33 @@ Neither side is ever moved backwards.
 
 **Not there yet:** MyAnimeList and Kitsu (the seam is built for them and the ids are reserved), a
 zero-config built-in client so no registration is needed, list browsing, and recommendations.
+
+## Gestures
+
+On a phone or tablet the video player answers to the gestures every mobile player uses. They register on
+**touch form factors only** — with a mouse, a keyboard or a TV remote nothing here applies and nothing about
+those inputs changes.
+
+- **Swipe up and down** — on the **right** half for volume, on the **left** half for brightness, with the
+  level shown while you move. Brightness is in-app: it dims the picture itself, so it works on platforms with
+  no screen-brightness API of their own.
+- **Swipe across** — scrub, with the time you are at and the time you would land on. Lifting your finger
+  commits it; sliding back to where you started cancels it and nothing moves.
+- **Double-tap** — the left or right third skips back or forward. It skips by the **same interval** as the
+  skip buttons (Settings > Playback > *Audio jump interval*), not a second setting. Double-tap the middle to
+  play or pause.
+- **Hold** — double speed for as long as you hold, back to normal when you let go.
+- **Pinch** — cycle how the video fits the screen: fit, fill, stretch.
+- **Lock** — the lock button on the player suspends every gesture, for listening with the screen in a pocket.
+  While it is locked a tap does nothing but bring the button back so you can unlock.
+
+Each family can be switched off in **Settings > General > Gestures**, on either layout. The same section sets
+how wide a band along the screen edge is left alone (24 px by default) so the system's own back and
+notification swipes are never fought, and no gesture registers while a menu or overlay is open.
+
+The readers have their own touch handling — tap zones for page turns, a swipe to turn, and pinch-to-zoom in
+the PDF and comic views.
+
 ## After a crash
 
 On Windows a crash records itself. `crash_report.log` gets the faulting module and offset, the
