@@ -21,6 +21,7 @@
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/AudiobookCatalogs.h" // browse::AudiobookEmptyNote — the same, for the books (#139)
+#include "../browse/AbsCatalogs.h"       // browse::AbsCoverFn — the Audiobookshelf levels (#197)
 #include "../browse/BookCatalogs.h"      // browse::BookEmptyNote - and the same again, for #134
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
@@ -72,6 +73,11 @@ public:
     // -> only then a username and password. In that order deliberately: a server whose identity cannot be
     // read is never asked for a password, because there would be nothing to qualify its rows with.
     void connectJellyfinServerInteractive();
+    // #197: the OSK prompt that adds an AUDIOBOOKSHELF server (name / address / username / password, and
+    // the plain-HTTP downgrade). PUBLIC for the same reason the music one is: both settings builders open
+    // it, and a capability reachable only from the shelf it manages is one most people never find. The
+    // password is handed to AbsClient::login and is not retained anywhere on this side.
+    void addAudiobookServerInteractive();
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
@@ -464,6 +470,11 @@ signals:
     // `startSec` < 0 is "wherever the marks say" and is what every route but one passes; the chapter list
     // (#139 increment 2) passes a real offset into `startPath`, and 0 there means the top of that part.
     void playAudiobookRequested(const QString& bookKey, const QString& startPath, int startSec);
+    // #197: play an AUDIOBOOKSHELF item. `qualifiedId` is "abs:<serverId>:<itemId>" (or an episode's
+    // "...#<episodeId>"); `startPart` is the part to begin on, or -1 for "wherever the server says". Same
+    // contract as the two signals above and for the same reason — the KEY travels, never a link: the link
+    // for a part is minted at the moment the app reaches it (core/RemoteAudiobook.h is the argument).
+    void playAbsRequested(const QString& qualifiedId, int startPart);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
@@ -591,6 +602,25 @@ private:
     void renderMusicArtist(const QString& artistKey);
     void renderMusicAlbum(const QString& albumKey);
     void showMusicServerError(const QString& title, const QString& why);
+    // ---- Audiobookshelf (issue #197) -------------------------------------------------------------------
+    // ONE open/populate PAIR for all thirteen levels, rather than thirteen pairs. Every level here is the
+    // same three steps — decide the title, ask the client for what it needs, render a builder over what
+    // the client already has — and the only thing that differs is which builder. Thirteen copies of those
+    // three steps is thirteen places for the Back path and the fetch-landed path to disagree, which is
+    // exactly the drift browse/LeafRoute.h exists to have removed for leaves.
+    //
+    // populateAbsLevel is therefore the ONE reader: openAbsLevel calls it, the cacheChanged signal calls
+    // it, and Back calls it, so a level cannot be drawn one way on the way in and another way on the way
+    // back.
+    void openAbsLevel(const QString& type, const QString& key, const QString& title);
+    void populateAbsLevel(const QString& type, const QString& key);
+    QString absTopKey() const;
+    void scheduleAbsArtRefresh();
+    void prefetchAbsCovers(const QString& qualifiedLibraryId, const QVector<Abs::Item>& items);
+    void removeAudiobookServerInteractive(const QString& serverId, const QString& name);
+    // Dispatch a row whose type starts with "_abs". True when it was one of ours and has been handled.
+    bool activateAbsItem(const MediaItem& it);
+    browse::AbsCoverFn absCover() const;
     void showMusicLoading(const QString& title);
     void scheduleMusicArtRefresh();
     void prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums);
@@ -1081,6 +1111,11 @@ private:
     // flag that keeps a level from being rebuilt once per cover that lands.
     int               musicFetchGen_ = 0;
     bool              musicArtRefreshPending_ = false;
+    // #197: the same two, for the Audiobookshelf levels. Its OWN generation counter and not musicFetchGen_,
+    // because the two features navigate independently and a music fetch landing must not cancel a book
+    // level's — which is exactly what one shared counter would do.
+    int               absFetchGen_ = 0;
+    bool              absArtRefreshPending_ = false;
     // #194: the merged view over every supplier, and the two "we have already asked" sets that keep a
     // FAILED fetch from re-arming itself. artistsLoaded() stays false when a server refuses, so a gate on it
     // alone would re-request on every repopulate — and every repopulate is triggered by the last reply.

@@ -83,6 +83,8 @@
 #include "../core/SubsonicServerStore.h"
 #include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
 #include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
+#include "../core/AbsClient.h"              // issue #197: the Audiobookshelf client + AbsSupply key routing
+#include "../core/AbsServerStore.h"         // ...and the saved servers behind it
 #include "../core/RecentStore.h"
 #include "../core/ReadingForm.h"
 #include "../core/StoredUrl.h"           // issue #224: the "is this an id or a link" guard on the recipe fields
@@ -595,6 +597,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // with two, a bare row is ambiguous and guessing would file one person's resume position against the
     // other's copy of the film.
     JellyfinMigrate::migrateSingleServer(JellyfinServerStore::ids());
+    // #197: the identical rule for audiobook servers. Adding the first one must make the Audiobooks
+    // category appear without a restart on every layout, and removing the last one must take it away —
+    // the tab's gate reads AbsServerStore::hasServers() while it builds the nav targets.
+    AbsServerStore::setChangeHook([this] {
+        if (home_) home_->refresh();
+        // ...and the Settings row that says how many are set up, whichever builder is presenting. The add
+        // is asynchronous, so this is the only moment either surface can be told the answer changed.
+        if (absServerStatusUpdate_) absServerStatusUpdate_();
+    });
     scrobbler_ = new Scrobbler(this);
     scrobbler_->setProvider(new ListenBrainzClient(scrobbler_));
     // ...and Last.fm BESIDE it, not instead of it: two services are not a choice between them, each has its
@@ -1638,6 +1649,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // The audio-queue + resume state machine: owns the track list/position, tells us what to play and where
     // to resume via signals; we own the actual player + playlist widget.
     session_ = new PlaybackSession(QString(), this);
+    installAbsProgressHooks();   // #197: a server that owns its own progress, before anything can play
     connect(session_, &PlaybackSession::playRequested, this,
             [this](const QString& p, const StreamHeaders::Headers& trackHeaders) {
         // Per-track choke point for EVERY queue-driven load — initial track and advances alike, keyed exactly
@@ -2017,6 +2029,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // #74: an album (or a track inside one) from the Music category -> ONE PlaybackSession queue.
     connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
     connect(home_, &HomeView::playAudiobookRequested, this, &MainWindow::openAudiobook);   // #139
+    connect(home_, &HomeView::playAbsRequested, this, &MainWindow::openAbsItem);          // #197
     connect(home_, &HomeView::playMusicQueueRequested, this, &MainWindow::openMusicQueue);
     // #193 inc 2: right-click a music row in the classic grid -> the nav-kit queue verbs. DIRECT, not queued:
     // this arrives from a QListWidget's own context-menu signal (no live QML delegate, so no issue #28), and
@@ -2704,6 +2717,207 @@ QString MainWindow::jellyfinServerStatusLine() const
     // A switched-off server is the one state that would otherwise look like a bug ("why is half my library
     // missing?"), so it is said out loud rather than left to be inferred from an empty shelf.
     return off > 0 ? base + QLatin1Char(' ') + tr("%n of them switched off.", "", off) : base;
+}
+
+// The same sentence, for AUDIOBOOK servers (issue #197). Its own function rather than a parameterised
+// shared one because the two say different things about where the servers appear, and a sentence built out
+// of a noun substituted into a template is how a translation ends up ungrammatical in half the languages
+// it is shown in. It never names a username and obviously never a token.
+QString MainWindow::audiobookServerStatusLine() const
+{
+    const QList<AbsServer> all = AbsServerStore::list();
+    if (all.isEmpty())
+        return tr("No audiobook servers yet. Add one and it appears under Audiobooks.");
+    QStringList names;
+    for (const AbsServer& s : all)
+        names << (s.name.trimmed().isEmpty() ? s.url : s.name);
+    return tr("%n audiobook server(s): %1. They appear under Audiobooks.", "", int(all.size()))
+               .arg(names.join(QStringLiteral(", ")));
+}
+
+// ==================================================================================================
+// AUDIOBOOKSHELF (issue #197, increment 1)
+// ==================================================================================================
+//
+// Open an Audiobookshelf item and hand it to the SAME machinery a torrent-sourced audiobook release uses
+// (#214's openRemoteAudiobook), because they are the same problem: a book that is many files, held by
+// somebody else, whose links expire. Everything that differs is here and is a difference the server makes
+// possible rather than one it forces:
+//
+//   * the parts come from a PLAY SESSION rather than a file listing, so their order is the server's
+//     explicit ordinal instead of a natural sort over names (Audiobookshelf.h says why that is strictly
+//     better information);
+//   * the chapter list is the SERVER'S and spans the whole book, so it is rebased per part and handed to
+//     the player through currentChapters();
+//   * the resume point is the SERVER'S, which arrives on the same reply, so seeding it costs no request
+//     this open did not already have — and it is passed as openRemoteAudiobook's start-index override so
+//     that a local mark, which for one of these ids could only be a leftover, cannot win.
+void MainWindow::openAbsItem(const QString& qualifiedId, int startPart)
+{
+    const Abs::Ref ref = Abs::parse(qualifiedId);
+    if (!ref.ok) return;
+    statusBar()->showMessage(tr("Opening…"), 4000);
+    AbsClient::instance().openSession(qualifiedId, [this, qualifiedId, startPart]
+                                      (const AbsClient::Result& r, const Abs::Session& s) {
+        if (!r.ok || !s.ok)
+        {
+            // The client's own sentence — a transport one of ours or the server's. Never a request.
+            notify(r.message.isEmpty() ? tr("Couldn't open that from the audiobook server.") : r.message);
+            return;
+        }
+        // THE STATE THE REST OF THIS FEATURE READS. Set before anything plays, and never cleared: every
+        // reader below guards on "is the entry playing RIGHT NOW one of this book's", so a stale copy left
+        // by a book finished an hour ago cannot answer for the film that is playing instead. That guard is
+        // cheaper and safer than a clear on every play sink, which is a list that would be one sink short
+        // the first time somebody added a new one.
+        absBookId_   = qualifiedId;
+        absTracks_   = s.tracks;
+        absChapters_ = s.chapters;
+        absDuration_ = s.duration > 0.0 ? s.duration
+                                        : Abs::absoluteTime(s.tracks, s.tracks.size() - 1,
+                                                            s.tracks.isEmpty() ? 0.0
+                                                                               : s.tracks.last().duration);
+
+        // WHERE TO BEGIN. An explicit part (somebody pressed part twelve) starts at its top; otherwise the
+        // server's own position decides both the part and the offset within it. #83's rule, and #197's:
+        // for a server's own item the server's position wins, including over a local mark.
+        int    part   = startPart;
+        double within = 0.0;
+        if (part < 0)
+        {
+            part   = qMax(0, Abs::trackAtTime(s.tracks, s.currentTime));
+            within = Abs::offsetWithinTrack(s.tracks, s.currentTime);
+        }
+        absSeedPart_   = part;
+        absSeedWithin_ = within;
+
+        const Abs::ItemDetail d = AbsClient::instance().item(qualifiedId);
+        MediaItem item;
+        item.id    = qualifiedId;          // the BOOK KEY every part token is built from, and the Recents id
+        // THE BOOK'S NAME, in the order the three sources are trustworthy. The expanded item is only
+        // cached when the listener BROWSED here; a re-open from Recents arrives with nothing fetched, and
+        // falling straight through to the first track's file name is how a re-opened book came back called
+        // "01 - One.mp3" on the first live drive of this feature — a Recents row that renamed itself.
+        item.title = d.ok && !d.item.title.isEmpty() ? d.item.title
+                   : !s.title.isEmpty()              ? s.title
+                   : (s.tracks.isEmpty() ? tr("Audiobook") : s.tracks.first().title);
+        item.type  = QStringLiteral("audiobook");
+        item.thumbnailUrl = AbsClient::instance().coverPath(qualifiedId);
+        // The Recents row's path. The QUALIFIED ID and not the stream url, which carries the token: a
+        // Recents row is written to the ini, and #200 is the issue about what happens when a signed link
+        // goes in one. An id is credential-free by construction and means the same thing tomorrow.
+        item.url   = qualifiedId;
+
+        // THE PART NAMES, which are three things at once and have to be all three: the display row, the
+        // half of the part token that makes it durable, and therefore the thing a resume mark is keyed by.
+        // The server's own track title is used, because it is what the listener is looking at — and it is
+        // DE-DUPLICATED, because two identically named tracks would mint the same token and the queue would
+        // then have two entries whose resume marks were one mark.
+        QSet<QString> used;
+        for (int i = 0; i < s.tracks.size(); ++i)
+        {
+            RemoteAudiobook::Part p;
+            p.id = QString::number(i);
+            QString name = s.tracks.at(i).title.trimmed();
+            if (name.isEmpty()) name = tr("Part %1").arg(i + 1);
+            if (used.contains(name)) name = QStringLiteral("%1 (%2)").arg(name).arg(i + 1);
+            used.insert(name);
+            p.fileName = name;
+            // DELIBERATELY NO SIZE. #218's book-scale position bar is priced out of part SIZES, which a
+            // torrent listing gives and a play session does not — it gives DURATIONS, which are better
+            // information and which that bar cannot yet read. Putting anything else here would be read by
+            // BookTimeline::bytesFromSizeText as a size, so the honest value is nothing: the bar stays
+            // per-part for a multi-file server book, exactly as it does for a release with a missing size.
+            item.bookParts.push_back(p);
+        }
+        const QString firstUrl = AbsClient::instance().partStreamUrl(qualifiedId, part);
+        if (firstUrl.isEmpty()) { notify(tr("That server gave no link for this part.")); return; }
+        // A single-track book takes openRemoteAudiobook's one-part path (openAudioStream), which is right:
+        // there is no queue to build and no boundary to cross. Its resume still comes from the server,
+        // because the hook below keys on the identity rather than on which path opened it.
+        openRemoteAudiobook(item, firstUrl, /*startIndexOverride*/ part);
+    });
+}
+
+// The chapter list everything that asks about chapters should be reading.
+//
+// THE SERVER'S, REBASED, when what is playing is an Audiobookshelf book; mpv's own otherwise. An
+// Audiobookshelf book is one chapter list over many files, and the player holds one file: handing mpv's
+// consumers the book's list would put every chapter at a time the six-minute file that is open has never
+// heard of, so "end of chapter" would be either instant or never. Abs::chaptersForTrack does the rebase and
+// probe_absclient pins it, including the chapter that straddles a part boundary.
+//
+// THE GUARD IS THE ENTRY THAT IS PLAYING, not a flag: absBookId_ is never cleared, so the question asked
+// here is "does the thing playing right now belong to that book" — which is false for every other media and
+// cannot be left true by a play sink that forgot to reset something.
+QVector<MediaSegments::Chapter> MainWindow::currentChapters() const
+{
+    const QVector<MediaSegments::Chapter> mpvOwn = player_ ? player_->chapters()
+                                                           : QVector<MediaSegments::Chapter>{};
+    if (absBookId_.isEmpty() || absChapters_.isEmpty() || absTracks_.isEmpty() || !session_) return mpvOwn;
+    const int idx = session_->currentIndex();
+    if (idx < 0 || idx >= absTracks_.size()) return mpvOwn;
+    if (AbsSupply::bookIdOf(session_->trackAt(idx)) != absBookId_) return mpvOwn;
+    const Abs::Track& t = absTracks_.at(idx);
+    const QVector<Abs::Chapter> here = Abs::chaptersForTrack(absChapters_, t.startOffset, t.duration);
+    QVector<MediaSegments::Chapter> out;
+    out.reserve(here.size());
+    for (const Abs::Chapter& c : here) out.push_back({ c.start, c.title });
+    return out.isEmpty() ? mpvOwn : out;
+}
+
+// The queue index of one entry, or -1. Walked rather than looked up because a queue is tens of entries at
+// most and a second index would be a second thing to keep in step with the queue.
+int MainWindow::absQueueIndexOf(const QString& identity) const
+{
+    if (!session_) return -1;
+    for (int i = 0; i < session_->count(); ++i)
+        if (session_->trackAt(i) == identity) return i;
+    return -1;
+}
+
+// Install the two seams PlaybackSession offers a server that owns its own progress (#197). Both are keyed
+// on the ENTRY'S IDENTITY rather than on any flag this window holds, so neither can be left armed over
+// something it is not about.
+void MainWindow::installAbsProgressHooks()
+{
+    if (!session_) return;
+
+    session_->setRemoteProgress([this](const QString& identity, double pos, double dur, bool leaving) {
+        const QString book = AbsSupply::bookIdOf(identity);
+        if (book.isEmpty()) return false;      // not one of ours: PlaybackSession writes it as it always has
+        // IN BOOK TIME. The server tracks one position per item, and the position it wants is the
+        // listener's place in the BOOK — a position in part four, reported bare, would send them back four
+        // minutes into a fifteen-hour book on every other client they own.
+        double at    = pos;
+        double total = dur;
+        if (book == absBookId_ && !absTracks_.isEmpty())
+        {
+            const int idx = absQueueIndexOf(identity);
+            if (idx >= 0) at = Abs::absoluteTime(absTracks_, idx, pos);
+            if (absDuration_ > 0.0) total = absDuration_;
+        }
+        AbsClient::instance().reportProgress(book, at, total, /*force*/ leaving);
+        return true;   // ...and NOTHING is written into our synced resume categories for this id.
+    });
+
+    // The side-effect-free "is this one theirs?", for the boundary marker (#220) that is not a position.
+    session_->setRemoteOwns([](const QString& identity) { return AbsSupply::isAbsEntry(identity); });
+
+    session_->setRemoteResume([this](const QString& identity) -> double {
+        const QString book = AbsSupply::bookIdOf(identity);
+        if (book.isEmpty()) return -1.0;       // not ours: the local mark decides, exactly as before
+        // Ours. The server's answer wins — and for every part of this book OTHER than the one the server's
+        // position falls in, the server's answer is "the top of it". Returning -1 here instead would let a
+        // stale local mark (a leftover from before this existed) decide, which is the one thing #197 says
+        // must not happen.
+        if (book != absBookId_ || absSeedPart_ < 0) return 0.0;
+        if (absQueueIndexOf(identity) != absSeedPart_) return 0.0;
+        // Consumed: this seed is for THIS open. A later return to the same part starts at its top, which is
+        // what pressing a part means.
+        absSeedPart_ = -1;
+        return absSeedWithin_;
+    });
 }
 
 // WHICH COPY PLAYS when a record is on this disk AND on a music server (issue #194). ONE list, built here,
@@ -7833,7 +8047,8 @@ static void applyRemintRecipe(RecentItem& row, const MediaItem& item)
 // `firstPartUrl` is part one's link, already resolved by the search the user has been watching a toast
 // for. It is seeded into the mint cache rather than thrown away so that the ordinary case — press play,
 // hear part one — costs no round trip this function did not already have.
-void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl)
+void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl,
+                                     int startIndexOverride)
 {
     const QVector<RemoteAudiobook::Part>& parts = item.bookParts;
     // …and the item goes WITH it (#224). This early return is the one-part book, which writes its Recents row
@@ -7899,8 +8114,16 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     //
     // ONE SPELLING OF THE SCAN, in ResumeStore (#220) — openAudiobook asks the identical question of a
     // local book's file paths and used to carry its own copy of this loop.
+    //
+    // ...UNLESS SOMEBODY ELSE KNOWS BETTER (#197). An Audiobookshelf book's position belongs to the server:
+    // every client of it reports to and reads from the same place, so the part the SERVER says wins over
+    // the marks on this disk, which for one of these ids could only be a leftover from before that was
+    // true. Clamped to the queue, because a server whose item was re-scanned shorter must land on the last
+    // part rather than off the end of it. -1 (every other caller) is the unchanged behaviour.
     const int reached = ResumeStore::lastMarkedIndex(store(), queue);
-    const int start = reached >= 0 ? reached : 0;
+    const int start = startIndexOverride >= 0 ? qMin(startIndexOverride, int(queue.size()) - 1)
+                    : reached >= 0            ? reached
+                                              : 0;
 
     // #192: a book is not a music record. Nothing here arms the album/stream scrobble identity, and the
     // pending pair is CLEARED rather than left, because a leftover key from the album played five minutes
@@ -7996,6 +8219,30 @@ void MainWindow::playRemoteBookPart(const QString& token)
     // after a failure has to take the message down even while the mint that follows is still in flight, and
     // the status bar's "Loading …" is what covers that gap.
     if (bookPartNoticeUp_) { bookPartNoticeUp_ = false; hideNotice(); }
+
+    // AN AUDIOBOOKSHELF PART (#197). Minted from the play session the server already gave us, so there is
+    // no round trip here at all — and, because it is minted at the moment the part is REACHED rather than
+    // at the moment the book was opened, a token whose url has since expired is re-signed rather than
+    // replayed. That is the same rule the addon path below follows and the reason both are here: the queue
+    // holds names, never links (core/RemoteAudiobook.h).
+    //
+    // Placed ABOVE the mint cache deliberately: a cached url for one of these is a url signed when the book
+    // was opened, which for part forty of a fifteen-hour book is days ago.
+    if (const QString absBook = AbsSupply::bookIdOf(token); !absBook.isEmpty())
+    {
+        const QString url = AbsClient::instance().partStreamUrl(absBook, at);
+        if (url.isEmpty())
+        {
+            mwLog(QStringLiteral("audiobook: %1 \"%2\" — the audiobook server has no link for this part")
+                      .arg(where, RemoteAudiobook::fileNameOfToken(token)));
+            reportBookPartUnavailable(tr("That part of the audiobook can't be fetched from the server."));
+            return;
+        }
+        mwLog(QStringLiteral("audiobook: %1 \"%2\" — minted from the audiobook server, playing %3")
+                  .arg(where, RemoteAudiobook::fileNameOfToken(token), logSafeUrl(url)));
+        player_->play(url, {}, session_->titles().value(at));
+        return;
+    }
 
     // Already minted this session — an ordinary re-listen of a part, or part one straight off the resolve.
     const QString cached = remoteBookMinted_.value(token);
@@ -13312,6 +13559,20 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     // The KEY is consulted ahead of the path for the reason the Steam/Epic arms above already do it: what
     // re-opens the row is its stable name, and the path is only a record of where it played from last time.
     // A playlist entry files both, so either arm reaches it.
+    // #197: AN AUDIOBOOKSHELF IDENTITY IS NOT A FILE AND NOT A LINK EITHER, and for exactly the reason the
+    // music one above is resolved here: QFileInfo would call a qualified id a missing file and say so on
+    // screen. It is placed FIRST of the two because the two id spaces are disjoint by construction (one
+    // starts "abs:", the other joins with 0x1F) and there is nothing to arbitrate — the order is only so
+    // that a reader sees the cheap structural test before the parse.
+    //
+    // Re-opening is a fresh openAbsItem, which re-opens the play session and therefore re-mints the links
+    // AND re-reads the server's position. A row saved with a stream url could not do either — see #200 and
+    // #224 for the two halves of that lesson.
+    {
+        const QString absId = Abs::isQualified(resumeKey) ? resumeKey
+                            : Abs::isQualified(path)      ? path : QString();
+        if (!absId.isEmpty()) { openAbsItem(absId, /*startPart*/ -1); return; }
+    }
     const QString musicId = Subsonic::isQualified(resumeKey) ? resumeKey
                           : Subsonic::isQualified(path)      ? path : QString();
     if (!musicId.isEmpty())
@@ -15728,7 +15989,10 @@ void MainWindow::applyRememberedSpeed()
     // never does. This only chooses the DEFAULT for an item with no stored speed (book -> global default, music
     // -> 1x); an explicit per-item speed wins regardless, so a misclassified file the user has set a speed on
     // still plays at that speed. Chapters are parsed by the time this fileLoaded/duration callback runs.
-    speedIsMusic_ = player_->chapters().isEmpty();
+    // #197: currentChapters(), not mpv's own — a server book's chapters are the SERVER'S, and without
+    // them a fifteen-hour m4b split into fifty-seven chapterless files would be classified as MUSIC and
+    // lose the audiobook speed default on every one of them.
+    speedIsMusic_ = currentChapters().isEmpty();
     musicGen_ = nextEpGen_;   // #141: this answer belongs to the file open RIGHT NOW - see decideCrossfadeBoundary
     const double stored = speedItemKey_.isEmpty() ? 0.0 : SpeedStore::storedForItem(speedItemKey_);
     setPlaybackSpeed(SpeedStore::speedForItem(stored, Settings::defaultPlaybackSpeed(), speedIsMusic_));
@@ -15795,7 +16059,7 @@ void MainWindow::openSleepTimerMenu(QWidget* anchor)
 
     menu.addSeparator();
     QAction* eoc = menu.addAction(tr("At the end of this chapter"));
-    eoc->setEnabled(player_ && !player_->chapters().isEmpty());   // needs real chapter data
+    eoc->setEnabled(!currentChapters().isEmpty());   // needs real chapter data (#197: the server's count)
     connect(eoc, &QAction::triggered, this, [this] { armSleepTimer(1, 0.0); });
 
     const QSize sh = menu.sizeHint();
@@ -15865,7 +16129,7 @@ void MainWindow::armSleepTimer(int mode, double minutes)
     if (mode == 1) t.mode = SleepTimer::Mode::EndOfChapter;
     else         { t.mode = SleepTimer::Mode::Minutes; t.minutes = minutes; }
     const double expiry = SleepTimer::expiryTime(t, lastPos_,
-                                                 player_ ? player_->chapters() : QVector<MediaSegments::Chapter>{},
+                                                 currentChapters(),   // #197: the server's list where there is one
                                                  duration_);
     if (expiry < 0.0) { notify(tr("Nothing to set a sleep timer against here.")); return; }
     sleepExpirySec_ = expiry;
@@ -20864,6 +21128,14 @@ void MainWindow::openGeneralSettings()
                 "remembers where you were. This is kept apart from your Music folder on purpose: nothing is "
                 "guessed from the file, so an mp3 in here is a book and the same mp3 in your music folder "
                 "is music."), QString());
+        // Audiobook SERVERS (#197). The classic twin is below; a setting in one builder only is unreachable
+        // in the other mode. The servers themselves are managed from the Audiobooks category's own
+        // "Audiobook Servers" shelf — which is where removing one belongs, beside the thing it is about —
+        // and this row is the doorway for somebody who is already in Settings. The info line below it is
+        // the ONE place that says whether any are set up at all.
+        action(QStringLiteral("audiobooks.addserver"), tr("Add an audiobook server…"));
+        info(QStringLiteral("audiobooks.serverstatus"), tr("Audiobook servers"),
+             audiobookServerStatusLine());
         // --- Books (#134): the local reading library's root + rescan. Classic twins below; a setting in
         // one builder only is unreachable in the other mode.
         //
@@ -21394,6 +21666,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("audiobooks.rescan")) {
                     rescanAudiobookLibrary();
                     statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
+                }
+                else if (id == QStringLiteral("audiobooks.addserver")) {
+                    // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside
+                    // the themed panel's own activation. The deferPastQmlEmission discipline (crash #28).
+                    // setInfo is the enclosing builder's own lambda, so it is captured explicitly (the
+                    // dispatch lambda has no default capture on purpose - see the builder).
+                    absServerStatusUpdate_ = [this, setInfo] {
+                        setInfo(QStringLiteral("audiobooks.serverstatus"), tr("Audiobook servers"),
+                                audiobookServerStatusLine());
+                    };
+                    QMetaObject::invokeMethod(this, [this] {
+                        if (home_) home_->addAudiobookServerInteractive();
+                    }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("books.change")) {
                     const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your books folder"),
@@ -22681,6 +22966,31 @@ void MainWindow::openGeneralSettings()
         connect(abRescan, &QPushButton::clicked, this, [this] {
             rescanAudiobookLibrary();
             statusBar()->showMessage(tr("Scanning your audiobooks…"), 4000);
+        });
+
+        // Audiobook SERVERS (#197) — the classic twin of the themed audiobooks.addserver row. Same prompt,
+        // same store, same status sentence: this opens HomeView's own add flow rather than a second copy of
+        // it, so there is one place that decides what adding a server asks and what it saves.
+        auto* abSrvNote = new QLabel(tr("Play an Audiobookshelf server you already run. Your books, series "
+                                        "and podcasts appear under Audiobooks, with the chapters and the "
+                                        "listening position the server itself keeps — so where you are in a "
+                                        "book is the same here as in every other app you use with it."));
+        abSrvNote->setWordWrap(true); abSrvNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(abSrvNote);
+        auto* abSrvAdd = new QPushButton(tr("Add an audiobook server…"));
+        abSrvAdd->setMinimumHeight(34);
+        v->addWidget(abSrvAdd);
+        auto* abSrvStatus = new QLabel(audiobookServerStatusLine());
+        abSrvStatus->setWordWrap(true);
+        abSrvStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(abSrvStatus);
+        connect(abSrvAdd, &QPushButton::clicked, this, [this, abSrvStatus] {
+            if (!home_) return;
+            // While THIS panel is up it owns the refresh hook — the scrobbleStatusUpdate_ idiom. QPointer,
+            // because the sign-in is a round trip and the panel can be gone before it lands.
+            const QPointer<QLabel> guard(abSrvStatus);
+            absServerStatusUpdate_ = [this, guard] { if (guard) guard->setText(audiobookServerStatusLine()); };
+            home_->addAudiobookServerInteractive();
         });
         v->addSpacing(10);
 
@@ -26276,7 +26586,7 @@ void MainWindow::gatherSegments()
     // below this file's own chapters. lookup() returns the season's own rows first and fills the types it is
     // silent about from the nearest other season, so "inherited" is exactly lookup() minus the exact rows.
     const QVector<MediaSegments::Segment> chapters =
-        MediaSegments::fromChapters(player_->chapters(), duration_);
+        MediaSegments::fromChapters(currentChapters(), duration_);   // #197: the server's, rebased
     const QVector<MediaSegments::Segment> learnedExact =
         segStore_ ? segStore_->lookupExact(segCtx_.seriesKey, segCtx_.season) : QVector<MediaSegments::Segment>{};
     QVector<MediaSegments::Segment> learnedInherited;

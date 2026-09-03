@@ -77,6 +77,9 @@
 #include "../browse/RemoteLeafResolve.h" // a remote source's leaf: resolve by id, else by title+console
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
+#include "../browse/AbsCatalogs.h"       // issue #197: the Audiobookshelf browse levels
+#include "../core/AbsClient.h"           // ...and the client those levels read
+#include "../core/AbsServerStore.h"      // ...and the saved servers behind it
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
 #include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
 #include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
@@ -598,6 +601,14 @@ static QString recentGroupLabel(const QString& key)
 HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(mgr)
 {
     nam_ = new QNetworkAccessManager(this);
+
+    // #197: a fetch landed for an Audiobookshelf server. Repopulate whichever of its levels the listener is
+    // standing in — through the SAME debounce the cover fetches use, because a library level fires three
+    // requests that land independently (items, then series, then authors) and re-rendering per landing would
+    // rebuild the model under the selection three times. Nothing else is refreshed: a fetch cannot add
+    // anything to a level that is not one of ours.
+    connect(&AbsClient::instance(), &AbsClient::cacheChanged, this,
+            [this](const QString&) { scheduleAbsArtRefresh(); });
 
     // The last calendar TraktClient cached, read ONCE here so an offline launch already has something to
     // draw before (or instead of) any fetch. Skipped entirely when Trakt is off, so an install that never
@@ -1256,7 +1267,11 @@ void HomeView::refresh()
     //
     // Type "audiobook": core::mediaCategory already files it under "audio", so on the themed layouts this
     // lands in the Audio bucket beside Music rather than inventing a category.
-    if (AudiobookLibrary::hasLibrary())
+    // ...OR a saved Audiobookshelf server (#197). An install whose whole audiobook collection lives on a
+    // server has no local root and would otherwise get no tab — i.e. the feature would be configured and
+    // unreachable. The Music tab takes the identical `folder OR server` gate for the identical reason, and
+    // AbsServerStore::hasServers is bounded so this stays a cheap question to ask on every refresh.
+    if (AudiobookLibrary::hasLibrary() || AbsServerStore::hasServers())
     {
         auto* booksBtn = new QPushButton(tr("Audiobooks"), this);
         connect(booksBtn, &QPushButton::clicked, this, &HomeView::selectAudiobooks);
@@ -2242,8 +2257,18 @@ void HomeView::selectAudiobooks()
 
 void HomeView::populateAudiobooks()
 {
-    showSyntheticCatalog(browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
-                                                      audiobookCover()));
+    MediaCatalog cat = browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
+                                                    audiobookCover());
+    // #197: the Audiobookshelf door, FIRST. Inserted here rather than inside audiobookRootCatalog because
+    // that builder is the LOCAL library's and knows nothing about a network — the same separation
+    // MusicCatalogs keeps by taking a server COUNT rather than a client.
+    //
+    // FIRST rather than last, and that ordering is the whole point of the empty case: a configured server
+    // is an answer to "there is nothing here", so somebody whose entire collection is on a server must not
+    // land on a sentence about choosing a folder with the thing they actually want below it.
+    const int servers = AbsServerStore::list().size();
+    if (servers > 0) cat.items.insert(0, browse::absServersRow(servers));
+    showSyntheticCatalog(cat);
 }
 
 // One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the
@@ -2424,6 +2449,339 @@ void HomeView::onAudiobookLibraryChanged()
         { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
     if (top.item.type == QStringLiteral("_abbook"))
         { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
+}
+
+// ---- AUDIOBOOKSHELF (issue #197, increment 1) ------------------------------------------------------------
+//
+// Thirteen levels behind ONE open/populate pair. Every one of them is the same three steps — decide the
+// title, ask AbsClient for what this level needs, render a pure builder over what the client already has —
+// so what actually differs between them is one switch arm each. HomeView.h argues why that is a pair rather
+// than thirteen: the Back path, the fetch-landed path and the first open all read the SAME function, so a
+// level cannot be drawn one way going in and another way coming back.
+//
+// EVERY LEVEL IS A DETAIL ROOT carrying an expandable container item whose `mime` is the level's own marker,
+// exactly like the Audiobooks and Music-server levels above — that is what makes loadTop() repopulate it
+// natively on Back rather than falling through to the addon path.
+browse::AbsCoverFn HomeView::absCover() const
+{
+    // The client's MetaCache path, never the server's cover URL: that URL carries the token, and a
+    // MediaItem's thumbnailUrl is copied into caches and item records. AbsCatalogs.h states the rule.
+    return [](const QString& qualifiedId) { return AbsClient::instance().coverPath(qualifiedId); };
+}
+
+// Artwork arrives after the rows do. Rather than re-render once per cover that lands (which would rebuild
+// the model under the user's selection dozens of times), each landing arms ONE debounced repopulate.
+// prefetchCover fires its callback only when new bytes were actually stored, so a level whose covers are
+// all cached schedules nothing and this cannot loop. scheduleMusicArtRefresh makes the identical argument.
+void HomeView::scheduleAbsArtRefresh()
+{
+    if (absArtRefreshPending_) return;
+    absArtRefreshPending_ = true;
+    QTimer::singleShot(400, this, [this] {
+        absArtRefreshPending_ = false;
+        if (stack_.isEmpty()) return;
+        const auto& top = stack_.last();
+        if (browse::isAbsType(top.item.type)) populateAbsLevel(top.item.type, absTopKey());
+    });
+}
+
+// The key of the level the user is standing in, read back out of its own marker mime. ONE reader, so a Back
+// and a refresh cannot disagree about which key a level is showing.
+QString HomeView::absTopKey() const
+{
+    if (stack_.isEmpty()) return QString();
+    const QString mime = stack_.last().item.mime;
+    const int colon = mime.indexOf(QLatin1Char(':'));
+    return colon < 0 ? QString() : mime.mid(colon + 1);
+}
+
+void HomeView::openAbsLevel(const QString& type, const QString& key, const QString& title)
+{
+    if (type.isEmpty()) return;
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    // The marker mime is the level's own prefix plus its key — which is how absTopKey reads it back and how
+    // loadTop knows to repopulate here. The prefix is derived from the type rather than passed, so a caller
+    // cannot pair one level's type with another's prefix.
+    const QString prefix = type.mid(1) + QLatin1Char(':');   // "_absbook" -> "absbook:"
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = title.isEmpty() ? tr("Audiobooks") : title;
+    lvl.item.id = type;
+    lvl.item.type = type;
+    lvl.item.expandable = true;
+    lvl.item.mime = prefix + key;
+    stack_.push_back(lvl);
+    populateAbsLevel(type, key);
+}
+
+void HomeView::populateAbsLevel(const QString& type, const QString& key)
+{
+    AbsClient& c = AbsClient::instance();
+    const QString title = stack_.isEmpty() ? tr("Audiobooks") : stack_.last().title;
+
+    // The one shared shape for "this level needs a request first": bump the generation, draw a loading row,
+    // then fire the fetch. `landed` is the other half — it drops an answer that arrives after the listener
+    // has navigated on. Every remote level below goes through both, so none of them can forget the guard.
+    const auto fetchThen = [this, title](const std::function<void(int)>& fire) {
+        const int gen = ++absFetchGen_;
+        showSyntheticCatalog(browse::absNoteCatalog(title, tr("Loading…")));
+        fire(gen);
+    };
+    const auto landed = [this, title](int gen, const AbsClient::Result& r,
+                                      const std::function<void()>& render) {
+        if (gen != absFetchGen_) return;                       // superseded by a newer navigation
+        if (!r.ok) { showSyntheticCatalog(browse::absNoteCatalog(title, r.message)); return; }
+        render();
+    };
+
+    // ---- The saved servers ---------------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsServersType))
+    {
+        QStringList ids, names, urls; QVector<bool> on;
+        for (const AbsServer& s : AbsServerStore::list())
+            { ids << s.id; names << s.name; urls << s.url; on << s.enabled; }
+        showSyntheticCatalog(browse::absServersCatalog(ids, names, urls, on));
+        return;
+    }
+
+    // ---- One server's libraries ----------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsServerType))
+    {
+        AbsServer srv;
+        if (!AbsServerStore::get(key, srv))
+        {
+            showSyntheticCatalog(browse::absNoteCatalog(title,
+                tr("That audiobook server is no longer set up.")));
+            return;
+        }
+        const QString srvName = srv.name;
+        std::function<void()> render = [this, key, srvName] {
+            MediaCatalog cat = browse::absLibrariesCatalog(key, srvName,
+                                                           AbsClient::instance().libraries(key));
+            if (cat.items.isEmpty())
+                cat = browse::absNoteCatalog(srvName, tr("That server has no libraries in it."));
+            showSyntheticCatalog(cat);
+        };
+        if (c.librariesLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchLibraries(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- One library: its doors, or (podcasts) its shows ----------------------------------------------
+    if (type == QLatin1String(browse::kAbsLibraryType))
+    {
+        std::function<void()> render = [this, key] {
+            AbsClient& cl = AbsClient::instance();
+            const QVector<Abs::Item> items = cl.libraryItems(key);
+            bool podcast = false;
+            for (const Abs::Library& l : cl.libraries(Abs::serverOf(key)))
+                if (l.id == Abs::itemOf(key)) { podcast = l.isPodcast(); break; }
+            // A library with nothing in it is a sentence, not a blank shelf — the same rule the local
+            // audiobook root follows, and only this layer can tell "empty" from "still fetching".
+            if (items.isEmpty())
+            {
+                showSyntheticCatalog(browse::absNoteCatalog(cl.libraryNameOf(key),
+                    tr("That library has nothing in it yet.")));
+                return;
+            }
+            if (podcast) prefetchAbsCovers(key, items);
+            showSyntheticCatalog(browse::absLibraryCatalog(key, cl.libraryNameOf(key), podcast,
+                                                           cl.series(key).size(), cl.authors(key).size(),
+                                                           items.size(), items, absCover()));
+        };
+        if (c.libraryLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchLibrary(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- The two dimension lists, and the three lists of books ---------------------------------------
+    // All five read the SAME cached library listing, so none of them costs a request once the library has
+    // been opened — and a level reached cold (a Back into a saved route) fetches it exactly as the library
+    // level would have.
+    if (type == QLatin1String(browse::kAbsSeriesListType) || type == QLatin1String(browse::kAbsAuthorsType)
+        || type == QLatin1String(browse::kAbsBooksType)   || type == QLatin1String(browse::kAbsSeriesType)
+        || type == QLatin1String(browse::kAbsAuthorType))
+    {
+        const QString libKey = browse::absKeyHead(key);
+        const QString bucket = browse::absKeyTail(key);
+        std::function<void()> render = [this, type, libKey, bucket] {
+            AbsClient& cl = AbsClient::instance();
+            const QString libName  = cl.libraryNameOf(libKey);
+            const QString serverId = Abs::serverOf(libKey);
+            MediaCatalog cat;
+            if (type == QLatin1String(browse::kAbsSeriesListType))
+                cat = browse::absSeriesListCatalog(libKey, tr("Series"), cl.series(libKey));
+            else if (type == QLatin1String(browse::kAbsAuthorsType))
+                cat = browse::absAuthorsCatalog(libKey, tr("Authors"), cl.authors(libKey));
+            else
+            {
+                const QVector<Abs::Item> books =
+                    type == QLatin1String(browse::kAbsSeriesType) ? cl.seriesBooks(libKey, bucket)
+                  : type == QLatin1String(browse::kAbsAuthorType) ? cl.authorBooks(libKey, bucket)
+                                                                  : cl.libraryItems(libKey);
+                prefetchAbsCovers(libKey, books);
+                cat = browse::absBooksCatalog(bucket.isEmpty() ? libName : bucket, serverId, books,
+                                              absCover());
+            }
+            if (cat.items.isEmpty()) cat = browse::absNoteCatalog(cat.title, tr("Nothing here yet."));
+            showSyntheticCatalog(cat);
+        };
+        if (c.libraryLoaded(libKey)) { render(); return; }
+        fetchThen([this, libKey, render, landed](int gen) {
+            AbsClient::instance().fetchLibrary(libKey, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- One book, and one podcast -------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsBookType) || type == QLatin1String(browse::kAbsPodcastType))
+    {
+        std::function<void()> render = [this, type, key] {
+            AbsClient& cl = AbsClient::instance();
+            const Abs::ItemDetail d = cl.item(key);
+            if (!d.ok)
+            {
+                showSyntheticCatalog(browse::absNoteCatalog(tr("Audiobooks"),
+                    tr("That server no longer has this item.")));
+                return;
+            }
+            cl.prefetchCover(key, [this] { scheduleAbsArtRefresh(); });
+            if (type == QLatin1String(browse::kAbsPodcastType))
+            {
+                showSyntheticCatalog(browse::absEpisodesCatalog(key, d.item, d.episodes, absCover()));
+                return;
+            }
+            showSyntheticCatalog(browse::absBookCatalog(key, d.item, d.tracks, d.chapters.size(),
+                                                        absCover()));
+        };
+        if (c.itemLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchItem(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // Anything else is a level this function does not build, which can only be a stale route. An empty,
+    // titled shelf rather than a crash — the rule every level in this file follows.
+    showSyntheticCatalog(browse::absNoteCatalog(title, QString()));
+}
+
+// Ask for the covers of the rows about to be drawn. Bounded, because a library level is every book the
+// server holds and a cold cache would otherwise open several hundred connections the moment somebody opened
+// a library; the rest arrive as the listener scrolls into them on a later visit.
+void HomeView::prefetchAbsCovers(const QString& qualifiedLibraryId, const QVector<Abs::Item>& items)
+{
+    const QString serverId = Abs::serverOf(qualifiedLibraryId);
+    if (serverId.isEmpty()) return;
+    constexpr int kMaxCoverFetches = 40;
+    int n = 0;
+    for (const Abs::Item& b : items)
+    {
+        if (n >= kMaxCoverFetches) break;
+        if (!b.hasCover) continue;
+        const QString key = Abs::qualify(serverId, b.id);
+        if (key.isEmpty()) continue;
+        ++n;
+        AbsClient::instance().prefetchCover(key, [this] { scheduleAbsArtRefresh(); });
+    }
+}
+
+// One row of an Audiobookshelf level was activated. TRUE means it was ours and has been handled — the two
+// surfaces (classic activateItem and themed playThemedLeaf) both call this, so neither can grow a private
+// answer for the same row.
+bool HomeView::activateAbsItem(const MediaItem& it)
+{
+    if (!browse::isAbsType(it.type)) return false;
+    const QString key = it.mime.mid(it.mime.indexOf(QLatin1Char(':')) + 1);
+
+    if (it.type == QLatin1String(browse::kAbsAddServerType))
+    {
+        // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside a browse
+        // activation. The deferPastQmlEmission discipline (crash #28 / #211).
+        QMetaObject::invokeMethod(this, [this] { addAudiobookServerInteractive(); }, Qt::QueuedConnection);
+        return true;
+    }
+    if (it.type == QLatin1String(browse::kAbsPlayBookType))
+        { emit playAbsRequested(key, -1); return true; }        // -1: wherever the SERVER says
+    if (it.type == QLatin1String(browse::kAbsPartType))
+        { emit playAbsRequested(browse::absKeyHead(key), browse::absKeyTail(key).toInt()); return true; }
+    if (it.type == QLatin1String(browse::kAbsEpisodeType))
+        { emit playAbsRequested(key, -1); return true; }
+
+    openAbsLevel(it.type, key, it.title);
+    return true;
+}
+
+// Add an Audiobookshelf server. The MUSIC-server prompt with one protocol difference, and it is the one
+// that matters: the password is posted to /login and what is saved is the TOKEN it answers with. Nothing on
+// this side holds the password past this function, and AbsServer has no field it could be stored in.
+void HomeView::addAudiobookServerInteractive()
+{
+    const QString name = Osk::getText(tr("Server name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return;  // covers backed-out (null) too
+    const QString url = Osk::getText(tr("Server address (https://...):"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;
+    const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (user.isEmpty()) return;
+    const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password, window());
+    if (pass.isEmpty()) return;
+
+    bool allowPlainHttp = false;
+    if (Abs::checkUrl(url, /*allowPlainHttp*/ false) == Abs::UrlVerdict::InsecureRefused)
+    {
+        // The explicit choice. Asked ONLY when it is actually needed, and phrased as the risk it is.
+        const int go = NavConfirm::ask(tr("Send the password unencrypted?"),
+            tr("That address is plain HTTP, so your username and password will be sent over the network "
+               "unencrypted. Use https:// instead if your server supports it."),
+            { tr("Cancel"), tr("Send unencrypted") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;                 // backing out ADDS NOTHING: no half-configured server
+        allowPlainHttp = true;
+    }
+
+    // NOTHING IS SAVED UNTIL THE SIGN-IN SUCCEEDS. A row written first and repaired later is a row that,
+    // if the app is closed in between, is a permanently broken server the user has to notice and delete —
+    // and, worse, one whose id has already been minted and could already have qualified something.
+    AbsClient::instance().login(url, user, pass, allowPlainHttp, name,
+                                [this](const AbsClient::Result& r, const AbsServer& srv) {
+        if (!r.ok)
+        {
+            // The client's own sentence, which is either a transport one of ours or the server's — never a
+            // request, and never anything derived from what was typed.
+            emit toastRequested(r.message.isEmpty() ? tr("Couldn't sign in to that audiobook server.")
+                                                    : r.message, 6000);
+            return;
+        }
+        AbsServerStore::add(srv);
+        if (!stack_.isEmpty() && stack_.last().item.type == QLatin1String(browse::kAbsServersType))
+            populateAbsLevel(QString::fromLatin1(browse::kAbsServersType), QString());
+        emit browseItemsChanged(false);
+        emit toastRequested(tr("Added “%1”.").arg(srv.name), 4000);
+    });
+}
+
+// Remove a saved audiobook server. The Live TV / music-server shape, and the one extra sentence this owes:
+// what the user is giving up is the SIGN-IN, and nothing on the server itself is touched.
+void HomeView::removeAudiobookServerInteractive(const QString& serverId, const QString& name)
+{
+    const int choice = NavConfirm::ask(tr("Remove audiobook server"),
+        tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed.").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+    if (choice != 1) return;
+    AbsServerStore::remove(serverId);        // fires the change hook -> the Audiobooks tab re-evaluates
+    populateAbsLevel(QString::fromLatin1(browse::kAbsServersType), QString());
 }
 
 
@@ -6932,6 +7290,10 @@ void HomeView::activateItem(int row)
     // row is deferred a turn, exactly like "_newopds" and "_newlivetv" below, because it spins Osk nested
     // loops and then rebuilds this very level's model - and NavMenu::pick is a nested event loop, so doing
     // that inside a QML activation is how crash #28 is reproduced.
+    // Audiobookshelf (#197). ONE call rather than thirteen `type ==` lines, and it is the SAME call the
+    // themed route below makes: browse/LeafRoute.h's whole argument is that two surfaces answering the same
+    // question from two hand-written lists is how a category ends up working on one layout only.
+    if (activateAbsItem(it)) return;
     if (it.type == QString::fromLatin1(browse::kMusicServersType))
         { openMusicServersLevel(); return; }
     if (it.type == QString::fromLatin1(browse::kMusicServerType))
@@ -7670,6 +8032,16 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
                                   Qt::QueuedConnection);
         return;
     }
+    // #197: a saved AUDIOBOOK server long-presses to remove, for the identical reason. Something you can add
+    // and never remove is not configuration.
+    if (it.type == QString::fromLatin1(browse::kAbsServerType))
+    {
+        const QString sid = browse::absKeyOf(it.mime, browse::kAbsServerPrefix);
+        const QString name = it.title;
+        QMetaObject::invokeMethod(this, [this, sid, name] { removeAudiobookServerInteractive(sid, name); },
+                                  Qt::QueuedConnection);
+        return;
+    }
 
     // #193 increment 2: a music track or album long-presses/right-clicks to the queue verbs. Placed above the
     // recentView_ guard for the same reason Live TV's two rows are — this is a BROWSE row, and the plain
@@ -7946,6 +8318,10 @@ void HomeView::loadTop()
         { populateMusicWork(browse::musicKeyOf(top.item.mime, browse::kMusicWorkPrefix)); return; }
     // Returning to an Audiobooks level (#139) — Back out of a played book, or out of an author. Same shape
     // and same reasoning as the music levels above: rebuild from the installed index, never a rescan.
+    // Returning to an Audiobookshelf level (#197). ONE line for all thirteen, because every one of them
+    // stamped its own key into its marker mime and populateAbsLevel is the only thing that reads it.
+    if (top.detail && browse::isAbsType(top.item.type))
+        { populateAbsLevel(top.item.type, absTopKey()); return; }
     if (top.detail && top.item.type == QStringLiteral("_abroot")) { populateAudiobooks(); return; }
     if (top.detail && top.item.type == QStringLiteral("_abauthor"))
         { populateAudiobookAuthor(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookAuthorPrefix)); return; }
@@ -9319,6 +9695,10 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
+    // Audiobookshelf (#197), the SAME call activateItem makes. These rows all drill (every type starts with
+    // '_', so themedEnterFor sends them down the ordinary browse path) and so should never arrive here — but
+    // "should never" is exactly what was true of a music track before #74 found it was not.
+    if (activateAbsItem(it)) return;
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
     // provider detour below (a metadata-only catalog otherwise dead-ends at "No stream source" though the file
     // is on disk). Mirrors resolvePlay's head + the classic Play route.

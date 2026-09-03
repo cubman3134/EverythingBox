@@ -317,6 +317,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // JellyfinServerStore keys everything (server list, tokens, per-server enable) under this prefix.
         // probe_cloudmerge pins the carve-out.
         || key.startsWith(QStringLiteral("jellyfin/"))
+        // audiobookshelf/* (issue #197): saved Audiobookshelf servers. Same shape and the same hazard as the
+        // three above, with the credential in its most concentrated form — the stored value is an API TOKEN,
+        // which is a standing grant against that server rather than something a login screen still stands
+        // between. Left in the heavy settings bundle it would put that token in a zip in a third party's
+        // Drive folder, for a server the user signed into on one machine. Device-local, and AbsServerStore
+        // keys everything under this prefix. probe_cloudmerge pins the carve-out; probe_absclient byte-scans
+        // a fixture token against everything the feature writes.
+        || key.startsWith(QStringLiteral("audiobookshelf/"))
         // followsnap/* (issue #155): what THIS device has already seen of each followed series, and which
         // children it has not shown you yet. The DEVICE-LOCAL half of the follow feature, and the inverse of
         // the "follow/" carve-out above. Same family and the same argument as #23's backfill watermark: it is
