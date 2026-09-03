@@ -37,6 +37,7 @@
 #include "../core/SystemCatalog.h"
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
+#include "../core/RecompFeed.h"  // issue #248 (b): the RetComM catalogue as a second feed
 #include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
 #include "../core/RomLibrary.h"
 #include "../core/SteamLibrary.h"
@@ -66,6 +67,9 @@
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
+#include "../core/FollowStore.h"     // Following a series (#155): the synced per-item follow mark
+#include "../core/FollowSnapshot.h"  // ...and the device-local snapshot the New shelf is built from
+#include "../core/FollowPlan.h"      // ...and the pure rules both layouts share (followability, the shelf)
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
@@ -74,6 +78,9 @@
 #include "../browse/RemoteLeafResolve.h" // a remote source's leaf: resolve by id, else by title+console
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
 #include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
+#include "../browse/AbsCatalogs.h"       // issue #197: the Audiobookshelf browse levels
+#include "../core/AbsClient.h"           // ...and the client those levels read
+#include "../core/AbsServerStore.h"      // ...and the saved servers behind it
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
 #include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
 #include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
@@ -595,6 +602,14 @@ static QString recentGroupLabel(const QString& key)
 HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(mgr)
 {
     nam_ = new QNetworkAccessManager(this);
+
+    // #197: a fetch landed for an Audiobookshelf server. Repopulate whichever of its levels the listener is
+    // standing in — through the SAME debounce the cover fetches use, because a library level fires three
+    // requests that land independently (items, then series, then authors) and re-rendering per landing would
+    // rebuild the model under the selection three times. Nothing else is refreshed: a fetch cannot add
+    // anything to a level that is not one of ours.
+    connect(&AbsClient::instance(), &AbsClient::cacheChanged, this,
+            [this](const QString&) { scheduleAbsArtRefresh(); });
 
     // The last calendar TraktClient cached, read ONCE here so an offline launch already has something to
     // draw before (or instead of) any fetch. Skipped entirely when Trakt is off, so an install that never
@@ -1253,7 +1268,11 @@ void HomeView::refresh()
     //
     // Type "audiobook": core::mediaCategory already files it under "audio", so on the themed layouts this
     // lands in the Audio bucket beside Music rather than inventing a category.
-    if (AudiobookLibrary::hasLibrary())
+    // ...OR a saved Audiobookshelf server (#197). An install whose whole audiobook collection lives on a
+    // server has no local root and would otherwise get no tab — i.e. the feature would be configured and
+    // unreachable. The Music tab takes the identical `folder OR server` gate for the identical reason, and
+    // AbsServerStore::hasServers is bounded so this stays a cheap question to ask on every refresh.
+    if (AudiobookLibrary::hasLibrary() || AbsServerStore::hasServers())
     {
         auto* booksBtn = new QPushButton(tr("Audiobooks"), this);
         connect(booksBtn, &QPushButton::clicked, this, &HomeView::selectAudiobooks);
@@ -1726,7 +1745,7 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
 
     // The classic home's built-in shelves, in the order it produces them.
     out.push_back({ QStringLiteral("continue"), tr("Continue watching"), true });
-    out.push_back({ QStringLiteral("trakt:missed"), tr("You Missed"), true });
+    out.push_back({ QStringLiteral("new"), tr("New"), true });
     out.push_back({ QStringLiteral("trakt:calendar"), tr("Airing Soon"), true });
     out.push_back({ QStringLiteral("favorites"), tr("★ Favorites"), true });
     // ...and the opt-in ones, offered whether or not they currently hold anything: this is the ADD list, and a
@@ -1933,6 +1952,16 @@ QVariantList HomeView::browseItems()
             m[QStringLiteral("onDisk")] = true;
             const int eps = LocalLibrary::index().ownedEpisodes(it.id);
             if (eps > 0) m[QStringLiteral("onDiskCount")] = eps;
+        }
+        // Following (issue #155): a followed series' tile says so, and carries its unread count so the
+        // themed grid can badge it. Purely additive — an un-followed tile carries neither key, so every
+        // other row renders byte-for-byte as it did.
+        if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable)
+            && FollowStore::isFollowed(it.id))
+        {
+            m[QStringLiteral("followed")] = true;
+            const int unread = followUnreadCount(it.id);
+            if (unread > 0) m[QStringLiteral("newCount")] = unread;
         }
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
@@ -2229,8 +2258,18 @@ void HomeView::selectAudiobooks()
 
 void HomeView::populateAudiobooks()
 {
-    showSyntheticCatalog(browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
-                                                      audiobookCover()));
+    MediaCatalog cat = browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
+                                                    audiobookCover());
+    // #197: the Audiobookshelf door, FIRST. Inserted here rather than inside audiobookRootCatalog because
+    // that builder is the LOCAL library's and knows nothing about a network — the same separation
+    // MusicCatalogs keeps by taking a server COUNT rather than a client.
+    //
+    // FIRST rather than last, and that ordering is the whole point of the empty case: a configured server
+    // is an answer to "there is nothing here", so somebody whose entire collection is on a server must not
+    // land on a sentence about choosing a folder with the thing they actually want below it.
+    const int servers = AbsServerStore::list().size();
+    if (servers > 0) cat.items.insert(0, browse::absServersRow(servers));
+    showSyntheticCatalog(cat);
 }
 
 // One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the
@@ -2411,6 +2450,339 @@ void HomeView::onAudiobookLibraryChanged()
         { populateAudiobookSeries(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookSeriesPrefix)); return; }
     if (top.item.type == QStringLiteral("_abbook"))
         { populateAudiobookBook(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookBookPrefix)); return; }
+}
+
+// ---- AUDIOBOOKSHELF (issue #197, increment 1) ------------------------------------------------------------
+//
+// Thirteen levels behind ONE open/populate pair. Every one of them is the same three steps — decide the
+// title, ask AbsClient for what this level needs, render a pure builder over what the client already has —
+// so what actually differs between them is one switch arm each. HomeView.h argues why that is a pair rather
+// than thirteen: the Back path, the fetch-landed path and the first open all read the SAME function, so a
+// level cannot be drawn one way going in and another way coming back.
+//
+// EVERY LEVEL IS A DETAIL ROOT carrying an expandable container item whose `mime` is the level's own marker,
+// exactly like the Audiobooks and Music-server levels above — that is what makes loadTop() repopulate it
+// natively on Back rather than falling through to the addon path.
+browse::AbsCoverFn HomeView::absCover() const
+{
+    // The client's MetaCache path, never the server's cover URL: that URL carries the token, and a
+    // MediaItem's thumbnailUrl is copied into caches and item records. AbsCatalogs.h states the rule.
+    return [](const QString& qualifiedId) { return AbsClient::instance().coverPath(qualifiedId); };
+}
+
+// Artwork arrives after the rows do. Rather than re-render once per cover that lands (which would rebuild
+// the model under the user's selection dozens of times), each landing arms ONE debounced repopulate.
+// prefetchCover fires its callback only when new bytes were actually stored, so a level whose covers are
+// all cached schedules nothing and this cannot loop. scheduleMusicArtRefresh makes the identical argument.
+void HomeView::scheduleAbsArtRefresh()
+{
+    if (absArtRefreshPending_) return;
+    absArtRefreshPending_ = true;
+    QTimer::singleShot(400, this, [this] {
+        absArtRefreshPending_ = false;
+        if (stack_.isEmpty()) return;
+        const auto& top = stack_.last();
+        if (browse::isAbsType(top.item.type)) populateAbsLevel(top.item.type, absTopKey());
+    });
+}
+
+// The key of the level the user is standing in, read back out of its own marker mime. ONE reader, so a Back
+// and a refresh cannot disagree about which key a level is showing.
+QString HomeView::absTopKey() const
+{
+    if (stack_.isEmpty()) return QString();
+    const QString mime = stack_.last().item.mime;
+    const int colon = mime.indexOf(QLatin1Char(':'));
+    return colon < 0 ? QString() : mime.mid(colon + 1);
+}
+
+void HomeView::openAbsLevel(const QString& type, const QString& key, const QString& title)
+{
+    if (type.isEmpty()) return;
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    // The marker mime is the level's own prefix plus its key — which is how absTopKey reads it back and how
+    // loadTop knows to repopulate here. The prefix is derived from the type rather than passed, so a caller
+    // cannot pair one level's type with another's prefix.
+    const QString prefix = type.mid(1) + QLatin1Char(':');   // "_absbook" -> "absbook:"
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = title.isEmpty() ? tr("Audiobooks") : title;
+    lvl.item.id = type;
+    lvl.item.type = type;
+    lvl.item.expandable = true;
+    lvl.item.mime = prefix + key;
+    stack_.push_back(lvl);
+    populateAbsLevel(type, key);
+}
+
+void HomeView::populateAbsLevel(const QString& type, const QString& key)
+{
+    AbsClient& c = AbsClient::instance();
+    const QString title = stack_.isEmpty() ? tr("Audiobooks") : stack_.last().title;
+
+    // The one shared shape for "this level needs a request first": bump the generation, draw a loading row,
+    // then fire the fetch. `landed` is the other half — it drops an answer that arrives after the listener
+    // has navigated on. Every remote level below goes through both, so none of them can forget the guard.
+    const auto fetchThen = [this, title](const std::function<void(int)>& fire) {
+        const int gen = ++absFetchGen_;
+        showSyntheticCatalog(browse::absNoteCatalog(title, tr("Loading…")));
+        fire(gen);
+    };
+    const auto landed = [this, title](int gen, const AbsClient::Result& r,
+                                      const std::function<void()>& render) {
+        if (gen != absFetchGen_) return;                       // superseded by a newer navigation
+        if (!r.ok) { showSyntheticCatalog(browse::absNoteCatalog(title, r.message)); return; }
+        render();
+    };
+
+    // ---- The saved servers ---------------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsServersType))
+    {
+        QStringList ids, names, urls; QVector<bool> on;
+        for (const AbsServer& s : AbsServerStore::list())
+            { ids << s.id; names << s.name; urls << s.url; on << s.enabled; }
+        showSyntheticCatalog(browse::absServersCatalog(ids, names, urls, on));
+        return;
+    }
+
+    // ---- One server's libraries ----------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsServerType))
+    {
+        AbsServer srv;
+        if (!AbsServerStore::get(key, srv))
+        {
+            showSyntheticCatalog(browse::absNoteCatalog(title,
+                tr("That audiobook server is no longer set up.")));
+            return;
+        }
+        const QString srvName = srv.name;
+        std::function<void()> render = [this, key, srvName] {
+            MediaCatalog cat = browse::absLibrariesCatalog(key, srvName,
+                                                           AbsClient::instance().libraries(key));
+            if (cat.items.isEmpty())
+                cat = browse::absNoteCatalog(srvName, tr("That server has no libraries in it."));
+            showSyntheticCatalog(cat);
+        };
+        if (c.librariesLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchLibraries(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- One library: its doors, or (podcasts) its shows ----------------------------------------------
+    if (type == QLatin1String(browse::kAbsLibraryType))
+    {
+        std::function<void()> render = [this, key] {
+            AbsClient& cl = AbsClient::instance();
+            const QVector<Abs::Item> items = cl.libraryItems(key);
+            bool podcast = false;
+            for (const Abs::Library& l : cl.libraries(Abs::serverOf(key)))
+                if (l.id == Abs::itemOf(key)) { podcast = l.isPodcast(); break; }
+            // A library with nothing in it is a sentence, not a blank shelf — the same rule the local
+            // audiobook root follows, and only this layer can tell "empty" from "still fetching".
+            if (items.isEmpty())
+            {
+                showSyntheticCatalog(browse::absNoteCatalog(cl.libraryNameOf(key),
+                    tr("That library has nothing in it yet.")));
+                return;
+            }
+            if (podcast) prefetchAbsCovers(key, items);
+            showSyntheticCatalog(browse::absLibraryCatalog(key, cl.libraryNameOf(key), podcast,
+                                                           cl.series(key).size(), cl.authors(key).size(),
+                                                           items.size(), items, absCover()));
+        };
+        if (c.libraryLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchLibrary(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- The two dimension lists, and the three lists of books ---------------------------------------
+    // All five read the SAME cached library listing, so none of them costs a request once the library has
+    // been opened — and a level reached cold (a Back into a saved route) fetches it exactly as the library
+    // level would have.
+    if (type == QLatin1String(browse::kAbsSeriesListType) || type == QLatin1String(browse::kAbsAuthorsType)
+        || type == QLatin1String(browse::kAbsBooksType)   || type == QLatin1String(browse::kAbsSeriesType)
+        || type == QLatin1String(browse::kAbsAuthorType))
+    {
+        const QString libKey = browse::absKeyHead(key);
+        const QString bucket = browse::absKeyTail(key);
+        std::function<void()> render = [this, type, libKey, bucket] {
+            AbsClient& cl = AbsClient::instance();
+            const QString libName  = cl.libraryNameOf(libKey);
+            const QString serverId = Abs::serverOf(libKey);
+            MediaCatalog cat;
+            if (type == QLatin1String(browse::kAbsSeriesListType))
+                cat = browse::absSeriesListCatalog(libKey, tr("Series"), cl.series(libKey));
+            else if (type == QLatin1String(browse::kAbsAuthorsType))
+                cat = browse::absAuthorsCatalog(libKey, tr("Authors"), cl.authors(libKey));
+            else
+            {
+                const QVector<Abs::Item> books =
+                    type == QLatin1String(browse::kAbsSeriesType) ? cl.seriesBooks(libKey, bucket)
+                  : type == QLatin1String(browse::kAbsAuthorType) ? cl.authorBooks(libKey, bucket)
+                                                                  : cl.libraryItems(libKey);
+                prefetchAbsCovers(libKey, books);
+                cat = browse::absBooksCatalog(bucket.isEmpty() ? libName : bucket, serverId, books,
+                                              absCover());
+            }
+            if (cat.items.isEmpty()) cat = browse::absNoteCatalog(cat.title, tr("Nothing here yet."));
+            showSyntheticCatalog(cat);
+        };
+        if (c.libraryLoaded(libKey)) { render(); return; }
+        fetchThen([this, libKey, render, landed](int gen) {
+            AbsClient::instance().fetchLibrary(libKey, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // ---- One book, and one podcast -------------------------------------------------------------------
+    if (type == QLatin1String(browse::kAbsBookType) || type == QLatin1String(browse::kAbsPodcastType))
+    {
+        std::function<void()> render = [this, type, key] {
+            AbsClient& cl = AbsClient::instance();
+            const Abs::ItemDetail d = cl.item(key);
+            if (!d.ok)
+            {
+                showSyntheticCatalog(browse::absNoteCatalog(tr("Audiobooks"),
+                    tr("That server no longer has this item.")));
+                return;
+            }
+            cl.prefetchCover(key, [this] { scheduleAbsArtRefresh(); });
+            if (type == QLatin1String(browse::kAbsPodcastType))
+            {
+                showSyntheticCatalog(browse::absEpisodesCatalog(key, d.item, d.episodes, absCover()));
+                return;
+            }
+            showSyntheticCatalog(browse::absBookCatalog(key, d.item, d.tracks, d.chapters.size(),
+                                                        absCover()));
+        };
+        if (c.itemLoaded(key)) { render(); return; }
+        fetchThen([this, key, render, landed](int gen) {
+            AbsClient::instance().fetchItem(key, [this, gen, render, landed](const AbsClient::Result& r) {
+                landed(gen, r, render);
+            });
+        });
+        return;
+    }
+
+    // Anything else is a level this function does not build, which can only be a stale route. An empty,
+    // titled shelf rather than a crash — the rule every level in this file follows.
+    showSyntheticCatalog(browse::absNoteCatalog(title, QString()));
+}
+
+// Ask for the covers of the rows about to be drawn. Bounded, because a library level is every book the
+// server holds and a cold cache would otherwise open several hundred connections the moment somebody opened
+// a library; the rest arrive as the listener scrolls into them on a later visit.
+void HomeView::prefetchAbsCovers(const QString& qualifiedLibraryId, const QVector<Abs::Item>& items)
+{
+    const QString serverId = Abs::serverOf(qualifiedLibraryId);
+    if (serverId.isEmpty()) return;
+    constexpr int kMaxCoverFetches = 40;
+    int n = 0;
+    for (const Abs::Item& b : items)
+    {
+        if (n >= kMaxCoverFetches) break;
+        if (!b.hasCover) continue;
+        const QString key = Abs::qualify(serverId, b.id);
+        if (key.isEmpty()) continue;
+        ++n;
+        AbsClient::instance().prefetchCover(key, [this] { scheduleAbsArtRefresh(); });
+    }
+}
+
+// One row of an Audiobookshelf level was activated. TRUE means it was ours and has been handled — the two
+// surfaces (classic activateItem and themed playThemedLeaf) both call this, so neither can grow a private
+// answer for the same row.
+bool HomeView::activateAbsItem(const MediaItem& it)
+{
+    if (!browse::isAbsType(it.type)) return false;
+    const QString key = it.mime.mid(it.mime.indexOf(QLatin1Char(':')) + 1);
+
+    if (it.type == QLatin1String(browse::kAbsAddServerType))
+    {
+        // Deferred a turn: the prompt spins Osk/NavConfirm nested loops, and this runs inside a browse
+        // activation. The deferPastQmlEmission discipline (crash #28 / #211).
+        QMetaObject::invokeMethod(this, [this] { addAudiobookServerInteractive(); }, Qt::QueuedConnection);
+        return true;
+    }
+    if (it.type == QLatin1String(browse::kAbsPlayBookType))
+        { emit playAbsRequested(key, -1); return true; }        // -1: wherever the SERVER says
+    if (it.type == QLatin1String(browse::kAbsPartType))
+        { emit playAbsRequested(browse::absKeyHead(key), browse::absKeyTail(key).toInt()); return true; }
+    if (it.type == QLatin1String(browse::kAbsEpisodeType))
+        { emit playAbsRequested(key, -1); return true; }
+
+    openAbsLevel(it.type, key, it.title);
+    return true;
+}
+
+// Add an Audiobookshelf server. The MUSIC-server prompt with one protocol difference, and it is the one
+// that matters: the password is posted to /login and what is saved is the TOKEN it answers with. Nothing on
+// this side holds the password past this function, and AbsServer has no field it could be stored in.
+void HomeView::addAudiobookServerInteractive()
+{
+    const QString name = Osk::getText(tr("Server name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return;  // covers backed-out (null) too
+    const QString url = Osk::getText(tr("Server address (https://...):"), QString(),
+                                     QLineEdit::Normal, window()).trimmed();
+    if (url.isEmpty()) return;
+    const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (user.isEmpty()) return;
+    const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password, window());
+    if (pass.isEmpty()) return;
+
+    bool allowPlainHttp = false;
+    if (Abs::checkUrl(url, /*allowPlainHttp*/ false) == Abs::UrlVerdict::InsecureRefused)
+    {
+        // The explicit choice. Asked ONLY when it is actually needed, and phrased as the risk it is.
+        const int go = NavConfirm::ask(tr("Send the password unencrypted?"),
+            tr("That address is plain HTTP, so your username and password will be sent over the network "
+               "unencrypted. Use https:// instead if your server supports it."),
+            { tr("Cancel"), tr("Send unencrypted") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (go != 1) return;                 // backing out ADDS NOTHING: no half-configured server
+        allowPlainHttp = true;
+    }
+
+    // NOTHING IS SAVED UNTIL THE SIGN-IN SUCCEEDS. A row written first and repaired later is a row that,
+    // if the app is closed in between, is a permanently broken server the user has to notice and delete —
+    // and, worse, one whose id has already been minted and could already have qualified something.
+    AbsClient::instance().login(url, user, pass, allowPlainHttp, name,
+                                [this](const AbsClient::Result& r, const AbsServer& srv) {
+        if (!r.ok)
+        {
+            // The client's own sentence, which is either a transport one of ours or the server's — never a
+            // request, and never anything derived from what was typed.
+            emit toastRequested(r.message.isEmpty() ? tr("Couldn't sign in to that audiobook server.")
+                                                    : r.message, 6000);
+            return;
+        }
+        AbsServerStore::add(srv);
+        if (!stack_.isEmpty() && stack_.last().item.type == QLatin1String(browse::kAbsServersType))
+            populateAbsLevel(QString::fromLatin1(browse::kAbsServersType), QString());
+        emit browseItemsChanged(false);
+        emit toastRequested(tr("Added “%1”.").arg(srv.name), 4000);
+    });
+}
+
+// Remove a saved audiobook server. The Live TV / music-server shape, and the one extra sentence this owes:
+// what the user is giving up is the SIGN-IN, and nothing on the server itself is touched.
+void HomeView::removeAudiobookServerInteractive(const QString& serverId, const QString& name)
+{
+    const int choice = NavConfirm::ask(tr("Remove audiobook server"),
+        tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed.").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+    if (choice != 1) return;
+    AbsServerStore::remove(serverId);        // fires the change hook -> the Audiobooks tab re-evaluates
+    populateAbsLevel(QString::fromLatin1(browse::kAbsServersType), QString());
 }
 
 
@@ -4549,6 +4921,10 @@ static QString recompStateLabel(recomps::State s)
     {
         case recomps::State::NotInstalled:    return HomeView::tr("not installed");
         case recomps::State::NeedsRom:        return HomeView::tr("needs ROM");
+        // #248 (b). Not "needs ROM": a plausible dump is on this machine and its digests are being computed.
+        // Saying "needs ROM" here and correcting it four seconds later would send somebody looking for a game
+        // they already own.
+        case recomps::State::CheckingDumps:   return HomeView::tr("checking dumps…");
         case recomps::State::Installed:       return HomeView::tr("installed");
         case recomps::State::UpdateAvailable: return HomeView::tr("update available");
         // Reserved for the self-compiled tier (#248 increment c). deriveState never returns them today; the
@@ -4566,19 +4942,60 @@ void HomeView::populateRecomps()
     // proper, and anything already recorded as downloaded (a ROM that arrived through the app lives there and
     // may sit outside the library root entirely).
     QVector<recomps::LibraryRom> library;
+    // The DIGESTS come off the shared hash cache (HashVerify), never off the file: this loop runs on the GUI
+    // thread every time the section is drawn, and cachedHashes() is an ini lookup plus one stat. A row with no
+    // cached digests is not a row with no match — it is one the gate will report as `checking`, and the
+    // scheduler below is what turns that into an answer.
+    auto addRom = [&library](const QString& systemId, const QString& title, const QString& path) {
+        recomps::LibraryRom r;
+        r.systemId = systemId;
+        r.title    = title;
+        r.path     = path;
+        if (!path.isEmpty())
+        {
+            const QFileInfo fi(path);
+            if (fi.exists()) r.size = fi.size();
+            r.archive = ArchiveRom::isArchive(path);
+            const HashVerify::Hashes h = HashVerify::cachedHashes(path);
+            r.hashes = { h.crc, h.md5, h.sha1, h.sha256 };
+        }
+        library.push_back(r);
+    };
     for (const RomLibrary::SystemGroup& g : RomLibrary::scan())
         for (const RomLibrary::Rom& r : g.roms)
-            library.push_back({ r.systemId, r.title, r.path });
+            addRom(r.systemId, r.title, r.path);
     for (const DownloadedItem& d : DownloadsStore::list())
         if (d.kind == QStringLiteral("game") && !d.system.isEmpty())
-            library.push_back({ d.system, d.title, d.path });
+            addRom(d.system, d.title, d.path);
+
+    // THE CATALOGUE, both feeds. RecompFeed::catalogue merges the last good copy of RetComM's published
+    // catalogue over the in-tree one, in-tree winning on a title identity clash; `feedError` is non-empty only
+    // when a copy exists and could not be READ, which is the #174 error row below.
+    QString feedError;
+    const QList<ExternalEmulator> catalogue = RecompFeed::catalogue(&feedError);
+
+    // What still needs hashing, gathered while the rows are derived so the file list and the states can never
+    // disagree about which rows are `checking`.
+    QStringList needHash;
+    QHash<QString, QString> hashHints;   // path -> system id, for HashVerify's format hint
 
     const QVector<recomps::Row> rows = recomps::buildRows(
-        NativePorts::all(),
-        [&library](const ExternalEmulator& e) {
+        catalogue,
+        [&](const ExternalEmulator& e) {
             recomps::Facts f;
             f.installed    = EmulatorManager::isInstalled(e);
-            f.libraryMatch = recomps::libraryMatches(e, library);
+            // THE ROM-IDENTITY GATE (#248 b). `libraryMatch` still means "a dump on this machine is this
+            // entry's game", but what backs it is now the published digests where there are any.
+            const recomps::DumpMatch m = recomps::dumpMatch(e, library);
+            f.libraryMatch   = (m == recomps::DumpMatch::Hashed || m == recomps::DumpMatch::TitleOnly);
+            f.dumpUnverified = (m == recomps::DumpMatch::TitleOnly);
+            f.checkingDumps  = (m == recomps::DumpMatch::Checking);
+            if (!f.libraryMatch)
+                for (const QString& path : recomps::pathsNeedingHash(e, library))
+                {
+                    if (!needHash.contains(path)) needHash << path;
+                    hashHints.insert(path, e.port.platform);
+                }
             // Only meaningful for an install that exists; asking otherwise would read a folder that is not there.
             if (f.installed) f.installedTag = NativePorts::readInstalledTag(EmulatorManager::installDir(e));
             f.catalogueTag = e.port.releaseTag;
@@ -4625,13 +5042,100 @@ void HomeView::populateRecomps()
         // OWN name — never the recompilation toolchain's brand, whose developers asked exactly that of a
         // third-party launcher (#233).
         QStringList bits{ recompStateLabel(r.state) };
+        // IMMEDIATELY after the state, because it QUALIFIES the state rather than describing the project: this
+        // row says "not installed" on the strength of a filename, and the qualifier is the least droppable
+        // thing on the line. It was originally last, where the themed row's elision ate it at 1280 px.
+        if (r.dumpUnverified)          bits << tr("dump not verified");
         if (!r.creditedName.isEmpty()) bits << r.creditedName;
+        // The ENGINE, on every self-compiled row (#248 b). A recomp built here is the recompiler's program as
+        // much as the port author's, and the licence beside it is the engine's.
+        if (!r.engine.isEmpty())       bits << r.engine;
         if (!r.license.isEmpty())      bits << r.license;
         bits << (r.tier == recomps::Tier::PreBuilt ? tr("pre-built") : tr("self-compiled"));
         it.subtitle = bits.join(QStringLiteral(" · "));
         cat.items.push_back(it);
     }
+
+    // #174, for the SECOND feed: a cached catalogue that cannot be read is an error row appended to the real
+    // ones, not a silently shorter list. The in-tree rows above are unaffected and say so.
+    if (!feedError.isEmpty())
+    {
+        MediaItem err;
+        err.id       = QStringLiteral("_recompsfeederror");
+        // NOT type "info", and the difference is the whole of #174 here. The themed browse model flushes a
+        // guidance row ONLY when nothing else survived the level (HomeView::browseItems' `loneInfoRow`), so an
+        // "info" row appended AFTER real rows is silently dropped on the themed layout — which is precisely
+        // "the section quietly got shorter", the failure the error row exists to prevent. A '_'-prefixed type
+        // is carried through as an ordinary row on both layouts, exactly as the system headers are, and
+        // activateItem refuses it by name.
+        err.type     = QStringLiteral("_recompsfeederror");
+        err.title    = tr("The RetComM catalogue could not be read.");
+        err.subtitle = tr("The rows above are this app's own catalogue. %1.").arg(feedError);
+        cat.items.push_back(err);
+    }
+
     showSyntheticCatalog(cat);
+    // Both of these are no-ops on a warm machine: the fetch is stamped once a day, and the hash list is empty
+    // whenever every plausible dump is already in the cache. They are last so the section is on screen before
+    // either starts.
+    scheduleRecompHashes(needHash, hashHints);
+    refreshRecompFeedAsync();
+}
+
+// THE FEED REFRESH. Off-thread, one at a time, at most once a day (RecompFeed::dueForRefresh), and never on
+// the path that draws the section: the rows are already on screen from the last good copy by the time this
+// runs, and a fetch that fails changes nothing at all.
+void HomeView::refreshRecompFeedAsync()
+{
+    if (recompFeedFetching_ || !RecompFeed::dueForRefresh()) return;
+    recompFeedFetching_ = true;
+    QPointer<HomeView> self(this);
+    QThreadPool::globalInstance()->start([self]() {
+        // Blocking, bounded, redirect-following. The result is not read here: refresh() has already replaced
+        // (or deliberately not replaced) the cached copy, which is the one thing the section reads.
+        RecompFeed::refresh();
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self]() {
+            if (!self) return;
+            self->recompFeedFetching_ = false;
+            self->refreshRecompsIfShown();   // a newer catalogue may have added or moved rows
+        }, Qt::QueuedConnection);
+    });
+}
+
+// THE ONE-OFF HASHING behind the ROM-identity gate. Never at browse time (RecompRows.h cannot hash at all);
+// this is the caller that turns a `checking dumps…` row into an answer, and it is the same arrangement the
+// #97 dump badge uses: the global pool, a per-path in-flight guard, the shared HashVerify record, and a
+// re-derive on the GUI thread when it lands.
+void HomeView::scheduleRecompHashes(const QStringList& paths, const QHash<QString, QString>& systemHints)
+{
+    for (const QString& path : paths)
+    {
+        if (path.isEmpty() || recompHashInFlight_.contains(path)) continue;
+        recompHashInFlight_.insert(path);
+        const QString hint = systemHints.value(path);
+        QPointer<HomeView> self(this);
+        QThreadPool::globalInstance()->start([self, path, hint]() {
+            // An archived dump is hashed from its EXTRACTED stream while the record stays keyed on the
+            // archive the user sees — HashVerify's own arrangement, and the reason an archive is exempt from
+            // the size narrowing: the digests in the cache are the dump's, not the archive's.
+            QString hashSource;
+            if (ArchiveRom::isArchive(path))
+            {
+                const QString tmp = ArchiveRom::extractToTemp(path);
+                if (!tmp.isEmpty()) hashSource = tmp;
+            }
+            HashVerify::hashAndCache(path, hint, hashSource);
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, path]() {
+                if (!self) return;
+                self->recompHashInFlight_.remove(path);
+                // Only while the section is the level on screen. A hash that lands after the user navigated
+                // away has still been cached, which is the point — the next visit is instant.
+                self->refreshRecompsIfShown();
+            }, Qt::QueuedConnection);
+        });
+    }
 }
 
 void HomeView::refreshRecompsIfShown()
@@ -5540,6 +6044,155 @@ void HomeView::showTraktMissedMenu(MediaItem it)
     }, window());
 }
 
+// ---- Following a series (issue #155): the row menu, the verb menu, and re-opening a followed series ------
+
+// Re-open a followed series' detail page, rooted at Home so Back returns where the user was. This is
+// openFavorite's tail with the identity coming from the follow row instead of the favourite row, and it
+// exists for the same reason that one does: once a shelf row is the only thing on screen, the SOURCE it came
+// from has to be recoverable from what the row carries, because the catalogue that produced it is long gone.
+void HomeView::openFollowedSeries(const QString& addonId, const QString& seriesId,
+                                  const QString& title, const QString& type, const QString& thumb)
+{
+    if (seriesId.isEmpty()) return;
+    LoadedAddon* addon = nullptr;
+    if (mgr_)
+        for (LoadedAddon* src : mgr_->sources())
+            if (src->manifest.id == addonId) { addon = src; break; }
+    if (!addon)
+    {
+        showToast(tr("That series' source addon isn't available."), kFeedbackLong);
+        return;
+    }
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("home"));
+    stack_.clear();
+    MediaItem mi;
+    mi.id = seriesId; mi.title = title; mi.type = type; mi.thumbnailUrl = thumb; mi.expandable = true;
+    Level lvl;
+    lvl.addon = addon; lvl.detail = true; lvl.item = mi; lvl.title = title;
+    stack_.push_back(lvl);
+    loadTop();
+}
+
+// The menu a New-shelf row opens. Row 0 is "open the series" rather than "play this child" deliberately: a
+// child of an arbitrary source is not necessarily playable from a home row (a manga chapter is a reader
+// route, a bridged episode needs a stream resolve), while the series page is the surface that already knows
+// how to open every one of them. The rest are the verbs the shelf needs to be clearable.
+void HomeView::showNewItemMenu(MediaItem it)
+{
+    const QString addonId  = browse::newShelfAddonOf(it.mime);
+    const QString seriesId = browse::newShelfSeriesOf(it.mime);
+    QString seriesTitle = it.subtitle.section(QStringLiteral("  ·  "), 0, 0);
+    for (const FollowItem& f : FollowStore::list())
+        if (f.itemId == seriesId) { seriesTitle = f.title; break; }
+    const QStringList rows = {
+        tr("▶   Open %1").arg(seriesTitle),
+        tr("✓   Mark this as seen"),
+        tr("✓✓  Mark everything in %1 as seen").arg(seriesTitle),
+        tr("☆   Stop following %1").arg(seriesTitle),
+    };
+    const QString childId = it.id;
+    const QString type = it.type;
+    const QString thumb = it.thumbnailUrl;
+    new NavMenu(it.title, rows, [this, addonId, seriesId, seriesTitle, childId, type, thumb](int row) {
+        // Fails CLOSED on a row whose marker did not carry a series: no row this build produces can be in
+        // that state (probe_browse pins the round trip), so this guards a row an older/newer build left on
+        // screen across an update rather than anything reachable today.
+        if (seriesId.isEmpty()) return;
+        switch (row)
+        {
+        case 0: openFollowedSeries(addonId, seriesId, seriesTitle, type, thumb); return;
+        case 1: FollowSnapshot::clearPending(seriesId, childId); break;
+        case 2: FollowSnapshot::markAllSeen(seriesId); break;
+        case 3:
+            FollowStore::remove(seriesId);
+            // Forget what this device had seen too. A re-follow years later must start from a silent
+            // baseline, not announce everything published in between — FollowSnapshot.h states the rule.
+            FollowSnapshot::forget(seriesId);
+            showToast(tr("No longer following “%1”.").arg(seriesTitle), kFeedbackShort);
+            break;
+        default: return;
+        }
+        if (recentView_) renderRecents();
+        else             loadTop();
+        emit browseItemsChanged(false);   // re-sync a themed browse view (else its selection desyncs)
+    }, window());
+}
+
+// The verb menu on a series row itself, for the CLASSIC layout (the themed layout carries the same verbs as
+// detail-row pills — see themedDetailData's "follow"/"markseen"). Gated on follow::isFollowable, the one
+// oracle both layouts ask, so the verb can never appear on a leaf on one surface and not the other.
+void HomeView::showFollowMenu(MediaItem it)
+{
+    const bool followed = FollowStore::isFollowed(it.id);
+    const int unread = followUnreadCount(it.id);
+    QStringList rows;
+    rows << (followed ? tr("✓   Following — stop") : tr("＋   Follow this series"));
+    if (followed && unread > 0) rows << tr("✓✓  Mark all %1 new as seen").arg(unread);
+    if (followed) rows << tr("⟳   Check for new items now");
+    const MediaItem copy = it;
+    new NavMenu(it.title, rows, [this, copy, followed, unread](int row) {
+        if (row == 0)
+        {
+            toggleFollow(copy);
+            return;
+        }
+        int next = 1;
+        if (followed && unread > 0 && row == next++) { FollowSnapshot::markAllSeen(copy.id); }
+        else if (followed && row == next) { emit followCheckNowRequested(); return; }
+        else return;
+        if (recentView_) renderRecents();
+        else             loadTop();
+        emit browseItemsChanged(false);
+    }, window());
+}
+
+// Follow / unfollow, from either layout. The stored row carries everything the background refresh needs to
+// re-ask the source (its addon and the source's own item id) AND everything a shelf needs to draw it.
+void HomeView::toggleFollow(const MediaItem& it)
+{
+    if (it.id.isEmpty()) return;
+    if (FollowStore::isFollowed(it.id))
+    {
+        FollowStore::remove(it.id);
+        FollowSnapshot::forget(it.id);
+        showToast(tr("No longer following “%1”.").arg(it.title), kFeedbackShort);
+    }
+    else
+    {
+        FollowItem f;
+        f.itemId = it.id;
+        f.addonId = stack_.isEmpty() || !stack_.last().addon ? QString() : stack_.last().addon->manifest.id;
+        f.title = it.title;
+        f.subtitle = it.subtitle;
+        f.type = it.type;
+        f.thumbnailUrl = it.thumbnailUrl;
+        FollowStore::add(f);
+        showToast(tr("Following “%1”. New items appear on the New shelf.").arg(it.title), kFeedbackShort);
+        emit followCheckNowRequested();   // ...and take the first, silent baseline reading right away
+    }
+    browseSelectKey_ = it.id;
+    if (recentView_) renderRecents();
+    else             loadTop();
+    emit browseItemsChanged(false);
+    browseSelectKey_.clear();
+}
+
+// How many unseen children a followed series is carrying, counted through the SAME dealt-with filter the New
+// shelf's rows use (follow::unreadCount over follow::isDealtWith), so the badge and the rows cannot disagree.
+// 0 for anything not followed.
+int HomeView::followUnreadCount(const QString& seriesId) const
+{
+    if (seriesId.isEmpty() || !FollowStore::isFollowed(seriesId)) return 0;
+    const FollowSnapshot::Snapshot snap = FollowSnapshot::get(seriesId);
+    if (snap.pending.isEmpty()) return 0;
+    return follow::unreadCount(snap.pending, [](const QString& childId) {
+        const ItemMarks::Marks m = ItemMarks::get(childId);
+        return follow::isDealtWith(m.hidden, m.completion == ItemMarks::Completion::None);
+    });
+}
+
 // The watchlist / collection folders. Same gate as the calendar, re-asserted here rather than trusted to
 // have been asserted when the vectors were filled, so a future path that fills them without checking
 // still cannot make a folder appear on an unconfigured install.
@@ -5974,8 +6627,10 @@ void HomeView::renderRecents()
     //
     // The default is load-bearing: with no stored list, `available` is built by walking
     // homerows::defaultShelfOrder() and the planner hands it straight back, so an untouched profile gets the
-    // exact sequence — recently-played groups, "You Missed", "Airing Soon", "★ Favorites" — this function
-    // produced before #161. probe_homerows pins both halves of that.
+    // exact sequence — recently-played groups, "New", "Airing Soon", "★ Favorites" — this function
+    // produced before #161, with #155's "New" standing where "You Missed" stood: it absorbed that shelf's
+    // rows (see buildNew), so the substitution changes the header, not what is on the screen.
+    // probe_homerows pins both halves of that.
     struct Group { QString header; QVector<MediaItem> items; };  // a shelf's rows, under an optional divider
     enum RowStyle { StyleResume, StyleWhen, StylePlain };         // how a row's label/icon is drawn
     struct Shelf { QString rowId; RowStyle style = StylePlain; QVector<Group> groups; int count = 0; };
@@ -6029,23 +6684,6 @@ void HomeView::renderRecents()
         return out;
     };
 
-    // "trakt:missed" — Trakt "You Missed" (#25): the episodes of your followed shows that already aired and
-    // you have not seen. COMPLETELY ABSENT unless a Trakt account is configured AND connected — the catalog is
-    // empty otherwise, and an empty shelf is never pushed, so an install that never heard of Trakt renders
-    // exactly the rows it rendered before this existed. No shelf, no header, no placeholder, no hint. BOUNDED
-    // at trakt::kMissedShelfMax: this is the one shelf whose length is driven by how long the user has been
-    // away, and a strip you have to scroll has stopped being a glance. The folder under the video catalogue is
-    // where the whole backlog lives.
-    auto buildTraktMissed = [this]() {
-        QVector<Group> out;
-        Group g;
-        g.header = tr("You Missed");
-        for (const MediaItem& raw : traktMissedItems(trakt::kMissedShelfMax).items)
-            g.items.push_back(correctedRow(raw));   // Trakt's title is a scrape like any other
-        if (!g.items.isEmpty()) out.push_back(g);
-        return out;
-    };
-
     // "trakt:calendar" — Trakt "Airing Soon" (#23): the episodes of your followed shows still to air this
     // week. Same absent-unless-there-is-something rule as the shelf above, for the same reason, and a calendar
     // whose every episode has already aired leaves no orphan divider.
@@ -6081,6 +6719,99 @@ void HomeView::renderRecents()
             // get — otherwise Home showed a corrected poster (displayImage already ran it) beside an
             // uncorrected title, on the screen the app lands on.
             g.items.push_back(correctedRow(it));
+        }
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
+    // "new" — "New" (issue #155): ONE shelf with TWO producers. It REPLACES the "trakt:missed" row in
+    // homerows::defaultShelfOrder() — that id stays accepted vocabulary with no producer in this build, so a
+    // stored list naming it is kept and skipped like any other unknown row (HomeRows.h), and #25's rows are
+    // still on the home screen, under this header.
+    //
+    // WHY #25's ROWS MOVED IN HERE. Issue #155 says the two "should share the New shelf rather than each
+    // growing their own — noted so whichever lands second doesn't duplicate the UI", and this is the one
+    // landing second. "You missed" (Trakt's calendar says an episode of a show you follow THERE aired and
+    // you have not watched it) and a follow (a source you asked us to watch grew a child) are the same
+    // sentence from two directions, and a home screen that said it twice under two headings would be the
+    // duplication that note exists to prevent. So the #25 rows are unchanged — same MediaItem, same marker,
+    // same activation, same dismissal menu — they are merely emitted under this header, in one order, with
+    // the union deduplicated by item id (follow::mergeNewShelf). The uncapped "You Missed" FOLDER under the
+    // video catalogue is untouched and is still where the whole backlog lives.
+    //
+    // BOUNDED twice: the #25 half at trakt::kMissedShelfMax and the union at follow::kNewShelfMax. This is
+    // the one shelf whose length is driven by how long the user has been away, and a strip you have to
+    // scroll has stopped being a glance.
+    //
+    // ABSENT UNLESS THERE IS SOMETHING, the rule every shelf here uses: an install with no follows and no
+    // Trakt account renders exactly what it rendered before this existed — no header, no placeholder, no hint.
+    auto buildNew = [this]() {
+        QVector<Group> out;
+
+        // A child leaves the shelf once the user has dealt with it, through the completion states that
+        // already exist (ItemMarks) — the same rule #25's rows live under. One predicate, shared by the rows
+        // and by the tile badge in browseItems(), so the two can never disagree.
+        auto dealtWith = [](const QString& childId) {
+            const ItemMarks::Marks m = ItemMarks::get(childId);
+            return follow::isDealtWith(m.hidden, m.completion == ItemMarks::Completion::None);
+        };
+
+        QVector<follow::NewRow> followRows;
+        QHash<QString, MediaItem> byId;
+        for (const FollowItem& f : FollowStore::list())
+        {
+            const FollowSnapshot::Snapshot snap = FollowSnapshot::get(f.itemId);
+            if (snap.pending.isEmpty()) continue;
+            const QVector<follow::NewRow> rows =
+                follow::rowsForSeries(f.itemId, f.addonId, snap.pending, dealtWith);
+            for (const follow::NewRow& r : rows)
+            {
+                MediaItem it;
+                it.id = r.id;
+                it.type = r.type.isEmpty() ? f.type : r.type;
+                it.title = r.title.isEmpty() ? f.title : r.title;
+                // The series name rides the row text: on the Home list "Ep 412" alone says nothing about
+                // WHICH show grew, and this shelf is a mixture of every series you follow.
+                it.subtitle = r.subtitle.isEmpty() ? f.title
+                                                   : (f.title + QStringLiteral("  ·  ") + r.subtitle);
+                it.thumbnailUrl = MetaCache::scrapedImage(r.id, r.thumbnailUrl.isEmpty() ? f.thumbnailUrl
+                                                                                         : r.thumbnailUrl);
+                it.url = r.url;
+                // The marker activation and the row menu read back: which series, and from which source.
+                it.mime = browse::newShelfMarker(f.addonId, f.itemId);
+                if (isHiddenItem(it)) continue;
+                byId.insert(r.id, correctedRow(it));   // a source's own title is a scrape like any other
+                followRows << r;
+            }
+        }
+
+        QVector<follow::NewRow> missedRows;
+        for (const MediaItem& raw : traktMissedItems(trakt::kMissedShelfMax).items)
+        {
+            const MediaItem it = correctedRow(raw);   // Trakt's title is a scrape like any other
+            follow::NewRow r;
+            r.id = it.id;
+            r.title = it.title;
+            r.subtitle = it.subtitle;
+            // The row's own stamp: the newest episode it speaks for. That is the number the marker already
+            // carries for the dismissal, and using it here is what interleaves the two producers by DATE
+            // rather than by which loop ran first.
+            r.foundAt = browse::traktMissedThroughOf(it.mime);
+            if (r.id.isEmpty()) continue;
+            if (!byId.contains(r.id)) byId.insert(r.id, it);
+            missedRows << r;
+        }
+
+        const QVector<follow::NewRow> merged =
+            follow::mergeNewShelf(followRows, missedRows, follow::kNewShelfMax);
+        if (merged.isEmpty()) return out;
+        Group g;
+        g.header = tr("New");
+        for (const follow::NewRow& r : merged)
+        {
+            const MediaItem it = byId.value(r.id);
+            if (it.title.isEmpty() && it.id.isEmpty()) continue;
+            g.items.push_back(it);
         }
         if (!g.items.isEmpty()) out.push_back(g);
         return out;
@@ -6141,7 +6872,7 @@ void HomeView::renderRecents()
     for (const QString& id : homerows::defaultShelfOrder())
     {
         if (id == QStringLiteral("continue"))            pushShelf(id, StyleResume, buildContinue());
-        else if (id == QStringLiteral("trakt:missed"))   pushShelf(id, StyleWhen,   buildTraktMissed());
+        else if (id == QStringLiteral("new"))            pushShelf(id, StyleWhen,   buildNew());
         else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
         else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
     }
@@ -6224,7 +6955,9 @@ void HomeView::renderRecents()
                 {
                     // The air day / episode code rides in the row text: the Home list is a list, not a poster
                     // grid, and "Show S01E04" alone does not say WHEN, which is the entire point of the shelf.
-                    label += QStringLiteral("    ·  ") + it.subtitle;
+                    // Only when there IS one: the "New" shelf mixes producers and a row with no second line
+                    // would otherwise render a dangling separator with nothing after it.
+                    if (!it.subtitle.isEmpty()) label += QStringLiteral("    ·  ") + it.subtitle;
                 }
                 auto* w = new QListWidgetItem(label, grid_);
                 w->setSizeHint(QSize(0, 52));
@@ -6545,6 +7278,17 @@ void HomeView::activateItem(int row)
         QMetaObject::invokeMethod(this, [this, copy] { showTraktMissedMenu(copy); }, Qt::QueuedConnection);
         return;
     }
+    // A New-shelf row (issue #155), on EITHER surface. Same shape and the same reasoning as the #25 row
+    // above: the row needs verbs beyond "open it" — mark this one seen, mark the whole series seen, stop
+    // following — and a menu is the only control every one of this app's four layouts reaches with a D-pad.
+    // Deferred a turn for the reason that one is: this can arrive from a themed `activated` handler, and
+    // opening a nested overlay under a live QML delegate is the #28 crash.
+    if (browse::isNewShelfMime(it.mime))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showNewItemMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
     if (it.mime == QStringLiteral("trakt:cal"))
     {
         if (it.imdbStreamId.isEmpty())
@@ -6695,6 +7439,10 @@ void HomeView::activateItem(int row)
     // row is deferred a turn, exactly like "_newopds" and "_newlivetv" below, because it spins Osk nested
     // loops and then rebuilds this very level's model - and NavMenu::pick is a nested event loop, so doing
     // that inside a QML activation is how crash #28 is reproduced.
+    // Audiobookshelf (#197). ONE call rather than thirteen `type ==` lines, and it is the SAME call the
+    // themed route below makes: browse/LeafRoute.h's whole argument is that two surfaces answering the same
+    // question from two hand-written lists is how a category ends up working on one layout only.
+    if (activateAbsItem(it)) return;
     if (it.type == QString::fromLatin1(browse::kMusicServersType))
         { openMusicServersLevel(); return; }
     if (it.type == QString::fromLatin1(browse::kMusicServerType))
@@ -6863,6 +7611,7 @@ void HomeView::activateItem(int row)
     // unlike a row index — cannot be invalidated by a repopulate during the turn.
     if (it.type == QStringLiteral("_recomps")) { openRecompsLevel(); return; }
     if (it.type == QStringLiteral("_recompheader")) return;   // a section label: not activatable
+    if (it.type == QStringLiteral("_recompsfeederror")) return;  // #174 error row: not actionable either
     if (it.type == QStringLiteral("_recompport"))
     {
         const QString pid = it.mime.mid(QStringLiteral("recompport:").size());
@@ -7433,6 +8182,16 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
                                   Qt::QueuedConnection);
         return;
     }
+    // #197: a saved AUDIOBOOK server long-presses to remove, for the identical reason. Something you can add
+    // and never remove is not configuration.
+    if (it.type == QString::fromLatin1(browse::kAbsServerType))
+    {
+        const QString sid = browse::absKeyOf(it.mime, browse::kAbsServerPrefix);
+        const QString name = it.title;
+        QMetaObject::invokeMethod(this, [this, sid, name] { removeAudiobookServerInteractive(sid, name); },
+                                  Qt::QueuedConnection);
+        return;
+    }
 
     // #193 increment 2: a music track or album long-presses/right-clicks to the queue verbs. Placed above the
     // recentView_ guard for the same reason Live TV's two rows are — this is a BROWSE row, and the plain
@@ -7440,6 +8199,23 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
     // a nav-kit NavMenu owned by MainWindow, and it re-resolves on the far side.
     if (browse::queueTargetFor(it).ok()) { emit browseQueueMenuRequested(row); return; }
 
+    // A New-shelf row (issue #155). Above the recentView_ guard AND above the plain remove menu below it,
+    // because on the Home list this row is neither a recent nor a favourite — "Remove from Recent" would
+    // remove nothing and say it had.
+    if (browse::isNewShelfMime(it.mime))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showNewItemMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
+    // A series-shaped row anywhere in a catalogue: the classic layout's Follow verb. Deferred a turn like
+    // every other menu here (issue #28).
+    if (follow::isFollowable(it.type, it.expandable) && !it.id.isEmpty())
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showFollowMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
@@ -7692,6 +8468,10 @@ void HomeView::loadTop()
         { populateMusicWork(browse::musicKeyOf(top.item.mime, browse::kMusicWorkPrefix)); return; }
     // Returning to an Audiobooks level (#139) — Back out of a played book, or out of an author. Same shape
     // and same reasoning as the music levels above: rebuild from the installed index, never a rescan.
+    // Returning to an Audiobookshelf level (#197). ONE line for all thirteen, because every one of them
+    // stamped its own key into its marker mime and populateAbsLevel is the only thing that reads it.
+    if (top.detail && browse::isAbsType(top.item.type))
+        { populateAbsLevel(top.item.type, absTopKey()); return; }
     if (top.detail && top.item.type == QStringLiteral("_abroot")) { populateAudiobooks(); return; }
     if (top.detail && top.item.type == QStringLiteral("_abauthor"))
         { populateAudiobookAuthor(browse::audiobookKeyOf(top.item.mime, browse::kAudiobookAuthorPrefix)); return; }
@@ -8612,6 +9392,38 @@ static bool isLocalGameLeaf(const MediaItem& it)
     return (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty();
 }
 
+// ---- The themed layout's Follow verbs (issue #155) -------------------------------------------------------
+// The themed twins of showFollowMenu's rows. They take a browse INDEX, like every other themedLeaf* accessor
+// the detail action row is driven through, and resolve it to the item here — the classic long-press menu is
+// handed a MediaItem instead, but both end in the same toggleFollow/markAllSeen, so the two layouts cannot
+// come to disagree about what the verb does.
+bool HomeView::isThemedLeafFollowed(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    return FollowStore::isFollowed(items_[browseRowMap_[idx]].id);
+}
+
+int HomeView::themedLeafNewCount(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return 0;
+    return followUnreadCount(items_[browseRowMap_[idx]].id);
+}
+
+void HomeView::runThemedFollowVerb(int idx, const QString& verb)
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return;
+    const MediaItem it = items_[browseRowMap_[idx]];   // copy: both arms below repopulate items_
+    if (!follow::isFollowable(it.type, it.expandable) || it.id.isEmpty()) return;
+    if (verb == QStringLiteral("markseen"))
+    {
+        FollowSnapshot::markAllSeen(it.id);
+        loadTop();
+        emit browseItemsChanged(false);
+        return;
+    }
+    toggleFollow(it);
+}
+
 bool HomeView::isThemedLeafFavorite(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return false;
@@ -8905,6 +9717,20 @@ QVariantMap HomeView::themedDetailData(int idx)
     // nothing on a film and nothing on a PC game; retroSystemFor excludes both.
     if (!retroSystemFor(it, browseConsoleName()).isEmpty()) verbs << QStringLiteral("romhack");
     verbs << QStringLiteral("favorite");
+    // "Follow" — series-shaped rows only, on BOTH layouts, through the one oracle the classic long-press
+    // menu also asks (follow::isFollowable). Next to Favorite because it is its peer: the favourite says "I
+    // like this", the follow says "tell me when it grows", and they are stored, synced and merged alike.
+    // "Mark all seen" appears only while the series is actually carrying unread children, so the pill row
+    // does not grow a permanently-inert control.
+    if (follow::isFollowable(it.type, it.expandable) && !it.id.isEmpty())
+    {
+        verbs << QStringLiteral("follow");
+        const bool followed = FollowStore::isFollowed(it.id);
+        const int unread = followUnreadCount(it.id);
+        out.insert(QStringLiteral("followed"), followed);
+        out.insert(QStringLiteral("newCount"), unread);
+        if (followed && unread > 0) verbs << QStringLiteral("markseen");
+    }
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
     // External-player one-off actions, only on leaves that resolve to VIDEO playback (audio/readers/games stay
@@ -9019,6 +9845,10 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
+    // Audiobookshelf (#197), the SAME call activateItem makes. These rows all drill (every type starts with
+    // '_', so themedEnterFor sends them down the ordinary browse path) and so should never arrive here — but
+    // "should never" is exactly what was true of a music track before #74 found it was not.
+    if (activateAbsItem(it)) return;
     // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
     // provider detour below (a metadata-only catalog otherwise dead-ends at "No stream source" though the file
     // is on disk). Mirrors resolvePlay's head + the classic Play route.
@@ -10450,6 +11280,15 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         const MediaItem& it = items_[i];
         QString label = it.title;
+        // The unread badge on a followed series' tile (issue #155), CLASSIC half. The themed grid draws a
+        // "N NEW" corner badge from browseItems()'s newCount; this list has no delegate to badge, so the
+        // same number rides the tile text — the idiom the Recents rows already use for their resume
+        // percentage. Both are counted through the one filter (followUnreadCount), so they cannot disagree.
+        if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable))
+        {
+            const int unread = followUnreadCount(it.id);
+            if (unread > 0) label += QStringLiteral("   \u25cf %1 new").arg(unread);
+        }
         if (!it.subtitle.isEmpty()) label += QStringLiteral("\n") + it.subtitle;
         auto* w = new QListWidgetItem(label, grid_);
         w->setSizeHint(QSize(kPoster.width() + 16, kPoster.height() + 48));

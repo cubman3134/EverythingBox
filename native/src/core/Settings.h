@@ -309,6 +309,24 @@ namespace Settings
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
 
+    // FOLLOWING A SERIES (issue #155). How often the background pass asks each followed series' source what
+    // children it has now, in HOURS — one of follow::intervalChoicesHours() (6 / 12 / 24 / 168), or 0 for
+    // MANUAL, where nothing runs until "Check now" is pressed. Default daily.
+    //
+    // Both keys live under "following/" and are ORDINARY SYNCED PREFERENCES that ride the settings bundle: how
+    // often to check and whether to check on a metered link are choices about the user, and someone who set
+    // "weekly" on the TV means it on the phone too. The prefix is deliberately NOT "follow/", which
+    // CloudSync::isPerItemStoreKey claims for the per-item follow marks — "following/" does not start with
+    // "follow/" (the slash is load-bearing), and probe_cloudmerge pins that the two are classified apart.
+    int  followIntervalHours();
+    void setFollowIntervalHours(int hours);
+
+    // Whether the scheduled pass may run on a METERED connection. Off by default, per the issue: a background
+    // refresh over somebody's phone tethering is exactly the thing a polite feature does not do. "Check now"
+    // is a deliberate press and is never gated on it.
+    bool followOnMetered();
+    void setFollowOnMetered(bool on);
+
     // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
     // screenshots without the window needing focus (see core/UiTestServer). Default off.
     bool uiTestChannel();
@@ -575,6 +593,14 @@ namespace Settings
     // Key "ps3/autoUpdate".
     bool ps3AutoUpdate();
     void setPs3AutoUpdate(bool on);
+
+    // Install a game's own update and DLC packages into the target emulator before launching it (issue #189):
+    // whatever sits in the `updates/` and `dlc/` folders BESIDE the game, installed per that emulator's recipe
+    // (ContentRecipe.h). Default on — a game whose DLC is silently missing looks broken, and nothing here can
+    // block a launch: every failure is reported and the base game still boots. Off is the master switch for
+    // someone who drives their emulators' content stores entirely by hand. Key "content/autoInstall".
+    bool installGameContent();
+    void setInstallGameContent(bool on);
 
     // Verify ROMs against user-supplied No-Intro / Redump DAT files dropped into <data>/dats/ (issue #97). When
     // on, the detail view lazily hashes a game's PAYLOAD and stamps it Verified / Bad / Unknown. Passive — never

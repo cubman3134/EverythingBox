@@ -22,6 +22,7 @@
 //     "marks":   { "<profile>": { "items": {"<hash>": <blob>}, "tagVocab": [...], "pinnedTags": [...],
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
+//     "follow":  { "<profile>": { "items": [<follow>...], "tombs": [{key,ts}] } },  // followed series (#155)
 //     "bookmarks":{ "<profile>": { "items": [<bookmark>...], "tombs": [{key,ts}] } },  // per-book reading marks (#136)
 //     "audiobookmarks":{ "<profile>": { "items": [<abm>...], "tombs": [{key,ts}] } },  // per-item audio marks (#140)
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
@@ -50,6 +51,9 @@
 //                  shelf anywhere) OR pinned space (a bare unpin retires the shelf without deleting the tag).
 //   * favorites  — union by itemId keep newest ts; a tombstone with ts >= the item's ts suppresses it (a
 //                  newer re-add — ts strictly greater — beats an older tombstone; resurrection prevented).
+//   * follow     — followed series (issue #155): union by itemId keep newest ts, tombstone-vs-ts exactly as
+//                  favourites. Deliberately the same rule and not a new one — FollowStore was shaped as
+//                  favourites' twin so this section could be favourites' section with a different key.
 //   * bookmarks  — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #136). The id is
 //                  the book+position (BookmarkStore::idFor), so the same passage on two devices folds to one
 //                  row; a remove tombstones so a peer cannot resurrect it.

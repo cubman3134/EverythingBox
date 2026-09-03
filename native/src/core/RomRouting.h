@@ -14,6 +14,7 @@
 #include <QChar>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 
 namespace RomRouting
 {
@@ -75,5 +76,28 @@ namespace RomRouting
     inline bool acceptUnderSystemFolder(const QString& extLower)
     {
         return !isLibraryJunkExtension(extLower);
+    }
+
+    // ---- the CONTENT SIDECAR folders (issue #189) ---------------------------------------------------------
+    // `updates/` and `dlc/` beside a game hold that game's update and DLC PACKAGES, not games. They are
+    // ordinary ROM-shaped files (.nsp, .wux, a folder of .rpx) sitting under a recognised system folder, so
+    // the extension filter above cannot tell them apart from the game — the FOLDER is what says what they are,
+    // exactly as the folder is what says which system a file belongs to.
+    //
+    // Without this the feature is self-defeating: putting a game's update beside it would add a second tile to
+    // the library named after the update, and "Great Game [0100000000010800][v65536]" would sit in the grid
+    // looking playable next to the game it patches. (Observed on the very first live drive of #189.)
+    //
+    // `relPath` is the file's path RELATIVE to the system folder, with '/' separators. Case-insensitive, and
+    // it matches a whole segment only — a game legitimately called "Updates.nsp", or one in a folder called
+    // "dlcpack", is untouched.
+    inline bool underContentSidecar(const QString& relPath)
+    {
+        const QStringList parts = relPath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        for (int i = 0; i + 1 < parts.size(); ++i)   // directory segments only — never the file name itself
+            if (parts.at(i).compare(QLatin1String("updates"), Qt::CaseInsensitive) == 0
+             || parts.at(i).compare(QLatin1String("dlc"), Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
     }
 }

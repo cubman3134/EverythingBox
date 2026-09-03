@@ -15,10 +15,12 @@
 #include <vector>
 #include "../addons/AddonModels.h"
 #include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
+#include "../core/FollowPlan.h"      // follow::Child is a value in the in-flight fetch map (#155)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
+#include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
@@ -32,6 +34,7 @@
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 
+namespace LaunchOpts { struct Override; }   // issue #189: the per-game content levers' row-value helper
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
@@ -47,6 +50,7 @@ class BackgroundMusic;
 class HomeView;
 class AddonManager;
 class CatalogPrefetcher;
+class FollowScheduler;      // the followed-series background refresh (issue #155)
 class CloudSync;
 class SaveSync;             // per-file save/state sync — see core/SaveSync.h
 class LocalResolveCache;
@@ -563,7 +567,31 @@ private:
     // reaches part forty days after part one was signed, so each part's link is minted when the app reaches
     // it, at the playRequested choke point. `firstPartUrl` is part one's, already resolved by the search the
     // user was waiting on, so the common case costs no extra round trip.
-    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl);
+    //
+    // `startIndexOverride` (#197) is the part to begin on when somebody OTHER than the resume marks knows
+    // the answer — which for an Audiobookshelf book is the server, whose position is the one every client
+    // of it agrees on. -1, the default, is the unchanged behaviour: the last part carrying a mark.
+    void openRemoteAudiobook(const MediaItem& item, const QString& firstPartUrl,
+                             int startIndexOverride = -1);
+    // ---- Audiobookshelf (issue #197) --------------------------------------------------------------------
+    // Open an Audiobookshelf item: a book (multi-file or single), or one podcast episode. `startPart` is the
+    // part to begin on, or -1 for "wherever the server says" — which is the ordinary case, because the play
+    // session the server answers with CARRIES its own resume position, so seeding a resume from the server
+    // costs no request this open did not already have.
+    void openAbsItem(const QString& qualifiedId, int startPart);
+    // The chapter list the player should be navigating: the SERVER'S, rebased onto the part that is open,
+    // when an Audiobookshelf book is playing; mpv's own otherwise. One reader, because the sleep timer, the
+    // per-book speed memory and the segment stack each ask this question and three answers would be three
+    // features that disagreed about whether the thing playing has chapters.
+    QVector<MediaSegments::Chapter> currentChapters() const;
+    // The Settings line that says whether any audiobook servers are set up. The twin of
+    // musicServerStatusLine, and the ONE place either builder says it.
+    QString audiobookServerStatusLine() const;
+    // The queue index of one entry, or -1. Both hooks below need it and neither may guess.
+    int absQueueIndexOf(const QString& identity) const;
+    // Install the two PlaybackSession seams a server that owns its own progress needs. Called once, at
+    // construction, beside the rest of the session wiring.
+    void installAbsProgressHooks();
     // Mint the link for the part `token` names and play it — the choke point's answer for a part token.
     // Async, guarded by remoteBookGen_ so an answer for a part the listener has already skipped past is
     // dropped rather than played over the one they chose.
@@ -1023,6 +1051,11 @@ private:
     // builders hold that line in different things, and the caller only ever wants "show the value again".
     // Re-armed from Scrobbler::statusChanged, so a listen delivered while the panel is up moves the number.
     std::function<void()> scrobbleStatusUpdate_;
+    // #197: the same idiom for the audiobook-server status line. Adding a server is ASYNCHRONOUS — the
+    // sign-in is a round trip — so the row that says how many are set up cannot be refreshed on the line
+    // after the call the way the music one is. Whichever settings surface is up owns this hook, and the
+    // store's change hook fires it once the add has actually landed.
+    std::function<void()> absServerStatusUpdate_;
     // The same idiom again for the DISCORD presence line. Re-armed from PresenceController::statusChanged,
     // so a Discord client started while the panel is up flips the line from "isn't running" to "connected"
     // without the user reopening anything.
@@ -1108,6 +1141,17 @@ private:
     void themedDetailPickStatus(QString key); // the completion-status picker (NavMenu) for one item
     void themedDetailEditTags(QString key);   // the re-presenting tags picker/loop for one item
     void editLaunchOptions(QString key, QString systemId); // the per-game core/emulator/args editor (NavMenu/Osk, issue #51)
+    // Per-game GAME UPDATES / DLC levers (issue #189). ONE implementation shared by the two per-game surfaces —
+    // the themed detail's "Launch options…" editor and the Start-menu emulation panel (the route the CLASSIC
+    // grid has to per-game settings) — so the rows exist on both layouts with one write path and no drift.
+    // `dlc` false = the update version pin (default / none / a typed pin), true = the DLC on/off lever.
+    // Blocking (NavMenu/Osk), so the panel opens it deferred off the pad timer like its other blocking rows.
+    void editContentLever(QString key, bool dlc);
+    // The row's value text for a given override ("Newest available" / "None" / the pin; "On" / "Off").
+    static QString contentLeverValue(const LaunchOpts::Override& ov, bool dlc);
+    // Does the emulator this game resolves to declare ANY content-install recipe? A row for an emulator with
+    // no recipe would be a lever that cannot do anything, so it is not offered.
+    static bool emulatorHasContentRecipes(const QString& emulatorId);
     void showOtherVersions(QString gamePath);  // the region/revision "Other versions" picker (NavMenu, issue #50)
     // Bulk edit (issue #65): a re-presenting nav-kit CHECKLIST over the current level's leaves (seeded with the
     // item the "Select…" verb came from), then a single action applied to the whole selection — favourite /
@@ -1265,6 +1309,15 @@ private:
     std::unique_ptr<LocalResolveCache> resolveCache_;
     std::unique_ptr<CatalogResolver> resolver_;
     CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
+    // Following a series (issue #155): the polite background refresh (a QObject child of this) and the map
+    // from an in-flight AddonManager request id to the scheduler callback waiting for it. The map is cleared
+    // at every cycle boundary, so a reply that never arrives cannot accumulate.
+    // The display name for one follow interval, in hours. ONE function, called by BOTH settings builders,
+    // so the themed Choice row and the classic combo cannot come to offer differently-worded (or
+    // differently-ordered) versions of the same list — which is exactly the GS_TWINS failure class.
+    static QString followIntervalLabel(int hours);
+    FollowScheduler* followSched_ = nullptr;
+    QHash<int, std::function<void(bool, const QVector<follow::Child>&)>> followFetches_;
     std::unique_ptr<CloudSync> cloud_;
     // Per-file sync of emulator saves and save states (save-sync T5). Declared AFTER cloud_ on purpose: it
     // holds a raw CloudSync* and members are destroyed in reverse declaration order, so this one goes first.
@@ -1687,6 +1740,11 @@ private:
     // port is and what it will ask them for, then install (if it is not there yet) and launch it. `portId`
     // is a NativePorts catalog id. See core/NativePorts.h for why a port is not an emulator.
     void showNativePort(const MediaItem& item, const QString& portId);
+    // The SELF-COMPILED tier's card (issue #248 increment b), defined in MainWindowRecomps.cpp. A catalogue
+    // entry that names a recompiler is built ON THIS MACHINE from that engine plus the user's own dump, and
+    // this build does not build anything yet — so the row lists, states its engine and licence, and its
+    // Install says so and offers the engine's own page instead of starting something that cannot finish.
+    void showSelfCompiledPort(const ExternalEmulator& port);
     // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
     // the flow that chose it has returned by the time this is used, and a download can outlive the page the
     // game was picked from.
@@ -1880,6 +1938,27 @@ private:
     // Bumped by every new queue and every jump. A mint that comes back carrying a stale generation is
     // dropped: a slow answer for a part the listener skipped past must not play over the one they chose.
     quint64 remoteBookGen_ = 0;
+    // ---- The Audiobookshelf book the queue is currently playing (#197) -----------------------------------
+    // The qualified id of the book/episode the queue belongs to, empty when the queue is not one of ours.
+    // It is what the progress hook reports under and what partStreamUrl mints from; the queue itself still
+    // holds only part tokens, exactly as #214 requires.
+    QString absBookId_;
+    // The book's tracks, so a position in the PART that is playing can be turned into a position in the
+    // BOOK — which is the only time base the server speaks. Exact (each track's real start and length),
+    // never the byte estimate #218's BookTimeline has to make for a torrent release.
+    QVector<Abs::Track> absTracks_;
+    // The server's chapter list for the whole book, and the rebased slice of it for the part that is open.
+    // currentChapters() hands the second to everything that asks; it is empty for every other kind of media,
+    // which is what keeps mpv's own list the answer everywhere else.
+    QVector<Abs::Chapter> absChapters_;
+    QVector<MediaSegments::Chapter> serverChapters_;
+    // The position the server gave us for THIS open, and the part it falls in. Consumed once by the resume
+    // hook (a second entry must not be seeded to the same offset), which is why it is cleared when read.
+    int    absSeedPart_ = -1;
+    double absSeedWithin_ = 0.0;
+    // The book's whole length, as the server gives it. Reported alongside the position, because a fraction
+    // computed from the PART that is playing would tell the server this book is six minutes long.
+    double absDuration_ = 0.0;
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
