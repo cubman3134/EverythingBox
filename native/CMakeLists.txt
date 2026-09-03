@@ -715,6 +715,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/FollowStore.cpp src/core/FollowStore.h       # followed series, per-item-synced (issue #155)
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h # ...and the device-local seen/pending snapshots
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h # ...and the polite background refresh
+        src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
         src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
@@ -1031,6 +1035,22 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # Following a series (issue #155): the pure rule layer (FollowPlan.h -- followability, the schedule and its
+    # jitter bound, the per-source politeness predicate, the snapshot diff and the New shelf's union), the SYNCED
+    # follow mark (FollowStore, favourites' shape + tombstones), the DEVICE-LOCAL snapshot store
+    # (FollowSnapshot), and the background scheduler driven against a FAKE CLOCK. QtCore-only -- the scheduler
+    # takes its clock, its fetcher, its follow list and its playing/metered predicates as injected callbacks, so
+    # nothing here needs the addon manager, the network or an event loop.
+    add_executable(probe_follow tools/probe_follow.cpp
+        src/core/FollowPlan.h                          # header-only; the pure rules the probe drives directly
+        src/core/FollowStore.cpp src/core/FollowStore.h
+        src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h
+        src/core/FollowScheduler.cpp src/core/FollowScheduler.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records the unfollow tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_follow PRIVATE src src/core)
+    target_link_libraries(probe_follow PRIVATE Qt6::Core)
 
     # Per-book reading bookmarks (issue #136): the pure ReaderAnchor model (header-only, in src/ebook) and the
     # BookmarkStore round-trip (add/remove/list-sorted + the delete tombstone). QtCore-only (a QSettings wrapper

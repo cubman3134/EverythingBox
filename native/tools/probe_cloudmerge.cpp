@@ -345,7 +345,7 @@ int main(int argc, char** argv)
         QSettings raw(iniPath, QSettings::IniFormat);
         for (const char* g : {"marks", "favorites", "bookmarks", "audiobookmarks", "playlists", "filterpresets",
                               "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset",
-                              "missed"})
+                              "missed", "follow", "followsnap"})
             raw.remove(QLatin1String(g));
         raw.sync();
         ItemMarks::invalidate();
@@ -5176,6 +5176,117 @@ int main(int argc, char** argv)
         CHECK(!legacyOut.contains(QStringLiteral("stype")));
         CHECK(legacyOut.value(QStringLiteral("path")).toString() == QStringLiteral("C:\\x\\y.mkv"));
         noCredentialOnAnyKey(legacyOut);   // 38c's whole-row statement over THIS row too — see the lambda
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 39. Followed series (issue #155): favourites' merge rule, and the two-way carve-out ---------------
+    // The follow mark is a peer of the favourite, so this section is deliberately favourites' section (SS8)
+    // asked again of a different key -- if the two ever answer differently, one of them has grown a rule of its
+    // own, which is exactly what shaping FollowStore as favourites' twin was meant to prevent.
+    //
+    // The carve-out is asserted BOTH ways for the reason SS16 asserts every other one both ways: a mistaken
+    // filing is invisible from one side. And the near-miss is asserted explicitly -- the SETTINGS keys live
+    // under "following/", one letter away from the per-item prefix "follow/", and if the prefix ever loses its
+    // slash the schedule silently stops syncing while every other test stays green.
+    {
+        auto injFollows = [&](const QString& p, const QVector<QPair<QString, qint64>>& items) {
+            QJsonArray a;
+            for (const auto& it : items)
+            {
+                QJsonObject o; o["itemId"] = it.first; o["title"] = it.first;
+                o["addonId"] = QStringLiteral("srcA"); o["type"] = QStringLiteral("series");
+                o["ts"] = double(it.second); a.append(o);
+            }
+            setRaw(QStringLiteral("follow/") + p + QStringLiteral("/items"), compact(a));
+        };
+        auto followIds = [&](const QString& p) {
+            QStringList out;
+            QSettings rawS(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     rawS.value(QStringLiteral("follow/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+                out << v.toObject().value(QStringLiteral("itemId")).toString();
+            out.sort();
+            return out;
+        };
+        auto followTs = [&](const QString& p, const QString& id) -> qint64 {
+            QSettings rawS(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     rawS.value(QStringLiteral("follow/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+                if (v.toObject().value(QStringLiteral("itemId")).toString() == id)
+                    return qint64(v.toObject().value(QStringLiteral("ts")).toDouble());
+            return -1;
+        };
+
+        // 39a. Newer wins, each direction; disjoint sets union.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}});
+        const QJsonObject remFA = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 500}}); mergeDoc(remFA);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("S")) == T - 100);
+
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 500}});
+        const QJsonObject remFB = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}}); mergeDoc(remFB);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("S")) == T - 100);
+
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}});
+        const QJsonObject remFC = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 100}}); mergeDoc(remFC);
+        CHECK(followIds(QStringLiteral("f39")) == (QStringList{QStringLiteral("A"), QStringLiteral("B")}));
+
+        // 39b. An UNFOLLOW travels: the tombstone suppresses a peer's copy stamped at or before it, so the
+        // series does not come back from the device that still holds it.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 400}});
+        const QJsonObject remStale = serializeNow();
+        wipeStores();
+        injFollows(QStringLiteral("f39"), {});
+        Tombstones::record(QStringLiteral("follow/f39"), QStringLiteral("S"), T - 300);
+        mergeDoc(remStale);
+        CHECK(followIds(QStringLiteral("f39")).isEmpty());
+
+        // ...and a strictly NEWER re-follow beats that tombstone, so an unfollow is not permanent.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("S"), T - 100}});
+        const QJsonObject remFresh = serializeNow();
+        wipeStores();
+        injFollows(QStringLiteral("f39"), {});
+        Tombstones::record(QStringLiteral("follow/f39"), QStringLiteral("S"), T - 300);
+        mergeDoc(remFresh);
+        CHECK(followIds(QStringLiteral("f39")) == (QStringList{QStringLiteral("S")}));
+
+        // 39c. Both merge orders converge -- the property every section here exists to keep.
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}, {QStringLiteral("B"), T - 900}});
+        const QJsonObject devFA = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 50}, {QStringLiteral("C"), T - 10}});
+        const QJsonObject devFB = serializeNow();
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("A"), T - 100}, {QStringLiteral("B"), T - 900}});
+        mergeDoc(devFB);
+        const QStringList afterAB = followIds(QStringLiteral("f39"));
+        const qint64 bTsAB = followTs(QStringLiteral("f39"), QStringLiteral("B"));
+        wipeStores(); injFollows(QStringLiteral("f39"), {{QStringLiteral("B"), T - 50}, {QStringLiteral("C"), T - 10}});
+        mergeDoc(devFA);
+        CHECK(followIds(QStringLiteral("f39")) == afterAB);
+        CHECK(followTs(QStringLiteral("f39"), QStringLiteral("B")) == bTsAB);
+        CHECK(bTsAB == T - 50);   // the newer of the two stamps for the same series
+
+        // 39d. THE CARVE-OUT, both ways, and the "following/" near-miss.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("follow/default/items")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("follow/default/items"))  == false);
+        // The device-local half is the exact inverse.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("followsnap/default/deadbeef")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("followsnap/default/deadbeef")) == false);
+        // The SCHEDULE settings are ordinary synced preferences: neither carve-out may claim them, or the
+        // interval a user chose on one device silently stops reaching the next.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("following/interval")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("following/interval"))  == false);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("following/metered"))  == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("following/metered"))   == false);
+
+        // 39e. Both stores are out of SETTINGS-TRANSACTION scope: the snapshot is written by a BACKGROUND
+        // pass that can land mid-visit, and a Discard that reverted it would announce the same children twice.
+        CHECK(SettingsTxn::inScope(QStringLiteral("follow/f39/items")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("followsnap/f39/deadbeef")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("following/interval")) == true);
 
         wipeStores();
         useProfile(QStringLiteral("cmA"));

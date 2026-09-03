@@ -66,6 +66,9 @@
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
+#include "../core/FollowStore.h"     // Following a series (#155): the synced per-item follow mark
+#include "../core/FollowSnapshot.h"  // ...and the device-local snapshot the New shelf is built from
+#include "../core/FollowPlan.h"      // ...and the pure rules both layouts share (followability, the shelf)
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
@@ -1726,7 +1729,7 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
 
     // The classic home's built-in shelves, in the order it produces them.
     out.push_back({ QStringLiteral("continue"), tr("Continue watching"), true });
-    out.push_back({ QStringLiteral("trakt:missed"), tr("You Missed"), true });
+    out.push_back({ QStringLiteral("new"), tr("New"), true });
     out.push_back({ QStringLiteral("trakt:calendar"), tr("Airing Soon"), true });
     out.push_back({ QStringLiteral("favorites"), tr("★ Favorites"), true });
     // ...and the opt-in ones, offered whether or not they currently hold anything: this is the ADD list, and a
@@ -1933,6 +1936,16 @@ QVariantList HomeView::browseItems()
             m[QStringLiteral("onDisk")] = true;
             const int eps = LocalLibrary::index().ownedEpisodes(it.id);
             if (eps > 0) m[QStringLiteral("onDiskCount")] = eps;
+        }
+        // Following (issue #155): a followed series' tile says so, and carries its unread count so the
+        // themed grid can badge it. Purely additive — an un-followed tile carries neither key, so every
+        // other row renders byte-for-byte as it did.
+        if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable)
+            && FollowStore::isFollowed(it.id))
+        {
+            m[QStringLiteral("followed")] = true;
+            const int unread = followUnreadCount(it.id);
+            if (unread > 0) m[QStringLiteral("newCount")] = unread;
         }
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
@@ -5524,6 +5537,155 @@ void HomeView::showTraktMissedMenu(MediaItem it)
     }, window());
 }
 
+// ---- Following a series (issue #155): the row menu, the verb menu, and re-opening a followed series ------
+
+// Re-open a followed series' detail page, rooted at Home so Back returns where the user was. This is
+// openFavorite's tail with the identity coming from the follow row instead of the favourite row, and it
+// exists for the same reason that one does: once a shelf row is the only thing on screen, the SOURCE it came
+// from has to be recoverable from what the row carries, because the catalogue that produced it is long gone.
+void HomeView::openFollowedSeries(const QString& addonId, const QString& seriesId,
+                                  const QString& title, const QString& type, const QString& thumb)
+{
+    if (seriesId.isEmpty()) return;
+    LoadedAddon* addon = nullptr;
+    if (mgr_)
+        for (LoadedAddon* src : mgr_->sources())
+            if (src->manifest.id == addonId) { addon = src; break; }
+    if (!addon)
+    {
+        showToast(tr("That series' source addon isn't available."), kFeedbackLong);
+        return;
+    }
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("home"));
+    stack_.clear();
+    MediaItem mi;
+    mi.id = seriesId; mi.title = title; mi.type = type; mi.thumbnailUrl = thumb; mi.expandable = true;
+    Level lvl;
+    lvl.addon = addon; lvl.detail = true; lvl.item = mi; lvl.title = title;
+    stack_.push_back(lvl);
+    loadTop();
+}
+
+// The menu a New-shelf row opens. Row 0 is "open the series" rather than "play this child" deliberately: a
+// child of an arbitrary source is not necessarily playable from a home row (a manga chapter is a reader
+// route, a bridged episode needs a stream resolve), while the series page is the surface that already knows
+// how to open every one of them. The rest are the verbs the shelf needs to be clearable.
+void HomeView::showNewItemMenu(MediaItem it)
+{
+    const QString addonId  = browse::newShelfAddonOf(it.mime);
+    const QString seriesId = browse::newShelfSeriesOf(it.mime);
+    QString seriesTitle = it.subtitle.section(QStringLiteral("  ·  "), 0, 0);
+    for (const FollowItem& f : FollowStore::list())
+        if (f.itemId == seriesId) { seriesTitle = f.title; break; }
+    const QStringList rows = {
+        tr("▶   Open %1").arg(seriesTitle),
+        tr("✓   Mark this as seen"),
+        tr("✓✓  Mark everything in %1 as seen").arg(seriesTitle),
+        tr("☆   Stop following %1").arg(seriesTitle),
+    };
+    const QString childId = it.id;
+    const QString type = it.type;
+    const QString thumb = it.thumbnailUrl;
+    new NavMenu(it.title, rows, [this, addonId, seriesId, seriesTitle, childId, type, thumb](int row) {
+        // Fails CLOSED on a row whose marker did not carry a series: no row this build produces can be in
+        // that state (probe_browse pins the round trip), so this guards a row an older/newer build left on
+        // screen across an update rather than anything reachable today.
+        if (seriesId.isEmpty()) return;
+        switch (row)
+        {
+        case 0: openFollowedSeries(addonId, seriesId, seriesTitle, type, thumb); return;
+        case 1: FollowSnapshot::clearPending(seriesId, childId); break;
+        case 2: FollowSnapshot::markAllSeen(seriesId); break;
+        case 3:
+            FollowStore::remove(seriesId);
+            // Forget what this device had seen too. A re-follow years later must start from a silent
+            // baseline, not announce everything published in between — FollowSnapshot.h states the rule.
+            FollowSnapshot::forget(seriesId);
+            showToast(tr("No longer following “%1”.").arg(seriesTitle), kFeedbackShort);
+            break;
+        default: return;
+        }
+        if (recentView_) renderRecents();
+        else             loadTop();
+        emit browseItemsChanged(false);   // re-sync a themed browse view (else its selection desyncs)
+    }, window());
+}
+
+// The verb menu on a series row itself, for the CLASSIC layout (the themed layout carries the same verbs as
+// detail-row pills — see themedDetailData's "follow"/"markseen"). Gated on follow::isFollowable, the one
+// oracle both layouts ask, so the verb can never appear on a leaf on one surface and not the other.
+void HomeView::showFollowMenu(MediaItem it)
+{
+    const bool followed = FollowStore::isFollowed(it.id);
+    const int unread = followUnreadCount(it.id);
+    QStringList rows;
+    rows << (followed ? tr("✓   Following — stop") : tr("＋   Follow this series"));
+    if (followed && unread > 0) rows << tr("✓✓  Mark all %1 new as seen").arg(unread);
+    if (followed) rows << tr("⟳   Check for new items now");
+    const MediaItem copy = it;
+    new NavMenu(it.title, rows, [this, copy, followed, unread](int row) {
+        if (row == 0)
+        {
+            toggleFollow(copy);
+            return;
+        }
+        int next = 1;
+        if (followed && unread > 0 && row == next++) { FollowSnapshot::markAllSeen(copy.id); }
+        else if (followed && row == next) { emit followCheckNowRequested(); return; }
+        else return;
+        if (recentView_) renderRecents();
+        else             loadTop();
+        emit browseItemsChanged(false);
+    }, window());
+}
+
+// Follow / unfollow, from either layout. The stored row carries everything the background refresh needs to
+// re-ask the source (its addon and the source's own item id) AND everything a shelf needs to draw it.
+void HomeView::toggleFollow(const MediaItem& it)
+{
+    if (it.id.isEmpty()) return;
+    if (FollowStore::isFollowed(it.id))
+    {
+        FollowStore::remove(it.id);
+        FollowSnapshot::forget(it.id);
+        showToast(tr("No longer following “%1”.").arg(it.title), kFeedbackShort);
+    }
+    else
+    {
+        FollowItem f;
+        f.itemId = it.id;
+        f.addonId = stack_.isEmpty() || !stack_.last().addon ? QString() : stack_.last().addon->manifest.id;
+        f.title = it.title;
+        f.subtitle = it.subtitle;
+        f.type = it.type;
+        f.thumbnailUrl = it.thumbnailUrl;
+        FollowStore::add(f);
+        showToast(tr("Following “%1”. New items appear on the New shelf.").arg(it.title), kFeedbackShort);
+        emit followCheckNowRequested();   // ...and take the first, silent baseline reading right away
+    }
+    browseSelectKey_ = it.id;
+    if (recentView_) renderRecents();
+    else             loadTop();
+    emit browseItemsChanged(false);
+    browseSelectKey_.clear();
+}
+
+// How many unseen children a followed series is carrying, counted through the SAME dealt-with filter the New
+// shelf's rows use (follow::unreadCount over follow::isDealtWith), so the badge and the rows cannot disagree.
+// 0 for anything not followed.
+int HomeView::followUnreadCount(const QString& seriesId) const
+{
+    if (seriesId.isEmpty() || !FollowStore::isFollowed(seriesId)) return 0;
+    const FollowSnapshot::Snapshot snap = FollowSnapshot::get(seriesId);
+    if (snap.pending.isEmpty()) return 0;
+    return follow::unreadCount(snap.pending, [](const QString& childId) {
+        const ItemMarks::Marks m = ItemMarks::get(childId);
+        return follow::isDealtWith(m.hidden, m.completion == ItemMarks::Completion::None);
+    });
+}
+
 // The watchlist / collection folders. Same gate as the calendar, re-asserted here rather than trusted to
 // have been asserted when the vectors were filled, so a future path that fills them without checking
 // still cannot make a folder appear on an unconfigured install.
@@ -5958,8 +6120,10 @@ void HomeView::renderRecents()
     //
     // The default is load-bearing: with no stored list, `available` is built by walking
     // homerows::defaultShelfOrder() and the planner hands it straight back, so an untouched profile gets the
-    // exact sequence — recently-played groups, "You Missed", "Airing Soon", "★ Favorites" — this function
-    // produced before #161. probe_homerows pins both halves of that.
+    // exact sequence — recently-played groups, "New", "Airing Soon", "★ Favorites" — this function
+    // produced before #161, with #155's "New" standing where "You Missed" stood: it absorbed that shelf's
+    // rows (see buildNew), so the substitution changes the header, not what is on the screen.
+    // probe_homerows pins both halves of that.
     struct Group { QString header; QVector<MediaItem> items; };  // a shelf's rows, under an optional divider
     enum RowStyle { StyleResume, StyleWhen, StylePlain };         // how a row's label/icon is drawn
     struct Shelf { QString rowId; RowStyle style = StylePlain; QVector<Group> groups; int count = 0; };
@@ -6013,23 +6177,6 @@ void HomeView::renderRecents()
         return out;
     };
 
-    // "trakt:missed" — Trakt "You Missed" (#25): the episodes of your followed shows that already aired and
-    // you have not seen. COMPLETELY ABSENT unless a Trakt account is configured AND connected — the catalog is
-    // empty otherwise, and an empty shelf is never pushed, so an install that never heard of Trakt renders
-    // exactly the rows it rendered before this existed. No shelf, no header, no placeholder, no hint. BOUNDED
-    // at trakt::kMissedShelfMax: this is the one shelf whose length is driven by how long the user has been
-    // away, and a strip you have to scroll has stopped being a glance. The folder under the video catalogue is
-    // where the whole backlog lives.
-    auto buildTraktMissed = [this]() {
-        QVector<Group> out;
-        Group g;
-        g.header = tr("You Missed");
-        for (const MediaItem& raw : traktMissedItems(trakt::kMissedShelfMax).items)
-            g.items.push_back(correctedRow(raw));   // Trakt's title is a scrape like any other
-        if (!g.items.isEmpty()) out.push_back(g);
-        return out;
-    };
-
     // "trakt:calendar" — Trakt "Airing Soon" (#23): the episodes of your followed shows still to air this
     // week. Same absent-unless-there-is-something rule as the shelf above, for the same reason, and a calendar
     // whose every episode has already aired leaves no orphan divider.
@@ -6065,6 +6212,99 @@ void HomeView::renderRecents()
             // get — otherwise Home showed a corrected poster (displayImage already ran it) beside an
             // uncorrected title, on the screen the app lands on.
             g.items.push_back(correctedRow(it));
+        }
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
+    // "new" — "New" (issue #155): ONE shelf with TWO producers. It REPLACES the "trakt:missed" row in
+    // homerows::defaultShelfOrder() — that id stays accepted vocabulary with no producer in this build, so a
+    // stored list naming it is kept and skipped like any other unknown row (HomeRows.h), and #25's rows are
+    // still on the home screen, under this header.
+    //
+    // WHY #25's ROWS MOVED IN HERE. Issue #155 says the two "should share the New shelf rather than each
+    // growing their own — noted so whichever lands second doesn't duplicate the UI", and this is the one
+    // landing second. "You missed" (Trakt's calendar says an episode of a show you follow THERE aired and
+    // you have not watched it) and a follow (a source you asked us to watch grew a child) are the same
+    // sentence from two directions, and a home screen that said it twice under two headings would be the
+    // duplication that note exists to prevent. So the #25 rows are unchanged — same MediaItem, same marker,
+    // same activation, same dismissal menu — they are merely emitted under this header, in one order, with
+    // the union deduplicated by item id (follow::mergeNewShelf). The uncapped "You Missed" FOLDER under the
+    // video catalogue is untouched and is still where the whole backlog lives.
+    //
+    // BOUNDED twice: the #25 half at trakt::kMissedShelfMax and the union at follow::kNewShelfMax. This is
+    // the one shelf whose length is driven by how long the user has been away, and a strip you have to
+    // scroll has stopped being a glance.
+    //
+    // ABSENT UNLESS THERE IS SOMETHING, the rule every shelf here uses: an install with no follows and no
+    // Trakt account renders exactly what it rendered before this existed — no header, no placeholder, no hint.
+    auto buildNew = [this]() {
+        QVector<Group> out;
+
+        // A child leaves the shelf once the user has dealt with it, through the completion states that
+        // already exist (ItemMarks) — the same rule #25's rows live under. One predicate, shared by the rows
+        // and by the tile badge in browseItems(), so the two can never disagree.
+        auto dealtWith = [](const QString& childId) {
+            const ItemMarks::Marks m = ItemMarks::get(childId);
+            return follow::isDealtWith(m.hidden, m.completion == ItemMarks::Completion::None);
+        };
+
+        QVector<follow::NewRow> followRows;
+        QHash<QString, MediaItem> byId;
+        for (const FollowItem& f : FollowStore::list())
+        {
+            const FollowSnapshot::Snapshot snap = FollowSnapshot::get(f.itemId);
+            if (snap.pending.isEmpty()) continue;
+            const QVector<follow::NewRow> rows =
+                follow::rowsForSeries(f.itemId, f.addonId, snap.pending, dealtWith);
+            for (const follow::NewRow& r : rows)
+            {
+                MediaItem it;
+                it.id = r.id;
+                it.type = r.type.isEmpty() ? f.type : r.type;
+                it.title = r.title.isEmpty() ? f.title : r.title;
+                // The series name rides the row text: on the Home list "Ep 412" alone says nothing about
+                // WHICH show grew, and this shelf is a mixture of every series you follow.
+                it.subtitle = r.subtitle.isEmpty() ? f.title
+                                                   : (f.title + QStringLiteral("  ·  ") + r.subtitle);
+                it.thumbnailUrl = MetaCache::scrapedImage(r.id, r.thumbnailUrl.isEmpty() ? f.thumbnailUrl
+                                                                                         : r.thumbnailUrl);
+                it.url = r.url;
+                // The marker activation and the row menu read back: which series, and from which source.
+                it.mime = browse::newShelfMarker(f.addonId, f.itemId);
+                if (isHiddenItem(it)) continue;
+                byId.insert(r.id, correctedRow(it));   // a source's own title is a scrape like any other
+                followRows << r;
+            }
+        }
+
+        QVector<follow::NewRow> missedRows;
+        for (const MediaItem& raw : traktMissedItems(trakt::kMissedShelfMax).items)
+        {
+            const MediaItem it = correctedRow(raw);   // Trakt's title is a scrape like any other
+            follow::NewRow r;
+            r.id = it.id;
+            r.title = it.title;
+            r.subtitle = it.subtitle;
+            // The row's own stamp: the newest episode it speaks for. That is the number the marker already
+            // carries for the dismissal, and using it here is what interleaves the two producers by DATE
+            // rather than by which loop ran first.
+            r.foundAt = browse::traktMissedThroughOf(it.mime);
+            if (r.id.isEmpty()) continue;
+            if (!byId.contains(r.id)) byId.insert(r.id, it);
+            missedRows << r;
+        }
+
+        const QVector<follow::NewRow> merged =
+            follow::mergeNewShelf(followRows, missedRows, follow::kNewShelfMax);
+        if (merged.isEmpty()) return out;
+        Group g;
+        g.header = tr("New");
+        for (const follow::NewRow& r : merged)
+        {
+            const MediaItem it = byId.value(r.id);
+            if (it.title.isEmpty() && it.id.isEmpty()) continue;
+            g.items.push_back(it);
         }
         if (!g.items.isEmpty()) out.push_back(g);
         return out;
@@ -6125,7 +6365,7 @@ void HomeView::renderRecents()
     for (const QString& id : homerows::defaultShelfOrder())
     {
         if (id == QStringLiteral("continue"))            pushShelf(id, StyleResume, buildContinue());
-        else if (id == QStringLiteral("trakt:missed"))   pushShelf(id, StyleWhen,   buildTraktMissed());
+        else if (id == QStringLiteral("new"))            pushShelf(id, StyleWhen,   buildNew());
         else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
         else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
     }
@@ -6208,7 +6448,9 @@ void HomeView::renderRecents()
                 {
                     // The air day / episode code rides in the row text: the Home list is a list, not a poster
                     // grid, and "Show S01E04" alone does not say WHEN, which is the entire point of the shelf.
-                    label += QStringLiteral("    ·  ") + it.subtitle;
+                    // Only when there IS one: the "New" shelf mixes producers and a row with no second line
+                    // would otherwise render a dangling separator with nothing after it.
+                    if (!it.subtitle.isEmpty()) label += QStringLiteral("    ·  ") + it.subtitle;
                 }
                 auto* w = new QListWidgetItem(label, grid_);
                 w->setSizeHint(QSize(0, 52));
@@ -6527,6 +6769,17 @@ void HomeView::activateItem(int row)
     {
         const MediaItem copy = it;
         QMetaObject::invokeMethod(this, [this, copy] { showTraktMissedMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
+    // A New-shelf row (issue #155), on EITHER surface. Same shape and the same reasoning as the #25 row
+    // above: the row needs verbs beyond "open it" — mark this one seen, mark the whole series seen, stop
+    // following — and a menu is the only control every one of this app's four layouts reaches with a D-pad.
+    // Deferred a turn for the reason that one is: this can arrive from a themed `activated` handler, and
+    // opening a nested overlay under a live QML delegate is the #28 crash.
+    if (browse::isNewShelfMime(it.mime))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showNewItemMenu(copy); }, Qt::QueuedConnection);
         return;
     }
     if (it.mime == QStringLiteral("trakt:cal"))
@@ -7424,6 +7677,23 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
     // a nav-kit NavMenu owned by MainWindow, and it re-resolves on the far side.
     if (browse::queueTargetFor(it).ok()) { emit browseQueueMenuRequested(row); return; }
 
+    // A New-shelf row (issue #155). Above the recentView_ guard AND above the plain remove menu below it,
+    // because on the Home list this row is neither a recent nor a favourite — "Remove from Recent" would
+    // remove nothing and say it had.
+    if (browse::isNewShelfMime(it.mime))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showNewItemMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
+    // A series-shaped row anywhere in a catalogue: the classic layout's Follow verb. Deferred a turn like
+    // every other menu here (issue #28).
+    if (follow::isFollowable(it.type, it.expandable) && !it.id.isEmpty())
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showFollowMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
@@ -8596,6 +8866,38 @@ static bool isLocalGameLeaf(const MediaItem& it)
     return (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty();
 }
 
+// ---- The themed layout's Follow verbs (issue #155) -------------------------------------------------------
+// The themed twins of showFollowMenu's rows. They take a browse INDEX, like every other themedLeaf* accessor
+// the detail action row is driven through, and resolve it to the item here — the classic long-press menu is
+// handed a MediaItem instead, but both end in the same toggleFollow/markAllSeen, so the two layouts cannot
+// come to disagree about what the verb does.
+bool HomeView::isThemedLeafFollowed(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    return FollowStore::isFollowed(items_[browseRowMap_[idx]].id);
+}
+
+int HomeView::themedLeafNewCount(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return 0;
+    return followUnreadCount(items_[browseRowMap_[idx]].id);
+}
+
+void HomeView::runThemedFollowVerb(int idx, const QString& verb)
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return;
+    const MediaItem it = items_[browseRowMap_[idx]];   // copy: both arms below repopulate items_
+    if (!follow::isFollowable(it.type, it.expandable) || it.id.isEmpty()) return;
+    if (verb == QStringLiteral("markseen"))
+    {
+        FollowSnapshot::markAllSeen(it.id);
+        loadTop();
+        emit browseItemsChanged(false);
+        return;
+    }
+    toggleFollow(it);
+}
+
 bool HomeView::isThemedLeafFavorite(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return false;
@@ -8889,6 +9191,20 @@ QVariantMap HomeView::themedDetailData(int idx)
     // nothing on a film and nothing on a PC game; retroSystemFor excludes both.
     if (!retroSystemFor(it, browseConsoleName()).isEmpty()) verbs << QStringLiteral("romhack");
     verbs << QStringLiteral("favorite");
+    // "Follow" — series-shaped rows only, on BOTH layouts, through the one oracle the classic long-press
+    // menu also asks (follow::isFollowable). Next to Favorite because it is its peer: the favourite says "I
+    // like this", the follow says "tell me when it grows", and they are stored, synced and merged alike.
+    // "Mark all seen" appears only while the series is actually carrying unread children, so the pill row
+    // does not grow a permanently-inert control.
+    if (follow::isFollowable(it.type, it.expandable) && !it.id.isEmpty())
+    {
+        verbs << QStringLiteral("follow");
+        const bool followed = FollowStore::isFollowed(it.id);
+        const int unread = followUnreadCount(it.id);
+        out.insert(QStringLiteral("followed"), followed);
+        out.insert(QStringLiteral("newCount"), unread);
+        if (followed && unread > 0) verbs << QStringLiteral("markseen");
+    }
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
     // External-player one-off actions, only on leaves that resolve to VIDEO playback (audio/readers/games stay
@@ -10434,6 +10750,15 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         const MediaItem& it = items_[i];
         QString label = it.title;
+        // The unread badge on a followed series' tile (issue #155), CLASSIC half. The themed grid draws a
+        // "N NEW" corner badge from browseItems()'s newCount; this list has no delegate to badge, so the
+        // same number rides the tile text — the idiom the Recents rows already use for their resume
+        // percentage. Both are counted through the one filter (followUnreadCount), so they cannot disagree.
+        if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable))
+        {
+            const int unread = followUnreadCount(it.id);
+            if (unread > 0) label += QStringLiteral("   \u25cf %1 new").arg(unread);
+        }
         if (!it.subtitle.isEmpty()) label += QStringLiteral("\n") + it.subtitle;
         auto* w = new QListWidgetItem(label, grid_);
         w->setSizeHint(QSize(kPoster.width() + 16, kPoster.height() + 48));
