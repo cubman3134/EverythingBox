@@ -63,7 +63,7 @@ bool contentEqual(const Override& a, const Override& b)
 {
     return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs
         && a.backend == b.backend    // Slice 2a: the backend is a lever like the others
-        && a.contentUpdate == b.contentUpdate && a.contentDlc == b.contentDlc;   // issue #189
+        && a.contentUpdate == b.contentUpdate && a.contentDlc == b.contentDlc   // issue #189
         && a.bootFile == b.bootFile; // #190: which program inside a folder game this row boots
 }
 
@@ -74,7 +74,7 @@ bool Override::isEmpty() const
     // The backend is a full lever: a game that overrides ONLY its backend must read as a real record, not a
     // husk — otherwise ensureCache() would drop it and get() would lose the choice on the next read.
     return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty()
-        && contentUpdate.isEmpty() && contentDlc.isEmpty();   // issue #189: both content levers are full levers
+        && contentUpdate.isEmpty() && contentDlc.isEmpty()   // issue #189: both content levers are full levers
         && bootFile.isEmpty();
 }
 
