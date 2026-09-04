@@ -1758,7 +1758,8 @@ int main(int argc, char** argv)
                       && rows[0].url.isEmpty(),
                   "jellyfin: a Continue Watching row is the same leaf shape a browse level builds");
         }
-=======
+    }
+
     // ---- Personal TV channels (#179 inc 1): the shelf builder + the favourite -------------------------------
     // The two things about a channel row that are NOT obvious and that a live drive punished: its id is the
     // ROW-PRODUCER KEY (one string shared by the star, Recents and a #161 home row), and it is NOT a folder —

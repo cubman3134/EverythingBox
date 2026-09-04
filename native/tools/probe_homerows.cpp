@@ -102,8 +102,10 @@ static void testDefaultIsToday()
     // #83: and the built-in list itself. It is `classicToday` plus "jellyfin:continue", directly after the
     // local recently-played shelf — the same question one machine along, and above the two Trakt shelves,
     // which are about what exists rather than about what you were doing.
+    // "new" rather than "trakt:missed": #155's New shelf absorbed #25's rows and took that position, so the
+    // built-in list is classicToday with "jellyfin:continue" inserted after the local recently-played shelf.
     const QStringList builtIn{ QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
-                               QStringLiteral("trakt:missed"), QStringLiteral("trakt:calendar"),
+                               QStringLiteral("new"), QStringLiteral("trakt:calendar"),
                                QStringLiteral("favorites") };
     CHECK(defaultShelfOrder() == builtIn);
     // Every one of `classicToday` is still there, in its old relative order — the property that matters, and
