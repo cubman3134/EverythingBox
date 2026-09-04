@@ -141,6 +141,14 @@ namespace SystemCatalog
             { "zxspectrum",   "Sinclair ZX Spectrum",{ "tzx", "z80", "szx", "rzx", "scl", "trd", "sna" }, { "fuse" } },
             { "c64",          "Commodore 64",        { "d64", "t64", "prg", "crt", "g64", "x64", "p00" }, { "vice_x64", "vice_x64sc" } },
             { "msdos",        "MS-DOS",              { "dosz", "com", "bat", "conf" }, { "dosbox_pure", "dosbox_core" } },
+            // MSX (#190 increment 2). Added because the issue lists MSX and the launch recipes had nowhere to
+            // attach: blueMSX was only ever a FALLBACK core for sg1000/coleco, so "the MSX system" did not
+            // exist as an id and a recipe naming it would have been data nothing could reach. blueMSX is the
+            // default (its machine set covers MSX/MSX2/MSX2+/turboR and it auto-boots carts and disks); fMSX
+            // is the lighter alternative. Only the unambiguous cartridge extensions are claimed: .rom, .dsk,
+            // .cas and .col are all spoken for by earlier systems (or far too generic), so those route by the
+            // "MSX" console hint / the msx/ folder, which is the same rule Amstrad's .dsk already follows.
+            { "msx",          "MSX / MSX2",          { "mx1", "mx2" },        { "bluemsx", "fmsx" } },
             { "vic20",        "Commodore VIC-20",    { "20", "40", "60", "a0", "b0" }, { "vice_xvic" } },
             // More consoles / computers / arcade / CD systems. CD and arcade systems share cue/chd/iso/zip
             // with earlier systems, so they claim only unambiguous extensions (often none) and are routed by
@@ -512,6 +520,7 @@ namespace SystemCatalog
         else if (has("cdtv"))                                            id = QStringLiteral("cdtv");  // before commodore->c64
         else if (has("vic-20") || has("vic20") || has("vic"))             id = QStringLiteral("vic20"); // before commodore->c64
         else if (has("commodore 64") || has("c64") || has("commodore"))   id = QStringLiteral("c64");
+        else if (has("msx"))                                              id = QStringLiteral("msx"); // matches "MSX", "MSX2", "MSX Turbo R"
         else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
         else if (has("xbox 360") || has("xbox360"))                       id = QStringLiteral("xbox360");
         else if (has("xbox"))                                            id = QStringLiteral("xbox");

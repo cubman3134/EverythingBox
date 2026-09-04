@@ -388,6 +388,12 @@ public:
 
     QString addonsRoot() const { return root_; }
 
+    // The per-source config blob this app sends with requests to OUR OWN servers (never to a third-party
+    // Stremio addon). Exposed for issue #194 increment 3, whose music-shelf fetcher speaks the same HTTP
+    // shape as the calls above but is a separate unit — a music supplier is not a browse level — and would
+    // otherwise have had to re-derive a per-source credential. Empty when the source has no settings.
+    QByteArray serverConfigHeader(const LoadedAddon* src) const;
+
 signals:
     void catalogReady(int requestId, const MediaCatalog& catalog);
     void metaReady(int requestId, const MediaDetail& detail);

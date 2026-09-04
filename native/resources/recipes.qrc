@@ -10,5 +10,6 @@
     <file alias="apple2.json">../systems/recipes/apple2.json</file>
     <file alias="pc98.json">../systems/recipes/pc98.json</file>
     <file alias="x1.json">../systems/recipes/x1.json</file>
+    <file alias="msx.json">../systems/recipes/msx.json</file>
   </qresource>
 </RCC>

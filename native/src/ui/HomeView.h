@@ -12,15 +12,18 @@
 #include <QHash>
 #include <QPointer>
 #include "../addons/AddonModels.h"
+#include "../core/Tracker.h"   // tracker::Kind - TrackerLeaf names it by value (issue #156)
 #include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
 #include "../core/GameFilter.h"   // gamefilter::GameFacts — saved-filter shelf extraction (#63)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
+#include "../core/Channels.h"        // #179: the channel model the editor edits
 #include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
 #include "../browse/MusicCatalogs.h" // browse::MusicEmptyNote — the Music category's "nothing here" text (#74)
 #include "../browse/AudiobookCatalogs.h" // browse::AudiobookEmptyNote — the same, for the books (#139)
+#include "../browse/AbsCatalogs.h"       // browse::AbsCoverFn — the Audiobookshelf levels (#197)
 #include "../browse/BookCatalogs.h"      // browse::BookEmptyNote - and the same again, for #134
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
@@ -72,6 +75,11 @@ public:
     // -> only then a username and password. In that order deliberately: a server whose identity cannot be
     // read is never asked for a password, because there would be nothing to qualify its rows with.
     void connectJellyfinServerInteractive();
+    // #197: the OSK prompt that adds an AUDIOBOOKSHELF server (name / address / username / password, and
+    // the plain-HTTP downgrade). PUBLIC for the same reason the music one is: both settings builders open
+    // it, and a capability reachable only from the shelf it manages is one most people never find. The
+    // password is handed to AbsClient::login and is not retained anywhere on this side.
+    void addAudiobookServerInteractive();
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
@@ -222,6 +230,8 @@ public:
     QVariant dumpStatusFact(const MediaItem& it);
     void scheduleRomVerify(const MediaItem& it, const QString& romPath);
     QSet<QString> romVerifyInFlight_;   // ROM paths whose background verification is running (dedupe)
+    QSet<QString> recompHashInFlight_;  // #248: ROM paths being hashed for the recomp ROM-identity gate
+    bool          recompFeedFetching_ = false;   // one catalogue fetch at a time, whatever the navigation
     // Composite an item's miximage card on the thread pool (compose+PNG-encode is 100-400ms — synchronous on
     // the display path it WAS the themed shelf's per-row scroll hitch). Plans on the GUI thread (MetaCache is
     // not thread-safe), composes on a worker, then records the role + refreshes the panel if the row is still
@@ -240,6 +250,12 @@ public:
     void downloadThemedLeaf(int browseIndex);      // resolve + queue the browse-item to download (no play)
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;
+    // Following a series (issue #155), the themed twins of the classic long-press menu's rows. Index-keyed
+    // like every other themedLeaf* accessor the detail action row is driven through; both arms end in the
+    // same toggleFollow / markAllSeen the classic menu calls, so the two layouts cannot disagree.
+    bool isThemedLeafFollowed(int browseIndex) const;
+    int  themedLeafNewCount(int browseIndex) const;
+    void runThemedFollowVerb(int browseIndex, const QString& verb);   // "follow" | "markseen"
     void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)
     // The themed DETAIL view's data for the browse-item at `browseIndex`: the rich MediaDetail (title/subtitle/
     // overview/facts + art via MediaArt::writeInto) resolved from the same local sources requestThemedMeta uses
@@ -260,6 +276,12 @@ public:
     // The "Other versions" detail action (issue #50) reads this to re-derive the game's region/revision
     // siblings from its own folder.
     QString themedLeafGamePath(int browseIndex) const;
+    // The tracker identity of the browse leaf at `browseIndex` (issue #156): the link key (built by the
+    // one shared rule, tracker::itemKeyFor, so the reader/player/detail surfaces cannot disagree about
+    // what "this series" is), the title to search the tracker with, and whether to search its manga or
+    // its anime catalogue. An empty key means the row is not trackable.
+    struct TrackerLeaf { QString key; QString title; tracker::Kind kind = tracker::Kind::Anime; };
+    TrackerLeaf themedLeafTracker(int browseIndex) const;
     // True when the focused browse row is a game leaf (item.type == "game"), regardless of whether its OWN system
     // resolved. The Start emulation panel (Task 5) uses this so a game whose system can only be inferred from the
     // console FOLDER it sits in (a catalog/streamed game with no systemHint and an ambiguous/absent extension) is
@@ -393,6 +415,12 @@ signals:
     // request headers to fetch at all — many image CDNs gate on a Referer, and there was nowhere to put one.
     void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run);
+    // "Read online" was chosen on an OPDS book whose server offers OPDS-PSE (#153). The item carries its
+    // page template (MediaItem::pse) and this catalog's device-local Authorization header, and MainWindow
+    // turns both into the page list the seam above already knows how to open. A SEPARATE signal from
+    // openItem because the two verbs are genuinely different endings of the same row: this one streams
+    // pages, that one downloads the volume — and the download must stay reachable, which is the point.
+    void readOpdsPseRequested(const MediaItem& item);
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
@@ -415,6 +443,12 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // The tracker verb (issue #156) was activated on this item, from the classic detail button or the
+    // themed action row. MainWindow owns the NavMenu flows and the network object, exactly as it owns the
+    // source picker above; HomeView only says WHICH item.
+    // `manga` comes from the SAME gate the Play/Read button uses (classicActionGates, private here), so
+    // the caller does not have to re-derive it from a type list that could drift from the button.
+    void trackerRequested(const MediaItem& item, bool manga);
     // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
     // confirm and the install — the same shape as chooseSourceRequested above.
     void romhacksRequested(const MediaItem& item, const QString& systemId);
@@ -422,6 +456,16 @@ signals:
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.
     void nativePortRequested(const MediaItem& item, const QString& portId);
+    // A channel row was activated: TUNE it (issue #179). MainWindow owns the tuner — it resolves what is on
+    // now from the wall clock, joins the programme at its offset through PlaybackSession, and owns the
+    // Up/Down surfing that follows — so this view only names the channel. Carries the CHANNEL ID, not the
+    // row's index or its MediaItem, because the id is the one thing a repopulate cannot invalidate.
+    void tuneChannelRequested(const QString& channelId);
+    // "Check for new items now" (issue #155). MainWindow owns the FollowScheduler — it is the only object
+    // that can reach the addon manager, the playback state and the network — so the view asks rather than
+    // runs, the same shape as chooseSourceRequested above. Also fired right after a fresh follow, so the
+    // first (silent) baseline reading is taken while the user is still looking at the thing they followed.
+    void followCheckNowRequested();
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
@@ -453,6 +497,11 @@ signals:
     // `startSec` < 0 is "wherever the marks say" and is what every route but one passes; the chapter list
     // (#139 increment 2) passes a real offset into `startPath`, and 0 there means the top of that part.
     void playAudiobookRequested(const QString& bookKey, const QString& startPath, int startSec);
+    // #197: play an AUDIOBOOKSHELF item. `qualifiedId` is "abs:<serverId>:<itemId>" (or an episode's
+    // "...#<episodeId>"); `startPart` is the part to begin on, or -1 for "wherever the server says". Same
+    // contract as the two signals above and for the same reason — the KEY travels, never a link: the link
+    // for a part is minted at the moment the app reaches it (core/RemoteAudiobook.h is the argument).
+    void playAbsRequested(const QString& qualifiedId, int startPart);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.
@@ -580,6 +629,25 @@ private:
     void renderMusicArtist(const QString& artistKey);
     void renderMusicAlbum(const QString& albumKey);
     void showMusicServerError(const QString& title, const QString& why);
+    // ---- Audiobookshelf (issue #197) -------------------------------------------------------------------
+    // ONE open/populate PAIR for all thirteen levels, rather than thirteen pairs. Every level here is the
+    // same three steps — decide the title, ask the client for what it needs, render a builder over what
+    // the client already has — and the only thing that differs is which builder. Thirteen copies of those
+    // three steps is thirteen places for the Back path and the fetch-landed path to disagree, which is
+    // exactly the drift browse/LeafRoute.h exists to have removed for leaves.
+    //
+    // populateAbsLevel is therefore the ONE reader: openAbsLevel calls it, the cacheChanged signal calls
+    // it, and Back calls it, so a level cannot be drawn one way on the way in and another way on the way
+    // back.
+    void openAbsLevel(const QString& type, const QString& key, const QString& title);
+    void populateAbsLevel(const QString& type, const QString& key);
+    QString absTopKey() const;
+    void scheduleAbsArtRefresh();
+    void prefetchAbsCovers(const QString& qualifiedLibraryId, const QVector<Abs::Item>& items);
+    void removeAudiobookServerInteractive(const QString& serverId, const QString& name);
+    // Dispatch a row whose type starts with "_abs". True when it was one of ours and has been handled.
+    bool activateAbsItem(const MediaItem& it);
+    browse::AbsCoverFn absCover() const;
     void showMusicLoading(const QString& title);
     void scheduleMusicArtRefresh();
     void prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums);
@@ -601,7 +669,13 @@ private:
     void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
     void applyMusicRemap();                             // ...and move what was banked onto the new pick
     void applyMusicStreamRekey(const QString& albumKey); // #204: off the signed url, onto the track's own name
-    void fetchMergeSources();                           // one getArtists per server, at most once per session
+    void fetchMergeSources();                           // one artist list per supplier, at most once per session
+    // The connected servers that serve a MUSIC SHELF, refreshed into ServerMusicClient (issue #194,
+    // increment 3). Which addon sources those are is a question only this side can answer — it needs the
+    // loaded-source list, each source's base url and its per-source config header — so the answer is pushed
+    // DOWN to the fetcher rather than the fetcher reaching up for it. Cheap and idempotent; called wherever
+    // the supplier list is about to be read.
+    void refreshMusicShelves();
     // An instance key -> the key its merged row is actually rendered under. Identity when nothing merged.
     QString mergedArtistPrimary(const QString& key) const;
     QString mergedAlbumPrimary(const QString& key) const;
@@ -753,12 +827,27 @@ private:
     void fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl); // resolve+fetch(daily-cache)+parse EPG
     void openLiveTvGuideLevel(const QString& sourceId);        // drill the "Guide" row -> the channels×today grid
     void populateLiveTvGuide(const QString& sourceId);         // (re)build the grid without pushing a level (Back)
+    // ---- Personal TV channels (#179 inc 1) --------------------------------------------------------------
+    // The Channels shelf and its NavOverlay editor. The editor is the nav kit rather than a themed panel so
+    // that ONE implementation serves both layouts; every caller defers past the QML emission first, because
+    // NavMenu::pick / Osk::getText spin nested loops (the #28 family).
+    void openChannelsLevel();                                  // drill Home's "Channels" folder -> the shelf
+    void populateChannels();                                   // (re)build it: one row per channel + a "create" row
+    void editChannelInteractive(const QString& channelId);     // create ("") or edit/delete one channel
+    bool pickChannelSource(channels::SourceKind& kind, QString& sourceId, QString& label); // the source menu
     void addIptvSourceInteractive();                           // OSK name + URL -> save the source, refresh
     void removeIptvSourceInteractive(const QString& sourceId, const QString& name); // confirm -> remove, refresh
     void toggleLiveTvChannelFavorite(const MediaItem& it);     // star/unstar a channel (FavoritesStore "livetv")
     // ---- Recomps (#248 inc a): the browse surface over the native-port catalogue #233 ships ----
     void openRecompsLevel();                                   // drill Games' "Recomps" folder -> the section
     void populateRecomps();                                    // (re)build it: a header per system + its ports
+    // #248 inc b: the RetComM feed, refreshed at most once a day, off-thread, when the section is opened.
+    // The rows are drawn from the LAST GOOD COPY immediately and re-drawn if the fetch brings a newer one, so
+    // opening the section never waits on a network round trip.
+    void refreshRecompFeedAsync();
+    // ...and the ROM-identity gate's one-off hashing. A row is `checking dumps…` while these run; each path is
+    // hashed once, on the pool, into the shared HashVerify cache, and the section re-derives when it lands.
+    void scheduleRecompHashes(const QStringList& paths, const QHash<QString, QString>& systemHints);
     // ---- OPDS book catalogs (#146): saved book servers -> a browsable feed shelf -> download+open a book ----
     void openOpdsCatalogsLevel();                              // drill Reading's "Book Servers" folder -> the shelf
     void populateOpdsCatalogs();                               // (re)build it: one row per catalog + an "add" row
@@ -769,6 +858,7 @@ private:
     void showOpdsError(const QString& title);                  // a readable one-row failure, never a crash
     void addOpdsCatalogInteractive();                          // OSK name+URL+optional user/pass -> save, refresh
     void openOpdsBook(const MediaItem& it);                    // attach device-local auth, then download+open
+    void chooseOpdsBookAction(const MediaItem& book);          // #153: "Read online" beside "Download"
     // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
     void showPlaylistMenu(const QString& playlistId);
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
@@ -828,6 +918,26 @@ private:
     // NavMenu from the nav kit is controller/keyboard/mouse navigable in all of them. Same pattern, and
     // the same reasoning, as the Recent/Downloads game menu below.
     void showTraktMissedMenu(MediaItem it);
+
+    // ---- Following a series (issue #155) ---------------------------------------------------------
+    // The classic layout's verb surface. The THEMED layout carries the same two verbs as detail-row pills
+    // ("follow" / "markseen", built in themedDetailData and dispatched by MainWindow), and BOTH are gated on
+    // the one oracle follow::isFollowable — so the verb cannot appear on a leaf on one layout and not the
+    // other, which is the class of defect the two-layouts rule exists for.
+    void showFollowMenu(MediaItem it);       // long-press/right-click on a series row
+    void toggleFollow(const MediaItem& it);  // the verb itself, called from both layouts
+    // Activating a New-shelf row opens a menu rather than playing, for the "You Missed" row's reason: the
+    // row needs verbs beyond "open it" (mark this seen / mark the series seen / stop following), and a
+    // NavMenu is the only control every one of this app's four layouts reaches with a D-pad.
+    void showNewItemMenu(MediaItem it);
+    // Re-open a followed series' detail page from what a shelf row carries. openFavorite's tail, and it
+    // exists for the same reason: once the row is the only thing on screen, the source has to be
+    // recoverable from the row.
+    void openFollowedSeries(const QString& addonId, const QString& seriesId, const QString& title,
+                            const QString& type, const QString& thumb);
+    // The unread badge on a followed series' tile, counted through the same dealt-with filter the New
+    // shelf's rows use. 0 for anything not followed.
+    int  followUnreadCount(const QString& seriesId) const;
     // The synthetic "Trakt Watchlist" / "Trakt Collection" folders (video category only). Gated exactly as
     // the calendar is: the builder returns an EMPTY catalog whenever Trakt is not configured+connected, and
     // an empty catalog means no folder at all — no row, no placeholder, no "connect Trakt" hint.
@@ -990,6 +1100,10 @@ private:
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
     QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)
+    // "Track…" / "Tracking" — the AniList link for this series (issue #156). The classic twin of the
+    // themed action row's "tracker" pill. Hidden entirely until an AniList client is configured, so a
+    // user who does not use a tracker never sees it.
+    QPushButton* trackBtn_ = nullptr;
     QPushButton* manualBtn_ = nullptr;   // 📖 "Manual" — open the scraped game manual (issue #89), on demand
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
@@ -1082,6 +1196,11 @@ private:
     // flag that keeps a level from being rebuilt once per cover that lands.
     int               musicFetchGen_ = 0;
     bool              musicArtRefreshPending_ = false;
+    // #197: the same two, for the Audiobookshelf levels. Its OWN generation counter and not musicFetchGen_,
+    // because the two features navigate independently and a music fetch landing must not cancel a book
+    // level's — which is exactly what one shared counter would do.
+    int               absFetchGen_ = 0;
+    bool              absArtRefreshPending_ = false;
     // #194: the merged view over every supplier, and the two "we have already asked" sets that keep a
     // FAILED fetch from re-arming itself. artistsLoaded() stays false when a server refuses, so a gate on it
     // alone would re-request on every repopulate — and every repopulate is triggered by the last reply.

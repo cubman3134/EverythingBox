@@ -1,0 +1,72 @@
+{
+  "system": "msx",
+  "summary": "Cartridges and disks boot themselves. blueMSX needs the Machines and Databases folders from a blueMSX install in the system folder, and fMSX needs the MSX BIOS ROMs — neither ships them, and neither is ours to hand out.",
+  "firmwareFolder": "system",
+  "folderIsGame": false,
+  "executables": { "extensions": [], "prefer": [], "avoid": [] },
+  "cores": [
+    {
+      "core": "bluemsx",
+      "options": {
+        "bluemsx_msxtype": "Auto",
+        "bluemsx_auto_rewind_cas": "ON"
+      },
+      "firmware": [
+        {
+          "purpose": "blueMSX machine definitions and BIOS ROMs (the Machines folder from a blueMSX install)",
+          "files": ["Machines/Shared Roms/MSX.rom"],
+          "required": true
+        },
+        {
+          "purpose": "blueMSX software database (the Databases folder from a blueMSX install)",
+          "files": ["Databases/msxromdb.xml"],
+          "required": true
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    },
+    {
+      "core": "fmsx",
+      "options": {
+        "fmsx_mode": "MSX2+",
+        "fmsx_video_mode": "NTSC"
+      },
+      "firmware": [
+        {
+          "purpose": "MSX2+ system ROM (fMSX starts as an MSX2+ unless you change MSX Mode)",
+          "files": ["MSX2P.ROM"],
+          "required": true
+        },
+        {
+          "purpose": "MSX2+ extension ROM",
+          "files": ["MSX2PEXT.ROM"],
+          "required": true
+        },
+        {
+          "purpose": "MSX disk ROM (without it a disk image will not start)",
+          "files": ["DISK.ROM"],
+          "required": true
+        },
+        {
+          "purpose": "MSX1 and MSX2 system ROMs (only needed if you change MSX Mode away from MSX2+)",
+          "files": ["MSX.ROM", "MSX2.ROM", "MSX2EXT.ROM"],
+          "required": false
+        },
+        {
+          "purpose": "Japanese Kanji font, FM-PAC sound cartridge and MSX-DOS 2 (optional extras)",
+          "files": ["KANJI.ROM", "FMPAC.ROM", "MSXDOS2.ROM", "PAINTER.ROM"],
+          "required": false
+        }
+      ],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": ""
+    }
+  ]
+}

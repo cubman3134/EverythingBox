@@ -28,6 +28,8 @@ engine — which is what makes both all-format video and libretro first-class.
 | `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `EverythingBox.exe` (runnable copy at `C:\EverythingBox-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below || Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`, `browse/JellyfinCatalogs`): **several servers at once**, merged into one library — browse, play, and report progress back | **built**; `probe_jellyfin` covers the ids, the migration, the store, the union, PlaybackInfo, progress, resume and segments, `probe_browse` the browse levels, `probe_leafroute` the leaf, `probe_segments` the server tier. Drive verified against local fixture servers — see below |
+| Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
+| One music library across every source (`MusicId`, `MusicMerge`, `MusicRemap`, + `Subsonic`/`JellyfinMusic`/`ServerMusic` suppliers) | **built**; `probe_musicid`, `probe_musicremap` and `probe_musicsources` cover identity, the remap and all four suppliers. Drive verified against fixture HTTP stubs — see below |
 
 ## Jellyfin servers
 
@@ -106,6 +108,60 @@ endpoint simply contributes one fewer tier.
 **Not yet.** Quick Connect (address plus username and password is what exists today), SyncPlay,
 downloads from the server, and live-tv endpoints. A Jellyfin **music** library is named by the browse
 mapping but is not browsed here.
+## One music library
+
+**Four suppliers, one library.** The local music folder (#74), every Subsonic server (#193), every
+enabled **Jellyfin** server's music, and the **EverythingBox server's music shelf** are folded into a
+single artist list by `MusicMerge`. Someone who owns the same record in three places sees **one row**
+with three copies behind it — not three parallel libraries. Everything below the merge is rendered by
+the same three browse builders the local library has always used: there is no second artist list, no
+second album row, no second track row and no second player.
+
+**Tracks stay per-source.** Artists and albums unify; each copy keeps its own track list, because each
+copy is a different set of files.
+
+**Matching is conservative, because a wrong merge hides music.** A missed merge shows a duplicate,
+which is untidy and completely recoverable by looking at it; a wrong one makes a record you own
+unreachable with nothing on screen to say why. So MusicBrainz ids decide it wherever a source reports
+them (Jellyfin's `ProviderIds`, Subsonic's `musicBrainzId`, the shelf's own `meta`, and the local
+library's tags), the year is a **gate** and the track count only ever breaks a tie, and anything the
+rules cannot answer confidently stays two rows. Two rows from the *same* supplier never merge: that
+source has already grouped its own library, and fusing two records it kept apart would hide one of them.
+
+**When it is wrong, you say so.** "These are not the same album" and "this is the same album as…" are
+recorded per pair and win outright over every automatic rule, in both directions, across suppliers.
+
+**Which copy plays.** *Settings → Play music from*: this device, any music server, or one server in
+particular. The album page lists every copy with the source it is on and — where the source reports it
+— its format and bitrate, so the FLAC on the NAS is distinguishable from the 128k copy on the phone. A
+Subsonic copy shows no format, because that API does not tell us and a guess would defeat the point of
+the line.
+
+**Favourites, playlists, playtime and scrobbles follow the merged identity**, not the per-source id, so
+changing which copy plays does not fragment a listening history (`MusicRemap`).
+
+**A slow supplier costs nothing.** Each supplier's artist list is fetched under its own deadline, and a
+server that is switched off or does not answer contributes nothing and blocks nothing — the library is
+whatever the suppliers that did answer say it is, and the local folder is on screen immediately either
+way.
+
+**What a stored music key looks like.** Nothing new is minted for a merged row: it is rendered under
+one of its copies' real keys, so everything downstream keeps working unchanged.
+
+```
+<artist><US>t<US><album>                    the local library         (US = 0x1F)
+sub<US><server uuid><US><kind><US><id>      a Subsonic server
+jf:<serverId>:<itemId>                      a Jellyfin server         (#160's own scheme, unchanged)
+ebs<US><source id><US><kind><US><id>        the EverythingBox server's music shelf
+```
+
+The four families are mutually unreadable **by construction** — field count, first field and second
+field together — so a key from one supplier can never resolve against another, and no local key can
+parse as a remote one however a user names their band. `probe_musicsources` drives every pair.
+
+**A credential is never stored.** The index holds an **id**; a stream URL — which for Jellyfin carries
+`api_key` and for Subsonic carries `t`/`s` — is minted at the moment the player is handed it and
+written nowhere, because the index is copied into queues and a queue is persisted.
 
 ## Layout
 ```
@@ -165,6 +221,66 @@ A ready-to-run copy is already deployed at **`C:\EverythingBox-app\EverythingBox
 To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv_*` exports to `mpv.def`
 (`LIBRARY libmpv-2.dll` / `EXPORTS` / one symbol per line), then
 `lib /def:mpv.def /machine:x64 /out:libmpv.lib`.
+
+## Following a series (issue #155)
+
+Star-shaped "I like this" is the favourite. **Follow** is the other half: *tell me when this grows*.
+
+**What can be followed.** Any series-shaped row from any source — an addon catalogue series, a podcast feed
+from the bundled Podcasts addon, a manga or comic series, a local-library show. Anything you can drill into
+that is not a leaf. An episode, a track, a chapter, a film, a console folder or a playlist folder cannot be
+followed, on either layout: the rule is one function (`follow::isFollowable`, `src/core/FollowPlan.h`) and
+both the themed detail pill and the classic long-press menu ask it, so the verb cannot appear in one place
+and not the other.
+
+**Where the verb is.**
+
+- *Themed layout*: the **Follow** pill on a series' detail page, beside Favorite. It shows the unread count
+  once there is one, and grows a **Mark all seen** pill while there is something to clear.
+- *Classic layout*: long-press / right-click a series row — Follow, Mark all seen, Check for new items now.
+
+**The schedule.** A background pass asks each followed series' source what children it has now. Settings ▸
+General ▸ Following offers **every 6 hours / every 12 hours / once a day (default) / once a week / only when
+I ask**, plus **Check for new items now**. The pass is deliberately polite, and every clause of that is
+pinned by `probe_follow` against a fake clock:
+
+- one request in flight per source, and a minimum five-second gap between two requests to the same source —
+  so forty followed shows on one addon cost it one request every five seconds, once a day, not forty at once;
+- a jittered start (deterministic per install, bounded by the smaller of one tenth of the interval and 15
+  minutes), so a household's boxes do not wake their shared sources on the same second;
+- **skipped while anything is playing** — a film, an album, a game holding the emulator's frame loop;
+- **skipped on a metered connection** by default (there is a setting to allow it);
+- a source that fails is written off for that cycle — every other series it holds is skipped rather than
+  retried — and asked again on the **next** cycle.
+
+A skip does not consume the pass: it is deferred to the next tick, so an evening of playback delays the
+day's check rather than losing it. "Check now" is a deliberate press and bypasses the playing/metered gates
+(never the per-source ones).
+
+**What counts as new.** Children that were not in this device's last snapshot of that series. The very first
+check is a silent **baseline** — following a twenty-year-old podcast does not dump a thousand rows on your
+home screen. A child that *disappeared* is not news either (a feed that only publishes its last 60 episodes
+drops old ones constantly). A source that does not give its children stable ids cannot be diffed per child,
+and degrades honestly to one row saying the series changed.
+
+**The New shelf.** A peer of Recents and Continue, on both layouts, newest first. It lists unseen children
+across every series you follow, and a followed tile carries an unread badge. Marking a child watched or read
+— the completion states that already exist — takes it off the shelf and off the badge; "Mark all seen"
+clears a whole series. The **You Missed** rows from Trakt (issue #25) land on this same shelf, deduplicated
+by item id, because "an episode you were waiting for is out" and "a series you follow grew" are the same
+sentence and do not want two headings. The uncapped *You Missed* folder under the video catalogue is
+unchanged.
+
+**What syncs and what does not.** The follow mark itself is per profile and **syncs** — it is a statement
+about you, merged exactly as a favourite is (newest wins, with a deletion tombstone a newer re-follow beats).
+What each device has already *seen* does **not** sync: that is a claim about a fetch this box performed, and
+a peer re-derives its own snapshot silently on its first check.
+
+**Not here yet.** This is increment 1. Still to come: **notifications** (a grouped system notification per
+refresh cycle, off by default, with a per-series mute — the `FollowScheduler::newItemsFound` /
+`cycleFinished` signals are the seam it will consume) and **optional auto-download** with a keep-last-N
+retention rule (per series, off by default, non-metered only). Following individual *authors* rather than
+series remains out of scope, as does any server-side push — this is local polling only.
 
 ## Roadmap
 1. **libretro frontend** — ✅ load/init/run/video/audio/input, ✅ core options, ✅ save states. Verify a ROM

@@ -39,6 +39,7 @@
 #include "AresInput.h"            // pure SDL-mapping -> ares settings.bml translation (ares ships unmapped)
 #include "Settings.h"             // ps3AutoUpdate() — gates ONLY the pre-boot PS3 *game* update; the firmware install is ungated
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
+#include "ContentInstall.h"                 // issue #189: sidecar update/DLC packages -> the emulator's content store
 #include "core/ps3/Ps3TitleId.h"           // read a PS3 game's Title ID from the rom path (folder or .pkg)
 #include "core/ps3/Ps3Firmware.h"          // auto-installs Sony's PS3UPDAT.PUP into RPCS3's dev_flash pre-boot
 #include "core/ps3/Ps3InstalledVersion.h"  // the installed game-update version on disk — the result an --installpkg run is waited on for
@@ -193,7 +194,7 @@ EmulatorManager::EmulatorManager(QObject* parent) : QObject(parent)
 }
 
 void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs,
-                           const EmuGfx::Settings& gfx)
+                           const EmuGfx::Settings& gfx, const QString& contentUpdate, const QString& contentDlc)
 {
     if (busy_) { emit failed(tr("An emulator is already running.")); return; }
     if (updateWorkerLive_)
@@ -206,6 +207,7 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
         return;
     }
     em_ = em; rom_ = rom; extraArgs_ = extraArgs; gfx_ = gfx; launchAfterInstall_ = true; busy_ = true;
+    contentUpdate_ = contentUpdate; contentDlc_ = contentDlc;   // issue #189
     const QString bin = resolveBinary(em);
     // A user-defined emulator (no update source) can't be auto-downloaded — it points at a binary the user
     // already has. If we couldn't resolve it, say so plainly instead of trying (and failing) to install.
@@ -246,6 +248,7 @@ void EmulatorManager::install(const ExternalEmulator& em)
         return;
     }
     em_ = em; rom_.clear(); extraArgs_.clear(); launchAfterInstall_ = false; busy_ = true;
+    contentUpdate_.clear(); contentDlc_.clear();   // issue #189: an install-only flow has no game, so no content
     // An install-only run rewrites the emulator's files on disk, so it retires the launch context the same
     // way a new launch does: pending async work from an earlier launch must not fire mid-reinstall.
     delete launchCtx_;
@@ -296,6 +299,7 @@ EmulatorManager::PendingCancel EmulatorManager::cancelPendingLaunch()
     launchAfterInstall_ = false;
     rom_.clear();
     extraArgs_.clear();
+    contentUpdate_.clear(); contentDlc_.clear();   // issue #189
     PendingCancel result = PendingCancel::Cancelled;
     QString msg = tr("%1 launch cancelled.").arg(em_.displayName);
     if (act == LaunchCancel::Action::CancelInstall)
@@ -1408,6 +1412,43 @@ void EmulatorManager::prepareCemuDiscKey(const QString& binDir)
     }
 }
 
+// ---- Game updates and DLC (issue #189) --------------------------------------------------------------------
+// Install whatever sits in the game's `updates/` and `dlc/` sidecar folders into THIS emulator's own content
+// store, following the recipe its registry entry declares (ContentRecipe.h). Runs immediately before the boot,
+// as the last step of the local-launch prep, for the same reason the BIOS and the Cemu keys do: the emulator
+// must find the content already there when it starts.
+//
+// BEST-EFFORT, ALWAYS. Every outcome is a REPORT — a package that could not be installed, or one whose
+// destination already held somebody else's content, is stated on the same status surface a missing BIOS uses
+// and the game boots anyway (unpatched, which is what would have happened before this existed). There is no
+// path out of here that refuses a launch.
+//
+// SYNCHRONOUS, deliberately for increment 1: it sits beside restoreSaves(), which already copies a save tree
+// on this thread at exactly this point, and the plan reads no bytes at all unless something is actually new
+// (ContentInstall's size+mtime stamp gate). A worker thread for multi-gigabyte first installs is the follow-up
+// the report names.
+void EmulatorManager::prepareContentInstall(const QString& binDir)
+{
+    if (rom_.isEmpty() || em_.contentInstall.isEmpty()) return;   // nothing declared / no game: not even a stat
+    if (!Settings::installGameContent()) return;                  // the master switch (issue #189)
+
+    const ContentInstall::Result r = ContentInstall::installForLaunch(
+        em_.id, em_.contentInstall, rom_, binDir, contentUpdate_, contentDlc_);
+
+    for (const QString& line : r.log) qInfo("%s", qUtf8Printable(line));
+    if (r.installed > 0)
+        emit status(tr("Installed %n update/DLC package(s) into %1…", "", r.installed).arg(em_.displayName), -1);
+    // A left-alone or failed package is the one thing the user has to hear about: it means the game is about to
+    // boot WITHOUT content they put beside it, and silence there is the report nobody can act on.
+    for (const ContentInstall::ItemResult& it : r.items)
+    {
+        if (it.outcome == ContentInstall::Outcome::LeftAlone)
+            emit status(tr("%1 was left alone — %2. Launching the game as it is.").arg(it.name, it.note), -1);
+        else if (it.outcome == ContentInstall::Outcome::Failed)
+            emit status(tr("Couldn't install %1 — %2. Launching the game as it is.").arg(it.name, it.note), -1);
+    }
+}
+
 // ---- Save-data backup / centralization for standalone emulators -------------------------------------------
 // Each standalone emulator writes its saves to its own scattered folder (Cemu's mlc, PCSX2/DuckStation memory
 // cards, Dolphin's User/GC & Wii NAND, ...). We snapshot those into one app-owned tree, <app>/saves/emulators/
@@ -1581,6 +1622,7 @@ void EmulatorManager::finishLocalLaunch(const QString& program, const QStringLis
         prepareGraphicsSettings(binDir); // write the resolved graphics quartet (issue #103) into its config
         prepareCemuKeys(binDir, [this, program, args, binDir] { // async too (gist fetch, Cemu only)
             prepareCemuDiscKey(binDir); // appends to the keys.txt the fetch may have just (over)written
+            prepareContentInstall(binDir); // issue #189: the game's own update/DLC packages, before it boots
             restoreSaves(binDir); // seed saves from the central backup if this install has none
             startGameProcess(program, args, binDir, false);
         });

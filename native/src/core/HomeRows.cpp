@@ -61,13 +61,19 @@ const QStringList& defaultShelfOrder()
     //
     // #83 ADDS ONE, AND THE PROMISE ABOVE SURVIVES IT. "jellyfin:continue" is what a connected media server
     // says this user is part-way through. It is built-in rather than opt-in because it is a source of the
-    // same kind as the four here - something the app can produce and the user never had to ask for - and it
-    // costs an untouched profile NOTHING: HomeView drops an empty producer before it becomes an available
-    // row, so a profile with no Jellyfin server sees the identical four shelves in the identical order.
-    // It sits directly after "continue" because it is the same question one machine along: what were you
-    // in the middle of? The two Trakt shelves are about what EXISTS rather than about what you were doing.
+    // same kind as the others here - something the app can produce and the user never had to ask for - and
+    // it costs an untouched profile NOTHING: HomeView drops an empty producer before it becomes an available
+    // row, so a profile with no Jellyfin server sees the identical shelves in the identical order. It sits
+    // directly after "continue" because it is the same question one machine along: what were you in the
+    // middle of? The Trakt shelf is about what EXISTS rather than about what you were doing.
+    //
+    // ONE substitution alongside it: issue #155's "new" stands where "trakt:missed" stood. That was not a
+    // new row either — the New shelf ABSORBED #25's "You Missed" rows (HomeView's buildNew unions them with
+    // the followed-series children), so the position and the content are the ones that were already there
+    // and only the header changed. "trakt:missed" stays accepted vocabulary with no producer in this build,
+    // which the open-vocabulary rule above already covers: a stored list naming it keeps it and skips it.
     static const QStringList kOrder{ QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
-                                     QStringLiteral("trakt:missed"),
+                                     QStringLiteral("new"),
                                      QStringLiteral("trakt:calendar"), QStringLiteral("favorites") };
     return kOrder;
 }

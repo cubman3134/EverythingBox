@@ -5,6 +5,7 @@
 #include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 #include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
 #include "Scrobble.h"          // isBackgroundStateKey() - the #192 counter/queue family, out of scope
+#include "Tracker.h"           // isBackgroundStateKey() - the #156 token/queue family, out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -73,6 +74,13 @@ bool SettingsTxn::inScope(const QString& key)
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
         "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
+        "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
+        // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
+        // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
+        // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings
+        // changed that the user never touched, and a Discard would revert the snapshot AFTER the New shelf had
+        // already been rebuilt from it, so the same children would be announced a second time.
+        "followsnap/",
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer
@@ -192,6 +200,18 @@ bool SettingsTxn::inScope(const QString& key)
     // which is why the two families have distinct top-level prefixes rather than one with a sub-group: a
     // prefix that covered both would silently make the token undiscardable. probe_scrobble pins both halves.
     if (Scrobble::isBackgroundStateKey(key)) return false;
+    // ANIME/MANGA TRACKERS (#156). Two things, and the split is the trakt/clientId-vs-trakt/access one
+    // above repeated exactly: trackerstate/* (the undelivered progress queue, the per-item debounce
+    // stamps, the last error) is written by PLAYBACK while a settings panel is open - finishing a
+    // chapter with Settings up is ordinary - so in scope it would inflate the exit prompt with changes
+    // the user never made and a Discard would throw away queued progress. And the OAuth TOKENS are
+    // excluded because linking an account is done FROM this panel, so a Discard on the way out would
+    // un-link it. tracker/anilist/clientId and clientSecret are deliberately NOT matched: they are typed
+    // into Settings and pasting the wrong one has to be discardable. probe_tracker pins both halves.
+    if (tracker::isBackgroundStateKey(key)) return false;
+    // The per-item link store, for the reason marks/ and metaoverrides/ are excluded above: it is owned
+    // by the CloudMerge document and is written by the match prompt, not by this panel.
+    if (key.startsWith(tracker::linkKeyPrefix())) return false;
 
     // ...with ONE exception inside that other half, and it is the "ra/user" / "ra/token" case above rather
     // than a new idea: Last.fm's credential (#192 increment 2) is a SESSION KEY the service hands back after

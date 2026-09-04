@@ -23,6 +23,13 @@
 // tier (asset globs -> artifact markers, release owner -> credited name, launch.* -> binaries) is asserted
 // here too. That projection is the seam a later increment reads the real feed through.
 //
+// SECTIONS 18-24 ARE THE RETCOMM FEED AND THE ROM-IDENTITY GATE (issue #248, increment b) — the published
+// `catalog.zip` read as a second feed and merged over the in-tree catalogue, and the digest gate that decides
+// whether the user owns the game. Neither can be driven live: the feed's failure modes are somebody else's
+// publish, and the gate's are a machine holding a particular wrong dump. Fixture catalogues are written with
+// miniz IN THIS PROCESS so each malformed case differs from the good one by the byte that matters, and the
+// gate is driven from hand-authored digests. See the note above section 18.
+//
 // SECTIONS 12-17 ARE THE RECOMPS SECTION (issue #248, increment a) — `Games → Recomps`, the browse surface
 // over this same catalog. The rail there is the INSTALL STATE: `not installed` / `needs ROM` / `installed` /
 // `update available` is derived from four inputs and stored nowhere, so the only way it can be wrong is the
@@ -33,13 +40,21 @@
 // on any failure prints PORTS-FAIL <cond> and exits non-zero.
 #include "NativePorts.h"
 #include "RecompRows.h"   // issue #248: the Recomps section's row/state model, sections 12-17
+#include "RecompFeed.h"   // issue #248 (b): the RetComM feed's parse/merge/cache, sections 18-24
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
+#include <QVector>
 #include <cstdio>
+#include <cstring>
+
+#include "miniz.h"   // sections 18-24 WRITE their fixture catalogues; no binary fixture is committed
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -53,6 +68,34 @@ static bool writeFile(const QString& path, const QByteArray& bytes)
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
     f.write(bytes);
     return true;
+}
+
+// A catalog.zip, built in memory (issue #248 (b), sections 18-24). Written rather than committed for the
+// reason probe_decopack does the same: every malformed case below differs from the good one by exactly the
+// change it is about, and a committed binary fixture hides that difference in a blob nobody can read.
+// Members are added in name order so two fixtures that describe the same catalogue are the same bytes.
+static QByteArray makeZip(const QHash<QString, QByteArray>& members)
+{
+    mz_zip_archive z;
+    std::memset(&z, 0, sizeof(z));
+    if (!mz_zip_writer_init_heap(&z, 0, 0)) return {};
+    QStringList names = members.keys();
+    names.sort();
+    for (const QString& n : names)
+    {
+        const QByteArray name = n.toUtf8();
+        const QByteArray body = members.value(n);
+        mz_zip_writer_add_mem(&z, name.constData(), body.constData(), size_t(body.size()),
+                              MZ_DEFAULT_COMPRESSION);
+    }
+    void* buf = nullptr;
+    size_t sz = 0;
+    QByteArray out;
+    if (mz_zip_writer_finalize_heap_archive(&z, &buf, &sz) && buf)
+        out = QByteArray(static_cast<const char*>(buf), int(sz));
+    mz_zip_writer_end(&z);
+    if (buf) mz_free(buf);
+    return out;
 }
 
 static const ExternalEmulator* find(const QList<ExternalEmulator>& list, const QString& id)
@@ -652,6 +695,615 @@ int main(int argc, char** argv)
         CHECK(QDir(dir).removeRecursively());
         CHECK(readInstalledTag(dir).isEmpty());
         CHECK(readInstalledTag(QString()).isEmpty());              // total: no install dir, no tag
+    }
+
+    // ======================================================================================================
+    // SECTIONS 18-24 ARE THE RETCOMM FEED AND THE ROM-IDENTITY GATE (issue #248, increment b).
+    //
+    // Two rails, and neither can be driven live on demand.
+    //
+    // THE FEED is a zip published by somebody else. Every way it can be broken — a truncated download, an
+    // index that lists a title whose file did not land, a publish that shipped HTML from a captive portal —
+    // has to present as an ERROR ROW rather than as a section that quietly got shorter (#174), and none of
+    // those can be staged against the real repository. The fixture catalogues below are WRITTEN with miniz in
+    // this process, so each malformed case differs from the good one by exactly the byte that matters.
+    //
+    // THE GATE decides whether the user owns the game, and it is the part of this feature that can be wrong
+    // in a way nobody notices: a gate that is too generous offers a build against the wrong dump, and a gate
+    // that is too strict tells somebody to go and find a game already on their disk. It is asserted per digest
+    // KIND (an author publishes only the one their own check uses), and — the assertion this increment exists
+    // for — a TITLE MATCH WITH A WRONG DIGEST IS NOT A MATCH, which is a behaviour change from increment (a)
+    // and is asserted against increment (a)'s own function so the change is visible rather than described.
+    //
+    // And the cache rule: NOTHING here hashes. pathsNeedingHash() is the only function that names a file and
+    // it opens none of them; a warm cache yields no work at all, which is what stops an open section hashing
+    // a 660 MB disc image on every redraw.
+    // ======================================================================================================
+
+    // ---- 18. the recompiler engines, and the licence that is NOT read out of the feed ---------------------
+    // A licence taken from a document the licensor does not control is not a licence notice. The table is
+    // hard-coded, checked against each project's own LICENSE file, and an engine that is not in it shows
+    // nothing rather than a guess.
+    {
+        using RecompFeed::engineInfo;
+        const QString poly = QStringLiteral("PolyForm Noncommercial 1.0.0");
+        CHECK(engineInfo(QStringLiteral("psxrecomp")).license == poly);
+        CHECK(engineInfo(QStringLiteral("snesrecomp")).license == poly);
+        CHECK(engineInfo(QStringLiteral("gbarecomp")).license == poly);
+        // #248 named psxrecomp's terms specifically, and the row is where a person reads them.
+        CHECK(engineInfo(QStringLiteral("psxrecomp")).homepage
+              == QStringLiteral("https://github.com/TechnicallyComputers/psxrecomp"));
+        CHECK(engineInfo(QStringLiteral("snesrecomp")).homepage.contains(QStringLiteral("snesrecomp")));
+        CHECK(engineInfo(QStringLiteral("gbarecomp")).homepage.contains(QStringLiteral("gbarecomp")));
+        // Spelling: a catalogue writes the engine name however it likes.
+        CHECK(engineInfo(QStringLiteral("PsxRecomp")).license == poly);
+        CHECK(engineInfo(QStringLiteral("  psxrecomp  ")).license == poly);
+        // An engine this build has never checked: empty, deliberately. Both fields, so no row can show a
+        // link to a page nobody looked at either.
+        CHECK(engineInfo(QStringLiteral("n64recomp")).license.isEmpty());
+        CHECK(engineInfo(QStringLiteral("n64recomp")).homepage.isEmpty());
+        CHECK(engineInfo(QString()).id.isEmpty());
+        CHECK(engineInfo(QString()).license.isEmpty());
+    }
+
+    // ---- 19. the published catalogue parses, in its real shape --------------------------------------------
+    // `index.json` + `titles/<id>.json`, the layout retcomm-catalog's own README and SCHEMA.md describe. The
+    // manifests below are cut down from the real `twisted-metal4-psx` and `tomba-psx` entries: every field the
+    // row model reads is present, and every value here was hand-copied rather than read back out of the code.
+    const QByteArray goodIndex = QByteArrayLiteral(
+        "{\"schema_version\":1,\"name\":\"RetComM supported titles\","
+        "\"catalog_date\":\"2026-09-02T14:03:33Z\",\"release_tag\":\"v2026.09.02.140333.26\","
+        "\"platform_defaults\":{\"psx\":{\"bios_identity\":{\"required\":true}}},"
+        "\"titles\":[\"twisted-metal4-psx\",\"tomba-psx\"]}");
+    const QByteArray tm4 = QByteArrayLiteral(
+        "{\"id\":\"twisted-metal4-psx\",\"name\":\"Twisted Metal4\",\"kind\":\"recomp\",\"platform\":\"psx\","
+        "\"description\":\"Twisted Metal 4\","
+        "\"homepage\":\"https://github.com/TechnicallyComputers/TwistedMetal4Recomp\","
+        "\"author_notes\":\"Use USA Redump image (Rev 1)\","
+        "\"rom_identity\":{\"crc32\":[\"020e8ae1\"],\"md5\":[\"0e5d822f108fcef31057645721d3d710\"],"
+        "\"sha1\":[\"64e226413b27ea12639589b3ca2806976c795c8b\"],"
+        "\"sha256\":[\"1be99e1d98c5b5e2d7572f3b46aa63c43ddd6f19f1b5cf179ffd853261a139f1\"],"
+        "\"sizes\":[384615504],\"track_counts\":[23],\"require_cue\":true,"
+        "\"filenames\":[\"Twisted Metal 4 (USA) (Rev 1).cue\"]},"
+        "\"rom_extensions\":[\".cue\",\".bin\"],"
+        "\"release\":{\"github\":\"TechnicallyComputers/TwistedMetal4Recomp\","
+        "\"asset_glob\":{\"windows\":\"*windows*\",\"linux\":\"*linux*\",\"macos\":\"*macos*\"},"
+        "\"allow_prerelease\":true},"
+        "\"install_dir_name\":\"TwistedMetal4Recomp\","
+        "\"launch\":{\"windows\":\"TwistedMetal4_Recompiled.exe\",\"linux\":\"TwistedMetal4_Recompiled\"},"
+        "\"build\":{\"enabled\":true,\"generate\":{\"engine\":\"psxrecomp\",\"config\":\"game.toml\"}}}");
+    const QByteArray tomba = QByteArrayLiteral(
+        "{\"id\":\"tomba-psx\",\"name\":\"Tomba!\",\"kind\":\"recomp\",\"platform\":\"psx\","
+        "\"rom_identity\":{\"crc32\":[],\"md5\":[],\"sha1\":[\"aaaabbbbccccddddeeeeffff0000111122223333\"],"
+        "\"sha256\":[],\"disc_serials\":[\"SCUS-94236\"]},"
+        "\"rom_extensions\":[\".cue\",\".bin\"],"
+        "\"release\":{\"github\":\"TechnicallyComputers/TombaRecomp\"},"
+        "\"launch\":{\"windows\":\"Tomba_Recompiled.exe\"},"
+        "\"build\":{\"enabled\":true,\"generate\":{\"engine\":\"psxrecomp\"}}}");
+
+    QHash<QString, QByteArray> goodMembers;
+    goodMembers.insert(QStringLiteral("index.json"), goodIndex);
+    goodMembers.insert(QStringLiteral("titles/twisted-metal4-psx.json"), tm4);
+    goodMembers.insert(QStringLiteral("titles/tomba-psx.json"), tomba);
+    const QByteArray goodZip = makeZip(goodMembers);
+    CHECK(!goodZip.isEmpty());
+
+    {
+        const RecompFeed::Feed feed = RecompFeed::parseCatalogZip(goodZip);
+        CHECK(feed.ok());
+        CHECK(feed.shapeError.isEmpty());
+        CHECK(feed.titles.size() == 2);
+        // The release identity RetComM itself compares on, so a later "is the remote newer" check has it.
+        CHECK(feed.releaseTag == QStringLiteral("v2026.09.02.140333.26"));
+        CHECK(feed.catalogDate == QStringLiteral("2026-09-02T14:03:33Z"));
+
+        const ExternalEmulator* t = find(feed.titles, QStringLiteral("twisted-metal4-psx"));
+        CHECK(t != nullptr);
+        if (t)
+        {
+            CHECK(t->isNativePort());
+            CHECK(t->port.name == QStringLiteral("Twisted Metal4"));
+            CHECK(t->port.platform == QStringLiteral("psx"));
+            CHECK(t->port.kind == QStringLiteral("recomp"));
+            CHECK(t->port.authorNotes == QStringLiteral("Use USA Redump image (Rev 1)"));
+            // THE TIER. Every entry in the published catalogue names an engine, so every one of them is the
+            // self-compiled tier, and the row's Install has to say so rather than start a download.
+            CHECK(t->port.buildEngine == QStringLiteral("psxrecomp"));
+            CHECK(recomps::tierOf(*t) == recomps::Tier::SelfCompiled);
+            // THE LICENCE, filled from the engine table because a published manifest has no licence field —
+            // the terms that govern a self-compiled port are the recompiler's.
+            CHECK(t->port.license == QStringLiteral("PolyForm Noncommercial 1.0.0"));
+            // The four digest kinds, verbatim, because the gate compares against exactly these strings.
+            CHECK(t->port.crc32 == QStringList{ QStringLiteral("020e8ae1") });
+            CHECK(t->port.md5 == QStringList{ QStringLiteral("0e5d822f108fcef31057645721d3d710") });
+            CHECK(t->port.sha1 == QStringList{ QStringLiteral("64e226413b27ea12639589b3ca2806976c795c8b") });
+            CHECK(t->port.sha256
+                  == QStringList{ QStringLiteral(
+                         "1be99e1d98c5b5e2d7572f3b46aa63c43ddd6f19f1b5cf179ffd853261a139f1") });
+            CHECK(t->port.sizes.size() == 1 && t->port.sizes.first() == 384615504LL);
+            CHECK(t->port.romExtensions == (QStringList{ QStringLiteral(".cue"), QStringLiteral(".bin") }));
+            CHECK(t->port.filenames.size() == 1);
+            CHECK(t->port.installDirName == QStringLiteral("TwistedMetal4Recomp"));
+            CHECK(t->port.allowPrerelease);
+            // ...and the projection onto EB's standalone tier that section 11 asserts for the in-tree
+            // catalogue, asserted again here because the feed is the SAME reader.
+            CHECK(t->displayName == QStringLiteral("TechnicallyComputers"));
+            CHECK(t->homepage
+                  == QStringLiteral("https://github.com/TechnicallyComputers/TwistedMetal4Recomp"));
+            CHECK(t->updateJsonUrl.contains(QStringLiteral("TwistedMetal4Recomp/releases/latest")));
+            CHECK(t->winArtifact == QStringLiteral("windows"));
+            CHECK(t->winBinaries.contains(QStringLiteral("TwistedMetal4_Recompiled.exe")));
+            CHECK(t->extensions == (QStringList{ QStringLiteral("cue"), QStringLiteral("bin") }));
+            // A port never names a system, on this feed either: that is what would make it a selectable PSX
+            // emulator for every PSX game (section 15's tripwire, asked of the feed).
+            CHECK(t->systems.isEmpty());
+        }
+        // The second entry publishes ONE digest kind and a disc serial. Both matter below: an author may
+        // publish only the algorithm their own gate uses, and a serial is NOT a digest this build can check.
+        const ExternalEmulator* tb = find(feed.titles, QStringLiteral("tomba-psx"));
+        CHECK(tb != nullptr);
+        if (tb)
+        {
+            CHECK(tb->port.crc32.isEmpty() && tb->port.md5.isEmpty() && tb->port.sha256.isEmpty());
+            CHECK(tb->port.sha1.size() == 1);
+            CHECK(tb->port.discSerials == QStringList{ QStringLiteral("SCUS-94236") });
+            CHECK(recomps::publishesHash(*tb));
+        }
+    }
+
+    // ---- 20. a document the reader cannot parse is an ERROR, never an empty list (#174) -------------------
+    {
+        auto shapeErrorOf = [](const QByteArray& zip) { return RecompFeed::parseCatalogZip(zip).shapeError; };
+
+        // Not a zip at all — a captive portal's HTML, or a truncated download.
+        CHECK(!shapeErrorOf(QByteArrayLiteral("<html>Sign in to continue</html>")).isEmpty());
+        CHECK(!shapeErrorOf(QByteArray()).isEmpty());
+        // A readable zip with no index.
+        QHash<QString, QByteArray> m = goodMembers;
+        m.remove(QStringLiteral("index.json"));
+        CHECK(!shapeErrorOf(makeZip(m)).isEmpty());
+        // An index that is not JSON, and one that is JSON of the wrong shape.
+        m = goodMembers; m.insert(QStringLiteral("index.json"), QByteArrayLiteral("{not json"));
+        CHECK(!shapeErrorOf(makeZip(m)).isEmpty());
+        m = goodMembers; m.insert(QStringLiteral("index.json"), QByteArrayLiteral("[\"tomba-psx\"]"));
+        CHECK(!shapeErrorOf(makeZip(m)).isEmpty());
+        // An index with no `titles` key: a document this reader does not understand, not an empty catalogue.
+        m = goodMembers; m.insert(QStringLiteral("index.json"), QByteArrayLiteral("{\"schema_version\":1}"));
+        CHECK(!shapeErrorOf(makeZip(m)).isEmpty());
+
+        // ...and the case that is NOT an error, which is the other half of the same rule: an index that
+        // understood itself and listed nothing. Inventing an error for that would put a red row on screen
+        // because somebody published an empty list.
+        m = goodMembers;
+        m.insert(QStringLiteral("index.json"), QByteArrayLiteral("{\"schema_version\":1,\"titles\":[]}"));
+        const RecompFeed::Feed emptyFeed = RecompFeed::parseCatalogZip(makeZip(m));
+        CHECK(emptyFeed.ok());
+        CHECK(emptyFeed.titles.isEmpty());
+
+        // A listed title whose file did not land: skipped, and the ones that did land survive. A catalogue
+        // mid-publish does this routinely and it is not a broken catalogue.
+        m = goodMembers; m.remove(QStringLiteral("titles/tomba-psx.json"));
+        const RecompFeed::Feed partial = RecompFeed::parseCatalogZip(makeZip(m));
+        CHECK(partial.ok());
+        CHECK(partial.titles.size() == 1);
+        CHECK(find(partial.titles, QStringLiteral("twisted-metal4-psx")) != nullptr);
+
+        // ...but when NONE of them can be read, the document describes nothing and that IS the error case.
+        m.clear();
+        m.insert(QStringLiteral("index.json"), goodIndex);
+        const RecompFeed::Feed nothing = RecompFeed::parseCatalogZip(makeZip(m));
+        CHECK(!nothing.ok());
+        CHECK(nothing.titles.isEmpty());
+
+        // An id that is a path, not a slug. Nothing here writes a file, so this cannot traverse anything —
+        // it is refused because a document with one in it is not a document this reader understands.
+        m = goodMembers;
+        m.insert(QStringLiteral("index.json"),
+                 QByteArrayLiteral("{\"titles\":[\"../../etc/passwd\",\"twisted-metal4-psx\"]}"));
+        const RecompFeed::Feed traversal = RecompFeed::parseCatalogZip(makeZip(m));
+        CHECK(traversal.ok());
+        CHECK(traversal.titles.size() == 1);
+
+        // The INDEX is authoritative about the id: a manifest whose own `id` disagrees with its filename is a
+        // packaging accident, and every later lookup uses the id the index published.
+        m = goodMembers;
+        QByteArray renamed = tm4;
+        renamed.replace("\"id\":\"twisted-metal4-psx\"", "\"id\":\"something-else\"");
+        m.insert(QStringLiteral("titles/twisted-metal4-psx.json"), renamed);
+        const RecompFeed::Feed renamedFeed = RecompFeed::parseCatalogZip(makeZip(m));
+        CHECK(find(renamedFeed.titles, QStringLiteral("twisted-metal4-psx")) != nullptr);
+        CHECK(find(renamedFeed.titles, QStringLiteral("something-else")) == nullptr);
+    }
+
+    // ---- 21. the merge: in-tree wins, by TITLE identity rather than by id ---------------------------------
+    // Two catalogues describing one game agree on the game and never on the slug, so the id is not the key.
+    // The in-tree entry wins because it carries what the published one structurally cannot: `rom_delivery`
+    // (our extension — the schema has no field for how a port takes the game file) and a licence we checked.
+    {
+        const QList<ExternalEmulator> inTree = shippedPorts();
+        CHECK(inTree.size() >= 1);
+
+        // A feed that offers the SAME game on the SAME console under a different id and a different spelling.
+        QJsonObject clash;
+        clash.insert(QStringLiteral("id"), QStringLiteral("majoras-mask-n64"));
+        clash.insert(QStringLiteral("name"), QStringLiteral("The Legend of Zelda: Majora's Mask"));
+        clash.insert(QStringLiteral("platform"), QStringLiteral("n64"));
+        QJsonObject clashRel; clashRel.insert(QStringLiteral("github"), QStringLiteral("someone/MMRecomp"));
+        clash.insert(QStringLiteral("release"), clashRel);
+        const ExternalEmulator clashPort = titleFromJson(clash);
+
+        // ...and one that offers a game nothing in-tree covers.
+        const RecompFeed::Feed feed = RecompFeed::parseCatalogZip(goodZip);
+        QList<ExternalEmulator> feedTitles = feed.titles;
+        feedTitles << clashPort;
+
+        const QList<ExternalEmulator> merged = RecompFeed::mergeByTitleIdentity(inTree, feedTitles);
+        // The clash is DROPPED and the in-tree entry is the one that survived — asserted on the field only the
+        // in-tree entry has, because "an entry with this id is present" would pass either way.
+        CHECK(find(merged, QStringLiteral("majoras-mask-n64")) == nullptr);
+        const ExternalEmulator* z = find(merged, QStringLiteral("zelda64recomp"));
+        CHECK(z != nullptr);
+        if (z) CHECK(z->port.romDelivery == QStringLiteral("in_app_menu"));
+        if (z) CHECK(z->port.license == QStringLiteral("GPL-3.0"));
+        // The feed-only titles are all there.
+        CHECK(find(merged, QStringLiteral("twisted-metal4-psx")) != nullptr);
+        CHECK(find(merged, QStringLiteral("tomba-psx")) != nullptr);
+        CHECK(merged.size() == inTree.size() + 2);
+
+        // An id collision shadows too, whatever the titles say.
+        QJsonObject sameId;
+        sameId.insert(QStringLiteral("id"), QStringLiteral("zelda64recomp"));
+        sameId.insert(QStringLiteral("name"), QStringLiteral("Something Else Entirely"));
+        sameId.insert(QStringLiteral("platform"), QStringLiteral("n64"));
+        const QList<ExternalEmulator> byId =
+            RecompFeed::mergeByTitleIdentity(inTree, { titleFromJson(sameId) });
+        CHECK(byId.size() == inTree.size());
+
+        // The SAME title on ANOTHER console is a different game and both rows stand. This is the near miss the
+        // whole identity rule exists for: a PSX Majora's Mask row must not be eaten by the N64 entry.
+        QJsonObject otherConsole = clash;
+        otherConsole.insert(QStringLiteral("id"), QStringLiteral("mm-psx"));
+        otherConsole.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+        const QList<ExternalEmulator> across =
+            RecompFeed::mergeByTitleIdentity(inTree, { titleFromJson(otherConsole) });
+        CHECK(across.size() == inTree.size() + 1);
+    }
+
+    // ---- 22. the ROM-identity gate, one section per digest kind -------------------------------------------
+    // A recomp is compiled against ONE exact dump. The gate is what stands between a person and a build made
+    // against the PAL disc, a bad rip or a hack — so it is asserted per kind (an author publishes only the
+    // algorithm their own check uses) and, above all, on the near miss.
+    {
+        using recomps::DumpMatch;
+        const QString crc    = QStringLiteral("020e8ae1");
+        const QString md5    = QStringLiteral("0e5d822f108fcef31057645721d3d710");
+        const QString sha1   = QStringLiteral("64e226413b27ea12639589b3ca2806976c795c8b");
+        const QString sha256 = QStringLiteral("1be99e1d98c5b5e2d7572f3b46aa63c43ddd6f19f1b5cf179ffd853261a139f1");
+
+        // One entry per kind, each publishing exactly one digest and nothing else, so a match can only have
+        // come from that kind.
+        auto entryWith = [](const char* key, const QString& value) {
+            QJsonObject o;
+            o.insert(QStringLiteral("id"), QStringLiteral("k"));
+            o.insert(QStringLiteral("name"), QStringLiteral("Twisted Metal 4"));
+            o.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+            o.insert(QStringLiteral("rom_extensions"), QJsonArray{ QStringLiteral(".bin") });
+            QJsonObject ri;
+            ri.insert(QLatin1String(key), QJsonArray{ value });
+            o.insert(QStringLiteral("rom_identity"), ri);
+            return titleFromJson(o);
+        };
+        auto romWith = [](const recomps::CachedHashes& h) {
+            recomps::LibraryRom r;
+            r.systemId = QStringLiteral("psx");
+            r.title    = QStringLiteral("Twisted Metal 4");
+            r.path     = QStringLiteral("C:/roms/psx/Twisted Metal 4 (USA) (Rev 1) (Track 01).bin");
+            r.hashes   = h;
+            return QVector<recomps::LibraryRom>{ r };
+        };
+
+        CHECK(recomps::dumpMatch(entryWith("crc32", crc), romWith({ crc, {}, {}, {} }))
+              == DumpMatch::Hashed);
+        CHECK(recomps::dumpMatch(entryWith("md5", md5), romWith({ {}, md5, {}, {} }))
+              == DumpMatch::Hashed);
+        CHECK(recomps::dumpMatch(entryWith("sha1", sha1), romWith({ {}, {}, sha1, {} }))
+              == DumpMatch::Hashed);
+        CHECK(recomps::dumpMatch(entryWith("sha256", sha256), romWith({ {}, {}, {}, sha256 }))
+              == DumpMatch::Hashed);
+        // ANY published kind matching is a match — the schema says so in as many words, and requiring
+        // agreement across kinds would refuse a dump over a digest nobody computed.
+        CHECK(recomps::dumpMatch(entryWith("sha1", sha1), romWith({ crc, md5, sha1, sha256 }))
+              == DumpMatch::Hashed);
+        // Hex case is not identity.
+        CHECK(recomps::dumpMatch(entryWith("sha1", sha1.toUpper()), romWith({ {}, {}, sha1, {} }))
+              == DumpMatch::Hashed);
+        // A digest of the same length that is not this one.
+        const QString wrong1 = QStringLiteral("0000000000000000000000000000000000000000");
+        CHECK(recomps::dumpMatch(entryWith("sha1", sha1), romWith({ {}, {}, wrong1, {} }))
+              == DumpMatch::None);
+
+        // ---- THE BEHAVIOUR CHANGE, stated against increment (a)'s own function ------------------------
+        // A file whose NAME is this game and whose BYTES are not. Increment (a) called that a match, because
+        // the title was all it compared. It is not one any more, and both answers are asserted here so the
+        // change is visible in the probe rather than only in a commit message.
+        {
+            const ExternalEmulator e = entryWith("sha1", sha1);
+            const QVector<recomps::LibraryRom> lib = romWith({ {}, {}, wrong1, {} });
+            CHECK(recomps::libraryMatches(e, lib));                      // increment (a): a match
+            CHECK(recomps::dumpMatch(e, lib) == DumpMatch::None);        // increment (b): not one
+            // ...and nothing more is scheduled to be hashed about it. The digest is known and it is wrong.
+            CHECK(recomps::pathsNeedingHash(e, lib).isEmpty());
+        }
+
+        // ---- NO PUBLISHED DIGEST: the title match stands, and the row says it is unverified ------------
+        {
+            QJsonObject o;
+            o.insert(QStringLiteral("id"), QStringLiteral("nohash"));
+            o.insert(QStringLiteral("name"), QStringLiteral("Twisted Metal 4"));
+            o.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+            const ExternalEmulator e = titleFromJson(o);
+            CHECK(!recomps::publishesHash(e));
+            const QVector<recomps::LibraryRom> lib = romWith({});
+            CHECK(recomps::dumpMatch(e, lib) == DumpMatch::TitleOnly);
+            // A serial is NOT counted as a digest: this build has no reader for a disc image's serial, and an
+            // entry that looked gated by one would be gated by nothing at all.
+            QJsonObject withSerial = o;
+            QJsonObject ri;
+            ri.insert(QStringLiteral("disc_serials"), QJsonArray{ QStringLiteral("SLUS-00562") });
+            withSerial.insert(QStringLiteral("rom_identity"), ri);
+            CHECK(!recomps::publishesHash(titleFromJson(withSerial)));
+            // ...and a library with nothing of that name is still no match.
+            CHECK(recomps::dumpMatch(e, {}) == DumpMatch::None);
+        }
+
+        // ---- THE NARROWING, which is what stops this hashing the whole disk -----------------------------
+        {
+            QJsonObject o;
+            o.insert(QStringLiteral("id"), QStringLiteral("n"));
+            o.insert(QStringLiteral("name"), QStringLiteral("Twisted Metal 4"));
+            o.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+            o.insert(QStringLiteral("rom_extensions"), QJsonArray{ QStringLiteral(".bin") });
+            QJsonObject ri;
+            ri.insert(QStringLiteral("sha1"), QJsonArray{ sha1 });
+            ri.insert(QStringLiteral("sizes"), QJsonArray{ 384615504LL });
+            o.insert(QStringLiteral("rom_identity"), ri);
+            const ExternalEmulator e = titleFromJson(o);
+
+            recomps::LibraryRom r;
+            r.systemId = QStringLiteral("psx");
+            r.title    = QStringLiteral("Twisted Metal 4");
+            r.path     = QStringLiteral("C:/roms/psx/tm4 (Track 01).bin");
+            r.size     = 384615504LL;
+            CHECK(recomps::worthHashing(e, r));
+
+            // Another console's file is never a candidate, however it is named.
+            { auto x = r; x.systemId = QStringLiteral("n64"); CHECK(!recomps::worthHashing(e, x)); }
+            // The .cue beside it: the entry does not list that extension, so it is not hashed. This is what
+            // keeps a multi-file disc dump from being hashed once per track.
+            { auto x = r; x.path = QStringLiteral("C:/roms/psx/tm4.cue"); CHECK(!recomps::worthHashing(e, x)); }
+            // A published size that this file is not.
+            { auto x = r; x.size = 700 * 1024 * 1024LL; CHECK(!recomps::worthHashing(e, x)); }
+            // An UNKNOWN size is not a wrong size. -1 means the caller could not stat it, and refusing on that
+            // would silently drop every candidate on a slow or disconnected volume.
+            { auto x = r; x.size = -1; CHECK(recomps::worthHashing(e, x)); }
+            // An ARCHIVE is exempt from BOTH: a .7z of the dump has its own extension and its own size, and
+            // the digests the cache holds for it are the digests of what is INSIDE it.
+            { auto x = r; x.archive = true; x.size = 12345; x.path = QStringLiteral("C:/roms/psx/tm4.7z");
+              CHECK(recomps::worthHashing(e, x)); }
+            // ...and an archive that is on another console still is not.
+            { auto x = r; x.archive = true; x.systemId = QStringLiteral("snes");
+              CHECK(!recomps::worthHashing(e, x)); }
+            // A row with no path at all (a catalogue row for a game that is not downloaded) is not a file.
+            { auto x = r; x.path.clear(); CHECK(!recomps::worthHashing(e, x)); }
+        }
+    }
+
+    // ---- 23. hashing is NEVER done at browse time --------------------------------------------------------
+    // The mechanism, not the convention: no function in RecompRows.h opens a file. What is asserted here is
+    // the consequence — a cold cache reports `checking` and asks for exactly one file; a WARM cache asks for
+    // nothing at all, which is what stops an open section re-hashing a 660 MB disc image on every redraw.
+    {
+        using recomps::DumpMatch;
+        const QString sha1 = QStringLiteral("64e226413b27ea12639589b3ca2806976c795c8b");
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), QStringLiteral("c"));
+        o.insert(QStringLiteral("name"), QStringLiteral("Twisted Metal 4"));
+        o.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+        QJsonObject ri; ri.insert(QStringLiteral("sha1"), QJsonArray{ sha1 });
+        o.insert(QStringLiteral("rom_identity"), ri);
+        const ExternalEmulator e = titleFromJson(o);
+
+        recomps::LibraryRom cold;
+        cold.systemId = QStringLiteral("psx");
+        cold.title    = QStringLiteral("Twisted Metal 4");
+        cold.path     = QStringLiteral("C:/roms/psx/tm4.bin");
+        CHECK(cold.hashes.isEmpty());
+
+        // COLD: not "you do not own it" — "we have not looked yet".
+        CHECK(recomps::dumpMatch(e, { cold }) == DumpMatch::Checking);
+        CHECK(recomps::pathsNeedingHash(e, { cold }) == QStringList{ cold.path });
+        {
+            recomps::Facts f;
+            f.checkingDumps = true;
+            CHECK(recomps::deriveState(f) == recomps::State::CheckingDumps);
+            // ...and it is only ever read when nothing matched. A match is not made provisional by a second
+            // candidate nobody has hashed, and an installed port is `installed` regardless.
+            f.libraryMatch = true;
+            CHECK(recomps::deriveState(f) == recomps::State::NotInstalled);
+            f.installed = true;
+            CHECK(recomps::deriveState(f) == recomps::State::Installed);
+        }
+
+        // WARM AND MATCHING: no work.
+        auto warm = cold; warm.hashes.sha1 = sha1;
+        CHECK(recomps::dumpMatch(e, { warm }) == DumpMatch::Hashed);
+        CHECK(recomps::pathsNeedingHash(e, { warm }).isEmpty());
+
+        // WARM AND NOT MATCHING: also no work. The digest is known; hashing it again would produce the same
+        // answer, and this is the case that would otherwise re-hash every unrelated PSX dump on every redraw.
+        auto warmWrong = cold; warmWrong.hashes.sha1 = QStringLiteral("1111111111111111111111111111111111111111");
+        CHECK(recomps::dumpMatch(e, { warmWrong }) == DumpMatch::None);
+        CHECK(recomps::pathsNeedingHash(e, { warmWrong }).isEmpty());
+
+        // A record from an OLDER build carries only the kinds that build computed. Against an entry that
+        // publishes a kind the record does not have, that is a cache MISS and not a refusal.
+        QJsonObject o256 = o;
+        QJsonObject ri256;
+        ri256.insert(QStringLiteral("sha256"),
+                     QJsonArray{ QStringLiteral(
+                         "1be99e1d98c5b5e2d7572f3b46aa63c43ddd6f19f1b5cf179ffd853261a139f1") });
+        o256.insert(QStringLiteral("rom_identity"), ri256);
+        const ExternalEmulator e256 = titleFromJson(o256);
+        auto legacy = cold; legacy.hashes.sha1 = sha1;   // sha1 only, as a pre-#248 stamp holds
+        CHECK(recomps::dumpMatch(e256, { legacy }) == DumpMatch::Checking);
+        CHECK(recomps::pathsNeedingHash(e256, { legacy }) == QStringList{ legacy.path });
+
+        // A MATCH ALREADY FOUND ends the question: the other candidate is not hashed just because it is there.
+        auto other = cold; other.path = QStringLiteral("C:/roms/psx/some other dump.bin");
+        CHECK(recomps::pathsNeedingHash(e, { warm, other }).isEmpty());
+        CHECK(recomps::pathsNeedingHash(e, { other, warm }).isEmpty());
+        // An entry that publishes NOTHING never asks for a hash either — there would be nothing to compare.
+        QJsonObject bare;
+        bare.insert(QStringLiteral("id"), QStringLiteral("b"));
+        bare.insert(QStringLiteral("name"), QStringLiteral("Twisted Metal 4"));
+        bare.insert(QStringLiteral("platform"), QStringLiteral("psx"));
+        CHECK(recomps::pathsNeedingHash(titleFromJson(bare), { cold }).isEmpty());
+    }
+
+    // ---- 24. the last good copy, and what a broken publish may not do -------------------------------------
+    // A feed that cannot be reached keeps what it had; a publisher who ships one broken build must not thereby
+    // delete the working catalogue on every machine that fetches it.
+    {
+        QDir(RecompFeed::cacheDir()).removeRecursively();
+        // Nothing downloaded yet: an error, and an empty list — the caller shows the in-tree rows and says so.
+        CHECK(!RecompFeed::cached().ok());
+        CHECK(RecompFeed::cached().titles.isEmpty());
+        // ...and `catalogue()` still returns the in-tree catalogue whole, with the reason as an out-param.
+        {
+            QString err;
+            const QList<ExternalEmulator> only = RecompFeed::catalogue(&err);
+            CHECK(!err.isEmpty());
+            CHECK(only.size() == all().size());
+        }
+
+        const RecompFeed::Feed stored = RecompFeed::storeIfParses(goodZip);
+        CHECK(stored.ok());
+        CHECK(QFile::exists(RecompFeed::cachedCatalogPath()));
+        CHECK(RecompFeed::cached().ok());
+        CHECK(RecompFeed::cached().titles.size() == 2);
+
+        // The bytes on disk, before a broken publish is offered.
+        QByteArray onDisk;
+        { QFile f(RecompFeed::cachedCatalogPath()); CHECK(f.open(QIODevice::ReadOnly)); onDisk = f.readAll(); }
+        CHECK(!onDisk.isEmpty());
+
+        const RecompFeed::Feed broken = RecompFeed::storeIfParses(QByteArrayLiteral("<html>502</html>"));
+        CHECK(!broken.ok());
+        // BYTE-IDENTICAL. Not "still parses" — identical, because a rewrite that happened to parse would hide
+        // exactly the defect this asserts against.
+        { QFile f(RecompFeed::cachedCatalogPath()); CHECK(f.open(QIODevice::ReadOnly));
+          CHECK(f.readAll() == onDisk); }
+        CHECK(RecompFeed::cached().titles.size() == 2);
+        // ...and no half-written temp file survives to be read as the catalogue next launch.
+        CHECK(!QFile::exists(RecompFeed::cachedCatalogPath() + QStringLiteral(".part")));
+
+        // With a good copy on disk, the section browses BOTH feeds and the error is empty.
+        {
+            QString err;
+            const QList<ExternalEmulator> both = RecompFeed::catalogue(&err);
+            CHECK(err.isEmpty());
+            CHECK(both.size() == all().size() + 2);
+            CHECK(find(both, QStringLiteral("twisted-metal4-psx")) != nullptr);
+            CHECK(find(both, QStringLiteral("zelda64recomp")) != nullptr);
+        }
+
+        // Row activation resolves an id from EITHER source — a feed-only row that could not be resolved would
+        // be a row that does nothing when pressed.
+        ExternalEmulator got;
+        CHECK(RecompFeed::findById(QStringLiteral("zelda64recomp"), &got));
+        CHECK(got.port.romDelivery == QStringLiteral("in_app_menu"));
+        CHECK(RecompFeed::findById(QStringLiteral("twisted-metal4-psx"), &got));
+        CHECK(got.port.buildEngine == QStringLiteral("psxrecomp"));
+        CHECK(recomps::tierOf(got) == recomps::Tier::SelfCompiled);
+        CHECK(!RecompFeed::findById(QStringLiteral("no-such-title"), &got));
+        CHECK(!RecompFeed::findById(QString(), &got));
+
+        // THE SCHEDULE. Once a day, and a stamp in the FUTURE (a clock that moved backwards, or an ini synced
+        // from another machine) must not freeze the feed until the clock catches up.
+        RecompFeed::forgetRefreshStamp();
+        CHECK(RecompFeed::dueForRefresh());
+        RecompFeed::markRefreshed();
+        CHECK(!RecompFeed::dueForRefresh());
+        RecompFeed::forgetRefreshStamp();
+        CHECK(RecompFeed::dueForRefresh());
+
+        // ---- the rows the section actually draws, over the merged catalogue --------------------------
+        // The whole increment, end to end: a feed-only PSX row is self-compiled, needs a ROM, and carries the
+        // engine and the engine's licence; the in-tree N64 row is untouched by any of it.
+        {
+            const QList<ExternalEmulator> both = RecompFeed::catalogue();
+            const QVector<recomps::Row> rows = recomps::buildRows(
+                both, [](const ExternalEmulator&) { return recomps::Facts{}; });
+            const recomps::Row* tm = nullptr;
+            const recomps::Row* zz = nullptr;
+            for (const recomps::Row& r : rows)
+            {
+                if (r.portId == QStringLiteral("twisted-metal4-psx")) tm = &r;
+                if (r.portId == QStringLiteral("zelda64recomp"))      zz = &r;
+            }
+            CHECK(tm != nullptr);
+            CHECK(zz != nullptr);
+            if (tm)
+            {
+                CHECK(tm->tier == recomps::Tier::SelfCompiled);
+                CHECK(tm->engine == QStringLiteral("psxrecomp"));
+                CHECK(tm->license == QStringLiteral("PolyForm Noncommercial 1.0.0"));
+                CHECK(tm->creditedName == QStringLiteral("TechnicallyComputers"));
+                CHECK(tm->state == recomps::State::NeedsRom);
+                CHECK(tm->systemId == QStringLiteral("psx"));
+            }
+            if (zz)
+            {
+                CHECK(zz->tier == recomps::Tier::PreBuilt);
+                CHECK(zz->engine.isEmpty());
+                CHECK(zz->license == QStringLiteral("GPL-3.0"));
+                CHECK(zz->systemId == QStringLiteral("n64"));
+            }
+            // Grouped by system id in ascending order, so the PSX header precedes the N64 rows... which is
+            // exactly what an id sort gives and a console-name sort would not. Asserted because the ORDER is
+            // what makes the list stable across runs.
+            int firstHeader = -1, psxHeader = -1;
+            for (int i = 0; i < rows.size(); ++i)
+                if (rows[i].kind == recomps::Row::Kind::SystemHeader)
+                {
+                    if (firstHeader < 0) firstHeader = i;
+                    if (rows[i].systemId == QStringLiteral("psx")) psxHeader = i;
+                }
+            CHECK(firstHeader >= 0);
+            CHECK(psxHeader >= 0);
+            CHECK(rows[firstHeader].systemId == QStringLiteral("n64"));   // "n64" < "psx"
+        }
+
+        // ...and `dumpUnverified` reaches the row only where it is the row's actual basis.
+        {
+            recomps::Facts f;
+            f.libraryMatch = true; f.dumpUnverified = true;
+            const QList<ExternalEmulator> in = shippedPorts();
+            const QVector<recomps::Row> rows =
+                recomps::buildRows(in, [&f](const ExternalEmulator&) { return f; });
+            bool sawPort = false;
+            for (const recomps::Row& r : rows)
+                if (r.kind == recomps::Row::Kind::Port) { sawPort = true; CHECK(r.dumpUnverified); }
+            CHECK(sawPort);
+            // An INSTALLED row is not "unverified" — the question is not being asked there at all.
+            f.installed = true;
+            const QVector<recomps::Row> installedRows =
+                recomps::buildRows(in, [&f](const ExternalEmulator&) { return f; });
+            for (const recomps::Row& r : installedRows)
+                if (r.kind == recomps::Row::Kind::Port) CHECK(!r.dumpUnverified);
+        }
+
+        QDir(RecompFeed::cacheDir()).removeRecursively();
     }
 
     if (failures == 0) std::printf("PORTS-OK\n");

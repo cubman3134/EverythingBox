@@ -35,7 +35,8 @@ static int failures = 0;
 // a full cover + a thumbnail + a downloadable epub). Base url is http://books.lan/opds/root.xml, so the
 // relative hrefs below resolve against http://books.lan/opds/ .
 static const char* kFeed = R"(<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog"
+      xmlns:pse="http://vaemendis.net/opds-pse/ns">
   <id>urn:root</id>
   <title>My Library</title>
   <link rel="self" href="/opds/root.xml" type="application/atom+xml;profile=opds-catalog;kind=navigation"/>
@@ -54,6 +55,14 @@ static const char* kFeed = R"(<?xml version="1.0" encoding="utf-8"?>
     <link rel="http://opds-spec.org/image/thumbnail" href="/covers/dune-thumb.png" type="image/png"/>
     <link rel="http://opds-spec.org/acquisition" href="download/dune.epub" type="application/epub+zip"/>
   </entry>
+  <entry>
+    <title>Saga, Vol. 1</title>
+    <id>urn:book:saga1</id>
+    <link rel="http://opds-spec.org/acquisition" href="download/saga-1.cbz"
+          type="application/vnd.comicbook+zip"/>
+    <link rel="http://vaemendis.net/opds-pse/stream" href="books/0A1/pages/{pageNumber}?zero_based=true"
+          type="image/jpeg" pse:count="160" pse:lastRead="7"/>
+  </entry>
 </feed>)";
 
 int main(int argc, char** argv)
@@ -67,7 +76,7 @@ int main(int argc, char** argv)
         const OpdsFeed feed = parseOpds(QByteArray(kFeed), base);
         CHECK(feed.title == QStringLiteral("My Library"));
         CHECK(feed.id == QStringLiteral("urn:root"));
-        CHECK(feed.entries.size() == 2);
+        CHECK(feed.entries.size() == 3);
 
         // --- entry 0: a NAVIGATION shelf (subsection, opds-catalog type) — no acquisition, no cover.
         const OpdsEntry& nav = feed.entries[0];
@@ -92,6 +101,26 @@ int main(int argc, char** argv)
         CHECK(book.acquisition[0].type == QStringLiteral("application/epub+zip"));
         // cover: the FULL image wins over the thumbnail, resolved to absolute (root-relative -> host root)
         CHECK(book.coverHref == QStringLiteral("http://books.lan/covers/dune.png"));
+        // ...and an entry the server offered no page stream for offers none. -1, not 0: "no progress" and
+        // "you are on the first page" are different statements (#153).
+        CHECK(!book.pse.isValid());
+        CHECK(book.pse.count == 0);
+        CHECK(book.pse.lastRead == -1);
+
+        // --- entry 2: an OPDS-PSE COMIC (#153). The page-stream link is lifted into `pse` and is NOT
+        // mistaken for an acquisition — the download is still there, which is the whole "Read online
+        // BESIDE Download" rule. Its href keeps its {pageNumber} placeholder through the resolve; a
+        // template that came back percent-encoded could never be substituted.
+        const OpdsEntry& comic = feed.entries[2];
+        CHECK(comic.title == QStringLiteral("Saga, Vol. 1"));
+        CHECK(comic.acquisition.size() == 1);
+        CHECK(comic.acquisition[0].href == QStringLiteral("http://books.lan/opds/download/saga-1.cbz"));
+        CHECK(comic.pse.isValid());
+        CHECK(comic.pse.count == 160);
+        CHECK(comic.pse.lastRead == 7);
+        CHECK(comic.pse.type == QStringLiteral("image/jpeg"));
+        CHECK(comic.pse.hrefTemplate
+              == QStringLiteral("http://books.lan/opds/books/0A1/pages/{pageNumber}?zero_based=true"));
     }
 
     // ================= 2. resolveHref: relative resolves, absolute is left alone ==================
@@ -105,6 +134,10 @@ int main(int argc, char** argv)
               == QStringLiteral("https://cdn.example/z.epub"));
         // an empty base leaves a relative href as-is (nothing to resolve against)
         CHECK(resolveHref(QString(), QStringLiteral("rel.xml")) == QStringLiteral("rel.xml"));
+        // a TEMPLATED href (#153) resolves like any other AND keeps its braces: `{` and `}` are not legal
+        // url characters, and a %7BpageNumber%7D coming back out would be unsubstitutable for ever.
+        CHECK(resolveHref(base, QStringLiteral("b/1/pages/{pageNumber}?w={maxWidth}"))
+              == QStringLiteral("http://books.lan/opds/b/1/pages/{pageNumber}?w={maxWidth}"));
     }
 
     // ================= 3. opdsBasicAuth: base64(user:pass), empty without a username ==============

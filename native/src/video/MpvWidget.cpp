@@ -932,6 +932,41 @@ double MpvWidget::speed() const
     return s;
 }
 
+// Issue #162's brightness gesture. mpv's video equalizer spans -100..100 with 0 as the untouched picture, so
+// the caller's 0..100 percent maps to pct-100: 100% => 0 (no change), 0% => -100 (black). Applied to BOTH
+// decks, for the same reason pause and mute are: a crossfade's incoming file must not pop back to full
+// brightness at the handover. Clamped here so a caller cannot brighten past the source (this gesture DIMS —
+// pushing the equalizer positive washes out the picture, which is not what "brightness" means to a viewer
+// reaching for it in a dark room).
+void MpvWidget::setVideoBrightness(int percent)
+{
+    brightnessPercent_ = qBound(0, percent, 100);
+    const int64_t eq = brightnessPercent_ - 100;
+    if (mpv) mpv_set_property(mpv, "brightness", MPV_FORMAT_INT64, (void*)&eq);
+    if (xfIncoming_) mpv_set_property(xfIncoming_, "brightness", MPV_FORMAT_INT64, (void*)&eq);
+}
+
+// Issue #162's pinch gesture: how the frame is fitted to the window.
+//   Fit     — keepaspect, no pan/scan: the letterboxed default.
+//   Fill    — keepaspect with panscan 1.0: zoom until the frame fills, cropping the overflow.
+//   Stretch — keepaspect off: the frame is distorted to the window, bars and all gone.
+// Both decks again, so a crossfade cannot hand over to a differently-shaped picture.
+void MpvWidget::setVideoFit(int fit)
+{
+    videoFit_ = (fit < 0 || fit > 2) ? 0 : fit;
+    const int keep = (videoFit_ == 2) ? 0 : 1;
+    const double panscan = (videoFit_ == 1) ? 1.0 : 0.0;
+    auto apply = [&](mpv_handle* h) {
+        if (!h) return;
+        int flag = keep;
+        double ps = panscan;
+        mpv_set_property(h, "keepaspect", MPV_FORMAT_FLAG, &flag);
+        mpv_set_property(h, "panscan", MPV_FORMAT_DOUBLE, &ps);
+    };
+    apply(mpv);
+    apply(xfIncoming_);
+}
+
 void MpvWidget::seekRelative(double seconds)
 {
     QByteArray s = QByteArray::number(seconds);

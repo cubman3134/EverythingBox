@@ -345,6 +345,54 @@ MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
     return cat;
 }
 
+// ---- Personal TV channels (issue #179, increment 1) ------------------------------------------------------
+
+MediaCatalog channelsCatalog(const QList<channels::Channel>& all)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Channels");
+    for (const channels::Channel& c : all)
+    {
+        MediaItem it;
+        // The ROW-PRODUCER KEY is the id (see the header): the same string the star files the favourite
+        // under, the same string Recents re-opens by, and the same string a #161 home row would name.
+        it.id       = channels::rowProducerKey(c.id);
+        it.type     = QStringLiteral("_channel");
+        it.title    = c.name;
+        // What the channel IS, not what is on it: a "now playing" line here would mean computing a schedule
+        // for every channel on every navigation into this folder, and the answer would be stale a minute
+        // later anyway. The guide (increment 2) is where "what is on" belongs.
+        it.subtitle = c.startFromBeginning
+                          ? QObject::tr("%1 · from the start").arg(channels::label(c.ordering))
+                          : channels::label(c.ordering);
+        it.expandable = false;                                   // a channel TUNES; it is not a folder
+        it.mime     = channels::rowProducerKey(c.id);            // activation tunes this channel
+        cat.items.push_back(it);
+    }
+    // The trailing "create a channel" row, present even when the list is empty (the Playlists / Live TV rule).
+    MediaItem add;
+    add.id    = QStringLiteral("_newchannel");
+    add.type  = QStringLiteral("_newchannel");
+    add.title = QObject::tr("➕  Create a channel…");
+    add.mime  = QStringLiteral("newchannel");
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    return cat;
+}
+
+FavoriteItem channelFavorite(const channels::Channel& ch)
+{
+    FavoriteItem f;
+    f.itemId       = channels::rowProducerKey(ch.id);
+    f.title        = ch.name;
+    f.subtitle     = channels::label(ch.ordering);
+    f.type         = QStringLiteral("_channel");
+    // The identity in BOTH fields, and a media `kind` — see the header. Never a file path and never a url:
+    // what a channel is playing right now is a property of the clock, not of the star.
+    f.path         = f.itemId;
+    f.kind         = QStringLiteral("video");
+    return f;
+}
+
 // ---- OPDS book catalogs (issue #146) ---------------------------------------------------------------------
 
 MediaCatalog opdsCatalogsList(const QList<OpdsCatalog>& catalogs)
@@ -416,6 +464,11 @@ MediaCatalog opdsCatalog(const OpdsFeed& feed)
             it.url          = best->href;   // the acquisition href — downloaded (with auth) at activation
             it.mime         = best->type;   // its content-type — names the download's file extension
             it.id           = e.id.isEmpty() ? best->href : e.id;
+            // The server's OPDS-PSE offer (#153), carried onto the row so activation can present "Read
+            // online" BESIDE the download rather than instead of it. Default-constructed (isValid()
+            // false) when the entry advertised none, and the download stays exactly what it was in
+            // either case — `url` and `mime` above are untouched by this.
+            it.pse          = e.pse;
             cat.items.push_back(it);
             continue;
         }
@@ -1099,6 +1152,32 @@ qint64 traktMissedThroughOf(const QString& mime)
     // store's "never dismissed" and therefore a press that does nothing rather than one that dismisses a
     // show through the epoch. Failing closed is the only safe direction for a value that drives a write.
     return mime.section(QLatin1Char(':'), 3, 3).toLongLong();
+}
+
+// ---- The New shelf (issue #155) ---------------------------------------------------------------------
+// One builder, three readers, no literal anywhere else -- the "You missed" marker's rule, for the same
+// reason. See the header for what the row has to carry and why the split lands where it does.
+static const QLatin1String kNewShelfPrefix("new:");
+
+QString newShelfMarker(const QString& addonId, const QString& seriesId)
+{
+    return kNewShelfPrefix + addonId + QLatin1Char(':') + seriesId;
+}
+
+bool isNewShelfMime(const QString& mime) { return mime.startsWith(kNewShelfPrefix); }
+
+QString newShelfAddonOf(const QString& mime)
+{
+    if (!isNewShelfMime(mime)) return QString();
+    return mime.section(QLatin1Char(':'), 1, 1);
+}
+
+QString newShelfSeriesOf(const QString& mime)
+{
+    if (!isNewShelfMime(mime)) return QString();
+    // section(..., 2) with no end index takes the REST of the string, colons and all. That is the whole
+    // point: "new:com.everythingbox.podcasts:itpod:1521578" must yield "itpod:1521578", not "itpod".
+    return mime.section(QLatin1Char(':'), 2);
 }
 
 MediaCatalog traktMissedCatalog(const QVector<trakt::MissedRow>& rows, int maxRows)

@@ -22,10 +22,25 @@
 namespace NetHeaderApply
 {
 
+// The two halves of the rule, in a Detail namespace so they stay UNAVAILABLE to callers: the invariant
+// get() states below — that nobody can apply the headers without also gating the redirect — is the whole
+// safety property here, and it survives the factoring only because these two are not part of the API.
+// They are declared ahead of get() because get() is written in terms of them, and get() stays first,
+// where it has always been, because it is what nearly every caller wants.
+namespace Detail
+{
+inline StreamHeaders::Headers applyHeaders(QNetworkRequest& rq,
+                                           const StreamHeaders::Headers& declaredHeaders,
+                                           const QString& declaredUrl);
+inline QNetworkReply* guardRedirects(QNetworkReply* reply, const StreamHeaders::Headers& appliedHeaders,
+                                     const QString& declaredUrl,
+                                     const std::function<void(bool allowed, const QUrl& to)>& onRedirect);
+}
+
 // GET `rq`, carrying whatever of `declaredHeaders` (declared by the stream for `declaredUrl`) this request's
 // URL is entitled to. Returns the reply, already guarded.
 //
-// Everything here is one function on purpose. Applying the headers and gating the redirect are not two steps
+// Everything here is one call on purpose. Applying the headers and gating the redirect are not two steps
 // a caller composes: UserVerifiedRedirectPolicy is set exactly when headers were applied, and that policy
 // HOLDS a redirected request until something calls redirectAllowed() — so a caller who applied headers and
 // forgot to gate would not leak, it would hang, which is a worse bug and one no reviewer spots. There is no
@@ -44,7 +59,21 @@ inline QNetworkReply* get(QNetworkAccessManager* nam, QNetworkRequest& rq,
                           const std::function<void(bool allowed, const QUrl& to)>& onRedirect = {})
 {
     if (!nam) return nullptr;
+    const StreamHeaders::Headers appliedHeaders = Detail::applyHeaders(rq, declaredHeaders, declaredUrl);
+    QNetworkReply* reply = nam->get(rq);
+    return Detail::guardRedirects(reply, appliedHeaders, declaredUrl, onRedirect);
+}
 
+namespace Detail
+{
+
+// The header half, pulled out of get() verbatim so a non-GET request can be given the SAME rules rather
+// than a second copy of them. Returns what this url was actually entitled to, which is what the redirect
+// gate then measures against.
+inline StreamHeaders::Headers applyHeaders(QNetworkRequest& rq,
+                                           const StreamHeaders::Headers& declaredHeaders,
+                                           const QString& declaredUrl)
+{
     // What THIS url may receive, which is not always what the stream declared: a debrid/CDN substitute is a
     // different host, and it gets none of them. Asked here rather than trusted from the caller so that every
     // one of the three fetch sites is scoped by the same rule whether or not its author thought about it.
@@ -69,8 +98,15 @@ inline QNetworkReply* get(QNetworkAccessManager* nam, QNetworkRequest& rq,
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                     appliedHeaders.isEmpty() ? QNetworkRequest::NoLessSafeRedirectPolicy
                                              : QNetworkRequest::UserVerifiedRedirectPolicy);
+    return appliedHeaders;
+}
 
-    QNetworkReply* reply = nam->get(rq);
+// The redirect half, likewise verbatim: hold a redirect that carries someone's headers until the target
+// is checked, allow it only back to the origin they were declared for, and abort otherwise.
+inline QNetworkReply* guardRedirects(QNetworkReply* reply, const StreamHeaders::Headers& appliedHeaders,
+                                     const QString& declaredUrl,
+                                     const std::function<void(bool allowed, const QUrl& to)>& onRedirect)
+{
     if (!reply || appliedHeaders.isEmpty()) return reply;
 
     // `reply` is the connection context as well as the sender, so this dies with the request rather than
@@ -84,6 +120,25 @@ inline QNetworkReply* get(QNetworkAccessManager* nam, QNetworkRequest& rq,
         else         reply->abort();
     });
     return reply;
+}
+
+} // namespace Detail
+
+// The same two rules for a request that is not a GET. #153 reports a comic's reading position back to the
+// server that owns it, which is a PATCH (Komga) or a POST (Kavita) carrying the very same device-local
+// Basic auth the feed and page fetches carry — so it needs the same scoping and the same redirect gate,
+// and getting them by calling the same two functions is the only way to be sure it has them.
+//
+// `verb` is the HTTP method; `body` is sent as-is and its content type is the caller's to set on `rq`.
+inline QNetworkReply* send(QNetworkAccessManager* nam, QNetworkRequest& rq, const QByteArray& verb,
+                           const QByteArray& body, const StreamHeaders::Headers& declaredHeaders,
+                           const QString& declaredUrl,
+                           const std::function<void(bool allowed, const QUrl& to)>& onRedirect = {})
+{
+    if (!nam) return nullptr;
+    const StreamHeaders::Headers appliedHeaders = Detail::applyHeaders(rq, declaredHeaders, declaredUrl);
+    QNetworkReply* reply = nam->sendCustomRequest(rq, verb, body);
+    return Detail::guardRedirects(reply, appliedHeaders, declaredUrl, onRedirect);
 }
 
 } // namespace NetHeaderApply

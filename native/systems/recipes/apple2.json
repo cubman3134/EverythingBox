@@ -8,7 +8,9 @@
     {
       "core": "applewin",
       "options": {
-        "applewin_machine": "Apple //e (enhanced)"
+        "applewin_machine": "Apple //e (enhanced)",
+        "applewin_slot7": "Hard Disk Controller",
+        "applewin_disk_control_drive": "Drive 1"
       },
       "firmware": [],
       "content": [

@@ -22,6 +22,7 @@
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
 #include "../core/LaunchRecipe.h"      // per-system launch recipes: options, firmware, content (issue #190)
+#include "../core/AmsdosCatalog.h"     // Amstrad CPC disk catalogue -> the RUN" command (issue #190)
 #include "../core/PerfTrace.h"
 #include <QTimer>
 #include <QFileInfo>
@@ -192,29 +193,23 @@ void GameLauncher::firePostHook(const QString& key, const QString& rom)
 // by archive path, so a second (warm) call from prepareCore on the GUI thread returns instantly. Returns the
 // resolved path (a file, or a PS3 game folder); empty + *err on failure. `game` non-archive => returned as-is.
 // ---- #190 launch recipes: the three places a recipe touches a launch ---------------------------------
-// The core a recipe should be read for, WITHOUT the per-game override — the system's configured core, else
-// its built-in default. Used by the archive decision below, which runs before the full resolution (it has no
-// item key). A per-game core override that would change how an ARCHIVE is presented is therefore not honoured
-// on that one decision; every other recipe consumer resolves the core properly first.
-static QString recipeCoreForSystem(const GameSystem* sys)
-{
-    if (!sys) return QString();
-    const QString configured = Settings::coreFor(sys->id);
-    return configured.isEmpty() ? sys->cores.value(0) : configured;
-}
-
 // Does this system's recipe say its core takes an ARCHIVE as it is, rather than extracted? True ONLY for a
 // recipe that says so in as many words: silence, no recipe, and an unreadable spelling all mean "extract",
 // which is what the app has always done. That asymmetry is deliberate — handing a core an unextracted ZIP is
 // a real behaviour change and must never be something a recipe falls into by omission.
-static bool recipeWantsArchiveAsIs(const GameSystem* sys)
+//
+// #190 increment 2: the per-GAME core override now reaches this decision. Increment 1 read the SYSTEM's core
+// here, because this call runs before the item key is available; the consequence was that a DOS game the user
+// had moved onto dosbox_core still got dosbox-pure's treatment — handed an unextracted .zip to a core with no
+// archive support at all, which can only ever fail. The override arrives as a plain string resolved by the
+// caller on the GUI thread (this function also runs on the extraction worker thread, where the override store
+// is not ours to touch), and the rule it is applied under is LaunchOpts::resolveCore's: an override naming a
+// core this system does not offer is stale and ignored.
+static bool recipeWantsArchiveAsIs(const GameSystem* sys, const QString& overrideCore)
 {
     if (!sys) return false;
-    const LaunchRecipe& r = LaunchRecipes::forSystem(sys->id);
-    if (r.isNull()) return false;
-    const RecipeCore* rc = LaunchRecipes::coreFor(r, recipeCoreForSystem(sys));
-    if (!rc) return false;
-    return LaunchRecipes::presentationFor(*rc, ContentKind::Archive) == Presentation::AsIs;
+    return LaunchRecipes::archiveAsIsForLaunch(LaunchRecipes::forSystem(sys->id), overrideCore,
+                                               Settings::coreFor(sys->id), sys->cores);
 }
 
 // Every file under `dir`, as paths relative to it. Bounded: a game folder is small, but a user can point this
@@ -231,7 +226,8 @@ static QStringList relativeFilesUnder(const QString& dir)
     return out;
 }
 
-QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err)
+QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err,
+                                              const QString& overrideCore)
 {
     QString game = rom;
     while (ArchiveRom::isArchive(game))
@@ -246,7 +242,7 @@ QString GameLauncher::resolveArchiveForLaunch(const QString& rom, const QString&
         // C: without unpacking it and keeps every modification the game makes in a save file beside it —
         // extracting first throws that away and hands the core one arbitrary file out of the game. There is
         // no way to detect this from the file, so it is the recipe that says so, per core.
-        if (recipeWantsArchiveAsIs(hs))
+        if (recipeWantsArchiveAsIs(hs, overrideCore))
         {
             glLog(QStringLiteral("game: recipe for %1 takes the archive as it is — not extracting \"%2\"")
                       .arg(hs->id, QFileInfo(game).fileName()));
@@ -285,7 +281,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // extraction runs OFF the GUI thread in open() before we get here, so this call is normally a warm cache hit;
     // it still works (synchronously) on the split-pane path and any caller that reaches prepareCore directly.
     QString aerr;
-    const QString game = resolveArchiveForLaunch(rom, systemHint, &aerr);
+    const QString game = resolveArchiveForLaunch(rom, systemHint, &aerr, ov.core);
     if (game.isEmpty())
     {
         glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(rom).fileName(), aerr));
@@ -549,9 +545,12 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     // GameLauncher is destroyed mid-extraction; the result lands in shared state the continuation reads.
     auto resultPath = std::make_shared<QString>();
     auto resultErr  = std::make_shared<QString>();
-    QThread* worker = QThread::create([rom, systemHint, resultPath, resultErr]() {
+    // #190: read the per-game core override HERE, on the GUI thread, because the archive decision below
+    // depends on which core will actually run this game and the worker must not touch the override store.
+    const QString overrideCore = key.isEmpty() ? QString() : LaunchOpts::get(key).core;
+    QThread* worker = QThread::create([rom, systemHint, overrideCore, resultPath, resultErr]() {
         if (QThread::currentThread()->isInterruptionRequested()) return; // app already quitting
-        *resultPath = resolveArchiveForLaunch(rom, systemHint, resultErr.get());
+        *resultPath = resolveArchiveForLaunch(rom, systemHint, resultErr.get(), overrideCore);
     });
     // Continuation runs on the GUI thread (ectx lives there). Tying it to ectx makes Qt drop it if ectx is
     // destroyed — by a superseding open() (fixes booting a stale game) OR by GameLauncher's own destruction
@@ -703,6 +702,15 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
                     emit notifyUser(blocked, kFeedbackLong);
                     return;
                 }
+                // #190: the CPC diagnostic. The launch is NOT refused — the core still boots the disk and
+                // shows its catalogue, which is a usable screen — but the user is told why nothing started
+                // and what to do, instead of being left staring at a `CAT` listing.
+                bool cpcReadable = false;
+                const QString cpcCmd = amsdosBootCommand(ready, &cpcReadable);
+                if (cpcReadable && cpcCmd.isEmpty())
+                    emit notifyUser(tr("“%1” has no program the disk names, so it will boot to a "
+                                       "catalogue listing. Type RUN\" followed by a name from the list.")
+                                        .arg(recentTitle), kFeedbackLong);
                 finishLibretroLaunch(ready, launchRom, recentTitle, thumb, key);
             });
     });
@@ -730,6 +738,49 @@ QString GameLauncher::firmwareBlocker(const CorePlan& plan, const QString& title
     const GameSystem* sys = plan.sys ? plan.sys : SystemCatalog::byId(plan.systemId);
     return LaunchRecipes::firmwareMessage(title, sys ? sys->name : plan.systemId, missing,
                                           QDir::toNativeSeparators(sysDir));
+}
+
+// #190 increment 2. The Amstrad CPC is the one system in this set whose zero-config answer is a TYPED
+// COMMAND, and the honest finding is that cap32 already derives it: libretro/dsk/loader.c walks the disk's
+// AMSDOS catalogue and types RUN"<name> itself, through a precedence chain that ends — and only ends — at a
+// bare `CAT` when the catalogue holds nothing runnable at all. Supplying our own command over the top of that
+// (cap32 takes one through a `#COMMAND:` line in an .m3u, retro_disk_control.c:57) would REPLACE the core's
+// own game-database command with a guess, so this deliberately does not. What it does instead is the other
+// half of what #190 asks for: say what is about to happen. AmsdosCatalog re-implements the core's chain
+// exactly, so the command logged here is the command the core types — and an EMPTY answer means the disk is
+// about to drop the user at a catalogue listing, which is the "black screen with no explanation" this issue
+// exists to end.
+//
+// Returns the command, or "" when there is none. *readable is false when the bytes were not a .dsk we could
+// parse at all (a .cdt tape, a .sna snapshot, an unreadable file) — in which case there is nothing to say and
+// the caller stays quiet.
+QString GameLauncher::amsdosBootCommand(const CorePlan& plan, bool* readable) const
+{
+    if (readable) *readable = false;
+    if (plan.systemId.isEmpty() || plan.core.isEmpty() || plan.launchRom.isEmpty()) return QString();
+    const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
+    if (recipe.isNull()) return QString();
+    const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
+    if (!rc || LaunchRecipes::bootCommandFor(*rc) != QLatin1String("amsdos")) return QString();
+    if (QFileInfo(plan.launchRom).suffix().compare(QLatin1String("dsk"), Qt::CaseInsensitive) != 0)
+        return QString();   // tapes and snapshots have no catalogue
+
+    QFile f(plan.launchRom);
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    // Bounded: the catalogue lives on tracks 0..2, and a CPC disk is 180 KB anyway. Reading a capped prefix
+    // keeps a mislabelled multi-gigabyte file off the GUI thread.
+    const QByteArray bytes = f.read(4 * 1024 * 1024);
+    f.close();
+
+    const AmsdosCatalog::Catalogue cat = AmsdosCatalog::read(bytes);
+    if (!cat.ok) return QString();
+    if (readable) *readable = true;
+    const QString cmd = AmsdosCatalog::bootCommand(cat);
+    glLog(QStringLiteral("game: CPC disk \"%1\" catalogue [%2] -> %3")
+              .arg(QFileInfo(plan.launchRom).fileName(),
+                   AmsdosCatalog::names(cat).join(QStringLiteral(", ")),
+                   cmd.isEmpty() ? QStringLiteral("(nothing runnable — the core will show its catalogue)") : cmd));
+    return cmd;
 }
 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
@@ -1094,7 +1145,12 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
         ? deviceDefault
         : EmuGfx::resolve(EmuGfxStore::get(key),
                           EmuGfx::resolve(EmuGfxStore::systemDefault(system), deviceDefault));
-    emu_->play(em, rom, extraArgs, gfx);
+    // Per-game update/DLC install levers (issue #189), read from the SAME #51 override record the extra args
+    // came from: which update package (if any) and whether DLC is installed into the emulator's own content
+    // store before it boots. Empty for a game with no override — and with no `updates/`/`dlc/` sidecar folders
+    // beside the game, nothing downstream even stats a path, so this is byte-for-byte today's launch.
+    const LaunchOpts::Override contentOv = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
+    emu_->play(em, rom, extraArgs, gfx, contentOv.contentUpdate, contentOv.contentDlc);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 

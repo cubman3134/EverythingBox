@@ -464,6 +464,15 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
     resumeServerOwned_ = false;
     double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
+    // #197: A SERVER'S OWN ITEM IS ASKED OF THE SERVER FIRST, and its answer wins over anything on this
+    // disk — including a mark this build wrote before the hook existed. `< 0` is the hook saying "not
+    // mine"; 0 is a real answer and must not be confused with one (which is why the test is on the hook's
+    // return and not on the position being positive). See PlaybackSession.h.
+    const double remote = remoteResume_ ? remoteResume_(path) : -1.0;
+    double pos = remote >= 0.0 ? remote
+                               : store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
+    if (remote < 0.0 && pos <= 0.0)
+        pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     resumeSeek_ = pos;       // applied once the duration is known (see onDuration)
     audioPos_ = 0.0;
     lastSavedPos_ = -100.0;
@@ -557,6 +566,40 @@ void PlaybackSession::persistResume()
         ResumeStore::noteResumed(resumePath_);
         lastSavedPos_ = audioPos_;
     }
+    // #197: OFFER IT TO THE OWNER FIRST. A `true` here means a server took this position, and this object
+    // then writes NOTHING into the resume store for the entry — one owner per position, and for a server's
+    // own item the owner is the server. The consumption-stats accrual below still runs: that is this
+    // DEVICE's accumulator, which no server has an equivalent of. PlaybackSession.h argues both halves.
+    if (remoteProgress_ && remoteProgress_(resumePath_, audioPos_, duration_, leavingMedia_))
+    {
+        lastSavedPos_ = audioPos_;   // the throttle is still this object's, so the hook is not called per tick
+        const double rdpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
+        lastAccruedPos_ = audioPos_;
+        statsAccum_ += rdpos;
+        const qint64 rwhole = qint64(statsAccum_);
+        if (rwhole > 0)
+        {
+            statsAccum_ -= double(rwhole);
+            ConsumptionStats::addMediaSeconds(resumePath_,
+                mediaIsVideo_ ? QStringLiteral("video") : QStringLiteral("audio"),
+                rwhole, resumeDisplayTitle());
+        }
+        // No resumeSaved(): that signal schedules the cloud "continue watching" push, and there is nothing
+        // to push — this position was never written into a synced category, which is the whole point.
+        return;
+    }
+    const QString k = mediaResumeKey(resumePath_);
+    store().setValue(k + QStringLiteral("pos"), audioPos_);
+    store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
+    store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
+    store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
+    store().sync();
+    // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
+    // not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the same-second
+    // case on its own — the merge's `tomb >= item` rule, which favourites share — so this closes that, and says
+    // out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on every ordinary save.
+    ResumeStore::noteResumed(resumePath_);
+    lastSavedPos_ = audioPos_;
 
     // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
     // a seek-forward can't dump minutes and a seek-backward accrues nothing. The exact float position drives the
@@ -628,6 +671,10 @@ void PlaybackSession::persistResume()
 void PlaybackSession::noteEntryReached()
 {
     if (resumePath_.isEmpty()) return;
+    // #197: ...and nothing at all for an entry whose position a SERVER owns. This is the one write in this
+    // class that is not a position, which is exactly why it needed saying separately: a zero banked here is
+    // still a row in `resume/`, and `resume/` syncs. See PlaybackSession.h.
+    if (remoteOwns_ && remoteOwns_(resumePath_)) return;
     const QString k = mediaResumeKey(resumePath_);
     if (store().contains(k + QStringLiteral("pos"))) return;   // already carries a position: leave it alone
     store().setValue(k + QStringLiteral("pos"), 0.0);
@@ -669,7 +716,11 @@ void PlaybackSession::finishResume()
 
 void PlaybackSession::clearQueue()
 {
+    // #197: this is the LAST position this media will report, and a hook whose own gate is a network round
+    // trip needs to be told so. Scoped to exactly this call so nothing else can see the flag set.
+    leavingMedia_ = true;
     persistResume();      // save where we left off before leaving this media (also flushes final accrual)
+    leavingMedia_ = false;
     resumePath_.clear();
     resumeSeek_ = 0.0;
     lastSavedPos_ = -100.0;
