@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.170 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -755,6 +755,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        # #190: the retro-computer launch surface (the folder-game program picker, and the split-pane
+        # branch's own firmware / boot-command reporting). Its own TU rather than more MainWindow.cpp:
+        # that file is already over MSVC's COMDAT ceiling (/bigobj below), and ten concurrent branches
+        # editing one 25k-line file is how merges start silently double-defining members.
+        src/ui/MainWindowRetroComputers.cpp
+        src/core/AmsdosCatalog.h   # #190: CPC disk catalogue -> the RUN" command (header-only, probe-driven)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h

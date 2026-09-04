@@ -421,6 +421,13 @@ private:
     void openGamePath(const QString& path, const QString& title = QString(),
                       const QString& thumb = QString(), const QString& key = QString(),
                       const QString& systemHint = QString()); // console/platform name to pick the system over the file ext
+    // #190: a folder game (MS-DOS) whose recipe found several plausible programs and no basis to choose.
+    // Ask once with a nav-kit menu, record the answer in the game's launch override, and re-open — through
+    // openGamePath, so a launch that started in a SPLIT PANE re-opens back into the pane rather than jumping
+    // to full screen. Defined in src/ui/MainWindowRetroComputers.cpp.
+    void askBootProgramThenReopen(const QString& title, const QStringList& choices, const QString& rom,
+                                  const QString& thumb, const QString& key, const QString& systemHint);
+
     // A PC (Windows) game isn't an emulator ROM: download it to <data>/games/pc and hand it to the OS to
     // run/install (installer/portable .exe runs; an archive opens). See openLibraryItem's PC-platform branch.
     void openPcGame(const MediaItem& item);
