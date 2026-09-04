@@ -7277,7 +7277,6 @@ void HomeView::renderRecents()
         if (id == QStringLiteral("continue"))            pushShelf(id, StyleResume, buildContinue());
         else if (id == QStringLiteral("jellyfin:continue"))
             pushShelf(id, StylePlain, buildJellyfinContinue());
-        else if (id == QStringLiteral("trakt:missed"))   pushShelf(id, StyleWhen,   buildTraktMissed());
         else if (id == QStringLiteral("new"))            pushShelf(id, StyleWhen,   buildNew());
         else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
         else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
