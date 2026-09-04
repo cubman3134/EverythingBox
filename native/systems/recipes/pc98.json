@@ -13,12 +13,12 @@
       "firmware": [
         {
           "purpose": "PC-98 system BIOS",
-          "files": ["np2kai/bios.rom", "np2kai/BIOS.ROM"],
+          "files": ["np2kai/bios.rom"],
           "required": true
         },
         {
           "purpose": "PC-98 font ROM",
-          "files": ["np2kai/font.rom", "np2kai/FONT.ROM", "np2kai/font.bmp"],
+          "files": ["np2kai/FONT.BMP", "np2kai/font.bmp", "np2kai/FONT.ROM", "np2kai/font.rom"],
           "required": true
         },
         {

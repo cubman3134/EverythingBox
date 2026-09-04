@@ -186,7 +186,12 @@ int main(int argc, char** argv)
 #ifdef EB_SYSCATALOG_EXAMPLE_DIR
     {
         const QList<GameSystem> withExample = loadDataDir(QStringLiteral(EB_SYSCATALOG_EXAMPLE_DIR), builtin);
-        CHECK(withExample.size() == builtin.size() + 4); // msx, pc88, x68000, wasm4
+        // THREE additions, not four: #190 increment 2 promoted "msx" to a BUILT-IN system (it needed a real
+        // system id before a recipe could name one), so the example file's msx entry now OVERRIDES a
+        // built-in rather than adding a system. It is kept there deliberately — the override is what carries
+        // its folderAliases ("msx1"/"msx2"), which built-ins take from RomLibrary's map instead.
+        CHECK(withExample.size() == builtin.size() + 3); // pc88, x68000, wasm4 — msx is built in now
+        CHECK(find(builtin, QStringLiteral("msx")) != nullptr); // ...and this is what changed
         const GameSystem* msx = find(withExample, QStringLiteral("msx"));
         CHECK(msx != nullptr && msx->cores.value(0) == QStringLiteral("bluemsx"));
         const GameSystem* x68 = find(withExample, QStringLiteral("x68000"));

@@ -273,6 +273,45 @@ namespace LaunchRecipes
         return Presentation::Unknown;
     }
 
+    // The command this core is asked to type after boot ("" = none). Reserved by increment 1; increment 2
+    // gives it its first value, "amsdos" — see AmsdosCatalog.h, which reads the command out of an Amstrad
+    // CPC disk's own catalogue. The value is a MECHANISM name rather than a literal command, because the
+    // command is per DISK and a recipe is per system: what the recipe can say is "this core's boot command
+    // comes from the AMSDOS catalogue", and the launcher then reads the disk.
+    inline QString bootCommandFor(const RecipeCore& c) { return c.bootCommand.trimmed(); }
+
+    // ---- pure: WHICH core a launch reads the recipe for ----------------------------------------------------
+    // #190 increment 1 shipped this decision as "the system's configured core, else its default", which meant
+    // a game the user had overridden onto a DIFFERENT core (#51/#95) still had its content presented the way
+    // the SYSTEM's core wanted. On MS-DOS that is not cosmetic: dosbox-pure mounts a .zip natively and
+    // dosbox_core cannot read one at all (its supported_extensions carry no `zip` and retro_load_game has no
+    // archive branch), so a game overridden onto dosbox_core was handed an unextracted archive and could
+    // never boot. So the per-game override has to reach this decision, under exactly the rule
+    // LaunchOpts::resolveCore already applies everywhere else: an override that is NOT a candidate core of
+    // this system is stale and ignored, and the system's own choice stands.
+    inline QString recipeCoreFor(const QString& overrideCore, const QString& configuredCore,
+                                 const QStringList& candidateCores)
+    {
+        const QString ov = overrideCore.trimmed();
+        if (!ov.isEmpty() && candidateCores.contains(ov)) return ov;
+        const QString cfg = configuredCore.trimmed();
+        return cfg.isEmpty() ? candidateCores.value(0) : cfg;
+    }
+
+    // Does this launch hand an ARCHIVE to its core as it is, rather than extracting it first? The whole
+    // decision in one pure call, so the probe drives it end to end (recipe + override + configured + the
+    // system's candidates) with no app state. False for every recipe that does not say `asIs` in as many
+    // words — silence, an unreadable spelling and no recipe at all all mean "extract", which is what the app
+    // has always done and what every core but dosbox-pure needs.
+    inline bool archiveAsIsForLaunch(const LaunchRecipe& r, const QString& overrideCore,
+                                     const QString& configuredCore, const QStringList& candidateCores)
+    {
+        if (r.isNull()) return false;
+        const RecipeCore* rc = coreFor(r, recipeCoreFor(overrideCore, configuredCore, candidateCores));
+        if (!rc) return false;
+        return presentationFor(*rc, ContentKind::Archive) == Presentation::AsIs;
+    }
+
     // ---- pure: firmware -----------------------------------------------------------------------------------
     // The REQUIRED firmware entries none of whose files are present. `exists` is injected (given a bare file
     // name, is it in the firmware folder?), so this is pure and the probe drives it against a set of literals.

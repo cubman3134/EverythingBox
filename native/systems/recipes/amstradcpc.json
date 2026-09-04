@@ -1,6 +1,6 @@
 {
   "system": "amstradcpc",
-  "summary": "cap32 carries the CPC firmware itself, so nothing has to be supplied, and it auto-runs disk and tape content.",
+  "summary": "cap32 carries the CPC firmware itself, so nothing has to be supplied. It reads the disk's own catalogue and types the RUN\" command for you; where its own guess would give up and just list the disk, EverythingBox reads the catalogue and supplies the command instead.",
   "firmwareFolder": "system",
   "folderIsGame": false,
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
@@ -11,6 +11,16 @@
         "cap32_autorun": "enabled",
         "cap32_model": "6128"
       },
+      "firmware": [],
+      "content": [
+        { "when": "file",    "present": "asIs" },
+        { "when": "archive", "present": "extract" }
+      ],
+      "bootCommand": "amsdos"
+    },
+    {
+      "core": "crocods",
+      "options": {},
       "firmware": [],
       "content": [
         { "when": "file",    "present": "asIs" },
