@@ -538,34 +538,34 @@ void PlaybackSession::seedResume(double seconds)
 void PlaybackSession::persistResume()
 {
     if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
-    // #83: THE POSITION BELONGS TO A SERVER. Nothing is written to resume/<hash> and no tombstone is
-    // recorded - the server is the one authority for this item, and a local row would be a second one that
-    // the cloud merge would then propagate to every device on the account. The heartbeat still HAPPENS, at
-    // exactly the cadence it always did, and goes out on serverProgress instead. Consumption stats below
-    // are deliberately outside this branch: watch seconds are a fact about this device.
+
+    // #83: THE POSITION BELONGS TO A SERVER, said by a flag rather than by a hook. Nothing is written to
+    // resume/<hash> and no tombstone is recorded — the server is the one authority for this item, and a
+    // local row would be a second one the cloud merge would then propagate to every device on the account.
+    // The heartbeat still happens at exactly the cadence it always did and goes out on serverProgress.
+    // Two owners, one rule: this branch and the #197 hook below both mean "somebody else owns this",
+    // they simply learn it differently (a flag the open route sets, versus a hook that answers per item).
     if (resumeServerOwned_)
     {
         lastSavedPos_ = audioPos_;
         emit serverProgress(resumePath_, audioPos_);
-    }
-    else
-    {
-        const QString k = mediaResumeKey(resumePath_);
-        store().setValue(k + QStringLiteral("pos"), audioPos_);
-        store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
-        store().setValue(k + QStringLiteral("title"), resumeDisplayTitle());
-        store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // cross-device merge-by-recency
-        store().sync();
-        // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished
-        // must not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the
-        // same-second case on its own — the merge's `tomb >= item` rule, which favourites share — so this
-        // closes that, and says out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on
-        // every ordinary save.
-        ResumeStore::noteResumed(resumePath_);
-        lastSavedPos_ = audioPos_;
+        // Consumption stats still accrue: watch seconds are a fact about THIS device, which no server has
+        // an equivalent of. No resumeSaved() — nothing was written into a synced category to push.
+        const double sdpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
+        lastAccruedPos_ = audioPos_;
+        statsAccum_ += sdpos;
+        const qint64 swhole = qint64(statsAccum_);
+        if (swhole > 0)
+        {
+            statsAccum_ -= double(swhole);
+            ConsumptionStats::addMediaSeconds(resumePath_,
+                mediaIsVideo_ ? QStringLiteral("video") : QStringLiteral("audio"),
+                swhole, resumeDisplayTitle());
+        }
+        return;
     }
     // #197: OFFER IT TO THE OWNER FIRST. A `true` here means a server took this position, and this object
-    // then writes NOTHING into the resume store for the entry — one owner per position, and for a server's
+    // then writes NOTHING into the resume store for the entry â€” one owner per position, and for a server's
     // own item the owner is the server. The consumption-stats accrual below still runs: that is this
     // DEVICE's accumulator, which no server has an equivalent of. PlaybackSession.h argues both halves.
     if (remoteProgress_ && remoteProgress_(resumePath_, audioPos_, duration_, leavingMedia_))
@@ -583,7 +583,7 @@ void PlaybackSession::persistResume()
                 rwhole, resumeDisplayTitle());
         }
         // No resumeSaved(): that signal schedules the cloud "continue watching" push, and there is nothing
-        // to push — this position was never written into a synced category, which is the whole point.
+        // to push â€” this position was never written into a synced category, which is the whole point.
         return;
     }
     const QString k = mediaResumeKey(resumePath_);
@@ -594,7 +594,7 @@ void PlaybackSession::persistResume()
     store().sync();
     // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
     // not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the same-second
-    // case on its own — the merge's `tomb >= item` rule, which favourites share — so this closes that, and says
+    // case on its own â€” the merge's `tomb >= item` rule, which favourites share â€” so this closes that, and says
     // out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on every ordinary save.
     ResumeStore::noteResumed(resumePath_);
     lastSavedPos_ = audioPos_;
@@ -602,7 +602,7 @@ void PlaybackSession::persistResume()
     // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
     // a seek-forward can't dump minutes and a seek-backward accrues nothing. The exact float position drives the
     // diff (seeks handled correctly, no runaway); a sub-second remainder carries in statsAccum_ so whole-second
-    // rounding never drifts. Keyed by the resume identity (its own per-profile store — NOT the global resume
+    // rounding never drifts. Keyed by the resume identity (its own per-profile store â€” NOT the global resume
     // keys), category from the file's kind, title as the current resume title.
     const double dpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
     lastAccruedPos_ = audioPos_;
@@ -616,9 +616,7 @@ void PlaybackSession::persistResume()
             whole, resumeDisplayTitle());
     }
 
-    // ...and NOT for a server-owned item: there is no local row for the cloud push to carry, and firing it
-    // would schedule a write of a document this item is deliberately absent from.
-    if (!resumeServerOwned_) emit resumeSaved(); // host schedules the cloud "continue watching" push
+    emit resumeSaved(); // host schedules the cloud "continue watching" push (debounced)
 }
 
 // A BOUNDARY WAS CROSSED INTO THIS ENTRY, WHICH IS A FACT (issue #220).
