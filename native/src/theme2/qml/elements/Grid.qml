@@ -174,6 +174,28 @@ GridView {
                 }
             }
 
+            // "N NEW" badge for a followed series carrying unseen children (issue #155). browseItems() sets
+            // modelData.newCount only on a followed tile with unread children, so every other tile renders
+            // exactly as it did. Top-LEFT, deliberately: the "on disk" badge below owns the top-right corner
+            // and a local library series can be both.
+            Rectangle {
+                visible: !!(modelData && modelData.newCount)
+                anchors { top: parent.top; left: parent.left; margins: 4 }
+                radius: 3
+                color: "#1E5B33"
+                implicitWidth: newText.implicitWidth + 10
+                implicitHeight: newText.implicitHeight + 4
+                width: implicitWidth; height: implicitHeight
+                Text {
+                    id: newText
+                    anchors.centerIn: parent
+                    text: (modelData && modelData.newCount) ? (modelData.newCount + " NEW") : ""
+                    color: "white"
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+            }
+
             // "Continue watching/listening" bar along the bottom of the card (issue #139 increment 2), the
             // themed counterpart of the classic grid's poster overlay. browseItems() sets modelData.progress
             // (0..1) only for a row that has somewhere to be — a part-way film, episode, track or audiobook

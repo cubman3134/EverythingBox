@@ -742,6 +742,45 @@ fi
 rm -f "$SERIAL_HITS" "$SERIAL_CODE"
 echo
 
+# The OPDS-PSE reader's log discipline, and its use of the ONE page seam (#153).
+#
+# A PSE page url can BE a credential: Kavita puts an apiKey in the query string, and the catalog's HTTP
+# Basic password rides in a request header that travels with every page. So nothing in the streaming TU may
+# log a url, a header map or an item's requestHeaders - it logs page NUMBERS and the family of server.
+#
+# Held as source shape because there is nowhere else to hold it: probe_pse asserts that the RULES never put
+# a credential in a url, but no probe can see what a future pseLog() line interpolates.
+#
+# THE POSITIVE HALF matters as much as the negative one - a "must not appear" grep passes trivially once the
+# feature is deleted, so this also requires the streaming path still to go through openImagePages (three
+# suppliers, one seam) and still to report progress to the server that owns it.
+echo "=== OPDS-PSE never logs a page url or a credential (#153) ==="
+PSE_TU="$HERE/../src/ui/MainWindowOpdsPse.cpp"
+PSE_HITS="$BUILD_DIR/pse-log-hits.txt"
+pse_fail=0
+if [ ! -f "$PSE_TU" ]; then
+  echo "FAIL: $PSE_TU is missing (this gate then asserts nothing about #153)"
+  pse_fail=1
+else
+  # To a FILE, never through a pipe into `grep -q`: that grep exits on its first match, the upstream takes
+  # SIGPIPE, and under `pipefail` the pipeline reports 141 - a failure ON A MATCH, read as "clean".
+  grep -nE 'pseLog\(.*(requestHeaders|headers|hrefTemplate|Authorization|\.url)' "$PSE_TU" > "$PSE_HITS" 2>/dev/null || true
+  if [ -s "$PSE_HITS" ]; then
+    echo "FAIL: a PSE log line names a url or a header - a page template can be a credential:"
+    sed 's|^|      |' "$PSE_HITS"
+    pse_fail=1
+  fi
+  grep -q 'openImagePages' "$PSE_TU"     || { echo "FAIL: the PSE reader no longer goes through the one page seam (#188/#153)"; pse_fail=1; }
+  grep -q 'OpdsPse::progressReport' "$PSE_TU"     || { echo "FAIL: the PSE reader no longer reports progress to the server that owns it"; pse_fail=1; }
+fi
+if [ "$pse_fail" -eq 0 ]; then
+  echo "PASS: PSE logs page numbers, streams through the one seam, and reports progress"
+else
+  fail=1
+fi
+rm -f "$PSE_HITS"
+echo
+
 # EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
 # ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
 # (CI), verifies for real where C:\RetroBat exists. Optional: only if built.
@@ -780,7 +819,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_cbr CBR-OK" "probe_ebookformats EBOOKFMT-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK" "probe_chapters CHAPTERS-OK" "probe_recipes RECIPES-OK" "probe_homerows HOMEROWS-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_cbr CBR-OK" "probe_ebookformats EBOOKFMT-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK" "probe_chapters CHAPTERS-OK" "probe_recipes RECIPES-OK" "probe_homerows HOMEROWS-OK" "probe_playon PLAYON-OK" "probe_jellyfin JELLYFIN-OK" "probe_readaloud READALOUD-OK" "probe_follow FOLLOW-OK" "probe_absclient ABSCLIENT-OK" "probe_contentinstall CONTENTINSTALL-OK" "probe_comicinfo COMICINFO-OK" "probe_pse PSE-OK" "probe_playergestures PLAYERGESTURES-OK" "probe_tracker TRACKER-OK" "probe_channels CHANNELS-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -2148,6 +2187,80 @@ fi
 if [ "$tk_fail" -eq 0 ]; then echo "PASS: trakt import wiring"; else echo "FAIL: trakt import wiring"; fail=1; fi
 echo
 
+# Read-aloud feature gate (issue #145). Read aloud rides on an OPTIONAL Qt module (qtspeech). The promise the
+# build makes is that a Qt install without it — CI's Linux runner is one, which is exactly why this matters —
+# still compiles and still ships a reader, minus the feature: no controller TU, no engine link, and a control
+# row with nothing drawn on it that cannot act.
+#
+# probe_readaloud pins the PURE half of that promise: bookSettingsRowCount(false) == 5 and (true) == 9. What a
+# probe cannot reach is the WIRING that decides which of those two the app is in — whether the count and the
+# drawn row read the same flag, whether the engine-facing TU really is behind the guard, whether the pure half
+# stayed engine-free. Each of those is a one-line slip that leaves both builds compiling and one of them
+# wrong: a hard-coded 9 gives the feature-absent build a cursor stop on a control that is not there; a
+# ReadAloudController.cpp in the unconditional source list breaks the no-qtspeech build outright; a
+# QTextToSpeech include in ReadAloud.cpp takes probe_readaloud down with it on every runner.
+echo "=== read-aloud feature gate (#145) ==="
+ra_fail=0
+ra_note() { echo "  $1"; ra_fail=1; }
+RA_CM="$HERE/../CMakeLists.txt"
+RA_PURE_H="$HERE/../src/ebook/ReadAloud.h"
+RA_PURE_C="$HERE/../src/ebook/ReadAloud.cpp"
+RA_CTRL="$HERE/../src/ebook/ReadAloudController.cpp"
+RA_VIEW="$HERE/../src/ebook/EbookView.cpp"
+RA_HOST="$HERE/../src/theme2/ReaderChromeHost.cpp"
+RA_QML="$HERE/../src/theme2/qml/elements/ReaderChrome.qml"
+for ra_f in "$RA_CM" "$RA_PURE_H" "$RA_PURE_C" "$RA_CTRL" "$RA_VIEW" "$RA_HOST" "$RA_QML"; do
+  [ -f "$ra_f" ] || ra_note "$ra_f is missing — this gate reads it, so nothing below is being checked."
+done
+if [ "$ra_fail" -eq 0 ]; then
+  # Corpus floor BEFORE any check: an empty or truncated file makes every grep below vacuously false, which
+  # would report the wiring as broken rather than unchecked — loud, but for the wrong reason. Floors are well
+  # under today's sizes.
+  ra_lines="$(cat "$RA_PURE_C" "$RA_CTRL" "$RA_VIEW" "$RA_HOST" | wc -l | tr -d '[:space:]')"
+  [ "$ra_lines" -ge 800 ] || ra_note "the four wiring files total $ra_lines line(s) — expected the read-aloud implementation. Treat every result below as meaningless."
+
+  # 1. The pure half must stay engine-free, or probe_readaloud stops building wherever qtspeech is absent —
+  #    which is every machine this gate is meant to protect.
+  #    Comments are stripped first: the header EXPLAINS the split in prose, and gating prose would be gating
+  #    the wrong thing.
+  ra_pure="$(sed -E 's://.*$::' "$RA_PURE_H" "$RA_PURE_C")"
+  if printf '%s' "$ra_pure" | grep -qE 'QTextToSpeech|QVoice|EB_HAVE_TTS'; then
+    ra_note "src/ebook/ReadAloud.{h,cpp} names the engine in CODE (QTextToSpeech / QVoice / EB_HAVE_TTS). The pure half is what a runner with no speech module compiles; it must decide WHAT is spoken and know nothing about who speaks it."
+  fi
+
+  # 2. EB_HAVE_TTS is set ONLY when Qt6::TextToSpeech is really there, and the define/link/TU all sit behind
+  #    it. A target_sources naming ReadAloudController outside the guard is the break that is invisible here
+  #    and fatal on a runner without the module.
+  grep -q 'if(TARGET Qt6::TextToSpeech)' "$RA_CM" \
+    || ra_note "native/CMakeLists.txt no longer sets EB_HAVE_TTS from \`if(TARGET Qt6::TextToSpeech)\`. Whatever it keys on now, a Qt without qtspeech must not reach the read-aloud sources."
+  grep -q 'OPTIONAL_COMPONENTS TextToSpeech' "$RA_CM" \
+    || ra_note "the TextToSpeech find_package is no longer OPTIONAL — a Qt install without qtspeech would now fail to configure at all, which is the opposite of this feature's build promise."
+  ra_guard="$(awk '/^    if\(EB_HAVE_TTS\)/ { p = 1 } p { print } p && /^    endif\(\)/ { exit }' "$RA_CM" </dev/null)"
+  printf '%s' "$ra_guard" | grep -q 'src/ebook/ReadAloudController.cpp' \
+    || ra_note "ReadAloudController.cpp is not inside the \`if(EB_HAVE_TTS)\` block in native/CMakeLists.txt. It includes <QTextToSpeech>; outside the guard, a build without the module does not compile at all."
+  printf '%s' "$ra_guard" | grep -q 'Qt6::TextToSpeech' \
+    || ra_note "the \`if(EB_HAVE_TTS)\` block does not link Qt6::TextToSpeech."
+  printf '%s' "$ra_guard" | grep -q 'EB_HAVE_TTS' \
+    || ra_note "the \`if(EB_HAVE_TTS)\` block does not define EB_HAVE_TTS on the app target — every #ifdef in the reader would then compile the feature away in a build that HAS the module."
+  ra_uncond="$(grep -c 'src/ebook/ReadAloudController' "$RA_CM" | tr -d '[:space:]')"
+  [ "$ra_uncond" -le 1 ] || ra_note "ReadAloudController is named $ra_uncond time(s) in native/CMakeLists.txt — one of them is outside the EB_HAVE_TTS guard."
+
+  # 3. The reader touches the controller only under the guard. A single unguarded `readAloud_->` is a build
+  #    error in the no-module configuration, and nothing on this machine would ever say so.
+  ra_bad="$(awk '/^#ifdef EB_HAVE_TTS/ { g = 1 } /^#endif/ { g = 0 } /readAloud_->/ && !g { print FNR": "$0 }' "$RA_VIEW" </dev/null)"
+  [ -z "$ra_bad" ] || ra_note "EbookView.cpp uses the controller outside an #ifdef EB_HAVE_TTS: ${ra_bad%%$'\n'*}"
+
+  # 4. The nav zone count and the drawn row must be ONE statement about the same flag. A literal here is how a
+  #    cursor comes to stop on a control that the QML did not draw — reachable, invisible, and silent.
+  grep -q 'ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable())' "$RA_HOST" \
+    || ra_note "ReaderChromeHost no longer sets the BOOK's readerSettings count from ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable()). A literal count and a QML row gated on availability drift apart in exactly one direction: a cursor stop on a control that is not drawn."
+  grep -q 'readAloudAvailable' "$RA_QML" \
+    || ra_note "ReaderChrome.qml does not gate its read-aloud controls on readAloudAvailable — the feature-absent build would draw controls that cannot speak."
+  ra_ctls="$(grep -c 'i: [5-8],' "$RA_QML" | tr -d '[:space:]')"
+  [ "$ra_ctls" -eq 4 ] || ra_note "ReaderChrome.qml draws $ra_ctls read-aloud control(s) at indices 5..8; ReadAloud::bookSettingsRowCount says there are 4. The row the cursor can reach and the row the eye can see must be the same row."
+fi
+if [ "$ra_fail" -eq 0 ]; then echo "PASS: read-aloud feature gate"; else echo "FAIL: read-aloud feature gate"; fail=1; fi
+echo
 # General settings builder parity gate (issue #133). CONTRIBUTING's two-builder rule — a user-facing setting
 # must exist in BOTH halves of MainWindow::openGeneralSettings(), because the themed surface is the
 # default-reachable one but a user who never enables the themed home picks settings ONLY in the classic form —
@@ -2219,6 +2332,11 @@ else
     'remote.enabled|new QCheckBox(tr("Control from a phone on your network"))'
     'update.check|new QPushButton(tr("Check now"))'
     'update.install|new QPushButton(tr("Install update"))'
+    'following.interval|followInterval = new QComboBox()'
+    'following.metered|new QCheckBox(tr("Check on metered connections"))'
+    'following.check|new QPushButton(tr("Check for new items now"))'
+    'playon.rename|poRename = panelRow(tr("Rename This Device'
+    'playon.pick|poPick = panelRow(tr("Play on Another Device'
     'livetv.add|tvAdd = panelRow(tr("Add a Live TV Source'
     'roms.change|rBrowse = new QPushButton(tr("Change…"))'
     'roms.open|panelRow(tr("Open ROMs Folder"))'
@@ -2228,6 +2346,7 @@ else
     'roms.collapseregions|new QCheckBox(tr("Collapse regional duplicates"))'
     'roms.keepdownloads|new QCheckBox(tr("Keep downloaded games in the ROMs folder"))'
     'ps3.autoupdate|new QCheckBox(tr("Auto-install PS3 game updates"))'
+    'content.autoinstall|new QCheckBox(tr("Install game updates and DLC before launch"))'
     'emu.autoinc|new QCheckBox(tr("Quick-save to the next free slot (keeps a history)"))'
     'emu.resume|resumeMode = new QComboBox()'
     'emu.hardcore|new QCheckBox(tr("Hardcore RetroAchievements (no save states, rewind or cheats)"))'
@@ -2238,6 +2357,7 @@ else
     'library.resolveonline|new QCheckBox(tr("Match local files to online catalogs"))'
     'library.rematch|new QPushButton(tr("Re-match Local Library online"))'
     'library.clearmetaedits|new QPushButton(tr("Reset my metadata edits'
+    'jellyfin.servers|jfSrv = new QPushButton(tr("Jellyfin servers'
     'photos.change|phBrowse = new QPushButton(tr("Change…"))'
     'music.change|muBrowse = new QPushButton(tr("Change…"))'
     'music.rescan|muRescan = new QPushButton(tr("Rescan"))'
@@ -2247,6 +2367,7 @@ else
     'music.clearmatches|muClear = new QPushButton(tr("Reset my music match corrections'
     'audiobooks.change|abBrowse = new QPushButton(tr("Change…"))'
     'audiobooks.rescan|abRescan = new QPushButton(tr("Rescan"))'
+    'audiobooks.addserver|abSrvAdd = new QPushButton(tr("Add an audiobook server'
     'books.change|bkBrowse = new QPushButton(tr("Change…"))'
     'books.rescan|bkRescan = new QPushButton(tr("Rescan"))'
     'pb.autonext|new QCheckBox(tr("Auto-play the next episode"))'
@@ -2257,6 +2378,13 @@ else
     'pb.onlinelyrics|new QCheckBox(tr("Look up lyrics online"))'
     'pb.defaultspeed|defSpeed = new QComboBox()'
     'pb.jump|jumpBox = new QComboBox()'
+    'gest.volume|new QCheckBox(tr("Swipe up and down on the right for volume"))'
+    'gest.brightness|new QCheckBox(tr("Swipe up and down on the left for brightness"))'
+    'gest.seek|new QCheckBox(tr("Swipe across to scrub"))'
+    'gest.doubletap|new QCheckBox(tr("Double-tap the sides to skip"))'
+    'gest.longpress|new QCheckBox(tr("Hold for double speed"))'
+    'gest.pinch|new QCheckBox(tr("Pinch to change how the video fits"))'
+    'gest.edge|gestEdge = new QComboBox()'
     'pb.skipseg|new QCheckBox(tr("Skip intros and credits"))'
     'pb.skipsegauto|new QCheckBox(tr("Skip them automatically (no button)"))'
     'pb.hwdec|hwdec = new QComboBox()'
@@ -2296,6 +2424,9 @@ else
     'trakt.connect|new QPushButton(TraktClient::connected() ? tr("Disconnect")'
     'trakt.backfill|new QPushButton(tr("Import watched history from Trakt"))'
     'trakt.reimport|new QPushButton(tr("Re-import everything from Trakt"))'
+    'anilist.id|addCredRow(tr("AniList Client ID:")'
+    'anilist.secret|addCredRow(tr("AniList Client secret:")'
+    'anilist.connect|new QPushButton(AniListTracker::isConnected() ? tr("Disconnect")'
     'scrobble.on|new QCheckBox(tr("Scrobble music I listen to"))'
     'scrobble.lbtoken|addCredRow(tr("ListenBrainz token:")'
     'scrobble.lburl|addCredRow(tr("Custom API URL:")'

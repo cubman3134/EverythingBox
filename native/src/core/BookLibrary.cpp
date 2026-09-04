@@ -55,6 +55,16 @@ namespace
             if (sa != sb) return naturalCollator().compare(sa, sb) < 0;
             if (indexRank(a.seriesIndex) != indexRank(b.seriesIndex))
                 return indexRank(a.seriesIndex) < indexRank(b.seriesIndex);
+            // TWO UNNUMBERED ISSUES ARE SEPARATED BY THE NUMBER THEY DO CARRY (issue #152). ComicInfo's
+            // <Number> is free text: "Annual 1", "Special", "½" all have an indexRank of "last", and
+            // without this they would fall through to the title — which for a comic is usually the same
+            // string for every one of them, leaving "Annual 10" ahead of "Annual 2". Natural order, through
+            // the one collator, for the same reason everything else here does (#205).
+            if (a.number != b.number)
+            {
+                const int c = naturalCollator().compare(a.number, b.number);
+                if (c != 0) return c < 0;
+            }
             return naturalCollator().compare(a.title, b.title) < 0;
         });
     }
@@ -187,6 +197,19 @@ QVector<FileEntry> scanFolder(const QString& root, const QHash<QString, FileEntr
         e.pageCount   = info.pageCount;
         e.hasCover    = info.hasCover;
         e.untagged    = info.isEmpty();
+        // ComicInfo.xml's fields (#152). Defaults for everything else the scan reads, so nothing but a comic
+        // archive with a document in it can put a value in one of these.
+        e.number      = info.number;
+        e.volume      = info.volume;
+        e.summary     = info.summary;
+        e.month       = info.month;
+        e.day         = info.day;
+        e.creators    = info.creators;
+        e.publisher   = info.publisher;
+        e.genre       = info.genre;
+        e.web         = info.web;
+        e.rating      = info.rating;
+        e.direction   = info.direction;
         out.push_back(e);
     }
 
@@ -261,17 +284,47 @@ Index buildIndex(const QVector<FileEntry>& entries)
         b.pageCount = e.pageCount;
         b.hasCover  = e.hasCover;
         b.author    = e.author.trimmed();
+        // Carried for every kind, because they are all defaulted for anything that is not a comic with a
+        // ComicInfo.xml in it (#152) — there is no branch to get wrong.
+        b.number    = e.number;
+        b.volume    = e.volume;
+        b.summary   = e.summary;
+        b.creators  = e.creators;
+        b.publisher = e.publisher;
+        b.genre     = e.genre;
+        b.language  = e.language;
+        b.web       = e.web;
+        b.rating    = e.rating;
+        b.direction = e.direction;
 
         if (e.kind == Kind::Comic)
         {
-            // A comic knows nothing about itself but its name, and ComicName has already decided how much
-            // of that name is a series. Its `title` is never empty by contract, so the "an untagged file
-            // must still appear" rule holds without a second fallback here.
+            // WHAT THE DOCUMENT SAID BEATS WHAT THE NAME SUGGESTS, dimension by dimension (see the header).
+            // ComicName has already read the filename for the whole folder; each dimension below takes that
+            // reading only where the archive's own ComicInfo.xml was silent.
             const ComicName::Grouped& g = comicOf.at(i);
-            b.title             = g.title;
-            b.series            = g.series;
-            b.seriesIndex       = g.number;
-            b.titleFromFilename = true;
+            const QString embeddedTitle  = e.title.trimmed();
+            const QString embeddedSeries = e.series.trimmed();
+
+            // TITLE. Most issues carry no <Title> — the series and the number are the identification — so
+            // the overwhelmingly common case here is the filename reading, unchanged. ComicName's `title`
+            // is never empty by contract, so "an untagged file must still appear" holds with no second
+            // fallback.
+            b.title             = embeddedTitle.isEmpty() ? g.title : embeddedTitle;
+            b.titleFromFilename = embeddedTitle.isEmpty();
+
+            // SERIES + NUMBER, together or not at all: a series from the document and a number from the
+            // filename would file an issue in the right shelf at the wrong place in it.
+            if (!embeddedSeries.isEmpty() || !e.number.isEmpty())
+            {
+                b.series      = embeddedSeries;
+                b.seriesIndex = e.seriesIndex;   // ComicInfo::numberAsIndex(<Number>), applied at scan time
+            }
+            else
+            {
+                b.series      = g.series;
+                b.seriesIndex = g.number;
+            }
         }
         else
         {
@@ -308,6 +361,33 @@ Index buildIndex(const QVector<FileEntry>& entries)
     // dimension at all.
     idx.series = bucketBySeries(idx.authors);
     return idx;
+}
+
+Index filterForProfile(const Index& idx, bool restricted)
+{
+    if (!restricted) return idx;   // the ONLY thing an unrestricted profile pays is the copy it asked for
+
+    Index out;
+    for (const Author& a : idx.authors)
+    {
+        Author kept;
+        kept.key  = a.key;
+        kept.name = a.name;
+        for (const Book& b : a.books)
+        {
+            if (ComicInfo::hiddenWhenRestricted(b.rating)) continue;
+            kept.books.push_back(b);
+            if (b.kind == Kind::Comic) ++out.comicCount; else ++out.bookCount;
+        }
+        // AN AUTHOR WITH NOTHING LEFT IS NOT A BUCKET. A shelf listing a name that opens onto an empty page
+        // tells a child exactly what was taken away and who wrote it.
+        if (!kept.books.isEmpty()) out.authors.push_back(kept);
+    }
+    // The series view is REBUILT rather than filtered, so a series whose every issue was hidden stops
+    // existing and the door to the dimension closes with it — the same compatibility gate an untagged
+    // library goes through.
+    out.series = bucketBySeries(out.authors);
+    return out;
 }
 
 const Author* Index::author(const QString& authorKey) const
@@ -353,7 +433,66 @@ namespace
     // 2 == issue #144: BookMeta learned .cbr, .fb2/.fb2.zip, .mobi/.azw/.azw3 and .txt/.md, so every
     //      library cached under rules 1 must be re-read to pick the new files (and the corrected MOBI
     //      title offset) up. Nothing else about the scan changed.
-    const int kRules = 2;
+    // 3 == issue #152: BookMeta reads a comic archive's ComicInfo.xml, so every cached comic holds a
+    //      series, a number, creators and a rating that were never looked for. Nothing else can supply
+    //      them — the cache is keyed on mtime+size and those have not changed — so the whole cache is
+    //      dropped once and every file re-read.
+    //
+    //      WHAT THAT COSTS, ONCE. One cold scan of the reading root: the same walk #134's first run makes,
+    //      which opens each container for its metadata and its page count and inflates no page image (a CBZ
+    //      is a central-directory read, a CBR a header walk, an EPUB one member, a PDF a PDFium load). It
+    //      runs on the scan's worker thread with the previous index still installed, so the shelf stays up
+    //      and in its old grouping until the new one replaces it, and the covers already in the art cache
+    //      are keyed by book and are NOT re-extracted. A library of a few thousand files pays seconds, once,
+    //      in the background — against re-reading nothing and never learning what half the collection says
+    //      about itself.
+    const int kRules = 3;
+
+    // The persisted spellings of the two ComicInfo enums. WRITTEN AS EXPLICIT NUMBERS rather than as a cast
+    // of the enumerator, so that inserting a rung into ComicInfo::Rating later cannot silently re-label
+    // every stored index — a stored 4 has to go on meaning Mature whatever position Mature occupies in the
+    // C++ enum. An unknown stored value reads as the neutral one, never as a rung.
+    int storedRating(ComicInfo::Rating r)
+    {
+        switch (r)
+        {
+        case ComicInfo::Rating::Unrated:    return 0;
+        case ComicInfo::Rating::Everyone:   return 1;
+        case ComicInfo::Rating::Everyone10: return 2;
+        case ComicInfo::Rating::Teen:       return 3;
+        case ComicInfo::Rating::Mature:     return 4;
+        case ComicInfo::Rating::Adults:     return 5;
+        }
+        return 0;
+    }
+    ComicInfo::Rating ratingFromStored(int v)
+    {
+        switch (v)
+        {
+        case 1: return ComicInfo::Rating::Everyone;
+        case 2: return ComicInfo::Rating::Everyone10;
+        case 3: return ComicInfo::Rating::Teen;
+        case 4: return ComicInfo::Rating::Mature;
+        case 5: return ComicInfo::Rating::Adults;
+        default: return ComicInfo::Rating::Unrated;
+        }
+    }
+    int storedDirection(ComicInfo::Direction d)
+    {
+        switch (d)
+        {
+        case ComicInfo::Direction::Unspecified: return 0;
+        case ComicInfo::Direction::LeftToRight: return 1;
+        case ComicInfo::Direction::RightToLeft: return 2;
+        }
+        return 0;
+    }
+    ComicInfo::Direction directionFromStored(int v)
+    {
+        if (v == 1) return ComicInfo::Direction::LeftToRight;
+        if (v == 2) return ComicInfo::Direction::RightToLeft;
+        return ComicInfo::Direction::Unspecified;
+    }
 }
 
 QString parseStamp() { return QString::number(kRules); }
@@ -390,6 +529,24 @@ QVector<FileEntry> loadIndexFile(const QString& filePath, QString* rulesUsed)
         e.pageCount   = o.value(QStringLiteral("pc")).toInt();
         e.hasCover    = o.value(QStringLiteral("cv")).toBool();
         e.untagged    = o.value(QStringLiteral("nt")).toBool();
+        // ComicInfo.xml (#152). Absent for every entry written by an older build — which is exactly what
+        // the parse stamp below drops the whole cache over, so none of these is ever half-populated.
+        e.number      = o.value(QStringLiteral("nm")).toString();
+        e.volume      = o.value(QStringLiteral("vo")).toInt();
+        e.summary     = o.value(QStringLiteral("sm")).toString();
+        e.month       = o.value(QStringLiteral("mo")).toInt();
+        e.day         = o.value(QStringLiteral("dy")).toInt();
+        e.publisher   = o.value(QStringLiteral("pb")).toString();
+        e.genre       = o.value(QStringLiteral("gn")).toString();
+        e.web         = o.value(QStringLiteral("wb")).toString();
+        e.rating      = ratingFromStored(o.value(QStringLiteral("ar")).toInt());
+        e.direction   = directionFromStored(o.value(QStringLiteral("dr")).toInt());
+        const QJsonArray cr = o.value(QStringLiteral("cs")).toArray();
+        for (const QJsonValue& c : cr)
+        {
+            const QString name = c.toString().trimmed();
+            if (!name.isEmpty()) e.creators.append(name);
+        }
         out.push_back(e);
     }
     return out;
@@ -413,6 +570,26 @@ bool saveIndexFile(const QString& filePath, const QVector<FileEntry>& entries)
         if (e.pageCount)           o.insert(QStringLiteral("pc"), e.pageCount);
         if (e.hasCover)            o.insert(QStringLiteral("cv"), true);
         if (e.untagged)            o.insert(QStringLiteral("nt"), true);
+        // ComicInfo.xml (#152), default-valued fields omitted exactly as above — a library with no tagged
+        // comic in it writes a file byte-identical to the one the previous build wrote.
+        if (!e.number.isEmpty())    o.insert(QStringLiteral("nm"), e.number);
+        if (e.volume)               o.insert(QStringLiteral("vo"), e.volume);
+        if (!e.summary.isEmpty())   o.insert(QStringLiteral("sm"), e.summary);
+        if (e.month)                o.insert(QStringLiteral("mo"), e.month);
+        if (e.day)                  o.insert(QStringLiteral("dy"), e.day);
+        if (!e.publisher.isEmpty()) o.insert(QStringLiteral("pb"), e.publisher);
+        if (!e.genre.isEmpty())     o.insert(QStringLiteral("gn"), e.genre);
+        if (!e.web.isEmpty())       o.insert(QStringLiteral("wb"), e.web);
+        if (e.rating != ComicInfo::Rating::Unrated)
+            o.insert(QStringLiteral("ar"), storedRating(e.rating));
+        if (e.direction != ComicInfo::Direction::Unspecified)
+            o.insert(QStringLiteral("dr"), storedDirection(e.direction));
+        if (!e.creators.isEmpty())
+        {
+            QJsonArray cr;
+            for (const QString& c : e.creators) cr.append(c);
+            o.insert(QStringLiteral("cs"), cr);
+        }
         files.append(o);
     }
     QJsonObject root;

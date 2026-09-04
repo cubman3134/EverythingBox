@@ -48,8 +48,14 @@ public:
     // appended to the emulator's resolved argsTemplate at launch; empty => today's args exactly. `gfx` (issue
     // #103) is the resolved graphics quartet (per-game override already layered over the per-system default by
     // the caller); an all-unset gfx writes nothing, so the emulator's own config is left exactly as it was.
+    // `contentUpdate` / `contentDlc` (issue #189) are the game's per-game content-install levers from the
+    // same #51 override record: which update package to install into this emulator's own content store before
+    // it boots (empty = whatever the game's `updates/` sidecar holds, "none" = nothing, anything else a
+    // version pin) and whether its `dlc/` sidecar installs at all ("off" = no). Both empty is byte-for-byte
+    // today's launch — with no sidecar folders beside the game, nothing is even looked at.
     void play(const ExternalEmulator& em, const QString& rom, const QString& extraArgs = QString(),
-              const EmuGfx::Settings& gfx = EmuGfx::Settings{});
+              const EmuGfx::Settings& gfx = EmuGfx::Settings{},
+              const QString& contentUpdate = QString(), const QString& contentDlc = QString());
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator (hard kill)
     void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
@@ -108,6 +114,10 @@ private:
     // has settled (immediately for non-Cemu emulators or when keys are present), parented to launchCtx_.
     void prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone);
     void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
+    // Install the game's sidecar update/DLC packages into this emulator's own content store before it boots
+    // (issue #189), per the emulator's registry recipe. Synchronous and best-effort: every outcome is logged
+    // and the launch continues either way — nothing here can stop a boot.
+    void prepareContentInstall(const QString& binDir);
     void launch(const QString& binary);
     // The on-disk prep + process start for a locally-installed emulator (the async BIOS/keys chain then boot).
     // Extracted from launch() so the normal path and the RPCS3 post-update path share one launch codepath.
@@ -141,6 +151,7 @@ private:
     ExternalEmulator em_;
     QString rom_;
     QString extraArgs_;   // per-game extra CLI args appended to the resolved argsTemplate at launch (issue #51)
+    QString contentUpdate_, contentDlc_;  // per-game update/DLC install levers (issue #189) — see play()
     EmuGfx::Settings gfx_; // resolved graphics quartet written into the emulator's config at launch (issue #103)
     QString archivePath_;
     bool launchAfterInstall_ = false;

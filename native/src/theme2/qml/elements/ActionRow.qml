@@ -29,6 +29,10 @@ Item {
     // nothing on any screen to distinguish corrected data from scraped data — and "reset to scraped" would
     // be an option with no visible reason to reach for it.
     readonly property bool edited: !!(sel && sel.edited)
+    // Is this series linked to a tracker entry (issue #156)? The pill says so, because otherwise a tracked
+    // series and an untracked one look identical and "unlink" is an option with no visible reason to reach
+    // for it. Supplied by themedDetailData only when a tracker is configured at all.
+    readonly property bool tracked: !!(sel && sel.tracked)
     function statusLabel(c) {
         if (c === "inProgress") return "In progress"
         if (c === "finished")   return "Finished"
@@ -37,6 +41,9 @@ Item {
         return "Set status"
     }
     // This row holds the nav cursor when the host parks the detail selection in the "actions" zone.
+    // Following (issue #155): whether this item is followed, and how many unseen children it holds.
+    readonly property bool followed: !!(sel && sel.followed)
+    readonly property int  newCount: (sel && sel.newCount) ? sel.newCount : 0
     readonly property bool zoneFocused: !!(host && host.detailZone === "actions")
     readonly property int focusIdx: (host ? host.detailActionIndex : 0)
 
@@ -66,6 +73,14 @@ Item {
         if (verb === "romhack")  return { label: "🧩  Romhacks…",                     color: "#E4F5E8", textColor: "#1E5B33" }
         if (verb === "favorite") return { label: (favorited ? "★  Favorited" : "☆  Favorite"),
                                           color: (favorited ? "#E0A92E" : "#FFF1CC"), textColor: (favorited ? "#3A2A00" : "#7A4E00") }
+        // Following a series (issue #155). The pill states what it IS, not what pressing it does — the
+        // favourite pill's convention right above — and carries the unread count once there is one, so the
+        // detail page says how far behind you are without leaving it.
+        if (verb === "follow")   return { label: (followed ? (newCount > 0 ? ("\u2713  Following \u00b7 " + newCount + " new")
+                                                                          : "\u2713  Following")
+                                                           : "\uff0b  Follow"),
+                                          color: (followed ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
+        if (verb === "markseen") return { label: "\u2713\u2713  Mark all seen", color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "external") return { label: "🔗  Open in external player",         color: "#7C5CFF", textColor: "#FFFFFF" }
         if (verb === "builtin")  return { label: "🖥  Play with built-in player",       color: "#E7EBF2", textColor: "#33405A" }
@@ -74,6 +89,9 @@ Item {
         if (verb === "status")   return { label: "◐  " + statusLabel(completion),
                                           color: (completion === "none" ? "#E7EBF2" : "#CFE3D2"), textColor: "#33405A" }
         if (verb === "tags")     return { label: "🏷  Tags",                              color: "#E7EBF2", textColor: "#33405A" }
+        // The AniList link for this series: link, re-link, refresh or unlink (issue #156).
+        if (verb === "tracker")  return { label: (tracked ? "📈  Tracking" : "📈  Track…"),
+                                          color: (tracked ? "#CFE0F5" : "#E4F0FF"), textColor: "#1B3A63" }
         if (verb === "editmeta") return { label: (edited ? "✎  Info edited" : "✎  Fix info…"),
                                           color: (edited ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         // Per-game launch overrides (issue #51): which core / standalone emulator / extra args THIS game runs on.

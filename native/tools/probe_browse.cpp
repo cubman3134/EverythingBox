@@ -1537,6 +1537,27 @@ int main(int argc, char** argv)
                 && c.items[0].url == QStringLiteral("http://x/b.epub"),
                 "opds: an entry with BOTH nav and acquisition is treated as a book"); }
 
+        // An OPDS-PSE offer (#153) rides onto the row, and takes NOTHING away from it: the download url
+        // and its content-type are exactly what they would be without the offer, because "Read online" is
+        // presented BESIDE "Download" and never instead of it. A row with no offer carries an invalid one,
+        // which is what makes the second verb appear on exactly the rows a server advertised it for.
+        { OpdsFeed f; OpdsEntry e; e.title = QStringLiteral("Saga, Vol. 1"); e.id = QStringLiteral("urn:0A1");
+          e.acquisition << acq(QStringLiteral("application/vnd.comicbook+zip"), QStringLiteral("http://x/s1.cbz"));
+          e.pse.hrefTemplate = QStringLiteral("http://x/books/0A1/pages/{pageNumber}?zero_based=true");
+          e.pse.count = 160; e.pse.lastRead = 7;
+          f.entries << e;
+          const MediaCatalog c = browse::opdsCatalog(f);
+          CHECK(c.items.size() == 1 && c.items[0].pse.isValid() && c.items[0].pse.count == 160
+                && c.items[0].pse.lastRead == 7
+                && c.items[0].pse.hrefTemplate
+                     == QStringLiteral("http://x/books/0A1/pages/{pageNumber}?zero_based=true"),
+                "opds: a PSE page-stream offer is carried onto the book row (#153)");
+          CHECK(c.items[0].url == QStringLiteral("http://x/s1.cbz")
+                && c.items[0].mime == QStringLiteral("application/vnd.comicbook+zip"),
+                "opds: the PSE offer takes nothing away from the download - Read online sits BESIDE it"); }
+        CHECK(!cat.items[1].pse.isValid(),
+              "opds: a row the server offered no page stream for carries no offer");
+
         // An empty feed -> an empty catalog, never a crash.
         CHECK(browse::opdsCatalog(OpdsFeed()).items.isEmpty(), "opds: an empty feed -> an empty catalog");
 
@@ -1567,6 +1588,76 @@ int main(int argc, char** argv)
         CHECK(browse::opdsCatalogsList({}).items.size() == 1
               && browse::opdsCatalogsList({}).items[0].type == QStringLiteral("_newopds"),
               "opds: an empty catalog list still offers the add row");
+    }
+
+    // ---- Personal TV channels (#179 inc 1): the shelf builder + the favourite -------------------------------
+    // The two things about a channel row that are NOT obvious and that a live drive punished: its id is the
+    // ROW-PRODUCER KEY (one string shared by the star, Recents and a #161 home row), and it is NOT a folder —
+    // activating it tunes. Plus the trailing create row, present even when the list is empty.
+    {
+        channels::Channel a;
+        a.id = QStringLiteral("aaa"); a.name = QStringLiteral("90s Saturday");
+        a.sourceKind = channels::SourceKind::LocalFolder; a.sourceId = QStringLiteral("name:the show");
+        a.ordering = channels::Ordering::Shuffle; a.startFromBeginning = true;
+        channels::Channel b;
+        b.id = QStringLiteral("bbb"); b.name = QStringLiteral("Movie Night");
+        b.ordering = channels::Ordering::InOrder;
+
+        const MediaCatalog cat = browse::channelsCatalog({ a, b });
+        CHECK(cat.items.size() == 3, "channels: two channels + the trailing create row");
+        CHECK(cat.items[0].id == QStringLiteral("channel:aaa"), "channels: the row id IS the row-producer key");
+        CHECK(cat.items[0].mime == QStringLiteral("channel:aaa"), "channels: ...and so is the mime activation reads");
+        CHECK(cat.items[0].type == QStringLiteral("_channel"), "channels: the row type");
+        CHECK(cat.items[0].title == QStringLiteral("90s Saturday"), "channels: the row title is the channel name");
+        CHECK(!cat.items[0].expandable, "channels: a channel TUNES, it is not a folder");
+        // The subtitle says what the channel IS — never what is on it, which would mean computing a schedule
+        // per channel on every navigation into this folder.
+        CHECK(cat.items[0].subtitle.contains(QStringLiteral("Shuffle"))
+              && cat.items[0].subtitle.contains(QStringLiteral("start")),
+              "channels: the subtitle carries the ordering + the from-the-start flag");
+        CHECK(cat.items[1].subtitle == QStringLiteral("In order"),
+              "channels: a join-in-progress channel's subtitle is just its ordering");
+        CHECK(cat.items[2].type == QStringLiteral("_newchannel")
+              && cat.items[2].mime == QStringLiteral("newchannel"), "channels: the trailing create row");
+        CHECK(browse::channelsCatalog({}).items.size() == 1
+              && browse::channelsCatalog({}).items[0].type == QStringLiteral("_newchannel"),
+              "channels: an empty channel list still offers the create row");
+
+        // THE FAVOURITE. #203's lesson, restated for a channel: the generic star stamps neither `path` nor
+        // `kind`, and openFavorite re-opens by PATH while `kind` routes it — so both must carry the identity.
+        const FavoriteItem f = browse::channelFavorite(a);
+        CHECK(f.itemId == QStringLiteral("channel:aaa"), "channels: the favourite is keyed by the identity");
+        CHECK(f.path == QStringLiteral("channel:aaa"), "channels: ...and re-opens by it, never by a file");
+        CHECK(f.kind == QStringLiteral("video"), "channels: the routing kind takes the media path");
+        CHECK(f.title == QStringLiteral("90s Saturday"), "channels: the favourite carries the channel name");
+        CHECK(!f.path.contains(QStringLiteral("/")), "channels: a favourite never stores a path or a url");
+    }
+    // ---- The New shelf's row marker (issue #155) --------------------------------------------------------
+    // A New-shelf row has to say which SERIES it belongs to and which SOURCE that series came from, and a
+    // MediaItem has nowhere to put either but `mime` -- the "You missed" marker's problem and its answer.
+    // What is pinned here is the round trip, and specifically the case the split gets wrong if anybody
+    // "tidies" it into a fixed field count: the bundled podcasts addon's item ids are "itpod:<number>",
+    // so the series id CONTAINS a colon and must be taken as the whole rest of the string.
+    {
+        const QString m = browse::newShelfMarker(QStringLiteral("com.everythingbox.podcasts"),
+                                                 QStringLiteral("itpod:1521578"));
+        CHECK(browse::isNewShelfMime(m), "new: the marker is recognised as one");
+        CHECK(browse::newShelfAddonOf(m) == QStringLiteral("com.everythingbox.podcasts"),
+              "new: the source addon round-trips");
+        CHECK(browse::newShelfSeriesOf(m) == QStringLiteral("itpod:1521578"),
+              "new: a series id containing a colon round-trips WHOLE");
+
+        // An id with several colons is still taken whole (a server-qualified id is the shape that gets here).
+        const QString m2 = browse::newShelfMarker(QStringLiteral("srv"), QStringLiteral("a:b:c"));
+        CHECK(browse::newShelfSeriesOf(m2) == QStringLiteral("a:b:c"), "new: multi-colon id round-trips");
+
+        // Every reader fails CLOSED on something that is not one of these markers -- including the OTHER
+        // synthetic marker in this file, which is the confusion that would actually happen.
+        CHECK(!browse::isNewShelfMime(QStringLiteral("trakt:missed:tt1:5")), "new: a #25 marker is not one");
+        CHECK(browse::newShelfAddonOf(QStringLiteral("trakt:missed:tt1:5")).isEmpty(), "new: no addon from a #25 marker");
+        CHECK(browse::newShelfSeriesOf(QStringLiteral("video")).isEmpty(), "new: no series from a plain mime");
+        CHECK(!browse::isNewShelfMime(QString()), "new: an empty mime is not a marker");
+        CHECK(!browse::isTraktMissedMime(m), "new: and a New marker is not a #25 one either");
     }
 
     if (fails == 0) printf("BROWSE-OK\n");

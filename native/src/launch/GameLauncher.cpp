@@ -1145,7 +1145,12 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
         ? deviceDefault
         : EmuGfx::resolve(EmuGfxStore::get(key),
                           EmuGfx::resolve(EmuGfxStore::systemDefault(system), deviceDefault));
-    emu_->play(em, rom, extraArgs, gfx);
+    // Per-game update/DLC install levers (issue #189), read from the SAME #51 override record the extra args
+    // came from: which update package (if any) and whether DLC is installed into the emulator's own content
+    // store before it boots. Empty for a game with no override — and with no `updates/`/`dlc/` sidecar folders
+    // beside the game, nothing downstream even stats a path, so this is byte-for-byte today's launch.
+    const LaunchOpts::Override contentOv = key.isEmpty() ? LaunchOpts::Override{} : LaunchOpts::get(key);
+    emu_->play(em, rom, extraArgs, gfx, contentOv.contentUpdate, contentOv.contentDlc);
     PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 

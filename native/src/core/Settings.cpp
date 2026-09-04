@@ -6,11 +6,15 @@
 #include "ShaderPreset.h"           // shaderPreset() seeds its global default from the legacy filter (issue #99)
 #include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include "Scrobble.h"               // the scrobble keys (#192) are built off the prefix the carve-out excludes
+#include "FollowPlan.h"             // followIntervalHours() clamps through the pure layer's own choice list (#155)
 #include <QSettings>
 #include <QCoreApplication>
+#include <QJsonDocument>   // #152: the per-series comic direction overrides are one JSON value
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QUuid>
+#include <QSysInfo>
 
 static QSettings& store()
 {
@@ -30,6 +34,28 @@ QString Settings::deviceId()
     store().setValue(QStringLiteral("device/id"), id);
     store().sync();
     return id;
+}
+
+QString Settings::deviceName()
+{
+    const QString stored = store().value(QStringLiteral("device/name")).toString().trimmed();
+    if (!stored.isEmpty()) return stored;
+    // NOT persisted on read, unlike deviceId above. The host name is a live fact about the machine, and
+    // freezing a copy of it into the ini the first time anything asked would leave a renamed box advertising
+    // its old name for ever with nothing to explain why.
+    const QString host = QSysInfo::machineHostName().trimmed();
+    return host.isEmpty() ? QStringLiteral("EverythingBox") : host;
+}
+
+void Settings::setDeviceName(const QString& name)
+{
+    const QString v = name.trimmed();
+    // An empty write CLEARS the override rather than storing a nameless device: the getter then falls back
+    // to the host name, which is the behaviour "reset this" should have and the only one that cannot leave a
+    // peer's picker showing a blank row.
+    if (v.isEmpty()) store().remove(QStringLiteral("device/name"));
+    else             store().setValue(QStringLiteral("device/name"), v);
+    store().sync();
 }
 
 bool Settings::subtitlesOnByDefault()
@@ -347,6 +373,31 @@ void Settings::setAudioJumpSeconds(int seconds)
 {
     store().setValue(QStringLiteral("playback/jumpSeconds"), qBound(5, seconds, 120)); store().sync();
 }
+
+// ---- Touch gestures over the video player (issue #162) ----------------------------------------------------
+// One key per gesture FAMILY, all default-on: they only ever register on a touch form factor (the recogniser's
+// own gate), so "on" costs a desktop or TV user nothing and a phone user gets the vocabulary they arrived
+// expecting. Plain playback preferences, so they bundle-sync like autoplayNext — a phone and a tablet signed
+// into the same profile should agree about what a swipe does.
+bool Settings::gestureVolume()      { return store().value(QStringLiteral("gestures/videoVolume"), true).toBool(); }
+void Settings::setGestureVolume(bool on)      { store().setValue(QStringLiteral("gestures/videoVolume"), on); store().sync(); }
+bool Settings::gestureBrightness()  { return store().value(QStringLiteral("gestures/videoBrightness"), true).toBool(); }
+void Settings::setGestureBrightness(bool on)  { store().setValue(QStringLiteral("gestures/videoBrightness"), on); store().sync(); }
+bool Settings::gestureSeek()        { return store().value(QStringLiteral("gestures/videoSeek"), true).toBool(); }
+void Settings::setGestureSeek(bool on)        { store().setValue(QStringLiteral("gestures/videoSeek"), on); store().sync(); }
+bool Settings::gestureDoubleTap()   { return store().value(QStringLiteral("gestures/videoDoubleTap"), true).toBool(); }
+void Settings::setGestureDoubleTap(bool on)   { store().setValue(QStringLiteral("gestures/videoDoubleTap"), on); store().sync(); }
+bool Settings::gestureLongPress()   { return store().value(QStringLiteral("gestures/videoLongPress"), true).toBool(); }
+void Settings::setGestureLongPress(bool on)   { store().setValue(QStringLiteral("gestures/videoLongPress"), on); store().sync(); }
+bool Settings::gesturePinch()       { return store().value(QStringLiteral("gestures/videoPinch"), true).toBool(); }
+void Settings::setGesturePinch(bool on)       { store().setValue(QStringLiteral("gestures/videoPinch"), on); store().sync(); }
+
+// The band along each window edge in which a touch is ignored outright, because it belongs to the OS's own
+// back / notification swipes. Clamped on read AND write for the same reason audioJumpSeconds is: 0 disables
+// the reservation entirely (a kiosk or a desktop window with no system gestures), 96 is as wide as any
+// platform's reserved band gets, and anything outside that is a value nobody could have meant.
+int  Settings::gestureEdgeInset()   { return qBound(0, store().value(QStringLiteral("gestures/edgeInset"), 24).toInt(), 96); }
+void Settings::setGestureEdgeInset(int px)    { store().setValue(QStringLiteral("gestures/edgeInset"), qBound(0, px, 96)); store().sync(); }
 
 // Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
 // before the next flush cannot lose the user's choice.
@@ -674,6 +725,22 @@ void Settings::setCheckUpdatesOnStartup(bool on)
 {
     store().setValue(QStringLiteral("general/checkUpdatesOnStartup"), on); store().sync();
 }
+// Issue #155. The stored value is clamped through the PURE layer's own choice list rather than validated
+// here, so the Settings row, the scheduler and probe_follow all agree on what an interval may be; an
+// unrecognised stored number reads back as the daily default rather than as itself.
+int Settings::followIntervalHours()
+{
+    return int(follow::clampIntervalHours(store().value(QStringLiteral("following/interval"), 24).toInt()));
+}
+void Settings::setFollowIntervalHours(int hours)
+{
+    store().setValue(QStringLiteral("following/interval"), int(follow::clampIntervalHours(hours))); store().sync();
+}
+bool Settings::followOnMetered() { return store().value(QStringLiteral("following/metered"), false).toBool(); }
+void Settings::setFollowOnMetered(bool on)
+{
+    store().setValue(QStringLiteral("following/metered"), on); store().sync();
+}
 bool Settings::uiTestChannel() { return store().value(QStringLiteral("debug/uiTestChannel"), false).toBool(); }
 void Settings::setUiTestChannel(bool on)
 {
@@ -746,6 +813,42 @@ QString Settings::readingFolder()
 void Settings::setReadingFolder(const QString& path)
 {
     store().setValue(QStringLiteral("reading/folder"), path); store().sync();
+}
+
+// Per-series comic reading direction (issue #152). ONE settings value holding a JSON object, rather than one
+// key per series: a series key is arbitrary user text — it can hold a '/', which QSettings reads as a group
+// separator, and a ']' or a '=', which the INI backend escapes — so keys minted from it would be a family of
+// silent corruptions. A JSON object stored as a single string has none of those questions.
+namespace
+{
+    const char* kComicDirKey = "reading/comicDirections";
+
+    QJsonObject comicDirections()
+    {
+        const QString raw = store().value(QLatin1String(kComicDirKey)).toString();
+        if (raw.isEmpty()) return QJsonObject();
+        return QJsonDocument::fromJson(raw.toUtf8()).object();   // unparseable == no overrides, never a throw
+    }
+}
+
+int Settings::comicDirectionOverride(const QString& seriesKey)
+{
+    if (seriesKey.isEmpty()) return 0;
+    const int v = comicDirections().value(seriesKey).toInt(0);
+    return (v == 1 || v == 2) ? v : 0;   // anything else stored is "no override"
+}
+
+void Settings::setComicDirectionOverride(const QString& seriesKey, int direction)
+{
+    if (seriesKey.isEmpty()) return;
+    QJsonObject o = comicDirections();
+    // 0 FORGETS rather than storing a third state — see Settings.h.
+    if (direction == 1 || direction == 2) o.insert(seriesKey, direction);
+    else                                  o.remove(seriesKey);
+    if (o.isEmpty()) store().remove(QLatin1String(kComicDirKey));
+    else store().setValue(QLatin1String(kComicDirKey),
+                          QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+    store().sync();
 }
 
 // The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and
@@ -952,6 +1055,9 @@ void Settings::setAutoApplyRomPatches(bool on) { store().setValue(QStringLiteral
 
 bool Settings::ps3AutoUpdate() { return store().value(QStringLiteral("ps3/autoUpdate"), true).toBool(); }
 void Settings::setPs3AutoUpdate(bool on) { store().setValue(QStringLiteral("ps3/autoUpdate"), on); store().sync(); }
+
+bool Settings::installGameContent() { return store().value(QStringLiteral("content/autoInstall"), true).toBool(); }
+void Settings::setInstallGameContent(bool on) { store().setValue(QStringLiteral("content/autoInstall"), on); store().sync(); }
 
 bool Settings::verifyRoms() { return store().value(QStringLiteral("roms/verifyDats"), true).toBool(); }
 void Settings::setVerifyRoms(bool on) { store().setValue(QStringLiteral("roms/verifyDats"), on); store().sync(); }
