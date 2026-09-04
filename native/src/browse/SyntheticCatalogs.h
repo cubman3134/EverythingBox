@@ -18,6 +18,7 @@
 #include "../core/PhotoLibrary.h" // photosCatalog: the scanned PhotoEntry list (#102)
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/IptvSourceStore.h" // liveTvSourcesCatalog: the saved IptvSource (#75 inc 2)
+#include "../core/Channels.h"       // channelsCatalog: the stored channels::Channel (#179)
 #include "../media/StreamResolver.h" // liveTvChannelsCatalog: the parsed M3uEntry (#75)
 #include "../core/LiveTvIdentity.h"  // liveTvChannelIds: a channel's durable, credential-free name (#203)
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
@@ -355,6 +356,50 @@ namespace browse
     QString traktMissedShowKeyOf(const QString& mime);   // "" when `mime` is not one of these markers
     qint64  traktMissedThroughOf(const QString& mime);   // 0 when it is not, or carries no usable stamp
     bool    isTraktMissedMime(const QString& mime);
+
+    // ---- Personal TV channels (issue #179, increment 1) -------------------------------------------------
+    // The "Channels" folder: one row per stored channel, plus a trailing synthetic "create a channel" row —
+    // the shape playlistsCatalog and liveTvSourcesCatalog already use, and for the same reason: that trailing
+    // row is the ONLY way to make the first channel, so it is present even when the list is empty.
+    //
+    // A CHANNEL ROW IS A FIRST-CLASS ITEM, not a folder. Its id is the row-producer key #161 names
+    // ("channel:<id>", channels::rowProducerKey), which is also the identity it is favourited under and the
+    // one MainWindow re-opens it by out of Recents — one string, so the star, the Recents row and a #161 home
+    // row cannot drift apart. It is NOT expandable: activating it TUNES, exactly as activating a Live TV
+    // channel plays it.
+    //
+    // Pure: the lineup is enumerated and the timeline computed later, at tune time — no store read, no clock,
+    // and deliberately no "what is on now" subtitle, because that would put a schedule computation on every
+    // navigation into the folder. The subtitle says what the channel IS (its ordering, and whether it starts
+    // programmes from the beginning), which is fixed and free.
+    //   channel row: type "_channel",    mime "channel:<id>"     (activation tunes)
+    //   create row:  type "_newchannel", mime "newchannel"       (activation opens the editor)
+    MediaCatalog channelsCatalog(const QList<channels::Channel>& all);
+
+    // The FavoriteItem for starring a CHANNEL. Mirrors liveTvChannelFavorite, and for the identical reason
+    // that one exists (#203): the generic star stamps neither `path` nor `kind`, and both are load-bearing —
+    // openFavorite re-opens a row by its PATH and `kind` is what routes it, so without them the star appears
+    // to work, the row shows up on Home, and pressing it says the favourite's source addon is missing.
+    // Both fields hold the ROW-PRODUCER KEY ("channel:<id>"), which is what the tuner resolves; `kind` is
+    // "video" so the re-open takes the media route the channel identity is tested on.
+    FavoriteItem channelFavorite(const channels::Channel& ch);
+    // ---- The New shelf (issue #155) ----------------------------------------------------------------
+    // The `mime` marker a New-shelf row carries, and the readers for it. Exactly the reason the "You
+    // missed" marker above exists: the row has to carry two things activation needs and a MediaItem has
+    // nowhere else to put them -- WHICH SERIES this child belongs to (so "mark all seen" and "open the
+    // series" have a target) and WHICH SOURCE that series came from (so the series can be re-opened at
+    // all; a follow may be the only place that pairing is still written down once the catalogue has
+    // moved on).
+    //
+    // Format: "new:<addonId>:<seriesId>". The addon id is a manifest id and carries no ':' of its own,
+    // which is what makes the split safe; the series id is EVERYTHING after the second colon, because a
+    // source's item id routinely does carry colons ("itpod:1521578ltd" from the bundled podcasts addon
+    // is the first one anybody will follow). Built and read in ONE place so the two cannot drift;
+    // probe_browse pins the round trip, including an id full of colons.
+    QString newShelfMarker(const QString& addonId, const QString& seriesId);
+    bool    isNewShelfMime(const QString& mime);
+    QString newShelfAddonOf(const QString& mime);    // "" when `mime` is not one of these markers
+    QString newShelfSeriesOf(const QString& mime);   // "" when it is not
 
     // ---- OPDS book catalogs (issue #146) -----------------------------------------------------------------
     // The saved-catalogs shelf: one row per saved OPDS catalog (drilling into its root feed, FETCHED fresh on

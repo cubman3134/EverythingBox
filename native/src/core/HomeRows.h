@@ -25,13 +25,16 @@
 //   continue            the recently-played shelf (this app's Continue Watching: RecentStore, with resume %)
 //   favorites           the ★ Favorites shelf
 //   downloads           the fully-downloaded items shelf
-//   trakt:missed        "You Missed"    (#25)
+//   new                 "New"           (#155): followed series' unseen children, UNIONED with #25's rows
 //   trakt:calendar      "Airing Soon"   (#23)
 //   playlist:<id>       one saved playlist's items (#playlists)
 //   preset:<id>         one #63 saved filter, evaluated over the rows the home already holds
 //   category:<key>      one media-type bucket on the themed home ("video" | "game" | "audio" | …)
 //   source:<navKey>     one catalogue's row on the themed home (the nav key = the catalogue id)
-//   recents, new        accepted vocabulary with no producer in this build — kept and skipped (see above)
+//   recents, trakt:missed
+//                       accepted vocabulary with no producer in this build — kept and skipped (see above).
+//                       "trakt:missed" HAD one until #155: the New shelf absorbed those rows, so a stored
+//                       list that still names it keeps it and skips it like any other unrecognised id.
 //
 // CAP: the maximum number of ITEMS the row may show; 0 means "no cap", which is what today does. A row whose
 // producer yields a single tile (category:/source:) stores a cap like any other and ignores it — the editor

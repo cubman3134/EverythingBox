@@ -49,6 +49,7 @@
 #include "BookMeta.h"
 #include "BookCatalogs.h"
 #include "ComicName.h"
+#include "ComicInfo.h"   // #152: the Rating / Direction an entry now carries
 #include "EpubMeta.h"
 #include "LeafRoute.h"   // kLocalBookMime — header only; the routing itself is probe_leafroute's job
 #include "AppPaths.h"
@@ -1047,6 +1048,195 @@ int main(int argc, char** argv)
         QString r;
         CHECK(BookLibrary::loadIndexFile(base + QStringLiteral("/missing.json"), &r).isEmpty());
         CHECK(r.isEmpty());
+    }
+
+    // ---- §14 ComicInfo.xml, through the scan and into the index (issue #152) ---------------------------
+    // ITS OWN ROOT, deliberately: the sections above pin exact file counts over `lib`, and a feature that
+    // had to renumber another feature's assertions to be tested would be one nobody could safely change.
+    // The PARSE is probe_comicinfo's; what the LIBRARY does with it is this.
+    {
+        const QString lib2 = base + QStringLiteral("/lib152");
+        auto comicWith = [&](const QString& path, const QByteArray& xml) {
+            QVector<QPair<QString, QByteArray>> m;
+            m.append({ QStringLiteral("page1.png"), pngBytes(QColor(30, 90, 160)) });
+            if (!xml.isEmpty()) m.append({ QStringLiteral("ComicInfo.xml"), xml });
+            m.append({ QStringLiteral("page2.png"), pngBytes(QColor(160, 90, 30)) });
+            return writeZip(path, m);
+        };
+        auto doc = [](const char* series, const char* number, const char* writer,
+                      const char* rating, const char* manga) {
+            QByteArray x = QByteArrayLiteral("<ComicInfo><Series>");
+            x += series; x += "</Series><Number>"; x += number; x += "</Number><Writer>";
+            x += writer; x += "</Writer>";
+            if (rating && *rating) { x += "<AgeRating>"; x += rating; x += "</AgeRating>"; }
+            if (manga && *manga)   { x += "<Manga>";     x += manga;  x += "</Manga>"; }
+            return x + QByteArrayLiteral("</ComicInfo>");
+        };
+
+        // TWO UNTAGGED ISSUES, whose grouping must not move a millimetre.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/Preacher 001.cbz"), {}));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/Preacher 002.cbz"), {}));
+        // TAGGED, and named NOTHING like what they say they are: the filenames would infer a series called
+        // "sandman-vol-issue" or nothing at all, so a shelf that shows "The Sandman" can only have got it
+        // from the document.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/sandman-vol1-issue1.cbz"),
+                        doc("The Sandman", "1", "Neil Gaiman", "Mature 17+", "No")));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/sandman-extra.cbz"),
+                        doc("The Sandman", "Annual 1", "Neil Gaiman", "Teen", "")));
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/nausicaa-01.cbz"),
+                        doc("Nausicaa", "1", "Hayao Miyazaki", "Everyone 10+", "YesAndRightToLeft")));
+        // An author whose ONLY book is one a restricted profile hides — so the bucket has to disappear.
+        CHECK(comicWith(lib2 + QStringLiteral("/comics/crossed-001.cbz"),
+                        doc("Crossed", "1", "Garth Ennis", "Adults Only 18+", "")));
+
+        ScanStats st;
+        const QVector<BookLibrary::FileEntry> e2 = BookLibrary::scanFolder(lib2, {}, &st);
+        CHECK(st.files == 6);
+        CHECK(e2.size() == 6);
+        const Index idxC = BookLibrary::buildIndex(e2);
+
+        auto byPathSuffix = [](const Index& ix, const QString& suffix) -> const Book* {
+            for (const BookLibrary::Author& a : ix.authors)
+                for (const Book& b : a.books)
+                    if (b.path.endsWith(suffix)) return &b;
+            return nullptr;
+        };
+
+        // (a) THE DOCUMENT BEATS THE FILENAME, dimension by dimension.
+        const Book* sand1 = byPathSuffix(idxC, QStringLiteral("sandman-vol1-issue1.cbz"));
+        CHECK(sand1 != nullptr);
+        if (sand1)
+        {
+            CHECK(sand1->series == QStringLiteral("The Sandman"));
+            CHECK(sand1->number == QStringLiteral("1"));
+            CHECK(sand1->seriesIndex == 1.0);
+            CHECK(sand1->author == QStringLiteral("Neil Gaiman"));
+            CHECK(sand1->creators.contains(QStringLiteral("Neil Gaiman")));
+            CHECK(sand1->rating == ComicInfo::Rating::Mature);
+            CHECK(sand1->kind == Kind::Comic);
+            // No <Title> in the document, so the shelf goes on showing the name the file has — the one
+            // thing about a tagged comic that does NOT change.
+            CHECK(sand1->titleFromFilename);
+            CHECK(sand1->pageCount == 2);       // COUNTED image members; ComicInfo.xml is not a page
+        }
+        const Book* annual = byPathSuffix(idxC, QStringLiteral("sandman-extra.cbz"));
+        CHECK(annual != nullptr);
+        if (annual)
+        {
+            CHECK(annual->series == QStringLiteral("The Sandman"));
+            CHECK(annual->number == QStringLiteral("Annual 1"));   // VERBATIM: no double holds this
+            CHECK(annual->seriesIndex == 0.0);                     // ...and it sorts as unnumbered
+            CHECK(annual->rating == ComicInfo::Rating::Teen);
+        }
+        const Book* nau = byPathSuffix(idxC, QStringLiteral("nausicaa-01.cbz"));
+        CHECK(nau != nullptr);
+        if (nau)
+        {
+            CHECK(nau->direction == ComicInfo::Direction::RightToLeft);
+            CHECK(nau->series == QStringLiteral("Nausicaa"));
+        }
+        // ...and a comic that said "Manga: No" is NOT right to left, which is the assertion that separates
+        // "the field was read" from "the field was found".
+        if (sand1) CHECK(sand1->direction != ComicInfo::Direction::RightToLeft);
+
+        // (b) AN ENTRY WITHOUT A DOCUMENT IS GROUPED EXACTLY AS TODAY. Not "looks right" — IDENTICAL to a
+        // control index built over a folder holding only those two files, so a tagged neighbour cannot have
+        // perturbed the folder-corroborated filename rule.
+        const QString ctrl = base + QStringLiteral("/lib152-control");
+        CHECK(comicWith(ctrl + QStringLiteral("/comics/Preacher 001.cbz"), {}));
+        CHECK(comicWith(ctrl + QStringLiteral("/comics/Preacher 002.cbz"), {}));
+        const Index idxCtrl = BookLibrary::buildIndex(BookLibrary::scanFolder(ctrl));
+        const Book* p1 = byPathSuffix(idxC, QStringLiteral("/comics/Preacher 001.cbz"));
+        const Book* c1 = byPathSuffix(idxCtrl, QStringLiteral("/comics/Preacher 001.cbz"));
+        CHECK(p1 != nullptr);
+        CHECK(c1 != nullptr);
+        if (p1 && c1)
+        {
+            CHECK(p1->series == c1->series);
+            CHECK(p1->seriesIndex == c1->seriesIndex);
+            CHECK(p1->title == c1->title);
+            CHECK(p1->titleFromFilename);
+            CHECK(c1->titleFromFilename);
+            CHECK(p1->number.isEmpty());        // nothing to carry, so nothing carried
+            CHECK(p1->rating == ComicInfo::Rating::Unrated);
+            CHECK(p1->direction == ComicInfo::Direction::Unspecified);
+            CHECK(!p1->series.isEmpty());       // ...and the filename rule DID fire, so this is not vacuous
+        }
+
+        // (c) SERIES ORDER: the numbered issue leads, the "Annual 1" follows as unnumbered, and the row
+        // shows the number the publisher WROTE rather than a decimal invented for it.
+        const MediaCatalog sandShelf =
+            browse::bookSeriesCatalog(idxC, ComicName::seriesKey(QStringLiteral("The Sandman")));
+        CHECK(sandShelf.items.size() == 2);
+        CHECK(sandShelf.title == QStringLiteral("The Sandman"));
+        if (sandShelf.items.size() == 2)
+        {
+            CHECK(sandShelf.items.at(0).subtitle.startsWith(QStringLiteral("#1")));
+            CHECK(sandShelf.items.at(1).subtitle.startsWith(QStringLiteral("#Annual 1")));
+        }
+
+        // (d) THE RESTRICTED PROFILE. Mature and Adults go; Teen, Everyone 10+ and Unrated stay; an author
+        // left with nothing goes with them, and so does a series left with nothing.
+        const Index open = BookLibrary::filterForProfile(idxC, false);
+        CHECK(open.comicCount == idxC.comicCount);
+        CHECK(open.authors.size() == idxC.authors.size());
+        CHECK(open.series.size() == idxC.series.size());
+
+        const Index kids = BookLibrary::filterForProfile(idxC, true);
+        CHECK(kids.comicCount == idxC.comicCount - 2);          // Sandman #1 (Mature) + Crossed (Adults)
+        CHECK(byPathSuffix(kids, QStringLiteral("sandman-vol1-issue1.cbz")) == nullptr);
+        CHECK(byPathSuffix(kids, QStringLiteral("crossed-001.cbz")) == nullptr);
+        CHECK(byPathSuffix(kids, QStringLiteral("sandman-extra.cbz")) != nullptr);   // Teen stays
+        CHECK(byPathSuffix(kids, QStringLiteral("nausicaa-01.cbz")) != nullptr);     // Everyone 10+ stays
+        CHECK(byPathSuffix(kids, QStringLiteral("/comics/Preacher 001.cbz")) != nullptr);  // Unrated stays
+        CHECK(kids.author(BookLibrary::authorKeyFor(QStringLiteral("Garth Ennis"))) == nullptr);
+        CHECK(kids.author(BookLibrary::authorKeyFor(QStringLiteral("Neil Gaiman"))) != nullptr);
+        CHECK(kids.seriesFor(ComicName::seriesKey(QStringLiteral("Crossed"))) == nullptr);
+        CHECK(kids.seriesFor(ComicName::seriesKey(QStringLiteral("The Sandman"))) != nullptr);
+        // ...and the one that survived is a SERIES OF ONE now, rather than a shelf still claiming two.
+        const BookLibrary::Series* keptSand =
+            kids.seriesFor(ComicName::seriesKey(QStringLiteral("The Sandman")));
+        if (keptSand) CHECK(keptSand->books.size() == 1);
+
+        // (e) THE INDEX FILE CARRIES ALL OF IT, so the next launch does not re-open every archive.
+        const QString f2 = base + QStringLiteral("/bookindex152.json");
+        CHECK(BookLibrary::saveIndexFile(f2, e2));
+        QString rules2;
+        const QVector<BookLibrary::FileEntry> back = BookLibrary::loadIndexFile(f2, &rules2);
+        CHECK(back.size() == e2.size());
+        CHECK(rules2 == BookLibrary::parseStamp());
+        const Index idxBack = BookLibrary::buildIndex(back);
+        const Book* sandBack = byPathSuffix(idxBack, QStringLiteral("sandman-extra.cbz"));
+        CHECK(sandBack != nullptr);
+        if (sandBack)
+        {
+            CHECK(sandBack->number == QStringLiteral("Annual 1"));
+            CHECK(sandBack->series == QStringLiteral("The Sandman"));
+            CHECK(sandBack->author == QStringLiteral("Neil Gaiman"));
+            CHECK(sandBack->creators.contains(QStringLiteral("Neil Gaiman")));
+            CHECK(sandBack->rating == ComicInfo::Rating::Teen);
+        }
+        const Book* nauBack = byPathSuffix(idxBack, QStringLiteral("nausicaa-01.cbz"));
+        CHECK(nauBack != nullptr);
+        if (nauBack) CHECK(nauBack->direction == ComicInfo::Direction::RightToLeft);
+        // A rescan over the reloaded cache re-opens NOTHING, which is what makes carrying the fields in the
+        // index worth doing at all.
+        ScanStats s152;
+        BookLibrary::scanFolder(lib2, BookLibrary::byPath(back), &s152);
+        CHECK(s152.reused == 6);
+        CHECK(s152.reread == 0);
+
+        // (f) THE STAMP MOVED, ONCE. A library cached under #144's rules holds no ComicInfo fields at all
+        // and nothing else can supply them (the cache is keyed on mtime+size, which have not changed), so
+        // the caller must see a different stamp and drop the lot. Behavioural: the OLD value is written out
+        // here rather than read from the constant.
+        CHECK(BookLibrary::parseStamp() != QStringLiteral("2"));
+        CHECK(BookLibrary::parseStamp() != QStringLiteral("1"));
+        // ...and only once: a file written by THIS build reads back as current, so the next launch reuses
+        // it rather than re-reading the library for ever.
+        QString rules3;
+        BookLibrary::loadIndexFile(f2, &rules3);
+        CHECK(rules3 == BookLibrary::parseStamp());
     }
 
     QDir(base).removeRecursively();

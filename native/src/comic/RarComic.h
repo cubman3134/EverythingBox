@@ -56,7 +56,12 @@ namespace RarComic
     QString message(Status s);
 
     // The image members, in the archive's own order, WITHOUT decompressing anything. For a page count.
-    QStringList imageNames(const QString& path, Status* status = nullptr);
+    //
+    // `otherNames`, when given, is filled with the members that are NOT page images — from the SAME header
+    // walk, so a caller looking for a sidecar (ComicInfo.xml, issue #152) learns whether it is there without
+    // a second pass and without inflating a byte. The returned list and the Status are exactly what they
+    // were before: "no images" is still NoPages however many other members there are.
+    QStringList imageNames(const QString& path, Status* status = nullptr, QStringList* otherNames = nullptr);
 
     // Every image member's encoded bytes, name-keyed, in the archive's own order. ONE pass (see the header).
     QVector<QPair<QString, QByteArray>> imagePages(const QString& path, Status* status = nullptr);
@@ -65,4 +70,10 @@ namespace RarComic
     // on. Walks the headers to learn the order, then makes the same single sequential pass and keeps only
     // that member — so a cover costs the archive up to page one, and never a second full extraction.
     QByteArray coverBytes(const QString& path, Status* status = nullptr);
+
+    // The bytes of ONE member by its exact name, page image or not — the sidecar door (ComicInfo.xml, issue
+    // #152). Costs the SAME single sequential pass coverBytes() does, for the same solid-archive reason, so
+    // ask imageNames() for `otherNames` first and come here only when the member is known to be there.
+    // Empty when the archive holds no such member.
+    QByteArray memberBytes(const QString& path, const QString& name, Status* status = nullptr);
 }
