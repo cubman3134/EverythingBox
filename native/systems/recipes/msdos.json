@@ -25,6 +25,21 @@
         { "when": "file",    "present": "asIs" }
       ],
       "bootCommand": ""
+    },
+    {
+      "core": "dosbox_core",
+      "options": {
+        "dosbox_core_machine": "svga_s3",
+        "dosbox_core_mount_c_as": "content",
+        "dosbox_core_cpu_cycles_mode": "fixed"
+      },
+      "firmware": [],
+      "content": [
+        { "when": "archive", "present": "extract" },
+        { "when": "folder",  "present": "executable" },
+        { "when": "file",    "present": "asIs" }
+      ],
+      "bootCommand": ""
     }
   ]
 }

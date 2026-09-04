@@ -40,7 +40,12 @@ public:
     // folder. The ONE slow step in a launch (a multi-GB LZMA decode); open() runs it on a worker thread so the
     // UI can't freeze, then re-uses the warm extraction cache. Empty + *err on failure. Public + static so it
     // has no instance state and can run safely off the GUI thread.
-    static QString resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err);
+    // `overrideCore` is the per-GAME core override (#51/#95), resolved by the CALLER on the GUI thread — this
+    // runs on a worker thread, and the override store is not ours to read from there. Empty = no override,
+    // which is byte-for-byte the pre-#190-increment-2 decision. It matters because whether an archive is
+    // handed over unextracted is a property of the core that will actually run it, not of the system.
+    static QString resolveArchiveForLaunch(const QString& rom, const QString& systemHint, QString* err,
+                                           const QString& overrideCore = QString());
 
     // The pipeline's resolution half (system + disc descriptor + core lookup), reused by MainWindow's split-pane
     // branch to run a ROM in the focused pane's own emulator. Resolution only — no network: `error` non-empty =>
@@ -78,6 +83,21 @@ public:
     // MainWindow's split-pane branch relies on (it has no key). The extra-args lever is applied later, at the
     // standalone-emulator launch (runEmulator), not here — a CorePlan carries no args.
     CorePlan prepareCore(const QString& rom, const QString& systemHint, const QString& key = QString());
+
+    // #190: the recipe's firmware check for a resolved plan — "" when everything the core needs is present
+    // (which is every system without a recipe, and every recipe whose firmware is there), otherwise the
+    // message naming the exact file(s) and the folder they go in. Called AFTER the BIOS fetch, so a file the
+    // app can legitimately fetch for itself is never reported as the user's problem.
+    // PUBLIC because the split-pane branch (MainWindow) drives its own core+BIOS fetch and so has to run this
+    // same check itself; increment 1 left that path with only the pre-download half, so a pane could still
+    // reach a black screen on a system whose firmware the user has not supplied.
+    QString firmwareBlocker(const CorePlan& plan, const QString& title) const;
+
+    // #190: the Amstrad CPC diagnostic. For a plan whose recipe declares its boot command comes from the
+    // AMSDOS catalogue, read the disk and return the command the core is about to type — or "" when the
+    // disk's catalogue holds nothing runnable, which is the one case where the core gives up and drops the
+    // user at a `CAT` listing with no explanation. Public so the split-pane branch reports it too.
+    QString amsdosBootCommand(const CorePlan& plan, bool* readable = nullptr) const;
 
     // Fill plan.corePath — immediately when installed, else via an async buildbot download (progress on the
     // Notifier toast) — then run onReady with the completed plan. On failure onReady never runs; the error
@@ -155,11 +175,6 @@ private:
     void openResolved(const QString& rom, const QString& title, const QString& thumb,
                       const QString& key, const QString& systemHint);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
-    // #190: the recipe's firmware check for a resolved plan — "" when everything the core needs is present
-    // (which is every system without a recipe, and every recipe whose firmware is there), otherwise the
-    // message naming the exact file(s) and the folder they go in. Called AFTER the BIOS fetch, so a file the
-    // app can legitimately fetch for itself is never reported as the user's problem.
-    QString firmwareBlocker(const CorePlan& plan, const QString& title) const;
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     // `emulatorId` is the resolved standalone-emulator id — sys->externalEmulator by default, or a per-game

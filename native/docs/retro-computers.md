@@ -27,15 +27,25 @@ and the **exact folder**, instead of showing you a black screen.
 | **Commodore 64** | Yes. VICE autostarts `.d64` / `.prg` / `.crt` / `.tap` — no `LOAD"*",8,1`. | None — VICE compiles the Commodore ROMs in. | The recipe keeps true drive emulation on (accuracy) and turns on load warp for disks, so a real 1541's loading time is not the experience. Optional JiffyDOS ROMs go in `vice/`. |
 | **Commodore VIC-20** | Yes. | None. | Memory expansion is set to `auto`, which is what most titles need. |
 | **ZX Spectrum** | Yes. Tapes auto-load; snapshots run directly. | None for any stock Sinclair model. Pentagon / Scorpion clones want `fuse/128p-0.rom`, `fuse/256s-0.rom` and friends. | The recipe turns on automatic model selection, so a 128K-only game stops appearing to do nothing on a 48K. |
-| **Amstrad CPC** | Yes. cap32 auto-runs disk and tape content. | None — the CPC firmware is compiled into the core. | |
-| **Apple II** | Yes. | None — the Apple II ROMs are compiled into the core. | The recipe selects the enhanced //e, which is the machine most software expects. |
-| **NEC PC-98** | Not until you supply the ROMs. | `np2kai/bios.rom` and a font ROM (`np2kai/font.rom` or `np2kai/font.bmp`); several titles also want `np2kai/itf.rom` and `np2kai/sound.rom`. | The core cannot boot at all without these, so the launch is refused with the file names rather than left at a black screen. |
-| **Sharp X1** | Not until you supply the IPL ROM. | `xmil/IPLROM.X1` (the turbo machine types also use `xmil/IPLROM.X1T`). | The core falls back to a stub boot ROM, which is why an X1 disk usually shows a blank screen. |
+| **Amstrad CPC** | Yes. cap32 reads the disk's own AMSDOS catalogue and types the `RUN"` command for you. | None — the CPC firmware is compiled into the core. | See [Amstrad CPC in detail](#amstrad-cpc-in-detail). CrocoDS is offered as an alternative core but has no catalogue autorun of its own: it shows a file browser instead. |
+| **Apple II** | Yes. `.dsk`, `.woz`, `.po`, `.2mg` and the rest boot from slot 6 drive 1 with nothing set. | None — the Apple II ROMs are compiled into the core (`resource/Apple2e_Enhanced.rom` and friends), and the core declares no firmware at all. | The recipe selects the enhanced //e, which is the machine most software expects, and keeps the slot-7 hard-disk controller in place so a `.hdv` / `.2mg` hard-disk image boots too. |
+| **MSX / MSX2** | Yes for the content — carts and disks boot themselves — **once the machine files are in place**. | **blueMSX** (the default) needs the `Machines/` and `Databases/` folders from a blueMSX install, at the root of the system folder: it opens `<system>/Machines` and `<system>/Databases` directly, and its own metadata marks both as required. **fMSX** needs the BIOS ROMs, flat in the system folder and spelled in upper case: `MSX2P.ROM` + `MSX2PEXT.ROM` (it starts as an MSX2+), plus `DISK.ROM` before any disk image will start. | MSX did not exist as a system in EverythingBox before this — blueMSX was only ever a fallback core for SG-1000 and ColecoVision — so there was nothing a recipe could attach to. `.mx1` and `.mx2` route on their own; `.rom`, `.dsk` and `.cas` are claimed by other systems, so put those in the `msx` folder or open them from an MSX shelf. |
+| **NEC PC-98** | Not until you supply the ROMs. | `np2kai/bios.rom` — **lower case**, that is the only spelling the core opens — and a font, which it genuinely does try in four spellings (`np2kai/FONT.BMP`, `font.bmp`, `FONT.ROM`, `font.rom`). Several titles also want `np2kai/itf.rom` and `np2kai/sound.rom`. | The launch is refused with the file names rather than left at a black screen. Note the core does carry a stub fallback BIOS and will *start* without `bios.rom`; almost nothing real runs on it, so EverythingBox treats the file as required. Machine model is `PC-9801VX` (the core offers only `PC-286`, `PC-9801VM` and `PC-9801VX`). |
+| **Sharp X1** | Not until you supply the IPL ROM. | `xmil/IPLROM.X1` — upper case, 32 KB. The turbo / turbo Z machine types use `xmil/IPLROM.X1T` instead. | The core falls back to a stub boot ROM, which is why an X1 disk usually shows a blank screen. The machine type is `X1` by default; its option keys are upper case (`X1_ROMTYPE`), unlike every other core here. |
 
-MSX is **not** in this table: EverythingBox's system catalog has no `msx` system id yet (blueMSX appears only
-as a fallback core for SG-1000 and ColecoVision), so a recipe for it would be data nothing could reach. Adding
-the system is a prerequisite, and blueMSX additionally requires `Machines/` and `Databases/` folders in the
-system folder.
+### Alternative cores
+
+Every system above lists more than one candidate core in the settings, and a recipe covers each core it
+knows about separately — because option keys, firmware and content handling are properties of the *core*,
+not of the system. Two that are easy to trip over:
+
+* **Amiga → `puae2021`.** Built from the same source as `puae` (the `2.6.1` branch, whose makefile sets
+  `TARGET_NAME := puae2021`), so it uses the same `puae_*` options and reads the same Kickstart filenames
+  from the same folder. Switching to it keeps the Kickstart check and the message.
+* **MS-DOS → `dosbox_core`.** The opposite of DOSBox-Pure on the one thing that matters here: it has **no
+  ZIP support at all**. A game you move onto it is unpacked first, and a folder game is still handed the
+  program inside it. Your per-game core choice reaches that decision, so a single overridden game behaves
+  correctly while the rest of your DOS library keeps DOSBox-Pure's handling.
 
 ## MS-DOS in detail
 
@@ -67,6 +77,25 @@ In order, stopping at the first step that decides:
 
 A game folder that ships its own `DOSBOX.CONF` is honoured automatically.
 
+## Amstrad CPC in detail
+
+A CPC boots to BASIC and waits for you to type `RUN"` and a file name, which is why every CPC user learns
+to type `CAT` first. You do not have to: **cap32 reads the disk's AMSDOS catalogue itself** and types the
+command, using the convention the platform settled on — a file called `DISC.*` / `DISK.*` if there is one,
+otherwise the only program on the disk, otherwise the first `.BAS`, then an extension-less file, then the
+first `.BIN`.
+
+EverythingBox does **not** override that with a command of its own. The core's own guess is backed by a
+game database EverythingBox cannot see, so replacing it would trade a good answer for a guess. What the
+app adds is the thing the core cannot: when the catalogue holds **nothing runnable at all** — the one case
+where the core gives up and simply types `CAT` — you get a message saying so and telling you to type
+`RUN"` followed by a name from the listing, instead of being left looking at a screen of file names with
+no idea why the game did not start. The command the core is about to type is also written to the log for
+every CPC disk, so a disk that boots the wrong thing can be diagnosed rather than guessed at.
+
+If you want a *specific* command on a disk cap32 gets wrong, cap32 reads one from an `.m3u` playlist: put
+the disk's file name on one line and `#COMMAND:RUN"THEGAME` on another, and open the `.m3u`.
+
 ## Changing any of this
 
 Copy the shipped recipe out of the source tree (`native/systems/recipes/<id>.json`) into
@@ -90,4 +119,6 @@ Inside a `cores[]` entry:
 * `content` — `{ when: file | folder | archive, present: asIs | executable | extract }`. Saying **nothing**
   about a shape means "behave as EverythingBox always has", which for an archive is *extract* — so handing a
   core an unextracted archive is something a recipe has to ask for in as many words.
-* `bootCommand` — reserved for the cores that take one; unused today.
+* `bootCommand` — how this core gets its typed boot command. `"amsdos"` means "read it out of the Amstrad
+  disk's own catalogue"; empty means the core needs none. It names a *mechanism*, not a literal command,
+  because the command is a property of the disk and a recipe is a property of the system.

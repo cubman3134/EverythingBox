@@ -2037,19 +2037,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(launcher_, &GameLauncher::chooseBootProgram, this,
             [this](const QString& title, const QStringList& choices, const QString& rom, const QString& thumb,
                    const QString& key, const QString& systemHint) {
-                const int row = NavMenu::pick(tr("Which program runs “%1”?").arg(title), choices, this);
-                if (row < 0 || row >= choices.size()) return;   // backed out: no launch, nothing remembered
-                // The identity the answer is filed under. A catalog row has a stable id; a game opened
-                // straight off disk has only its path — and it MUST still get an identity here, because
-                // re-opening with nothing remembered would ask the same question again, forever. This is the
-                // same "stable id, else the path" rule LaunchOpts documents, and GameLauncher recomputes it
-                // from these same two values, so both sides agree without a new field on the plan.
-                const QString bootKey = key.isEmpty() ? rom : key;
-                LaunchOpts::Override ov = LaunchOpts::get(bootKey);
-                ov.bootFile = choices.at(row);
-                LaunchOpts::set(bootKey, ov);
-                // Re-open: resolution now finds the stored answer and has nothing left to ask.
-                launcher_->open(rom, title, thumb, key, systemHint);
+                askBootProgramThenReopen(title, choices, rom, thumb, key, systemHint);
             }, Qt::QueuedConnection);
 
     controlsHideTimer_ = new QTimer(this);
@@ -7565,8 +7553,24 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     notePlaybackStart();  // a manual game launch is non-channel playback -> ends any idle channel (never airs games)
     if (splitTarget_) // run the ROM in the focused pane's own emulator instead of the full-screen one
     {
-        const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint);
+        // #190: `key` is passed now (increment 1 passed nothing). Without it this branch resolved with NO
+        // per-game override at all — so a game moved onto a different core, or a folder game whose program
+        // the user had already picked, was re-resolved from the system defaults every time a pane opened it.
+        const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint, key);
         if (!plan.error.isEmpty()) { notifier_->notify(plan.error, plan.errorMs); return; }
+        // #190: a folder game whose program the recipe could not pick. The full-screen tail asks through
+        // GameLauncher's queued chooseBootProgram signal; this branch reaches prepareCore directly, so it
+        // asks here — deferred past this delivery, because NavMenu::pick opens a nested event loop and this
+        // runs inside a click's signal emission (the #28 / #211 family). The pane stays armed, so the
+        // re-open after the answer lands back in it. Nothing is downloaded or launched on a guess.
+        if (!plan.bootChoices.isEmpty())
+        {
+            const QString askTitle = title.isEmpty() ? QFileInfo(plan.bootFolder).completeBaseName() : title;
+            QMetaObject::invokeMethod(this, [this, askTitle, choices = plan.bootChoices, rom, thumb, key, systemHint] {
+                askBootProgramThenReopen(askTitle, choices, rom, thumb, key, systemHint);
+            }, Qt::QueuedConnection);
+            return;
+        }
         if (!plan.externalEmulatorId.isEmpty()) // a standalone emulator owns its own window; it can't embed in a split pane
         {
             const ExternalEmulator* em = EmulatorRegistry::byId(plan.externalEmulatorId);
@@ -7613,6 +7617,18 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
                     notifier_->notify(s, 8000); // the status bar is hidden app-wide; the toast is the visible channel
                 },
                 [this, pane, ready, recentTitle, thumb, key] {
+                    // #190: the same post-BIOS-fetch reporting the full-screen tail does. Increment 1 gave
+                    // this branch only the PRE-download firmware refusal (it rides plan.error); a system the
+                    // app fetches a BIOS for is checked only after that fetch has had its turn, and without
+                    // this the pane reached a black screen instead of a sentence naming the missing file.
+                    const QString blocked = launcher_->firmwareBlocker(ready, recentTitle);
+                    if (!blocked.isEmpty()) { notifier_->notify(blocked, kFeedbackLong); return; }
+                    bool cpcReadable = false;
+                    const QString cpcCmd = launcher_->amsdosBootCommand(ready, &cpcReadable);
+                    if (cpcReadable && cpcCmd.isEmpty())
+                        notifier_->notify(tr("“%1” has no program the disk names, so it will boot to a "
+                                             "catalogue listing. Type RUN\" followed by a name from the list.")
+                                              .arg(recentTitle), kFeedbackLong);
                     mwLog(QStringLiteral("game: launching in split pane"));
                     pane->openGame(ready.corePath, ready.launchRom, ready.core, recentTitle, ready.systemId);
                     RecentStore::add({ ready.sourceRom.isEmpty() ? ready.launchRom : ready.sourceRom, recentTitle,
