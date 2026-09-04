@@ -123,7 +123,7 @@ static void testDefaultIsToday()
     }
     // ...and when the server DOES produce rows, the shelf lands where the order says.
     CHECK(spell(plan(avail(builtIn), {}))
-          == QStringLiteral("continue jellyfin:continue trakt:missed trakt:calendar favorites"));
+          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites"));
     // A built-in shelf, not an opt-in one: it does not need a row in the list to appear.
     CHECK(!isOptInShelf(QStringLiteral("jellyfin:continue")));
 
