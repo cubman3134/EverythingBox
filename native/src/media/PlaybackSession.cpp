@@ -462,8 +462,6 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
     // route reaches beginResume, and the one route that wants the flag sets it immediately afterwards -
     // which makes "off" the default for everything that has not asked, rather than a state left behind.
     resumeServerOwned_ = false;
-    double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
-    if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
     // #197: A SERVER'S OWN ITEM IS ASKED OF THE SERVER FIRST, and its answer wins over anything on this
     // disk — including a mark this build wrote before the hook existed. `< 0` is the hook saying "not
     // mine"; 0 is a real answer and must not be confused with one (which is why the test is on the hook's
