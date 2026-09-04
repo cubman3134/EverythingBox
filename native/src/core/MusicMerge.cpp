@@ -324,3 +324,33 @@ MusicMerge::Merged MusicMerge::merge(const QVector<Source>& sources, const QStri
 
     return out;
 }
+
+// ---- The picker's quality line (issue #194, increment 3) -----------------------------------------------
+//
+// See MusicMerge.h for why the rule lives here rather than in the surface that renders it, and why it
+// refuses to guess.
+QStringList MusicMerge::qualityBits(const MusicLibrary::Album& album)
+{
+    QStringList out;
+
+    QString fmt = album.format.trimmed().toUpper();
+    if (fmt.isEmpty() && !album.tracks.isEmpty())
+    {
+        // A LOCAL copy: the extension is exact, and it is what this level already showed. A remote key is
+        // excluded BY SHAPE rather than by asking a protocol module — see the header.
+        const QString sp = album.tracks.first().sourcePath;
+        const bool looksLikeAPath = !sp.contains(QChar(0x1F))
+                                    && (sp.contains(QLatin1Char('/')) || sp.contains(QLatin1Char('\\')));
+        if (looksLikeAPath)
+        {
+            const int dot = sp.lastIndexOf(QLatin1Char('.'));
+            // A dot must be inside the last few characters AND after the last separator, or a folder called
+            // "The Wall (1979. Remaster)" would hand the picker a format of "REMASTER)".
+            const int sep = qMax(sp.lastIndexOf(QLatin1Char('/')), sp.lastIndexOf(QLatin1Char('\\')));
+            if (dot > sep && dot > 0 && sp.size() - dot <= 6) fmt = sp.mid(dot + 1).toUpper();
+        }
+    }
+    if (!fmt.isEmpty()) out << fmt;
+    if (album.bitrateKbps > 0) out << QString::number(album.bitrateKbps) + QStringLiteral(" kbps");
+    return out;
+}

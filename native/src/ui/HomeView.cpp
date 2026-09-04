@@ -100,6 +100,9 @@
 #include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
 #include "../core/MusicMerge.h"          // ...and the merged view every music level renders
 #include "../core/MusicRemap.h"          // ...and the one-way move that keeps what was banked (#194 inc 2)
+#include "../core/JellyfinMusicClient.h"  // #194 inc 3: a Jellyfin server's music as a supplier
+#include "../core/ServerMusic.h"          // #194 inc 3: the EverythingBox server's music shelf (ids, readers)
+#include "../core/ServerMusicClient.h"    // ...and its fetches
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
@@ -1036,6 +1039,11 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(mgr_, &AddonManager::catalogReady, this, &HomeView::onCatalogReady);
     connect(mgr_, &AddonManager::metaReady, this, &HomeView::onMetaReady);
     connect(mgr_, &AddonManager::sourcesChanged, this, &HomeView::refresh); // a remote addon was added/removed
+    // ...and the music-shelf list rides the SAME signal (#194 increment 3). Kept off the browse path on
+    // purpose: the Settings row that lists the sources to prefer, and MusicSupply::playUrl resolving a shelf
+    // track for a Continue-listening row, both have to work before anybody has opened the Music tab.
+    connect(mgr_, &AddonManager::sourcesChanged, this, &HomeView::refreshMusicShelves);
+    refreshMusicShelves();
 
     // Cross-addon "search everything" fan-out. The aggregator owns the request lifecycle + merge rules; HomeView
     // paints each streamed batch into the "_search" grid and mirrors the loading/no-results UI (byte-for-byte
@@ -3020,8 +3028,79 @@ static browse::MusicCoverFn musicCover()
     return [](const MusicLibrary::Album& b) { return MusicSupply::albumArt(b); };
 }
 
+// ---- ONE QUESTION PER LEVEL, WHATEVER THE SUPPLIER (issue #194, increment 3) ---------------------------
+//
+// There are now three remote suppliers, and every browse level has to ask each of them the same two
+// questions: does this key still owe a fetch, and how do I ask for it? Written out at each call site that
+// would be four branches in eleven places, and the failure mode of that is specific and certain — somebody
+// adds a supplier and misses one of them, and that supplier's albums are silently empty on exactly one
+// level. So the routing is here, once, expressed the way MusicSupply expresses it: each family's own parser
+// answers "is this mine", and the families are mutually unreadable by construction.
+//
+// `done` collapses the three clients' Result types to (ok, message) because every caller uses exactly those
+// two fields, and the third — Subsonic's `auth` — is not acted on differently anywhere in this file.
+static bool musicNeedsArtistFetch(const QString& artistKey)
+{
+    if (Subsonic::isQualified(artistKey))   return !SubsonicClient::instance().artistLoaded(artistKey);
+    if (Jellyfin::isQualified(artistKey))   return !JellyfinMusicClient::instance().artistLoaded(artistKey);
+    if (ServerMusic::isQualified(artistKey)) return !ServerMusicClient::instance().artistLoaded(artistKey);
+    return false;   // a local key: its albums are in the scanned index already
+}
+
+static void musicFetchArtistAlbums(const QString& artistKey,
+                                   std::function<void(bool ok, const QString& message)> done)
+{
+    if (Subsonic::isQualified(artistKey))
+        SubsonicClient::instance().fetchArtistAlbums(artistKey,
+            [done](const SubsonicClient::Result& r) { done(r.ok, r.message); });
+    else if (Jellyfin::isQualified(artistKey))
+        JellyfinMusicClient::instance().fetchArtistAlbums(artistKey,
+            [done](const JellyfinMusicClient::Result& r) { done(r.ok, r.message); });
+    else if (ServerMusic::isQualified(artistKey))
+        ServerMusicClient::instance().fetchArtistAlbums(artistKey,
+            [done](const ServerMusicClient::Result& r) { done(r.ok, r.message); });
+    else
+        done(true, QString());
+}
+
+static bool musicNeedsAlbumFetch(const QString& albumKey)
+{
+    if (Subsonic::isQualified(albumKey))   return !SubsonicClient::instance().albumTracksLoaded(albumKey);
+    if (Jellyfin::isQualified(albumKey))   return !JellyfinMusicClient::instance().albumTracksLoaded(albumKey);
+    if (ServerMusic::isQualified(albumKey)) return !ServerMusicClient::instance().albumTracksLoaded(albumKey);
+    return false;
+}
+
+static void musicFetchAlbumTracks(const QString& albumKey,
+                                  std::function<void(bool ok, const QString& message)> done)
+{
+    if (Subsonic::isQualified(albumKey))
+        SubsonicClient::instance().fetchAlbumTracks(albumKey,
+            [done](const SubsonicClient::Result& r) { done(r.ok, r.message); });
+    else if (Jellyfin::isQualified(albumKey))
+        JellyfinMusicClient::instance().fetchAlbumTracks(albumKey,
+            [done](const JellyfinMusicClient::Result& r) { done(r.ok, r.message); });
+    else if (ServerMusic::isQualified(albumKey))
+        ServerMusicClient::instance().fetchAlbumTracks(albumKey,
+            [done](const ServerMusicClient::Result& r) { done(r.ok, r.message); });
+    else
+        done(true, QString());
+}
+
+// The sleeve, likewise. A local album's art is already on disk; each remote supplier fetches it into
+// MetaCache under that copy's own key.
+static void musicPrefetchCover(const QString& albumKey, std::function<void()> then)
+{
+    if (Subsonic::isQualified(albumKey))        SubsonicClient::instance().prefetchAlbumCover(albumKey, then);
+    else if (Jellyfin::isQualified(albumKey))   JellyfinMusicClient::instance().prefetchAlbumCover(albumKey, then);
+    else if (ServerMusic::isQualified(albumKey)) ServerMusicClient::instance().prefetchAlbumCover(albumKey, then);
+}
+
 void HomeView::populateMusicArtists()
 {
+    // Which connected servers serve music is read fresh here, before the supplier COUNT is taken: a shelf
+    // that arrived since the last look is the difference between the merged path and the single-source one.
+    refreshMusicShelves();
     const int serverCount = int(SubsonicServerStore::list().size());
     // ONE SUPPLIER: exactly the call this function has always made. Not "the merge happens to be a no-op" -
     // the merged path is not entered at all, so there is no way for it to change a row, a count or an order
@@ -3048,7 +3127,50 @@ bool HomeView::musicMergePossible() const
     // A COUNT OF SUPPLIERS, not of content: the local library gates on hasLibrary() (a configured root that
     // exists) exactly as the Music tab itself does, because the scan is asynchronous and "no tracks yet" and
     // "no library" want opposite answers.
-    return (MusicLibrary::hasLibrary() ? 1 : 0) + int(SubsonicServerStore::list().size()) >= 2;
+    //
+    // (#194 increment 3) Jellyfin counts its ENABLED servers rather than all of them, because `enabled` is
+    // the switch that means "get this library out of the way for the evening" — a server switched off is a
+    // supplier that is not supplying, and counting it would put a two-supplier install into the merged path
+    // with nothing to merge. Subsonic has no such switch, so its list is counted whole, unchanged.
+    return (MusicLibrary::hasLibrary() ? 1 : 0)
+           + int(SubsonicServerStore::list().size())
+           + int(JellyfinServerStore::enabled().size())
+           + int(ServerMusicClient::instance().shelves().size()) >= 2;
+}
+
+// The connected servers that serve a music shelf. See the header for why the answer is pushed down.
+//
+// THE GATE IS STRUCTURAL, NOT A NAME CHECK, and it is the load-bearing line in this function: a shelf
+// qualifies only when it is served by a REMOTE server the user connected over our own addon protocol. A
+// bundled metadata add-on has a catalogue of type `music` too (the AIO catalog's MusicBrainz shelf), and
+// merging THAT into somebody's library would fold a database of every record ever pressed into the twelve
+// albums they own. A metadata shelf answers "what exists"; a server shelf answers "what you have".
+void HomeView::refreshMusicShelves()
+{
+    QVector<ServerMusicClient::Shelf> shelves;
+    if (mgr_)
+    {
+        for (LoadedAddon* src : mgr_->sources())
+        {
+            if (!src || src->transport != LoadedAddon::RemoteHttp) continue;
+            if (src->stremio) continue;                        // a third-party Stremio addon is not our server
+            if (!mgr_->isEnabled(src->manifest.id)) continue;
+            for (const AddonCatalog& c : mgr_->catalogs(src))
+            {
+                if (c.type != QStringLiteral("music")) continue;
+                if (c.searchOnly || !c.skipReason.isEmpty()) continue;   // it can never be browsed
+                ServerMusicClient::Shelf s;
+                s.id           = src->manifest.id;
+                s.name         = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
+                s.baseUrl      = src->baseUrl;
+                s.catalogId    = c.id;
+                s.configHeader = mgr_->serverConfigHeader(src);
+                shelves.push_back(s);
+                break;   // one music shelf per server: a second would be the same library twice
+            }
+        }
+    }
+    ServerMusicClient::instance().setShelves(shelves);
 }
 
 bool HomeView::insideMusicServerLevel() const
@@ -3067,6 +3189,14 @@ void HomeView::rebuildMergedMusic()
     srcs.push_back({ QString(), &MusicLibrary::index() });          // "" == local, always first
     for (const SubsonicServer& s : SubsonicServerStore::list())
         srcs.push_back({ s.id, &SubsonicClient::instance().index(s.id) });
+    // THE ORDER IS THE PREFERENCE'S FALLBACK ORDER, so it has to be stable run to run: the servers as they
+    // were added, then the shelves as their sources load. MusicId::pickAutoSource is a total function of the
+    // preference and THIS order (MusicId.h), which is what stops a merged row's identity flapping between
+    // two refreshes.
+    for (const JellyfinServer& s : JellyfinServerStore::enabled())
+        srcs.push_back({ s.id, &JellyfinMusicClient::instance().index(s.id) });
+    for (const ServerMusicClient::Shelf& s : ServerMusicClient::instance().shelves())
+        srcs.push_back({ s.id, &ServerMusicClient::instance().index(s.id) });
     // merge() copies everything it keeps, so none of those references outlive this call.
     mergedMusic_      = MusicMerge::merge(srcs, Settings::musicPreferredSource());
     mergedMusicValid_ = true;
@@ -3154,6 +3284,38 @@ void HomeView::applyMusicStreamRekey(const QString& albumKey)
 
 void HomeView::fetchMergeSources()
 {
+    // The callback every supplier's artist fetch shares: whatever the outcome, repopulate the music level
+    // the user is standing in. A supplier that answered adds its artists; one that refused adds nothing and
+    // must not replace the rows already on screen with an error — the local library is still perfectly
+    // browsable, which is the whole point of merging rather than switching. This is also the whole of "a
+    // slow supplier does not stall the library": nothing waits on any of these.
+    auto landed = [this] {
+        if (stack_.isEmpty()) return;
+        const QString t = stack_.last().item.type;
+        if (t == QStringLiteral("_musicroot") || t == QString::fromLatin1(browse::kMusicArtistType)
+            || t == QString::fromLatin1(browse::kMusicAlbumType))
+        { mergedMusicValid_ = false; loadTop(); }
+    };
+
+    // (#194 increment 3) The two new suppliers, asked exactly as the Subsonic one is — and MARKED BEFORE
+    // THE REQUEST for the same reason spelled out below.
+    JellyfinMusicClient& jf = JellyfinMusicClient::instance();
+    for (const JellyfinServer& srv : JellyfinServerStore::enabled())
+    {
+        const QString tag = QStringLiteral("jf:") + srv.id;
+        if (jf.artistsLoaded(srv.id) || musicMergeFetched_.contains(tag)) continue;
+        musicMergeFetched_.insert(tag);
+        jf.fetchArtists(srv.id, [landed](const JellyfinMusicClient::Result&) { landed(); });
+    }
+    ServerMusicClient& sh = ServerMusicClient::instance();
+    for (const ServerMusicClient::Shelf& s : sh.shelves())
+    {
+        const QString tag = QStringLiteral("ebs:") + s.id;
+        if (sh.artistsLoaded(s.id) || musicMergeFetched_.contains(tag)) continue;
+        musicMergeFetched_.insert(tag);
+        sh.fetchArtists(s.id, [landed](const ServerMusicClient::Result&) { landed(); });
+    }
+
     SubsonicClient& c = SubsonicClient::instance();
     for (const SubsonicServer& srv : SubsonicServerStore::list())
     {
@@ -3196,6 +3358,12 @@ QString HomeView::musicSourceLabel(const QString& sourceId) const
     if (sourceId.isEmpty()) return tr("This device");
     SubsonicServer srv;
     if (SubsonicServerStore::get(sourceId, srv) && !srv.name.isEmpty()) return srv.name;
+    // (#194 increment 3) A Jellyfin server names itself: `ServerName` from /System/Info/Public, which is
+    // what #160 stores and what its rows are already tagged with elsewhere.
+    JellyfinServer jf;
+    if (JellyfinServerStore::get(sourceId, jf) && !jf.name.isEmpty()) return jf.name;
+    const QString shelf = ServerMusicClient::instance().nameOf(sourceId);
+    if (!shelf.isEmpty()) return shelf;
     return tr("Music server");
 }
 
@@ -3217,20 +3385,17 @@ browse::MusicAlbumSources HomeView::musicAlbumSourcesFor(const QString& albumKey
         s.albumKey = k;
         s.label    = musicSourceLabel(mergedMusic_.sourceOf.value(k));
         s.chosen   = (k == albumKey);
-        // QUALITY AWARENESS WHERE IT IS FREE. The track count is already in hand; the file format is, for a
-        // local copy, in the path we are about to play. A remote copy's format is NOT free - the Subsonic
-        // song rows carry a `suffix` that this app's index does not keep - so it is simply absent rather
-        // than guessed at.
+        // QUALITY AWARENESS WHERE IT IS FREE, and only there (#194 increment 3). The track count is in hand
+        // here because it is prose that needs translating; everything else a copy can honestly claim comes
+        // from MusicMerge::qualityBits, which is ONE rule over every supplier — the extension for a local
+        // copy, the container and bitrate a Jellyfin server or the EverythingBox server's shelf reported,
+        // and NOTHING for a Subsonic copy, whose API does not tell us. See MusicMerge.h for why a guess
+        // here would defeat the whole point of the line.
         QStringList bits;
         if (const MusicLibrary::Album* b = MusicSupply::indexFor(k).album(k))
         {
             bits << tr("%n track(s)", "", b->trackCount);
-            if (!Subsonic::isQualified(k) && !b->tracks.isEmpty())
-            {
-                const QString sp  = b->tracks.first().sourcePath;
-                const int     dot = sp.lastIndexOf(QLatin1Char('.'));
-                if (dot > 0 && sp.size() - dot <= 6) bits << sp.mid(dot + 1).toUpper();
-            }
+            bits += MusicMerge::qualityBits(*b);
         }
         s.detail = bits.join(QString::fromUtf8(" \xc2\xb7 "));
         out.instances.push_back(s);
@@ -3244,14 +3409,13 @@ void HomeView::playMusicAlbumFromSource(const QString& albumKey)
     // A remote copy the user has never opened has no track list yet, and a queue built from it would be
     // empty - the row would look like it did nothing at all, which this codebase treats as worse than an
     // error. So fetch the one request's worth first, then play.
-    if (Subsonic::isQualified(albumKey) && !SubsonicClient::instance().albumTracksLoaded(albumKey))
+    if (musicNeedsAlbumFetch(albumKey))
     {
-        SubsonicClient::instance().fetchAlbumTracks(albumKey,
-            [this, albumKey](const SubsonicClient::Result& r) {
-                if (!r.ok) { showMusicServerError(tr("Music"), r.message); return; }
-                mergedMusicValid_ = false;
-                emit playMusicAlbumRequested(albumKey, QString());
-            });
+        musicFetchAlbumTracks(albumKey, [this, albumKey](bool ok, const QString& message) {
+            if (!ok) { showMusicServerError(tr("Music"), message); return; }
+            mergedMusicValid_ = false;
+            emit playMusicAlbumRequested(albumKey, QString());
+        });
         return;
     }
     emit playMusicAlbumRequested(albumKey, QString());
@@ -3291,8 +3455,7 @@ void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)
 
     QStringList todo;
     for (const MusicLibrary::Album& b : a->albums)
-        if (Subsonic::isQualified(b.key) && !SubsonicClient::instance().albumTracksLoaded(b.key))
-            todo << b.key;
+        if (musicNeedsAlbumFetch(b.key)) todo << b.key;
     if (todo.isEmpty()) { emit playMusicQueueRequested(shown, shuffle); return; }
 
     const int gen = ++musicQueueFetchGen_;
@@ -3302,10 +3465,10 @@ void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)
     auto failed    = QSharedPointer<int>::create(0);
     for (const QString& k : todo)
     {
-        SubsonicClient::instance().fetchAlbumTracks(k,
-            [this, shown, shuffle, gen, remaining, failed](const SubsonicClient::Result& r) {
+        musicFetchAlbumTracks(k,
+            [this, shown, shuffle, gen, remaining, failed](bool ok, const QString&) {
                 if (gen != musicQueueFetchGen_) return;     // superseded by a later press
-                if (!r.ok) ++(*failed);
+                if (!ok) ++(*failed);
                 if (--(*remaining) > 0) return;             // still waiting on a sibling record
                 hideToast();
                 // A record that would not load is NOT a reason to refuse the rest: the queue is built from
@@ -3440,7 +3603,7 @@ void HomeView::scheduleMusicArtRefresh()
 void HomeView::prefetchAlbumCovers(const QVector<MusicLibrary::Album>& albums)
 {
     for (const MusicLibrary::Album& b : albums)
-        SubsonicClient::instance().prefetchAlbumCover(b.key, [this] { scheduleMusicArtRefresh(); });
+        musicPrefetchCover(b.key, [this] { scheduleMusicArtRefresh(); });
 }
 
 void HomeView::openMusicServersLevel()
@@ -3539,8 +3702,7 @@ void HomeView::populateMusicArtist(const QString& artistKey)
         const QString shown = mergedArtistPrimary(artistKey);
         QStringList todo;
         for (const QString& k : mergedMusic_.artistInstances(shown))
-            if (Subsonic::isQualified(k) && !SubsonicClient::instance().artistLoaded(k)
-                && !musicMergeArtistFetched_.contains(k))
+            if (musicNeedsArtistFetch(k) && !musicMergeArtistFetched_.contains(k))
                 todo << k;
         if (todo.isEmpty()) { renderMusicArtist(shown); return; }
 
@@ -3554,8 +3716,8 @@ void HomeView::populateMusicArtist(const QString& artistKey)
         for (const QString& k : todo)
         {
             musicMergeArtistFetched_.insert(k);       // before the request; see fetchMergeSources
-            SubsonicClient::instance().fetchArtistAlbums(k,
-                [this, shown, gen, remaining](const SubsonicClient::Result&) {
+            musicFetchArtistAlbums(k,
+                [this, shown, gen, remaining](bool, const QString&) {
                     if (gen != musicFetchGen_) return;             // superseded by a newer navigation
                     if (--(*remaining) > 0) return;                // still waiting on a sibling supplier
                     mergedMusicValid_ = false;
@@ -3567,15 +3729,15 @@ void HomeView::populateMusicArtist(const QString& artistKey)
     }
     // Which supplier owns this key is decided in ONE place, structurally - see MusicSupply / Subsonic::parse.
     // A local key can never parse as a qualified one, so this is a routing question rather than a guess.
-    if (Subsonic::isQualified(artistKey) && !SubsonicClient::instance().artistLoaded(artistKey))
+    if (musicNeedsArtistFetch(artistKey))
     {
         const int gen = ++musicFetchGen_;
         const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
         showMusicLoading(title);
-        SubsonicClient::instance().fetchArtistAlbums(artistKey,
-            [this, artistKey, title, gen](const SubsonicClient::Result& r) {
+        musicFetchArtistAlbums(artistKey,
+            [this, artistKey, title, gen](bool ok, const QString& message) {
                 if (gen != musicFetchGen_) return;
-                if (!r.ok) { showMusicServerError(title, r.message); return; }
+                if (!ok) { showMusicServerError(title, message); return; }
                 renderMusicArtist(artistKey);
             });
         return;
@@ -3621,15 +3783,15 @@ void HomeView::populateMusicAlbum(const QString& albumKey)
     QString key = albumKey;
     if (musicMergeActive()) { rebuildMergedMusic(); key = mergedAlbumPrimary(albumKey); }
     const QString albumKeyResolved = key;
-    if (Subsonic::isQualified(albumKeyResolved) && !SubsonicClient::instance().albumTracksLoaded(albumKeyResolved))
+    if (musicNeedsAlbumFetch(albumKeyResolved))
     {
         const int gen = ++musicFetchGen_;
         const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
         showMusicLoading(title);
-        SubsonicClient::instance().fetchAlbumTracks(albumKeyResolved,
-            [this, albumKeyResolved, title, gen](const SubsonicClient::Result& r) {
+        musicFetchAlbumTracks(albumKeyResolved,
+            [this, albumKeyResolved, title, gen](bool ok, const QString& message) {
                 if (gen != musicFetchGen_) return;
-                if (!r.ok) { showMusicServerError(title, r.message); return; }
+                if (!ok) { showMusicServerError(title, message); return; }
                 mergedMusicValid_ = false;
                 renderMusicAlbum(albumKeyResolved);
             });
@@ -3654,14 +3816,14 @@ void HomeView::renderMusicAlbum(const QString& albumKey)
         showSyntheticCatalog(browse::musicAlbumCatalog(mergedMusic_.idx, shown, musicCover(),
                                                        musicAlbumSourcesFor(shown)));
         if (const MusicLibrary::Album* b = mergedMusic_.idx.album(shown))
-            SubsonicClient::instance().prefetchAlbumCover(b->key, [this] { scheduleMusicArtRefresh(); });
+            musicPrefetchCover(b->key, [this] { scheduleMusicArtRefresh(); });
         return;
     }
     applyMusicStreamRekey(albumKey);
     const MusicLibrary::Index& idx = MusicSupply::indexFor(albumKey);
     showSyntheticCatalog(browse::musicAlbumCatalog(idx, albumKey, musicCover()));
     if (const MusicLibrary::Album* b = idx.album(albumKey))
-        SubsonicClient::instance().prefetchAlbumCover(b->key, [this] { scheduleMusicArtRefresh(); });
+        musicPrefetchCover(b->key, [this] { scheduleMusicArtRefresh(); });
 }
 
 // The CLASSICAL VIEW (#196, part 2) - Composers -> that composer's Works -> that work's Tracks. Three more
@@ -3728,6 +3890,7 @@ void HomeView::populateMusicWork(const QString& workKey)
 void HomeView::refreshMusicLevels()
 {
     mergedMusicValid_ = false;
+    refreshMusicShelves();   // an addon may have been connected or switched off since the last look (#194 inc 3)
     onMusicLibraryChanged();
 }
 

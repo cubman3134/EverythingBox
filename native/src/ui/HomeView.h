@@ -669,7 +669,13 @@ private:
     void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
     void applyMusicRemap();                             // ...and move what was banked onto the new pick
     void applyMusicStreamRekey(const QString& albumKey); // #204: off the signed url, onto the track's own name
-    void fetchMergeSources();                           // one getArtists per server, at most once per session
+    void fetchMergeSources();                           // one artist list per supplier, at most once per session
+    // The connected servers that serve a MUSIC SHELF, refreshed into ServerMusicClient (issue #194,
+    // increment 3). Which addon sources those are is a question only this side can answer — it needs the
+    // loaded-source list, each source's base url and its per-source config header — so the answer is pushed
+    // DOWN to the fetcher rather than the fetcher reaching up for it. Cheap and idempotent; called wherever
+    // the supplier list is about to be read.
+    void refreshMusicShelves();
     // An instance key -> the key its merged row is actually rendered under. Identity when nothing merged.
     QString mergedArtistPrimary(const QString& key) const;
     QString mergedAlbumPrimary(const QString& key) const;

@@ -90,6 +90,7 @@
 #include "../core/ChannelLineup.h"   // #179: source -> candidates -> the duration-gated lineup
 #include "../core/MediaDurations.h"  // #179: the duration index the lineup is gated on
 #include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
+#include "../core/ServerMusicClient.h"    // issue #194 inc 3: the connected servers that serve music
 #include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
 #include "../core/AbsClient.h"              // issue #197: the Audiobookshelf client + AbsSupply key routing
 #include "../core/AbsServerStore.h"         // ...and the saved servers behind it
@@ -2976,6 +2977,16 @@ static QList<QPair<QString, QString>> musicSourcePrefPairs()
     out << qMakePair(QObject::tr("A music server"), QString::fromLatin1(MusicId::kPreferServer));
     for (const SubsonicServer& srv : SubsonicServerStore::list())
         out << qMakePair(srv.name.trimmed().isEmpty() ? srv.url : srv.name, srv.id);
+    // (#194 increment 3) The two new suppliers, in the SAME order MusicMerge feeds them to
+    // pickAutoSource — servers as they were added, then the shelves as their sources load — so "the third
+    // one down" means the same thing in this list and in the fallback the pick actually applies.
+    //
+    // ENABLED Jellyfin servers only: `enabled` means "get this library out of the way", and offering a
+    // switched-off server as the one to play from would be offering a preference that can never be met.
+    for (const JellyfinServer& srv : JellyfinServerStore::enabled())
+        out << qMakePair(srv.name.trimmed().isEmpty() ? srv.url : srv.name, srv.id);
+    for (const ServerMusicClient::Shelf& sh : ServerMusicClient::instance().shelves())
+        out << qMakePair(sh.name.trimmed().isEmpty() ? sh.id : sh.name, sh.id);
     return out;
 }
 

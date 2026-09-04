@@ -105,4 +105,31 @@ namespace MusicMerge
     // `preference` is MusicId's stored source preference ("local", "server", or a server id); it decides
     // which instance of each group is the one the merged row is keyed and played from.
     Merged merge(const QVector<Source>& sources, const QString& preference);
+
+    // ==================================================================================================
+    // THE PICKER'S QUALITY LINE (issue #194, increment 3)
+    // ==================================================================================================
+    // "Where sources report format/bitrate, show it in the picker — the FLAC on the NAS and the 128k copy
+    // on a phone are not the same thing to anyone who cares." That is the issue's own sentence, and the
+    // operative half of it is WHERE SOURCES REPORT. This returns the bits a copy can honestly claim, in
+    // display order, and returns an EMPTY LIST rather than a guess when it cannot claim any:
+    //
+    //   * a supplier that filled Album::format / Album::bitrateKbps (Jellyfin's MediaSources, the server
+    //     shelf's own meta) is simply believed;
+    //   * a LOCAL copy has neither field set (MusicLibrary.h says why), so the format is derived from the
+    //     first track's `sourcePath` extension — which is exact, and is what the album level already showed
+    //     before this increment existed;
+    //   * anything else contributes nothing. A Subsonic album reports no container at all through the API
+    //     this app uses, so its line stays the track count alone, which is the truth.
+    //
+    // A path is recognised BY SHAPE — it holds a directory separator and no 0x1F — rather than by asking a
+    // protocol module whether the key is one of its own. That keeps this file free of every supplier
+    // (MusicMerge is pure over MusicLibrary types and must stay that way to be merge-order-independent),
+    // and it is correct by construction: every remote key family in this app joins its fields with 0x1F or
+    // is a colon-separated id with no separator in it, and no local file path can lack one.
+    //
+    // NOT TRANSLATED, and that is deliberate: "FLAC" and "kbps" are the same in every locale, and the one
+    // part of the line that IS prose — "%n track(s)" — is assembled by the caller that has a QObject to
+    // translate through. Splitting it that way is what lets a probe pin this without a UI.
+    QStringList qualityBits(const MusicLibrary::Album& album);
 }

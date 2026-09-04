@@ -660,6 +660,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        # ONE MUSIC LIBRARY ACROSS EVERY SOURCE (#194 increment 3): a Jellyfin server's music, and the
+        # EverythingBox server's music shelf, as two more SUPPLIERS of those same browse shapes. Each has a
+        # pure half (payload readers, ids, the conversion onto MusicLibrary::Index) that probe_musicsources
+        # drives, and a socket half that fetches one browse level at a time under its own deadline. They are
+        # separate from Jellyfin's own video client on purpose - see JellyfinMusicClient.h.
+        src/core/JellyfinMusic.cpp       src/core/JellyfinMusic.h
+        src/core/JellyfinMusicClient.cpp src/core/JellyfinMusicClient.h
+        src/core/ServerMusic.cpp         src/core/ServerMusic.h
+        src/core/ServerMusicClient.cpp   src/core/ServerMusicClient.h
         # JELLYFIN, N SERVERS MERGED INTO ONE LIBRARY (#160). Jellyfin.h/.cpp is the pure half (the
         # server-qualified item id, the auth handshake, the payload readers and the union across
         # servers) and is what probe_jellyfin drives; JellyfinMigrate is the repeatable, idempotent
@@ -2131,6 +2140,32 @@ if(EVERYTHINGBOX_BUILD_APP)
     # here because this probe WRITES records - a run against the app's real ini would move a user's data.
     target_compile_definitions(probe_musicremap PRIVATE EB_MUSICID_TEST_SEAM)
     target_link_libraries(probe_musicremap PRIVATE Qt6::Core)
+
+    # Headless test for THE TWO NEW MUSIC SUPPLIERS (issue #194, increment 3): every enabled Jellyfin
+    # server's music, and the EverythingBox server's music shelf, folded into the SAME merged library the
+    # local folder and every Subsonic server already fold into. It drives the two protocol halves (the
+    # payload readers, the requests whose `Fields=` list is the only reason MusicBrainz ids and bitrates
+    # reach this app at all, and the two id families) and then the merge over FOUR suppliers at once -
+    # what must merge, what must not, which copy the preference picks, what a play from any copy banks
+    # under, and what the picker may claim about a copy's quality.
+    #
+    # Qt6::Core alone, and no MusicLibrary.cpp: like probe_musicid it builds Index values by hand rather
+    # than by scanning, because MusicLibrary.cpp pulls AudioTags and TagLib and a probe that needs a tag
+    # reader to run is a probe nobody runs in a loop. NO NETWORK: everything here is pure.
+    add_executable(probe_musicsources tools/probe_musicsources.cpp
+        src/core/JellyfinMusic.cpp src/core/JellyfinMusic.h
+        src/core/ServerMusic.cpp   src/core/ServerMusic.h
+        src/core/Jellyfin.cpp      src/core/Jellyfin.h
+        src/core/Subsonic.cpp      src/core/Subsonic.h
+        src/core/MusicId.cpp       src/core/MusicId.h
+        src/core/MusicMerge.cpp    src/core/MusicMerge.h
+        src/core/MusicRemap.cpp    src/core/MusicRemap.h
+        src/core/MusicLibrary.h)
+    target_include_directories(probe_musicsources PRIVATE src src/core src/media tools)
+    # The ini-redirect seam, same macro and same rule as probe_musicid's: the override store PERSISTS, so a
+    # run that wrote into the app's real ini would leave a verdict the next run reads.
+    target_compile_definitions(probe_musicsources PRIVATE EB_MUSICID_TEST_SEAM)
+    target_link_libraries(probe_musicsources PRIVATE Qt6::Core)
 
     # Headless test for MULTIPLE JELLYFIN SERVERS MERGED INTO ONE LIBRARY (issue #160, increment 1): the
     # server-qualified item id and everything it must refuse, the transport verdicts, the auth header and
