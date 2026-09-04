@@ -77,6 +77,7 @@
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
 #include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
+#include "../browse/JellyfinCatalogs.h" // issue #83: the Jellyfin browse levels + the keyed leaf kind
 #include "../browse/RomhackTarget.h"   // the console a base-ROM crawl carries, from the system the verb was offered on
 #include "../browse/RemoteLeafResolve.h" // a remote source's leaf: resolve by id, else by title+console
 #include "../core/MusicLibrary.h"      // ...and the index those three builders render
@@ -7243,6 +7244,29 @@ void HomeView::renderRecents()
         return out;
     };
 
+    // "jellyfin:continue" — what the SERVER says this user is part-way through (#83), merged into the home
+    // beside the local recents. It draws the CACHE and never fetches: renderRecents runs on every Back and
+    // on every store change, and a fetch here would be a request per navigation. refreshJellyfinContinue()
+    // fills the cache and re-renders once when it lands.
+    //
+    // A built-in shelf rather than an opt-in one, and the #161 promise survives it: pushShelf drops an empty
+    // producer, so a profile with no Jellyfin server (or none answering, or nothing part-watched) gets no
+    // row, no header and no change of order whatsoever. What appears for somebody who HAS one is a shelf
+    // they never had to ask for, which is what "merged in like any other source" means.
+    auto buildJellyfinContinue = [this]() {
+        QVector<Group> out;
+        Group g;
+        g.header = tr("Continue Watching");
+        for (const MediaItem& raw : jellyfinContinue_)
+        {
+            const MediaItem it = correctedRow(raw);
+            if (isHiddenItem(it)) continue;
+            g.items.push_back(it);
+        }
+        if (!g.items.isEmpty()) out.push_back(g);
+        return out;
+    };
+
     const QVector<homerows::Row> rowList = HomeRowStore::list();
 
     // The built-in shelves, in the order the home has always produced them. The order comes from
@@ -7251,6 +7275,8 @@ void HomeView::renderRecents()
     for (const QString& id : homerows::defaultShelfOrder())
     {
         if (id == QStringLiteral("continue"))            pushShelf(id, StyleResume, buildContinue());
+        else if (id == QStringLiteral("jellyfin:continue"))
+            pushShelf(id, StylePlain, buildJellyfinContinue());
         else if (id == QStringLiteral("new"))            pushShelf(id, StyleWhen,   buildNew());
         else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
         else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
@@ -7351,6 +7377,11 @@ void HomeView::renderRecents()
     loadThumbnails(0); // load posters for recents/favourites that have one (else the placeholder stays)
     updateChrome();
     updateStatus();
+
+    // ...and ASK for the server's Continue Watching rows, once, AFTER drawing what we already have (#83).
+    // Below the render rather than above it so the home screen is never waiting on a network answer to
+    // paint: the rows arrive and re-render, exactly the way an addon catalog's do.
+    refreshJellyfinContinue();
 
     // In XMB layout, Home is the active category's column (recents/favourites), not the grid list.
     if (xmbMode_)
@@ -7695,6 +7726,14 @@ void HomeView::activateItem(int row)
         if (it.type == QStringLiteral("rechdr")) return;                 // a group header, not actionable
         if (it.mime.startsWith(QStringLiteral("fav:"))) { openFavorite(it); return; } // a favourite -> detail
         if (isGame && !it.url.isEmpty()) { queueMenu(it, /*isDownloads*/false); return; }
+        // #83: A CONTINUE WATCHING ROW FROM A JELLYFIN SERVER CARRIES NO URL, by design - the link is
+        // minted at play time and never sits on a row. The url test below would drop it in silence, which
+        // is the fifth outing for the asymmetry LeafRoute.h opens with (a music track, a photo, an OPDS
+        // book, a Live TV channel). Asked of the SAME table both Enter paths read, so a rename of the
+        // prefix cannot unroute this one copy of the question.
+        if (const browse::LeafRoute lr = browse::localLeafRoute(it);
+            lr.play == browse::LeafPlay::JellyfinItem)
+        { emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return; }
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); // a recent -> re-open
         return;
     }
@@ -7743,6 +7782,14 @@ void HomeView::activateItem(int row)
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
         case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
+        // #83: THROUGH openRecent, WHICH IS ALREADY THE ONE DOOR for a row that names an item rather than
+        // a link - a Live TV channel identity and a music-server track id both go through it, and both for
+        // the reason this row needs it: the playable url has to be MINTED, and only MainWindow can mint it.
+        // Passing the qualified id as BOTH the path and the resume key is deliberate and is the whole
+        // credential design: what gets written down is the id (Jellyfin::recordedPath), and the id is what
+        // the next open re-mints from.
+        case browse::LeafPlay::JellyfinItem:
+            emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
     if (!it.url.isEmpty())
@@ -8025,6 +8072,29 @@ void HomeView::activateItem(int row)
     // exactly like "_newlivetv" above, because addOpdsCatalogInteractive spins Osk nested loops then rebuilds
     // this very level's model. (A book item, type "opdsbook", was already claimed above, ahead of the generic
     // url branch, so it can download with auth.)
+    // Jellyfin (#83). The "Jellyfin" folder opens the merged library list; a library drills into its
+    // titles; a series drills into its seasons; a season drills into its episodes. Every one of them is
+    // FETCHED on open (HomeViewJellyfin.cpp says why there is no cache), and every one of them is a
+    // synthetic '_'-typed row, so the themed column drills it rather than offering a Play chooser over a
+    // container. A playable Jellyfin item is NOT here - it is a local leaf kind, claimed by the table
+    // above, so both surfaces route it through the one arm rather than two.
+    if (it.type == QString::fromLatin1(browse::kJellyfinRootType)) { openJellyfinLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kJellyfinLibType))
+    {
+        openJellyfinLibraryLevel(browse::jellyfinKeyOf(it.mime, browse::kJellyfinLibPrefix), it.title);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kJellyfinSeriesType))
+    {
+        openJellyfinSeriesLevel(browse::jellyfinKeyOf(it.mime, browse::kJellyfinSeriesPrefix), it.title);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kJellyfinSeasonType))
+    {
+        openJellyfinSeasonLevel(browse::jellyfinKeyOf(it.mime, browse::kJellyfinSeasonPrefix), it.title);
+        return;
+    }
+
     if (it.type == QStringLiteral("_opdscatalogs")) { openOpdsCatalogsLevel(); return; }
     if (it.type == QStringLiteral("_opdscatalog"))
         { openOpdsCatalog(it.mime.mid(QStringLiteral("opdscatalog:").size())); return; }
@@ -8936,6 +9006,31 @@ void HomeView::loadTop()
     // state that was true before the user acted.
     if (top.detail && top.item.type == QStringLiteral("_recomps")) { populateRecomps(); return; }
     // Returning to the OPDS "Book Servers" shelf (#146): rebuild it from the store.
+    // Returning to a Jellyfin level (#83) - Back out of an episode, a season, a series or a library.
+    // RE-FETCHED, not restored from a snapshot: a media server's library is the thing most likely to have
+    // changed since you last looked, and the fetch is one request against a box on your own network. Each
+    // arm rebuilds from the marker its own push site stored in `item.mime`, which is what the synthetic
+    // level Back survival gate checks.
+    if (top.detail && top.item.type == QString::fromLatin1(browse::kJellyfinRootType))
+    { populateJellyfinLibraries(); return; }
+    if (top.detail && top.item.type == QString::fromLatin1(browse::kJellyfinLibType))
+    {
+        populateJellyfinLibrary(browse::jellyfinKeyOf(top.item.mime, browse::kJellyfinLibPrefix),
+                                top.item.title);
+        return;
+    }
+    if (top.detail && top.item.type == QString::fromLatin1(browse::kJellyfinSeriesType))
+    {
+        populateJellyfinSeries(browse::jellyfinKeyOf(top.item.mime, browse::kJellyfinSeriesPrefix),
+                               top.item.title);
+        return;
+    }
+    if (top.detail && top.item.type == QString::fromLatin1(browse::kJellyfinSeasonType))
+    {
+        populateJellyfinSeason(browse::jellyfinKeyOf(top.item.mime, browse::kJellyfinSeasonPrefix),
+                               top.item.title);
+        return;
+    }
     if (top.detail && top.item.type == QStringLiteral("_opdscatalogs")) { populateOpdsCatalogs(); return; }
     // Returning to an OPDS feed level (Back out of a book or a sub-feed): re-fetch it, restoring the catalog's
     // auth context from the level's stored "opdsfeedlvl:<catalogId>\n<feedUrl>".
@@ -10272,6 +10367,11 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
     {
         // A merged PC game row has no url to re-open — it names a game, not a file (see playPcGame).
         if (isMergedPcGame(it)) { playPcGame(it); return; }
+        // #83: and neither does a Jellyfin row. The themed twin of the arm in activateItem's recentView_
+        // branch, and the reason this file has a routing gate at all.
+        if (const browse::LeafRoute lr = browse::localLeafRoute(it);
+            lr.play == browse::LeafPlay::JellyfinItem)
+        { emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return; }
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
@@ -10299,6 +10399,10 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         case browse::LeafPlay::OpdsBook:   openOpdsBook(it); return;   // re-emits openItem with the auth header
         case browse::LeafPlay::MusicAlbum: emit playMusicAlbumRequested(lr.key, it.url); return;
         case browse::LeafPlay::AudiobookBook: emit playAudiobookRequested(lr.key, it.url, -1); return;
+        // #83: the themed twin of activateItem's arm, and the reason LeafRoute has a gate at all. See there
+        // for why this goes through openRecent rather than openItem.
+        case browse::LeafPlay::JellyfinItem:
+            emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Audiobookshelf (#197), the SAME call activateItem makes. These rows all drill (every type starts with
@@ -11501,6 +11605,19 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 // Only once a playlist has actually been added. An empty Live TV folder sat under Video for
                 // everyone who has never used IPTV, offering a shelf whose whole content was its own "add a
                 // source" row. Settings -> Live TV -> "Add a Live TV source..." is what brings it back.
+                // Jellyfin (#83): the merged libraries of every connected server. Video only, and only
+                // once a server has been CONNECTED - the same rule Live TV settled on one line below, and
+                // for the identical reason: a folder whose whole content is "you have not set this up"
+                // sat under Video for everyone who has never run a media server. Settings -> Jellyfin
+                // servers is what brings it back.
+                //
+                // Gated on the STORE and never on a fetch: this runs on every navigation into the video
+                // root, and asking a server whether it has libraries would put a network round trip on
+                // that path. A connected server with nothing visible opens onto an ordinary explained
+                // level (populateJellyfinLibraries), which is the honest answer rather than a row that
+                // silently is not there.
+                { QLatin1String("_jellyfin"),  tr("Jellyfin"),      QStringLiteral("jellyfin:"),
+                                                             isVideo && JellyfinServerStore::hasServers() },
                 { QLatin1String("_livetv"),    tr("Live TV"),       QStringLiteral("livetv:"),
                                                              isVideo && !IptvSourceStore::list().isEmpty() },
                 // Channels (#179 inc 1): your own library, scheduled into channels you surf rather than

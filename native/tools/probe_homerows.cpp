@@ -78,12 +78,54 @@ static void testDefaultIsToday()
     // position, same rows, different header. "trakt:missed" is still known vocabulary with no producer.
     const QStringList classicToday{ QStringLiteral("continue"), QStringLiteral("new"),
                                     QStringLiteral("trakt:calendar"), QStringLiteral("favorites") };
-    CHECK(defaultShelfOrder() == classicToday);
+    // NOT an equality against classicToday any more: #83 put "jellyfin:continue" into the default order,
+    // and the claim this file makes is about what an untouched profile SEES rather than about the literal
+    // list — a row the app cannot produce never reaches plan(). So the shape is asserted instead: the
+    // server shelf sits directly after "continue", "trakt:missed" is still gone, and removing the one row
+    // #83 added leaves #161's promised sequence exactly as it was.
+    CHECK(defaultShelfOrder().indexOf(QStringLiteral("jellyfin:continue")) == 1);
     CHECK(!defaultShelfOrder().contains(QStringLiteral("trakt:missed")));
+    {
+        QStringList woServer = defaultShelfOrder();
+        woServer.removeAll(QStringLiteral("jellyfin:continue"));
+        CHECK(woServer == classicToday);
+    }
 
-    // No stored list -> that sequence, in that order, uncapped.
+    // No stored list -> that sequence, in that order, uncapped. THE CLAIM #161 MADE IS ABOUT WHAT AN
+    // UNTOUCHED PROFILE SEES, and it is asserted here rather than against defaultShelfOrder()'s literal
+    // contents: a row the app cannot PRODUCE never reaches plan() (HomeView drops an empty producer before
+    // it becomes `available`), so an install with no Jellyfin server renders exactly these four whatever
+    // else the built-in list names. That is the difference between adding a source and changing the home.
     CHECK(spell(plan(avail(classicToday), {}))
           == QStringLiteral("continue new trakt:calendar favorites"));
+
+    // #83: and the built-in list itself. It is `classicToday` plus "jellyfin:continue", directly after the
+    // local recently-played shelf — the same question one machine along, and above the two Trakt shelves,
+    // which are about what exists rather than about what you were doing.
+    // "new" rather than "trakt:missed": #155's New shelf absorbed #25's rows and took that position, so the
+    // built-in list is classicToday with "jellyfin:continue" inserted after the local recently-played shelf.
+    const QStringList builtIn{ QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
+                               QStringLiteral("new"), QStringLiteral("trakt:calendar"),
+                               QStringLiteral("favorites") };
+    CHECK(defaultShelfOrder() == builtIn);
+    // Every one of `classicToday` is still there, in its old relative order — the property that matters, and
+    // one an equality check on the whole list would leave implicit.
+    {
+        int at = -1;
+        bool inOrder = true;
+        for (const QString& id : classicToday)
+        {
+            const int i = defaultShelfOrder().indexOf(id);
+            if (i <= at) inOrder = false;
+            at = i;
+        }
+        CHECK(inOrder);
+    }
+    // ...and when the server DOES produce rows, the shelf lands where the order says.
+    CHECK(spell(plan(avail(builtIn), {}))
+          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites"));
+    // A built-in shelf, not an opt-in one: it does not need a row in the list to appear.
+    CHECK(!isOptInShelf(QStringLiteral("jellyfin:continue")));
 
     // ...and it still holds when the home has fewer rows than the full set (no Trakt account configured),
     // which is the shape most installs actually have.
@@ -221,7 +263,7 @@ static void testStore()
     CHECK(HomeRowStore::list().isEmpty());
     CHECK(!HomeRowStore::isCustomised());
     CHECK(spell(plan(avail(defaultShelfOrder()), HomeRowStore::list()))
-          == QStringLiteral("continue new trakt:calendar favorites"));
+          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites"));
 
     // A negative cap never reaches a caller.
     HomeRowStore::save({ row(QStringLiteral("continue"), true, -3) });

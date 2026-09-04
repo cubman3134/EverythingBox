@@ -41,8 +41,9 @@ namespace browse
     //
     // A KEYED kind (one whose mime carries a route id after a prefix) belongs with its feature, not here:
     // kMusicTrackPrefix lives in MusicCatalogs.h with the builder that stamps it and the musicKeyOf that
-    // reads it, and kAudiobookFilePrefix lives in AudiobookCatalogs.h for the same reason. This block is
-    // for the kinds whose whole contract is the spelling.
+    // reads it, kAudiobookFilePrefix lives in AudiobookCatalogs.h and kJellyfinItemPrefix in
+    // JellyfinCatalogs.h, all for the same reason. This block is for the kinds whose whole contract is the
+    // spelling.
     //
     // --- LOCAL LEAF KINDS (the parity gate reads this block) ---
     inline const char* kLocalVideoMime = "local:video";   // a scanned local-library video (#8/#73)
@@ -68,6 +69,17 @@ namespace browse
         // in two different indexes — collapsing them would let a book key that happened to parse as an album
         // key play the wrong thing, silently, with nothing in the type to say so.
         AudiobookBook,
+        // A PLAYABLE ITEM ON A JELLYFIN SERVER (#83). `key` is the server-qualified id (#160), and the row
+        // carries NO url on purpose: the stream link carries the token in its query, so it is minted at the
+        // moment the player is handed it and never written into a row, a queue or a recents entry
+        // (JellyfinCatalogs.h says why at length). That is the whole reason this is a route of its own
+        // rather than OpenFile — OpenFile hands `url` to the player, and there is deliberately nothing
+        // there to hand.
+        //
+        // It is in the LOCAL table despite the bytes being on somebody's server, because what "local" means
+        // here is exactly what LeafRoute.h's opening paragraph says it means: no addon can resolve this
+        // row, so both surfaces have to claim it or one of them answers "Nothing to play".
+        JellyfinItem,
     };
 
     struct LeafRoute

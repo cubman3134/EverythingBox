@@ -260,3 +260,358 @@ bool JellyfinClient::isAvailable(const QString& qualifiedId) const
     JellyfinServer s;
     return JellyfinServerStore::get(ref.serverId, s) && s.enabled;
 }
+
+// =========================================================================================================
+// BROWSE, PLAY AND PROGRESS (issue #83)
+// =========================================================================================================
+
+namespace {
+
+// Where a qualified id resolves to, right now, on this device: the owning server, its usable root, and the
+// item half. `error` is one of OUR sentences and never contains the url.
+//
+// THREE DIFFERENT SITUATIONS WITH ONE HONEST ANSWER, exactly as playUrlFor already has it: the id is not
+// qualified, its server is not configured any more, or that server is switched off. A caller renders all
+// three as "unavailable" rather than erroring at play.
+struct Resolved
+{
+    JellyfinServer server;
+    QString        root;
+    QString        itemId;
+    bool           ok = false;
+    QString        error;
+};
+
+Resolved resolveRef(const QString& qualifiedId)
+{
+    Resolved r;
+    const Jellyfin::Ref ref = Jellyfin::parse(qualifiedId);
+    if (!ref.ok)
+    { r.error = QObject::tr("That item does not name a Jellyfin server."); return r; }
+    if (!JellyfinServerStore::get(ref.serverId, r.server) || !r.server.enabled)
+    { r.error = QObject::tr("That item's Jellyfin server is not set up on this device."); return r; }
+    r.root = Jellyfin::normalizeRoot(r.server.url, r.server.allowPlainHttp);
+    if (r.root.isEmpty() || r.server.token.isEmpty() || r.server.userId.isEmpty())
+    { r.error = QObject::tr("That item's Jellyfin server is not signed in."); return r; }
+    r.itemId = ref.itemId;
+    r.ok = true;
+    return r;
+}
+
+} // namespace
+
+// ---- One server, one list of items ----------------------------------------------------------------------
+// The shared tail of fetchLibraryItems / fetchSeasons / fetchEpisodes: they differ only in the path and the
+// query, and writing the reply handling three times is how the three would come to disagree about what an
+// empty answer means.
+void JellyfinClient::fetchItemList(const QString& qualifiedId, const QString& path, const QString& query,
+                                   int budgetMs, ItemsDone done)
+{
+    const Resolved r = resolveRef(qualifiedId);
+    if (!r.ok) { if (done) done({}, r.error); return; }
+
+    QUrl u(r.root + path);
+    u.setQuery(query);
+    QNetworkRequest req{ u };
+    applyCommonHeaders(req, r.server.token);
+    QNetworkReply* reply = nam()->get(req);
+    QTimer* t = armDeadline(reply, budgetMs);
+    const QString serverId = r.server.id;
+    const QString serverName = r.server.name;
+    connect(reply, &QNetworkReply::finished, this, [reply, t, done, serverId, serverName] {
+        t->stop();
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        { if (done) done({}, transportSentence(reply->error())); return; }
+        bool ok = false;
+        const QVector<Jellyfin::RemoteItem> items = Jellyfin::readItems(reply->readAll(), &ok);
+        if (!ok)
+        { if (done) done({}, QObject::tr("That server's answer could not be read.")); return; }
+        // THROUGH THE UNION, EVEN FOR ONE SERVER. It is what qualifies the ids, and a second qualifying
+        // path here would be a second place for a bare id to escape from - the one thing #160 exists to
+        // make unspellable.
+        Jellyfin::ServerReply sr;
+        sr.serverId = serverId;
+        sr.serverName = serverName;
+        sr.outcome = Jellyfin::Outcome::Ok;
+        sr.items = items;
+        if (done) done(Jellyfin::unionOf({ sr }), QString());
+    });
+}
+
+void JellyfinClient::fetchLibraryItems(const QString& qualifiedLibraryId, int budgetMs, ItemsDone done)
+{
+    const Jellyfin::Ref ref = Jellyfin::parse(qualifiedLibraryId);
+    const Resolved r = resolveRef(qualifiedLibraryId);
+    if (!r.ok) { if (done) done({}, r.error); return; }
+    fetchItemList(qualifiedLibraryId, Jellyfin::itemsPath(r.server.userId),
+                  Jellyfin::libraryItemsQuery(ref.itemId), budgetMs, std::move(done));
+}
+
+void JellyfinClient::fetchSeasons(const QString& qualifiedSeriesId, int budgetMs, ItemsDone done)
+{
+    const Jellyfin::Ref ref = Jellyfin::parse(qualifiedSeriesId);
+    const Resolved r = resolveRef(qualifiedSeriesId);
+    if (!r.ok) { if (done) done({}, r.error); return; }
+    fetchItemList(qualifiedSeriesId, Jellyfin::seasonsPath(ref.itemId),
+                  Jellyfin::seasonsQuery(r.server.userId), budgetMs, std::move(done));
+}
+
+void JellyfinClient::fetchEpisodes(const QString& qualifiedSeriesId, const QString& qualifiedSeasonId,
+                                   int budgetMs, ItemsDone done)
+{
+    const Jellyfin::Ref series = Jellyfin::parse(qualifiedSeriesId);
+    const Resolved r = resolveRef(qualifiedSeriesId);
+    if (!r.ok) { if (done) done({}, r.error); return; }
+    // The season is optional AND is read from its own qualified id - so a season belonging to a different
+    // server than the series (which cannot happen, but would be a silent cross-server read if it did)
+    // simply contributes no filter rather than addressing the wrong box's season.
+    const Jellyfin::Ref season = Jellyfin::parse(qualifiedSeasonId);
+    const QString seasonId = (season.ok && season.serverId == series.serverId) ? season.itemId : QString();
+    fetchItemList(qualifiedSeriesId, Jellyfin::episodesPath(series.itemId),
+                  Jellyfin::episodesQuery(r.server.userId, seasonId), budgetMs, std::move(done));
+}
+
+// ---- The two fan-outs -------------------------------------------------------------------------------------
+// fetchLibrary's shape exactly: one slot per leg, filled in place, a countdown, and the union built from the
+// SLOTS so the merged order does not depend on which server answered first.
+
+void JellyfinClient::fetchLibraries(int budgetMs, LibrariesDone done)
+{
+    const QList<JellyfinServer> servers = JellyfinServerStore::enabled();
+    if (servers.isEmpty()) { if (done) done({}, {}); return; }
+
+    struct Fan
+    {
+        QVector<Jellyfin::LibraryReply> replies;
+        int                             outstanding = 0;
+        LibrariesDone                   done;
+    };
+    auto fan = std::make_shared<Fan>();
+    fan->replies.resize(servers.size());
+    fan->outstanding = int(servers.size());
+    fan->done = std::move(done);
+
+    auto settle = [fan] {
+        if (--fan->outstanding > 0) return;
+        QStringList notes;
+        for (const Jellyfin::LibraryReply& r : fan->replies)
+        {
+            // unavailableNote takes a ServerReply; the two replies carry the same three fields it reads,
+            // so the note is built from a ServerReply view of this one rather than from a second copy of
+            // the sentences - which is what keeps the wording identical on both shelves.
+            Jellyfin::ServerReply view;
+            view.serverId = r.serverId; view.serverName = r.serverName; view.outcome = r.outcome;
+            const QString n = Jellyfin::unavailableNote(view);
+            if (!n.isEmpty()) notes << n;
+        }
+        if (fan->done) fan->done(Jellyfin::unionOfLibraries(fan->replies), notes);
+    };
+
+    for (int i = 0; i < servers.size(); ++i)
+    {
+        const JellyfinServer& s = servers.at(i);
+        Jellyfin::LibraryReply& slot = fan->replies[i];
+        slot.serverId = s.id;
+        slot.serverName = s.name;
+
+        const QString root = Jellyfin::normalizeRoot(s.url, s.allowPlainHttp);
+        if (root.isEmpty() || s.userId.isEmpty() || s.token.isEmpty())
+        { slot.outcome = Jellyfin::Outcome::Failed; settle(); continue; }
+
+        QNetworkRequest req{ QUrl(root + Jellyfin::viewsPath(s.userId)) };
+        applyCommonHeaders(req, s.token);
+        QNetworkReply* reply = nam()->get(req);
+        QTimer* t = armDeadline(reply, budgetMs);
+        connect(reply, &QNetworkReply::finished, this, [reply, t, fan, i, settle] {
+            t->stop();
+            reply->deleteLater();
+            Jellyfin::LibraryReply& slot = fan->replies[i];
+            if (reply->error() == QNetworkReply::OperationCanceledError)
+                slot.outcome = Jellyfin::Outcome::TimedOut;
+            else if (reply->error() != QNetworkReply::NoError)
+                slot.outcome = Jellyfin::Outcome::Failed;
+            else
+            {
+                bool ok = false;
+                slot.libraries = Jellyfin::readViews(reply->readAll(), &ok);
+                slot.outcome = ok ? Jellyfin::Outcome::Ok : Jellyfin::Outcome::Failed;
+            }
+            settle();
+        });
+    }
+}
+
+void JellyfinClient::fetchContinueWatching(int budgetMs, ContinueDone done)
+{
+    const QList<JellyfinServer> servers = JellyfinServerStore::enabled();
+    if (servers.isEmpty()) { if (done) done({}, {}); return; }
+
+    struct Fan
+    {
+        QVector<Jellyfin::ServerReply> replies;
+        int                            outstanding = 0;
+        ContinueDone                   done;
+    };
+    auto fan = std::make_shared<Fan>();
+    fan->replies.resize(servers.size());
+    fan->outstanding = int(servers.size());
+    fan->done = std::move(done);
+
+    auto settle = [fan] {
+        if (--fan->outstanding > 0) return;
+        QStringList notes;
+        for (const Jellyfin::ServerReply& r : fan->replies)
+        {
+            const QString n = Jellyfin::unavailableNote(r);
+            if (!n.isEmpty()) notes << n;
+        }
+        if (fan->done) fan->done(Jellyfin::unionOf(fan->replies), notes);
+    };
+
+    for (int i = 0; i < servers.size(); ++i)
+    {
+        const JellyfinServer& s = servers.at(i);
+        Jellyfin::ServerReply& slot = fan->replies[i];
+        slot.serverId = s.id;
+        slot.serverName = s.name;
+
+        const QString root = Jellyfin::normalizeRoot(s.url, s.allowPlainHttp);
+        if (root.isEmpty() || s.userId.isEmpty() || s.token.isEmpty())
+        { slot.outcome = Jellyfin::Outcome::Failed; settle(); continue; }
+
+        QUrl u(root + Jellyfin::resumeItemsPath(s.userId));
+        u.setQuery(Jellyfin::resumeItemsQuery());
+        QNetworkRequest req{ u };
+        applyCommonHeaders(req, s.token);
+        QNetworkReply* reply = nam()->get(req);
+        QTimer* t = armDeadline(reply, budgetMs);
+        connect(reply, &QNetworkReply::finished, this, [reply, t, fan, i, settle] {
+            t->stop();
+            reply->deleteLater();
+            Jellyfin::ServerReply& slot = fan->replies[i];
+            if (reply->error() == QNetworkReply::OperationCanceledError)
+                slot.outcome = Jellyfin::Outcome::TimedOut;
+            else if (reply->error() != QNetworkReply::NoError)
+                slot.outcome = Jellyfin::Outcome::Failed;
+            else
+            {
+                bool ok = false;
+                slot.items = Jellyfin::readItems(reply->readAll(), &ok);
+                slot.outcome = ok ? Jellyfin::Outcome::Ok : Jellyfin::Outcome::Failed;
+            }
+            settle();
+        });
+    }
+}
+
+// ---- The open ---------------------------------------------------------------------------------------------
+// TWO ROUND TRIPS, IN THIS ORDER, and the order is the point: the user's state is read FIRST so that the
+// PlaybackInfo request can carry the real start position. Jellyfin uses StartTimeTicks to decide where a
+// transcode begins, so asking for playback at zero and then seeking would make the server transcode from
+// the beginning of a file the user is fifty minutes into.
+
+void JellyfinClient::prepareOpen(const QString& qualifiedId, double localResumeSeconds,
+                                 int audioStreamIndex, int subtitleStreamIndex, int budgetMs, OpenDone done)
+{
+    const Resolved r = resolveRef(qualifiedId);
+    if (!r.ok) { OpenPlan p; p.error = r.error; if (done) done(p); return; }
+
+    const QString root = r.root;
+    const QString token = r.server.token;
+    const QString userId = r.server.userId;
+    const QString itemId = r.itemId;
+
+    // Step one: what does the server say about this item for this user?
+    QNetworkRequest req{ QUrl(root + Jellyfin::itemPath(userId, itemId)) };
+    applyCommonHeaders(req, token);
+    QNetworkReply* reply = nam()->get(req);
+    QTimer* t = armDeadline(reply, budgetMs);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, t, done, root, token, userId, itemId, localResumeSeconds,
+             audioStreamIndex, subtitleStreamIndex, budgetMs] {
+        t->stop();
+        reply->deleteLater();
+        Jellyfin::UserState state;
+        // A FAILED USER-STATE READ IS NOT A FAILED OPEN. state.ok stays false, Jellyfin::resumeSeconds
+        // therefore keeps the LOCAL mark, and the playback goes ahead - which is the right trade: the
+        // server being briefly unreachable for one read should not stop the film.
+        if (reply->error() == QNetworkReply::NoError)
+            state = Jellyfin::readUserState(reply->readAll());
+        const double start = Jellyfin::resumeSeconds(state, localResumeSeconds);
+
+        // Step two: how may this be played?
+        QNetworkRequest pi{ QUrl(root + Jellyfin::playbackInfoPath(itemId)) };
+        applyCommonHeaders(pi, token);
+        pi.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        const QByteArray body = Jellyfin::playbackInfoBody(userId, Jellyfin::ticksFromSeconds(start),
+                                                           audioStreamIndex, subtitleStreamIndex);
+        QNetworkReply* pr = nam()->post(pi, body);
+        QTimer* pt = armDeadline(pr, budgetMs);
+        connect(pr, &QNetworkReply::finished, this,
+                [pr, pt, done, root, token, itemId, start, state] {
+            pt->stop();
+            pr->deleteLater();
+            OpenPlan plan;
+            plan.resumeSeconds      = start;
+            plan.serverKnewPosition = state.ok;
+            plan.played             = state.played;
+            if (pr->error() != QNetworkReply::NoError)
+            { plan.error = transportSentence(pr->error()); if (done) done(plan); return; }
+
+            const Jellyfin::PlaybackChoice choice = Jellyfin::readPlaybackInfo(pr->readAll());
+            plan.playSessionId = choice.playSessionId;
+            plan.mediaSourceId = choice.mediaSourceId;
+            plan.transcoding   = choice.mode == Jellyfin::PlaybackChoice::Mode::Transcode;
+            // THE URL, MINTED HERE AND NOWHERE ELSE. It carries the token; the caller hands it to the
+            // player and drops it.
+            plan.url = Jellyfin::playbackUrl(root, itemId, token, choice);
+            if (plan.url.isEmpty())
+                plan.error = QObject::tr("That server would not offer a way to play this item.");
+            if (done) done(plan);
+        });
+    });
+}
+
+// ---- Progress ------------------------------------------------------------------------------------------
+
+void JellyfinClient::reportProgress(const QString& qualifiedId, Jellyfin::ProgressEvent ev,
+                                    double positionSeconds, const QString& playSessionId,
+                                    const QString& mediaSourceId)
+{
+    const Resolved r = resolveRef(qualifiedId);
+    if (!r.ok) return;     // a removed or switched-off server: there is nobody to tell, and that is fine
+
+    QNetworkRequest req{ QUrl(r.root + Jellyfin::progressPath(ev)) };
+    applyCommonHeaders(req, r.server.token);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    QNetworkReply* reply = nam()->post(req, Jellyfin::progressBody(r.itemId, playSessionId, mediaSourceId,
+                                                                  positionSeconds, ev));
+    // FIRE AND FORGET. The reply is consumed only to free it: nothing is read from it, nothing is logged
+    // and nothing is shown. See the header for why a failed progress report is not worth a word.
+    connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
+}
+
+// ---- Media segments ------------------------------------------------------------------------------------
+
+void JellyfinClient::fetchMediaSegments(const QString& qualifiedId, int budgetMs, SegmentsDone done)
+{
+    const Resolved r = resolveRef(qualifiedId);
+    if (!r.ok) { if (done) done({}); return; }
+
+    QUrl u(r.root + Jellyfin::mediaSegmentsPath(r.itemId));
+    u.setQuery(Jellyfin::mediaSegmentsQuery());
+    QNetworkRequest req{ u };
+    applyCommonHeaders(req, r.server.token);
+    QNetworkReply* reply = nam()->get(req);
+    QTimer* t = armDeadline(reply, budgetMs);
+    connect(reply, &QNetworkReply::finished, this, [reply, t, done] {
+        t->stop();
+        reply->deleteLater();
+        // NO ERROR CHANNEL, DELIBERATELY. A pre-10.10 server answers 404 here and that is not a fault the
+        // user should read about - it is simply one fewer provider tier, exactly like a file with no .edl
+        // beside it.
+        if (reply->error() != QNetworkReply::NoError) { if (done) done({}); return; }
+        if (done) done(Jellyfin::readMediaSegments(reply->readAll()));
+    });
+}

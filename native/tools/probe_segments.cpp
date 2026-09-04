@@ -241,6 +241,44 @@ int main(int argc, char** argv)
         const QVector<Segment> mixed = resolve({ { 900, 1000, SegmentType::Credits } }, {}, chapIntro, {});
         CHECK(has(mixed, SegmentType::Intro, 5.0, 95.0) && has(mixed, SegmentType::Credits, 900.0, 1000.0),
               "an exact-season Credits mark does not suppress the chapter Intro");
+
+        // ---- THE MEDIA SERVER'S OWN DETECTION (#83), the fifth tier. Jellyfin 10.10+ fingerprints a whole
+        // series; this is that answer, and it sits between the .edl and the chapters.
+        const QVector<Segment> server = { { 20, 110, SegmentType::Intro } };
+        const QVector<Segment> withServer = resolve({}, {}, server, chapIntro, {});
+        CHECK(has(withServer, SegmentType::Intro, 20.0, 110.0),
+              "the SERVER's Intro beats a chapter Intro");
+        CHECK(countOf(withServer, SegmentType::Intro) == 1,
+              "…and the chapter range is not also armed");
+        // A hand-written .edl for THIS rip still wins: it is authored, the server's is detected.
+        CHECK(has(resolve({}, { { 5, 95, SegmentType::Intro } }, server, {}, {}),
+                  SegmentType::Intro, 5.0, 95.0),
+              "an .edl Intro beats the server's");
+        // ...and the user's own correction for this season still beats everything, which is the property
+        // the whole tier order exists to protect.
+        CHECK(has(resolve(mine, {}, server, chapIntro, {}), SegmentType::Intro, 10.0, 40.0),
+              "an EXACT-season learned Intro beats the server's");
+        // The server outranks an INHERITED mark, which is a guess about a different season.
+        CHECK(has(resolve({}, {}, server, {}, mine), SegmentType::Intro, 20.0, 110.0),
+              "the server's Intro beats an inherited learned Intro");
+        // Still per-type: a server that reports only an Intro does not suppress a chapter's Credits.
+        const QVector<Segment> chapCredits = { { 900, 1000, SegmentType::Credits } };
+        const QVector<Segment> perType = resolve({}, {}, server, chapCredits, {});
+        CHECK(has(perType, SegmentType::Intro, 20.0, 110.0)
+                  && has(perType, SegmentType::Credits, 900.0, 1000.0),
+              "a server Intro does not suppress a chapter Credits");
+
+        // THE FOUR-TIER FORM IS THE FIVE-TIER RULE WITH NO SERVER TIER, and it is asserted rather than
+        // assumed: every caller and every check written before #83 goes through it, so a divergence there
+        // would change behaviour for every file that has nothing to do with a media server.
+        const QVector<Segment> viaFour = resolve(mine, edl, chapters, inherited);
+        const QVector<Segment> viaFive = resolve(mine, edl, {}, chapters, inherited);
+        bool identical = viaFour.size() == viaFive.size();
+        for (int i = 0; identical && i < viaFour.size(); ++i)
+            identical = viaFour[i].type == viaFive[i].type
+                     && qAbs(viaFour[i].start - viaFive[i].start) < 0.01
+                     && qAbs(viaFour[i].end - viaFive[i].end) < 0.01;
+        CHECK(identical, "the four-tier resolve is the five-tier one with an empty server tier");
     }
 
     // ---------------------------------------------------------------- 6. keyFor

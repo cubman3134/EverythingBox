@@ -9,6 +9,7 @@
 #include "../src/browse/SearchAggregator.h"
 #include "../src/core/PcGameRemap.h"   // the drift assertion: catalog item id == remap destination
 #include "../src/core/PlaylistStore.h"
+#include "../src/browse/JellyfinCatalogs.h"   // #83: the Jellyfin browse levels, beside the synthetic ones
 
 static int fails = 0;
 #define CHECK(cond, name) do { if (cond) printf("PASS %s\n", name); \
@@ -1588,6 +1589,175 @@ int main(int argc, char** argv)
         CHECK(browse::opdsCatalogsList({}).items.size() == 1
               && browse::opdsCatalogsList({}).items[0].type == QStringLiteral("_newopds"),
               "opds: an empty catalog list still offers the add row");
+    }
+
+    // ==============================================================================================    // JELLYFIN BROWSE LEVELS (#83) - the rows, the tagging rule, and the one thing none of them carries
+    // =====================================================================================================
+    {
+        const QString srvA = QStringLiteral("0123456789abcdef0123456789abcdef");
+        const QString srvB = QStringLiteral("fedcba9876543210fedcba9876543210");
+        auto item = [](const QString& srv, const QString& srvName, const QString& id, const QString& title,
+                       const QString& type) {
+            Jellyfin::UnionItem u;
+            u.id = Jellyfin::qualify(srv, id);
+            u.title = title; u.type = type; u.serverId = srv; u.serverName = srvName;
+            return u;
+        };
+
+        // ---- The leaf row. THE ONE SHAPE every level shares. ---------------------------------------------
+        {
+            Jellyfin::UnionItem m = item(srvA, QStringLiteral("Attic"), QStringLiteral("m1"),
+                                         QStringLiteral("Alien"), QStringLiteral("Movie"));
+            m.year = 1979;
+            const MediaItem row = browse::jellyfinLeafRow(m, /*tagServer*/ false);
+            // NO URL. This is the whole credential design: the stream link carries the token in its query,
+            // so it is minted at play time and never sits on a row that gets copied into a playlist, a
+            // favourite or a recents entry.
+            CHECK(row.url.isEmpty(), "jellyfin: a playable row carries NO url");
+            // ...and the KEYED mime the local-leaf table claims, carrying the qualified id.
+            CHECK(row.mime == QString::fromLatin1(browse::kJellyfinItemPrefix) + m.id,
+                  "jellyfin: the leaf mime is the prefix + the qualified id");
+            CHECK(browse::jellyfinKeyOf(row.mime, browse::kJellyfinItemPrefix) == m.id,
+                  "jellyfin: jellyfinKeyOf reads the whole qualified id back, colons and all");
+            CHECK(row.id == m.id, "jellyfin: the row is filed under the qualified id");
+            CHECK(row.type == QStringLiteral("movie"), "jellyfin: a Movie types as the app's own 'movie'");
+            CHECK(row.subtitle == QStringLiteral("1979"),
+                  "jellyfin: one server, so the second line is the year and not the server's name");
+        }
+
+        // ---- The tagging rule, BOTH ARMS. A tag that is always on and a tag that is never on are the two
+        // ways this is wrong, and they look identical from one screenshot.
+        {
+            Jellyfin::UnionItem m = item(srvA, QStringLiteral("Attic"), QStringLiteral("m1"),
+                                         QStringLiteral("Alien"), QStringLiteral("Movie"));
+            m.year = 1979;
+            CHECK(!browse::jellyfinLeafRow(m, false).subtitle.contains(QStringLiteral("Attic")),
+                  "jellyfin: untagged, the server name is absent");
+            CHECK(browse::jellyfinLeafRow(m, true).subtitle.contains(QStringLiteral("Attic")),
+                  "jellyfin: tagged, the server name is on the row");
+        }
+
+        // ---- Level 1: the libraries. -------------------------------------------------------------------
+        {
+            QVector<Jellyfin::LibraryRef> libs;
+            libs.push_back({ Jellyfin::qualify(srvA, QStringLiteral("l1")), QStringLiteral("Films"),
+                             QStringLiteral("movies"), srvA, QStringLiteral("Attic") });
+            libs.push_back({ Jellyfin::qualify(srvA, QStringLiteral("l2")), QStringLiteral("Records"),
+                             QStringLiteral("music"), srvA, QStringLiteral("Attic") });
+            libs.push_back({ Jellyfin::qualify(srvA, QStringLiteral("l3")), QStringLiteral("Boxes"),
+                             QStringLiteral("boxsets"), srvA, QStringLiteral("Attic") });
+            const MediaCatalog one = browse::jellyfinLibrariesCatalog(libs, {});
+            // A library this increment cannot BROWSE is not listed: a folder whose every row is unopenable
+            // is worse than no folder. Music is named by the mapping and is #194's surface, not this one.
+            CHECK(one.items.size() == 1 && one.items[0].title == QStringLiteral("Films"),
+                  "jellyfin: only a video library is listed");
+            CHECK(one.items[0].expandable && one.items[0].type
+                      == QString::fromLatin1(browse::kJellyfinLibType),
+                  "jellyfin: a library row is an expandable container");
+            CHECK(one.items[0].subtitle.isEmpty(),
+                  "jellyfin: with one server contributing, a library row is not tagged");
+
+            libs.push_back({ Jellyfin::qualify(srvB, QStringLiteral("l1")), QStringLiteral("Films"),
+                             QStringLiteral("movies"), srvB, QStringLiteral("Basement") });
+            const MediaCatalog two = browse::jellyfinLibrariesCatalog(libs, {});
+            CHECK(two.items.size() == 2, "jellyfin: two servers' film libraries, both listed (no dedupe)");
+            CHECK(two.items[0].subtitle == QStringLiteral("Attic")
+                      && two.items[1].subtitle == QStringLiteral("Basement"),
+                  "jellyfin: with two servers, every row says which one it is from");
+            // ...and the two rows are DIFFERENT keys, though both servers call the library "l1". This is
+            // #160's whole point, seen from the browse surface.
+            CHECK(two.items[0].mime != two.items[1].mime,
+                  "jellyfin: the same raw library id on two servers is two different rows");
+
+            // A server that did not contribute says so ON THE SCREEN, not only in a log.
+            const MediaCatalog noted = browse::jellyfinLibrariesCatalog(
+                libs, { QStringLiteral("jellyfin: \"Cellar\" did not answer in time; its items are not in "
+                                       "this view") });
+            CHECK(noted.items.size() == 3 && noted.items[2].type == QStringLiteral("info"),
+                  "jellyfin: an unavailable server's note is a non-actionable row");
+            // An EMPTY level explains itself rather than being blank...
+            CHECK(browse::jellyfinLibrariesCatalog({}, {}).items.size() == 1,
+                  "jellyfin: an empty library list still says something");
+            // ...but a level whose only content is notes has explained itself already.
+            const MediaCatalog onlyNotes = browse::jellyfinLibrariesCatalog(
+                {}, { QStringLiteral("jellyfin: \"Cellar\" is switched off; its items are hidden") });
+            CHECK(onlyNotes.items.size() == 1,
+                  "jellyfin: notes alone are the explanation; no second 'nothing here' line");
+        }
+
+        // ---- Level 2: a library's titles. A Movie is a leaf, a Series is a container. --------------------
+        {
+            QVector<Jellyfin::UnionItem> items;
+            items << item(srvA, QStringLiteral("Attic"), QStringLiteral("m1"), QStringLiteral("Alien"),
+                          QStringLiteral("Movie"));
+            items << item(srvA, QStringLiteral("Attic"), QStringLiteral("s1"), QStringLiteral("Trek"),
+                          QStringLiteral("Series"));
+            const MediaCatalog c = browse::jellyfinLibraryCatalog(QStringLiteral("Films"), items, false, {});
+            CHECK(c.items.size() == 2, "jellyfin: a library lists its titles");
+            CHECK(!c.items[0].expandable, "jellyfin: a film is a leaf");
+            CHECK(c.items[1].expandable
+                      && c.items[1].type == QString::fromLatin1(browse::kJellyfinSeriesType),
+                  "jellyfin: a series is a container that drills into its seasons");
+            CHECK(browse::jellyfinKeyOf(c.items[1].mime, browse::kJellyfinSeriesPrefix)
+                      == items[1].id,
+                  "jellyfin: the series row carries its qualified id");
+        }
+
+        // ---- Level 3: seasons. The marker carries BOTH ids. ----------------------------------------------
+        {
+            const QString seriesRef = Jellyfin::qualify(srvA, QStringLiteral("s1"));
+            QVector<Jellyfin::UnionItem> seasons;
+            seasons << item(srvA, QStringLiteral("Attic"), QStringLiteral("se1"),
+                            QStringLiteral("Season 1"), QStringLiteral("Season"));
+            const MediaCatalog c = browse::jellyfinSeasonsCatalog(QStringLiteral("Trek"), seriesRef, seasons);
+            CHECK(c.items.size() == 1 && c.items[0].expandable, "jellyfin: a season is a container");
+            const QString marker = browse::jellyfinKeyOf(c.items[0].mime, browse::kJellyfinSeasonPrefix);
+            const int nl = marker.indexOf(QLatin1Char('\n'));
+            // /Shows/<seriesId>/Episodes is addressed by the SERIES and filtered by the season, so a marker
+            // carrying only the season would have to guess at the series on the way back in.
+            CHECK(nl > 0 && marker.left(nl) == seriesRef && marker.mid(nl + 1) == seasons[0].id,
+                  "jellyfin: a season row carries its series AND its season, qualified");
+        }
+
+        // ---- Level 4: episodes, numbered ONLY when the server gave numbers. ------------------------------
+        {
+            QVector<Jellyfin::UnionItem> eps;
+            Jellyfin::UnionItem e = item(srvA, QStringLiteral("Attic"), QStringLiteral("e1"),
+                                         QStringLiteral("The Cage"), QStringLiteral("Episode"));
+            e.indexNumber = 4; e.parentIndexNumber = 1; e.seriesName = QStringLiteral("Trek");
+            eps << e;
+            Jellyfin::UnionItem x = item(srvA, QStringLiteral("Attic"), QStringLiteral("e2"),
+                                         QStringLiteral("Behind the scenes"), QStringLiteral("Episode"));
+            eps << x;   // a special / an extra: no number at all
+            const MediaCatalog c = browse::jellyfinEpisodesCatalog(QStringLiteral("Season 1"), eps);
+            CHECK(c.items.size() == 2, "jellyfin: a season lists its episodes");
+            CHECK(c.items[0].title.startsWith(QStringLiteral("S1E4")),
+                  "jellyfin: a numbered episode leads with its number");
+            // "S0E0 · " in front of an extra would be this app inventing a number the server never gave.
+            CHECK(c.items[1].title == QStringLiteral("Behind the scenes"),
+                  "jellyfin: an episode with no number is titled by its name alone");
+            CHECK(c.items[0].url.isEmpty() && c.items[1].url.isEmpty(),
+                  "jellyfin: an episode row carries no url either");
+        }
+
+        // ---- Continue Watching: only what the user is actually part-way through. -------------------------
+        {
+            QVector<Jellyfin::UnionItem> items;
+            Jellyfin::UnionItem half = item(srvA, QStringLiteral("Attic"), QStringLiteral("m1"),
+                                            QStringLiteral("Alien"), QStringLiteral("Movie"));
+            half.positionTicks = 6000000000LL;
+            Jellyfin::UnionItem none = item(srvA, QStringLiteral("Attic"), QStringLiteral("m2"),
+                                            QStringLiteral("Solaris"), QStringLiteral("Movie"));
+            items << half << none;
+            const QVector<MediaItem> rows = browse::jellyfinContinueRows(items, false);
+            // A row at zero would be a film the user has never started, sitting at the top of their home
+            // screen claiming otherwise.
+            CHECK(rows.size() == 1 && rows[0].title == QStringLiteral("Alien"),
+                  "jellyfin: Continue Watching holds only part-watched items");
+            CHECK(rows[0].mime.startsWith(QString::fromLatin1(browse::kJellyfinItemPrefix))
+                      && rows[0].url.isEmpty(),
+                  "jellyfin: a Continue Watching row is the same leaf shape a browse level builds");
+        }
     }
 
     // ---- Personal TV channels (#179 inc 1): the shelf builder + the favourite -------------------------------

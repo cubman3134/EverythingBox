@@ -27,6 +27,7 @@ engine — which is what makes both all-format video and libretro first-class.
 | Input: remapping UI (controller + keyboard, per-port profiles), multi-player ports 1–4, rumble, turbo/autofire | **builds + deployed** - SDL enum/defaults cross-checked; live pad behaviour pending hardware |
 | `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `EverythingBox.exe` (runnable copy at `C:\EverythingBox-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
+| Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below || Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`, `browse/JellyfinCatalogs`): **several servers at once**, merged into one library — browse, play, and report progress back | **built**; `probe_jellyfin` covers the ids, the migration, the store, the union, PlaybackInfo, progress, resume and segments, `probe_browse` the browse levels, `probe_leafroute` the leaf, `probe_segments` the server tier. Drive verified against local fixture servers — see below |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
 | One music library across every source (`MusicId`, `MusicMerge`, `MusicRemap`, + `Subsonic`/`JellyfinMusic`/`ServerMusic` suppliers) | **built**; `probe_musicid`, `probe_musicremap` and `probe_musicsources` cover identity, the remap and all four suppliers. Drive verified against fixture HTTP stubs — see below |
 
@@ -63,6 +64,50 @@ on load, once, and the migration is idempotent and never drops a reference it ca
 **nothing at all** unless exactly one server is configured — with two, a bare row is ambiguous, and
 guessing would file one person's resume position against the other's copy of the film.
 
+**Browsing.** A *Jellyfin* folder appears under Video once at least one server is connected, and opens
+onto the libraries of every enabled server together: **Films / Shows → a title → (for a show) its
+seasons → its episodes**. Only libraries this app can play are listed — a music library is named by the
+mapping but belongs to the music surface, and collections, playlists and live-tv views are not shown at
+all rather than opening onto rows nothing can play. Rows are labelled with the server they came from
+**only when more than one server contributed to that level**; with a single server the second line
+shows the year or the episode instead. Every level is fetched on open and re-fetched on Back — a media
+server's library is the thing most likely to have changed since you last looked. Both layouts.
+
+**Continue Watching.** What the server says you are part-way through is merged into the home list as
+its own section, beside the local recents and the Trakt shelves. Items you have not started are not in
+it. It never holds up the home screen: the rows arrive and the list re-renders.
+
+**Playing.** The server decides how its own file is played. Opening a row asks
+`/Items/<id>/PlaybackInfo`; if the first media source supports direct play or direct stream, the file
+is handed to the player as it stands, and otherwise the **server's own transcode URL** is used — which
+is how Jellyfin's transcoding becomes a benefit here on day one rather than something to reimplement.
+A source the server will offer neither for is refused honestly instead of opening an empty player.
+
+**The stream URL is a credential.** It carries the access token in its query, because that is the only
+way to hand a file to the player. So it is minted at the moment the player is handed it and is **never
+written down**: a browse row carries no URL at all, and what a recents entry, a favourite or a playlist
+records is the qualified id — which is also what makes such a row survive the token being rotated or
+the server moving behind a certificate. `probe_jellyfin` drives the real recents store and then reads
+every byte of the ini it produced to prove the token is not in it.
+
+**Progress is the server's.** While a server item plays, its position is reported to the server that
+owns it (`/Sessions/Playing`, `…/Progress`, `…/Stopped`) from the same throttled hook that would have
+written a local resume position — and **no local resume row is written for it**, because two
+authorities for one number means the last device to close wins. On open, the position comes from the
+server's own `UserData.PlaybackPositionTicks` and beats any local mark, **including when it is zero**:
+a film finished on a phone reports zero, and a local mark that overrode it would restart every
+re-watch two minutes from the end. If the server cannot be reached for that one read, the local mark
+is used and the film still plays.
+
+**Intro and credit skipping.** A server running Jellyfin 10.10 or later has already detected them, and
+`/MediaSegments/<id>` is read as **one more provider tier** beside the `.edl` sidecar, named chapters
+and what you have taught the app yourself — ranked below a hand-written `.edl`, above a chapter title.
+The existing skip chip and auto-skip act on it with no new UI at all. A server too old to have the
+endpoint simply contributes one fewer tier.
+
+**Not yet.** Quick Connect (address plus username and password is what exists today), SyncPlay,
+downloads from the server, and live-tv endpoints. A Jellyfin **music** library is named by the browse
+mapping but is not browsed here.
 ## One music library
 
 **Four suppliers, one library.** The local music folder (#74), every Subsonic server (#193), every

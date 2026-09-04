@@ -201,8 +201,15 @@ QVector<Jellyfin::RemoteItem> Jellyfin::readItems(const QByteArray& body, bool* 
         it.seriesName   = o.value(QStringLiteral("SeriesName")).toString();
         it.year         = o.value(QStringLiteral("ProductionYear")).toInt();
         it.runTimeTicks = qint64(o.value(QStringLiteral("RunTimeTicks")).toDouble());
-        it.played       = o.value(QStringLiteral("UserData")).toObject()
-                           .value(QStringLiteral("Played")).toBool();
+        const QJsonObject ud = o.value(QStringLiteral("UserData")).toObject();
+        it.played       = ud.value(QStringLiteral("Played")).toBool();
+        // #83. Read here rather than in a second pass over the same body: a reader that skipped them would
+        // make every caller re-parse the row to find out which episode it is.
+        it.indexNumber       = o.value(QStringLiteral("IndexNumber")).toInt();
+        it.parentIndexNumber = o.value(QStringLiteral("ParentIndexNumber")).toInt();
+        it.positionTicks     = qint64(ud.value(QStringLiteral("PlaybackPositionTicks")).toDouble());
+        it.seriesId          = o.value(QStringLiteral("SeriesId")).toString();
+        it.seasonId          = o.value(QStringLiteral("SeasonId")).toString();
         if (it.id.isEmpty()) continue;      // a row with no id can never be qualified; it is not a row
         out.push_back(it);
     }
@@ -250,7 +257,38 @@ QVector<Jellyfin::UnionItem> Jellyfin::unionOf(const QVector<ServerReply>& repli
             u.serverId   = r.serverId;
             u.serverName = r.serverName;
             u.played     = it.played;
+            u.indexNumber       = it.indexNumber;
+            u.parentIndexNumber = it.parentIndexNumber;
+            u.runTimeTicks      = it.runTimeTicks;
+            u.positionTicks     = it.positionTicks;
+            // The parents are qualified by the SAME minter, so they are either a resolvable reference or
+            // absent - never a bare server-scoped id sitting in a field something will later route on.
+            u.seriesRef  = qualify(r.serverId, it.seriesId);
+            u.seasonRef  = qualify(r.serverId, it.seasonId);
             out.push_back(u);
+        }
+    }
+    return out;
+}
+
+QVector<Jellyfin::LibraryRef> Jellyfin::unionOfLibraries(const QVector<LibraryReply>& replies)
+{
+    QVector<LibraryRef> out;
+    for (const LibraryReply& r : replies)
+    {
+        // Failure isolation as the absence of a special case, exactly as unionOf has it.
+        if (r.outcome != Outcome::Ok) continue;
+        for (const Library& l : r.libraries)
+        {
+            const QString ref = qualify(r.serverId, l.id);
+            if (ref.isEmpty()) continue;    // unqualifiable: dropped, never emitted bare
+            LibraryRef out1;
+            out1.ref            = ref;
+            out1.name           = l.name;
+            out1.collectionType = l.collectionType;
+            out1.serverId       = r.serverId;
+            out1.serverName     = r.serverName;
+            out.push_back(out1);
         }
     }
     return out;
@@ -272,4 +310,347 @@ QString Jellyfin::unavailableNote(const ServerReply& reply)
     case Outcome::Ok:       break;
     }
     return QString();
+}
+
+// =========================================================================================================
+// SECTION 5 (issue #83): BROWSE, PLAY AND PROGRESS. Still pure - paths, bodies and readers, no socket.
+// =========================================================================================================
+
+// ---- The user's libraries -------------------------------------------------------------------------------
+
+QString Jellyfin::viewsPath(const QString& userId)
+{
+    return QStringLiteral("/Users/") + userId + QStringLiteral("/Views");
+}
+
+QVector<Jellyfin::Library> Jellyfin::readViews(const QByteArray& body, bool* ok)
+{
+    QVector<Library> out;
+    if (ok) *ok = false;
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return out;
+    // The same line readItems draws, and for the same reason: "this user has no libraries" and "that was
+    // not a Jellyfin answer" are different facts and the browse surface says different things for them.
+    const QJsonValue items = doc.object().value(QStringLiteral("Items"));
+    if (!items.isArray()) return out;
+    for (const QJsonValue& v : items.toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject o = v.toObject();
+        Library l;
+        l.id             = o.value(QStringLiteral("Id")).toString();
+        l.name           = o.value(QStringLiteral("Name")).toString();
+        l.collectionType = o.value(QStringLiteral("CollectionType")).toString().toLower();
+        if (l.id.isEmpty()) continue;      // a view with no id can never be qualified; it is not a view
+        out.push_back(l);
+    }
+    if (ok) *ok = true;
+    return out;
+}
+
+QString Jellyfin::categoryForCollection(const QString& collectionType)
+{
+    const QString t = collectionType.toLower();
+    if (t == QLatin1String("movies") || t == QLatin1String("tvshows") || t == QLatin1String("homevideos")
+        || t == QLatin1String("musicvideos"))
+        return QStringLiteral("video");
+    // Named, and deliberately not browsed by this increment - see the header. #194 owns the music surface.
+    if (t == QLatin1String("music")) return QStringLiteral("audio");
+    if (t == QLatin1String("books")) return QStringLiteral("reading");
+    if (t == QLatin1String("photos")) return QStringLiteral("photos");
+    // EVERYTHING ELSE IS EMPTY, NOT "video". Jellyfin's own view list carries collections, playlists and
+    // live tv, and an unrecognised type routed to the catch-all would put a folder in front of the user
+    // whose every row is something this increment cannot open.
+    return QString();
+}
+
+bool Jellyfin::isVideoCollection(const QString& collectionType)
+{
+    return categoryForCollection(collectionType) == QLatin1String("video");
+}
+
+// ---- Items, seasons and episodes ------------------------------------------------------------------------
+
+QString Jellyfin::libraryItemsQuery(const QString& libraryId)
+{
+    // Movie and Series only, RECURSIVE: a library is a folder tree on the server and the rows a person
+    // expects to see are the titles, not the top-level directories the admin happened to make. A Series is
+    // a CONTAINER here - its seasons and episodes are fetched when it is opened, never up front, because
+    // a library of two hundred shows would otherwise be several thousand rows nobody asked for.
+    return QStringLiteral("ParentId=") + libraryId
+         + QStringLiteral("&Recursive=true&IncludeItemTypes=Movie,Series&SortBy=SortName"
+                          "&SortOrder=Ascending&Fields=ProductionYear,RunTimeTicks"
+                          "&EnableTotalRecordCount=false");
+}
+
+QString Jellyfin::seasonsPath(const QString& seriesId)
+{
+    return QStringLiteral("/Shows/") + seriesId + QStringLiteral("/Seasons");
+}
+
+QString Jellyfin::episodesPath(const QString& seriesId)
+{
+    return QStringLiteral("/Shows/") + seriesId + QStringLiteral("/Episodes");
+}
+
+QString Jellyfin::seasonsQuery(const QString& userId)
+{
+    return QStringLiteral("userId=") + userId + QStringLiteral("&Fields=ProductionYear");
+}
+
+QString Jellyfin::episodesQuery(const QString& userId, const QString& seasonId)
+{
+    QString q = QStringLiteral("userId=") + userId
+              + QStringLiteral("&Fields=ProductionYear,RunTimeTicks&EnableTotalRecordCount=false");
+    // NO seasonId MEANS EVERY EPISODE OF THE SHOW, which is what the endpoint does with the parameter
+    // absent - and is exactly right for a show with no season structure. Passing an empty one would ask
+    // for the episodes of a season called "", and the server answers that with nothing.
+    if (!seasonId.isEmpty()) q += QStringLiteral("&seasonId=") + seasonId;
+    return q;
+}
+
+QString Jellyfin::resumeItemsPath(const QString& userId)
+{
+    return QStringLiteral("/Users/") + userId + QStringLiteral("/Items/Resume");
+}
+
+QString Jellyfin::resumeItemsQuery()
+{
+    // VIDEO ONLY, and capped. This feeds one section of the home list, so an unbounded answer from a server
+    // with a large household would push everything else off the screen; and audio resume points belong to
+    // the music surface (#194), not to Continue Watching.
+    return QStringLiteral("Recursive=true&MediaTypes=Video&Limit=24"
+                          "&Fields=ProductionYear,RunTimeTicks&EnableTotalRecordCount=false");
+}
+
+// ---- What the server says about ONE item ----------------------------------------------------------------
+
+QString Jellyfin::itemPath(const QString& userId, const QString& itemId)
+{
+    return QStringLiteral("/Users/") + userId + QStringLiteral("/Items/") + itemId;
+}
+
+Jellyfin::UserState Jellyfin::readUserState(const QByteArray& body)
+{
+    UserState s;
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return s;
+    const QJsonValue ud = doc.object().value(QStringLiteral("UserData"));
+    // `ok` IS THE WHOLE POINT OF THIS READER. "The server said zero" and "the server said nothing" produce
+    // the same number and must not produce the same decision: resumeSeconds() defers to the first and
+    // keeps the local mark for the second.
+    if (!ud.isObject()) return s;
+    const QJsonObject o = ud.toObject();
+    s.positionTicks = qint64(o.value(QStringLiteral("PlaybackPositionTicks")).toDouble());
+    s.played        = o.value(QStringLiteral("Played")).toBool();
+    s.ok            = true;
+    return s;
+}
+
+double Jellyfin::resumeSeconds(const UserState& server, double localSeconds)
+{
+    // THE SERVER WINS WHENEVER IT ANSWERED, INCLUDING WITH ZERO. See the header: a film finished on another
+    // device reports zero, and a local mark that beat it would restart every re-watch near the end.
+    if (server.ok) return secondsFromTicks(server.positionTicks);
+    return localSeconds > 0.0 ? localSeconds : 0.0;
+}
+
+// ---- PlaybackInfo: the server decides -------------------------------------------------------------------
+
+QString Jellyfin::playbackInfoPath(const QString& itemId)
+{
+    return QStringLiteral("/Items/") + itemId + QStringLiteral("/PlaybackInfo");
+}
+
+QByteArray Jellyfin::playbackInfoBody(const QString& userId, qint64 startTicks,
+                                      int audioStreamIndex, int subtitleStreamIndex)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("UserId"), userId);
+    o.insert(QStringLiteral("StartTimeTicks"), double(startTicks < 0 ? 0 : startTicks));
+    // WE ASK FOR ALL THREE AND LET THE SERVER CHOOSE. Turning any of them off here would be this client
+    // deciding what its own server may do with its own file - the exact thing the header says we do not do.
+    o.insert(QStringLiteral("EnableDirectPlay"), true);
+    o.insert(QStringLiteral("EnableDirectStream"), true);
+    o.insert(QStringLiteral("EnableTranscoding"), true);
+    o.insert(QStringLiteral("AllowVideoStreamCopy"), true);
+    o.insert(QStringLiteral("AllowAudioStreamCopy"), true);
+    o.insert(QStringLiteral("AutoOpenLiveStream"), true);
+    // A SELECTED TRACK IS PASSED THROUGH; AN UNSELECTED ONE IS ABSENT. -1 means "the user has not chosen",
+    // and sending -1 would pin the choice to "no track at all" - which for subtitles is a user-visible
+    // regression (the server's own default subtitle stops appearing) and for audio is a broken file.
+    if (audioStreamIndex >= 0)    o.insert(QStringLiteral("AudioStreamIndex"), audioStreamIndex);
+    if (subtitleStreamIndex >= 0) o.insert(QStringLiteral("SubtitleStreamIndex"), subtitleStreamIndex);
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
+Jellyfin::PlaybackChoice Jellyfin::readPlaybackInfo(const QByteArray& body)
+{
+    PlaybackChoice c;
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return c;
+    const QJsonObject root = doc.object();
+    const QJsonValue sources = root.value(QStringLiteral("MediaSources"));
+    if (!sources.isArray()) return c;
+    const QJsonArray arr = sources.toArray();
+    if (arr.isEmpty()) return c;              // an envelope with no source: nothing to play, and it says so
+    if (!arr.first().isObject()) return c;
+    const QJsonObject src = arr.first().toObject();   // THE FIRST SOURCE DECIDES - see the header
+
+    c.ok            = true;
+    c.mediaSourceId = src.value(QStringLiteral("Id")).toString();
+    c.container     = src.value(QStringLiteral("Container")).toString();
+    c.transcodingUrl = src.value(QStringLiteral("TranscodingUrl")).toString();
+    // PlaySessionId is on the ENVELOPE, not on the source: it names this playback, not this file.
+    c.playSessionId = root.value(QStringLiteral("PlaySessionId")).toString();
+
+    const bool direct = src.value(QStringLiteral("SupportsDirectPlay")).toBool()
+                     || src.value(QStringLiteral("SupportsDirectStream")).toBool();
+    if (direct)                        c.mode = PlaybackChoice::Mode::DirectPlay;
+    else if (!c.transcodingUrl.isEmpty()) c.mode = PlaybackChoice::Mode::Transcode;
+    else                               c.mode = PlaybackChoice::Mode::Unavailable;
+    return c;
+}
+
+QString Jellyfin::playbackUrl(const QString& root, const QString& itemId, const QString& token,
+                              const PlaybackChoice& choice)
+{
+    if (root.isEmpty() || itemId.isEmpty() || !choice.ok) return QString();
+
+    if (choice.mode == PlaybackChoice::Mode::Transcode)
+    {
+        if (choice.transcodingUrl.isEmpty()) return QString();
+        QString u = root + choice.transcodingUrl;
+        // THE SERVER'S OWN URL, USED AS THE SERVER BUILT IT. The token is appended only when it is not
+        // already there: Jellyfin reads the FIRST api_key, so a second one would leave us playing a url
+        // that does not match the session the server thinks it opened.
+        if (!token.isEmpty() && !u.contains(QLatin1String("api_key=")))
+            u += (u.contains(QLatin1Char('?')) ? QLatin1Char('&') : QLatin1Char('?'))
+               + QStringLiteral("api_key=") + QString::fromLatin1(QUrl::toPercentEncoding(token));
+        return u;
+    }
+    if (choice.mode != PlaybackChoice::Mode::DirectPlay) return QString();   // Unavailable: nothing honest
+
+    QUrl u(root + QStringLiteral("/Videos/") + itemId + QStringLiteral("/stream"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("static"), QStringLiteral("true"));
+    // The SOURCE, named. A film held in two versions has two media sources under one item id, and a stream
+    // url with no mediaSourceId lets the server pick - which is how the user asks for the 4K remux and
+    // gets the 720p one.
+    if (!choice.mediaSourceId.isEmpty())
+        q.addQueryItem(QStringLiteral("mediaSourceId"), choice.mediaSourceId);
+    // The same id every progress report carries, so the server's own session list shows ONE playback
+    // rather than a stream and a set of unattached reports.
+    if (!choice.playSessionId.isEmpty())
+        q.addQueryItem(QStringLiteral("playSessionId"), choice.playSessionId);
+    // THE TOKEN IS IN THIS QUERY, for the reason streamUrl above states: mpv cannot be handed a header.
+    // That is precisely why this string is minted at the moment the player is handed it and is never
+    // stored, never logged and never written into a queue, a playlist or a recents row (recordedPath).
+    if (!token.isEmpty()) q.addQueryItem(QStringLiteral("api_key"), token);
+    u.setQuery(q);
+    return u.toString(QUrl::FullyEncoded);
+}
+
+// ---- Progress: the sessions API -------------------------------------------------------------------------
+
+QString Jellyfin::progressPath(ProgressEvent ev)
+{
+    switch (ev)
+    {
+    case ProgressEvent::Start: return QStringLiteral("/Sessions/Playing");
+    case ProgressEvent::Stop:  return QStringLiteral("/Sessions/Playing/Stopped");
+    case ProgressEvent::Progress:
+    case ProgressEvent::Pause:
+    case ProgressEvent::Unpause:
+        break;
+    }
+    return QStringLiteral("/Sessions/Playing/Progress");
+}
+
+QByteArray Jellyfin::progressBody(const QString& itemId, const QString& playSessionId,
+                                  const QString& mediaSourceId, double positionSeconds, ProgressEvent ev)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("ItemId"), itemId);
+    // BOTH IDS RIDE EVERY REPORT. Without the play-session id the server files the report against no
+    // playback and the "now playing" row on another device never updates; without the media-source id a
+    // multi-version item records progress against whichever version the server guesses.
+    if (!playSessionId.isEmpty()) o.insert(QStringLiteral("PlaySessionId"), playSessionId);
+    if (!mediaSourceId.isEmpty()) o.insert(QStringLiteral("MediaSourceId"), mediaSourceId);
+    o.insert(QStringLiteral("PositionTicks"), double(ticksFromSeconds(positionSeconds)));
+    o.insert(QStringLiteral("IsPaused"), ev == ProgressEvent::Pause);
+    o.insert(QStringLiteral("IsMuted"), false);
+    o.insert(QStringLiteral("CanSeek"), true);
+    // The event name Jellyfin's own web client sends, and the reason a pause is a PROGRESS report rather
+    // than an endpoint of its own.
+    if (ev == ProgressEvent::Pause)        o.insert(QStringLiteral("EventName"), QStringLiteral("pause"));
+    else if (ev == ProgressEvent::Unpause) o.insert(QStringLiteral("EventName"), QStringLiteral("unpause"));
+    else if (ev == ProgressEvent::Progress) o.insert(QStringLiteral("EventName"),
+                                                     QStringLiteral("timeupdate"));
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
+bool Jellyfin::shouldReportProgress(double lastReportedS, double nowS)
+{
+    // NOTHING REPORTED YET reports immediately: the first tick after a start is what tells the server the
+    // playback is real, and waiting ten seconds for it makes a short open look like it never happened.
+    if (lastReportedS < 0.0) return true;
+    const double d = nowS - lastReportedS;
+    return (d < 0.0 ? -d : d) >= kProgressIntervalS;
+}
+
+// ---- Media segments (Jellyfin 10.10+) --------------------------------------------------------------------
+
+QString Jellyfin::mediaSegmentsPath(const QString& itemId)
+{
+    return QStringLiteral("/MediaSegments/") + itemId;
+}
+
+QString Jellyfin::mediaSegmentsQuery()
+{
+    // ASKED FOR BY NAME rather than left to the default, so what this client consumes is visible in one
+    // string. Commercial and Preview are read even though the existing stack only ACTS on Intro and
+    // Credits: MediaSegments::SegmentType already carries them, they are stored and not acted on, and a
+    // reader that dropped them would have to be changed again the day the chip learns a third type.
+    return QStringLiteral("includeSegmentTypes=Intro&includeSegmentTypes=Outro"
+                          "&includeSegmentTypes=Recap&includeSegmentTypes=Commercial"
+                          "&includeSegmentTypes=Preview");
+}
+
+QVector<Jellyfin::RemoteSegment> Jellyfin::readMediaSegments(const QByteArray& body)
+{
+    QVector<RemoteSegment> out;
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return out;
+    const QJsonValue items = doc.object().value(QStringLiteral("Items"));
+    if (!items.isArray()) return out;
+    for (const QJsonValue& v : items.toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject o = v.toObject();
+        RemoteSegment s;
+        s.start = secondsFromTicks(qint64(o.value(QStringLiteral("StartTicks")).toDouble()));
+        s.end   = secondsFromTicks(qint64(o.value(QStringLiteral("EndTicks")).toDouble()));
+        s.type  = o.value(QStringLiteral("Type")).toString();
+        // A RANGE THAT GOES NOWHERE IS NOT A RANGE. An inverted or zero-length row would arm a skip that
+        // jumps to where you already are, which reads as the chip being broken rather than as bad data.
+        if (s.end <= s.start) continue;
+        if (s.type.isEmpty()) continue;
+        out.push_back(s);
+    }
+    return out;
+}
+
+// ---- What a Jellyfin row may be WRITTEN DOWN --------------------------------------------------------------
+
+QString Jellyfin::recordedPath(const QString& qualifiedId, const QString& playUrl)
+{
+    // THE ONE DECISION THAT KEEPS THE TOKEN OUT OF EVERY STORE. A qualified id is stable, carries no
+    // credential and is re-openable (openRecent mints a fresh link from it), so it is what a row records.
+    // Anything else is returned byte for byte, so no other route changes at all.
+    return isQualified(qualifiedId) ? qualifiedId : playUrl;
 }

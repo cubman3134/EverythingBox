@@ -1616,6 +1616,33 @@ private:
     void startScrobble(const QString& imdbStreamId); // begin scrobbling a video (stops any prior one)
     void stopScrobble();                             // stop + mark-watched the current scrobble
 
+    // ---- JELLYFIN: play, and report progress to the server that owns the item (issue #83) ----------
+    // ALL DEFINED IN MainWindowJellyfin.cpp. Only the declarations are here — the feature-TU rule (#186),
+    // which matters most in this file: MainWindow.cpp is what every concurrent branch collides in.
+    //
+    // THE CONTRACT, IN ONE PARAGRAPH. A Jellyfin row names an ITEM, never a link. Opening one asks the
+    // owning server how it may be played and where this user got to (JellyfinClient::prepareOpen), hands
+    // the resulting url — which CARRIES THE TOKEN — straight to the player, and drops it; what gets written
+    // down is the qualified id (Jellyfin::recordedPath). While it plays, the position is reported to the
+    // server from PlaybackSession's existing throttled hook and is NOT written to this device's resume
+    // store, because the server is the one authority for it. When it stops, the server is told.
+    void openJellyfinItem(const QString& qualifiedId, const QString& title, const QString& thumb);
+    // The slot on PlaybackSession::serverProgress — the throttled hook, with Jellyfin's own report interval
+    // applied on top (Jellyfin::shouldReportProgress).
+    void onJellyfinProgress(const QString& key, double seconds);
+    // The Stopped report. Called from stopScrobble, which is the app's one "leaving whatever was playing"
+    // choke point; a no-op when nothing Jellyfin is playing.
+    void stopJellyfinPlayback();
+    // What is playing, and what every progress report about it has to quote. Empty when the current
+    // playback is not a Jellyfin item, which is what makes every function above a cheap no-op.
+    QString jellyfinPlayingId_;
+    QString jellyfinPlaySessionId_;
+    QString jellyfinMediaSourceId_;
+    double  jellyfinLastReportedS_ = -1.0;   // -1 = nothing reported yet; the first tick always goes out
+    // The server's own intro/credits detection for the file that is loading or playing — ONE MORE PROVIDER
+    // TIER, read by gatherSegments beside the .edl, the chapters and what the user taught us. Cleared by
+    // resetSegmentState with the rest of the per-file segment state.
+    QVector<MediaSegments::Segment> jellyfinSegments_;
     // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
     // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
     // the same seam in later increments, and nothing below names AniList except the construction.

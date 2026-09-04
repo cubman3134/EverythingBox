@@ -458,6 +458,10 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
 {
     const QString path = identityFor(pathOrKey);
     resumePath_ = path;
+    // #83: CLEARED HERE, so a server-owned item cannot leave the NEXT file's position unwritten. Every open
+    // route reaches beginResume, and the one route that wants the flag sets it immediately afterwards -
+    // which makes "off" the default for everything that has not asked, rather than a state left behind.
+    resumeServerOwned_ = false;
     // #197: A SERVER'S OWN ITEM IS ASKED OF THE SERVER FIRST, and its answer wins over anything on this
     // disk — including a mark this build wrote before the hook existed. `< 0` is the hook saying "not
     // mine"; 0 is a real answer and must not be confused with one (which is why the test is on the hook's
@@ -506,18 +510,62 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
 // character rather than reached for, so this file stays QtCore-only and probe_playback keeps its link set.
 QString PlaybackSession::resumeDisplayTitle() const
 {
-    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F));
+    // ...AND A THIRD KEY FAMILY, #83's. A Jellyfin resume identity is "jf:<server>:<item>": no '/', no '.',
+    // no unit separator and no scheme, so every test above hands it back WHOLE and the stores fill up with a
+    // machine string where a title belongs. It is caught by the flag rather than by a `jf:` prefix test,
+    // deliberately - this file is the playback state machine and must not learn any source's id grammar
+    // (that is the same argument setResumeOwnedByServer is a flag for). "Server owns this position" and
+    // "this identity is a machine key" are the same fact about the same route.
+    const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F))
+                       || resumeServerOwned_;
     if (notAName && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
         return StoredUrl::label(titles_.at(trackIndex_));
     if (notAName) return QString();   // no display title either: store nothing rather than a machine string
     return StoredUrl::label(QFileInfo(resumePath_).completeBaseName());
 }
 
+void PlaybackSession::seedResume(double seconds)
+{
+    // The SERVER's position, replacing whatever beginResume read out of the ini a moment ago. Both fields
+    // move together for the reason beginResume sets both: resumeSeek_ is where the player will jump to, and
+    // lastAccruedPos_ is where consumption stats start counting from, so a resume near the end of a film
+    // must not credit this device with the whole runtime.
+    resumeSeek_     = seconds > 0.0 ? seconds : 0.0;
+    lastAccruedPos_ = resumeSeek_;
+    statsAccum_     = 0.0;
+}
+
 void PlaybackSession::persistResume()
 {
     if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
+
+    // #83: THE POSITION BELONGS TO A SERVER, said by a flag rather than by a hook. Nothing is written to
+    // resume/<hash> and no tombstone is recorded — the server is the one authority for this item, and a
+    // local row would be a second one the cloud merge would then propagate to every device on the account.
+    // The heartbeat still happens at exactly the cadence it always did and goes out on serverProgress.
+    // Two owners, one rule: this branch and the #197 hook below both mean "somebody else owns this",
+    // they simply learn it differently (a flag the open route sets, versus a hook that answers per item).
+    if (resumeServerOwned_)
+    {
+        lastSavedPos_ = audioPos_;
+        emit serverProgress(resumePath_, audioPos_);
+        // Consumption stats still accrue: watch seconds are a fact about THIS device, which no server has
+        // an equivalent of. No resumeSaved() — nothing was written into a synced category to push.
+        const double sdpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
+        lastAccruedPos_ = audioPos_;
+        statsAccum_ += sdpos;
+        const qint64 swhole = qint64(statsAccum_);
+        if (swhole > 0)
+        {
+            statsAccum_ -= double(swhole);
+            ConsumptionStats::addMediaSeconds(resumePath_,
+                mediaIsVideo_ ? QStringLiteral("video") : QStringLiteral("audio"),
+                swhole, resumeDisplayTitle());
+        }
+        return;
+    }
     // #197: OFFER IT TO THE OWNER FIRST. A `true` here means a server took this position, and this object
-    // then writes NOTHING into the resume store for the entry — one owner per position, and for a server's
+    // then writes NOTHING into the resume store for the entry â€” one owner per position, and for a server's
     // own item the owner is the server. The consumption-stats accrual below still runs: that is this
     // DEVICE's accumulator, which no server has an equivalent of. PlaybackSession.h argues both halves.
     if (remoteProgress_ && remoteProgress_(resumePath_, audioPos_, duration_, leavingMedia_))
@@ -535,7 +583,7 @@ void PlaybackSession::persistResume()
                 rwhole, resumeDisplayTitle());
         }
         // No resumeSaved(): that signal schedules the cloud "continue watching" push, and there is nothing
-        // to push — this position was never written into a synced category, which is the whole point.
+        // to push â€” this position was never written into a synced category, which is the whole point.
         return;
     }
     const QString k = mediaResumeKey(resumePath_);
@@ -546,7 +594,7 @@ void PlaybackSession::persistResume()
     store().sync();
     // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
     // not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the same-second
-    // case on its own — the merge's `tomb >= item` rule, which favourites share — so this closes that, and says
+    // case on its own â€” the merge's `tomb >= item` rule, which favourites share â€” so this closes that, and says
     // out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on every ordinary save.
     ResumeStore::noteResumed(resumePath_);
     lastSavedPos_ = audioPos_;
@@ -554,7 +602,7 @@ void PlaybackSession::persistResume()
     // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
     // a seek-forward can't dump minutes and a seek-backward accrues nothing. The exact float position drives the
     // diff (seeks handled correctly, no runaway); a sub-second remainder carries in statsAccum_ so whole-second
-    // rounding never drifts. Keyed by the resume identity (its own per-profile store — NOT the global resume
+    // rounding never drifts. Keyed by the resume identity (its own per-profile store â€” NOT the global resume
     // keys), category from the file's kind, title as the current resume title.
     const double dpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
     lastAccruedPos_ = audioPos_;
@@ -638,6 +686,17 @@ void PlaybackSession::noteEntryReached()
 void PlaybackSession::finishResume()
 {
     if (resumePath_.isEmpty()) return;
+    // #83: A SERVER-OWNED ITEM HAS NO LOCAL ROW TO CLEAR, and clearing anyway would write a dated TOMBSTONE
+    // for a position this device never stored - which the cloud merge would then carry to every other
+    // device as an authoritative "this was finished". The server is told the item finished by the Stopped
+    // report the host sends; that is the whole of it.
+    if (resumeServerOwned_)
+    {
+        resumePath_.clear();
+        resumeSeek_ = 0.0;
+        lastSavedPos_ = -100.0;
+        return;
+    }
     // Through ResumeStore, which removes the group AND records a dated tombstone (issue #150). A bare remove()
     // made "played to the end" and "this device has never opened that file" the same fact on disk, and the
     // merge — which cannot delete, because an absence carries no timestamp — read the second one: the cloud

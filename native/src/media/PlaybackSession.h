@@ -172,6 +172,29 @@ public:
     { return trackIdentities_.value(playPath, playPath); }
 
     void beginResume(const QString& pathOrKey); // start tracking this file/key (and queue its saved spot)
+
+    // ---- WHEN THE POSITION BELONGS TO A SERVER (issue #83) ---------------------------------------------
+    // A Jellyfin item's watch position is the SERVER's, not this device's: #83 says so in as many words,
+    // and the reason is what a media server is for - the position has to be the same one the phone and the
+    // web client see, and two authorities for one number means the last device to close wins.
+    //
+    // So for such an item persistResume writes NO resume/<hash> row and records NO tombstone, and emits
+    // serverProgress() instead. Consumption stats still accrue: the seconds this device spent watching are
+    // a fact about this device and are not the server's business.
+    //
+    // It is a FLAG rather than a test on the key's spelling because this file must not learn what a
+    // Jellyfin id looks like: PlaybackSession is the app's playback state machine, and a `jf:` prefix test
+    // in it would be the second place that knowledge lived. The open site knows, and says so.
+    //
+    // Reset by beginResume, so a server item cannot leave the next local file's position unwritten.
+    void setResumeOwnedByServer(bool on) { resumeServerOwned_ = on; }
+    bool resumeOwnedByServer() const { return resumeServerOwned_; }
+
+    // Where the SERVER says to start. Applied exactly like a stored position (consumed once the duration is
+    // known), and it also moves the stats accrual point, so the resume jump itself never dumps minutes into
+    // this device's watch time. Called after beginResume, which is what fills in the local answer this
+    // replaces.
+    void seedResume(double seconds);
     // The identity beginResume was given — what the position, and the LENGTH, are filed under. Read by the
     // host's duration callback so a measured runtime can be recorded against the same key the rest of the
     // app knows the item by (issue #179: a channel's lineup needs lengths that outlive the resume group,
@@ -289,6 +312,12 @@ signals:
     void queueCleared();
     void queueFinished();                                             // host runs scrobble-stop / next-episode
     void resumeSaved();                                                // host schedules the cloud progress push
+    // #83: the throttled position hook, for an item whose position belongs to a server. Fired from
+    // persistResume - i.e. at the SAME cadence a resume write would have happened - carrying the durable
+    // identity and the position. The host applies the server's own report interval on top (see
+    // Jellyfin::shouldReportProgress); this signal is deliberately not the place that decision lives,
+    // because it is a fact about the Jellyfin API and not about playback.
+    void serverProgress(const QString& key, double seconds);
     // #193: a queue edit landed on an entry mpv had ALREADY been handed under gapless, so mpv's own playlist
     // no longer agrees with this one. The host drops every mpv playlist entry AFTER the one playing (none of
     // which has produced a sample yet, so nothing is audible) and lets the one-ahead feed run again. Emitted
@@ -333,6 +362,7 @@ private:
     QString resumePath_;           // the DURABLE IDENTITY of the timed media whose position we track, or empty
                                    // (#204: for everything but a music server track this is still its path)
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
+    bool   resumeServerOwned_ = false; // #83: this item's position is a server's, not this ini's
     double audioPos_ = 0.0;        // last reported playback position
     double lastSavedPos_ = -100.0; // throttle resume writes
     double lastAccruedPos_ = 0.0;  // consumption-stats: position through which watch/listen seconds were accrued

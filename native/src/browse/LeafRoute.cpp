@@ -1,5 +1,6 @@
 #include "LeafRoute.h"
 #include "AudiobookCatalogs.h"  // kAudiobookFilePrefix + audiobookKeyOf — likewise, for #139's books
+#include "JellyfinCatalogs.h"   // kJellyfinItemPrefix + jellyfinKeyOf — and again, for #83's server items
 #include "MusicCatalogs.h"   // kMusicTrackPrefix + musicKeyOf — a keyed kind's contract lives with its feature
 
 #include <QLatin1String>
@@ -21,6 +22,7 @@ const QVector<LocalLeafKind>& localLeafKinds()
         { kOpdsBookType,     LocalLeafKind::Type, false, LeafPlay::OpdsBook   },
         { kMusicTrackPrefix, LocalLeafKind::Mime, true,  LeafPlay::MusicAlbum },
         { kAudiobookFilePrefix, LocalLeafKind::Mime, true, LeafPlay::AudiobookBook },
+        { kJellyfinItemPrefix,  LocalLeafKind::Mime, true, LeafPlay::JellyfinItem },
     };
     return kinds;
 }
@@ -48,6 +50,18 @@ LeafRoute localLeafRoute(const MediaItem& it)
             // with a folder path, so "C:/Books/…" would be cut at the drive letter by any section(':').
             r.key = audiobookKeyOf(it.mime, k.id);
             if (r.key.isEmpty()) return {};   // a part naming no book: let the caller resolve it instead
+        }
+        else if (k.play == LeafPlay::JellyfinItem)
+        {
+            // Same "everything after the prefix" rule, and here it is not optional: the key IS a qualified
+            // id — "jf:<32 hex>:<item>" — so any section(':') split would hand back "jf" and route the row
+            // at a server that does not exist. A row naming no item falls through to the resolve it would
+            // have taken anyway rather than being claimed and dropped.
+            //
+            // AND NOTHING BELOW ASKS FOR A URL. A Jellyfin row carries none by design; the empty-url refusal
+            // in the next arm would reject every one of them.
+            r.key = jellyfinKeyOf(it.mime, k.id);
+            if (r.key.isEmpty()) return {};
         }
         else if (it.url.isEmpty())
         {

@@ -41,6 +41,7 @@
 //      claimed by the context menu (themedEnterFor says Drill, on every layout).
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
+#include "JellyfinCatalogs.h"
 #include "LeafRoute.h"
 #include "MusicCatalogs.h"
 #include "SyntheticCatalogs.h"
@@ -387,6 +388,51 @@ int main(int argc, char** argv)
         MediaItem artistRow; artistRow.type = QString::fromLatin1(browse::kMusicArtistType);
         artistRow.mime = QString::fromLatin1(browse::kMusicArtistPrefix) + QStringLiteral("the hollows");
         CHECK(!browse::queueTargetFor(artistRow).ok());   // a container: it drills, and Play all is its verb
+    }
+
+    // ---- A JELLYFIN ITEM (#83): the local leaf that has no file, and must not be asked for one ---------
+    // The kind is walked generically by the table loop in §2 like every other; this section states the two
+    // things that are SPECIFIC to it and that a generic walk cannot see.
+    {
+        const QString srv = QStringLiteral("0123456789abcdef0123456789abcdef");
+        const QString qualified = Jellyfin::qualify(srv, QStringLiteral("aabbccdd"));
+
+        // 1. IT IS CLAIMED WITH NO URL. Every other file route refuses a row with no url, deliberately -
+        // claiming one would open nothing. A Jellyfin row carries none BY DESIGN (the link is minted at
+        // play time and never written into a row), so it has to be claimed anyway or the whole category
+        // answers "Nothing to play" on both layouts.
+        MediaItem it;
+        it.type = QStringLiteral("movie");
+        it.mime = QString::fromLatin1(browse::kJellyfinItemPrefix) + qualified;
+        CHECK(it.url.isEmpty());
+        const LeafRoute r = enterAndPlay(it);
+        CHECK(r.play == LeafPlay::JellyfinItem);
+        CHECK(r.isLocal());
+
+        // 2. THE KEY IS THE WHOLE QUALIFIED ID, COLONS AND ALL. "jf:<32 hex>:<item>" has two of them
+        // before the item half even begins, so any section(':') reader would hand back "jf" and route the
+        // row at a server that does not exist.
+        CHECK(r.key == qualified);
+        CHECK(r.key.count(QLatin1Char(':')) >= 2);
+        CHECK(Jellyfin::parse(r.key).ok);
+        CHECK(Jellyfin::parse(r.key).serverId == srv);
+
+        // An item id that itself contains a colon survives the round trip, for the same reason.
+        MediaItem odd;
+        odd.type = QStringLiteral("episode");
+        const QString oddId = Jellyfin::qualify(srv, QStringLiteral("weird:id:with:colons"));
+        odd.mime = QString::fromLatin1(browse::kJellyfinItemPrefix) + oddId;
+        CHECK(enterAndPlay(odd).key == oddId);
+
+        // A row carrying the prefix and nothing after it names no item: NOT claimed, so it falls through to
+        // the resolve it would have taken rather than being consumed and dropped.
+        MediaItem empty;
+        empty.type = QStringLiteral("movie");
+        empty.mime = QString::fromLatin1(browse::kJellyfinItemPrefix);
+        CHECK(browse::localLeafRoute(empty).play == LeafPlay::NotLocal);
+
+        // ...and it is not a music row, so it carries no queue verbs. (#193's question, asked of #83's row.)
+        CHECK(!browse::queueTargetFor(it).ok());
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

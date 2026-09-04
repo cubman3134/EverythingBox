@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.180 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.185 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -545,6 +545,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # link edge so the lean browse probes can keep it.
         src/browse/LeafRoute.cpp src/browse/LeafRoute.h
         src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + guide-grid builders (#75 inc 3)
+        # #83: the Jellyfin browse levels (libraries -> titles -> seasons -> episodes, and the Continue
+        # Watching rows the home list merges in). Its own TU for LiveTvGuide's reason - it is pure, so the
+        # lean browse probes can link it without the client, the store or a socket coming with it.
+        src/browse/JellyfinCatalogs.cpp src/browse/JellyfinCatalogs.h
         # #74 inc 3: the Artists/Albums/Tracks browse. Its own TU for LiveTvGuide's reason — only the app and
         # probe_musicbrowse want MusicLibrary/AudioTags/TagLib linked, and folding it into SyntheticCatalogs
         # would hand probe_browse / probe_iptv / probe_locallib a TagLib dependency they have no use for.
@@ -842,6 +846,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
+        # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
+        # branch collides in.
+        src/ui/MainWindowJellyfin.cpp
+        # ...and the browse levels' half of the same feature, out of HomeView.cpp for the same reason.
+        src/ui/HomeViewJellyfin.cpp
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
         # #248 (b): the self-compiled tier's card. A MainWindow member in its OWN TU (the #186
         # direction) - MainWindow.cpp is one giant object that a dozen branches edit at once.
@@ -2182,6 +2192,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Jellyfin.cpp            src/core/Jellyfin.h
         src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
         src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        # #83: the credential section drives the REAL recents store and then reads every byte of the ini
+        # it produced. A hand-built QSettings write beside it would prove only that this probe can keep a
+        # token out of a file it wrote itself; what has to be true is that the store the app's play sites
+        # go through keeps it out. RecentStore is QtCore-only apart from these two.
+        src/core/RecentStore.cpp         src/core/RecentStore.h
+        src/core/Tombstones.cpp          src/core/Tombstones.h
         src/core/ProfileStore.cpp        src/core/ProfileStore.h)
     target_include_directories(probe_jellyfin PRIVATE src src/core tools)
     # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
@@ -2467,9 +2483,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_gamelist PRIVATE src src/core src/addons)
     target_link_libraries(probe_gamelist PRIVATE Qt6::Core Qt6::Network)
 
-    # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites).
+    # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites), and - since
+    # #83 - for the JELLYFIN browse levels beside them: they are pure builders of exactly the same shape,
+    # and this is the probe that already links MediaItem/MediaCatalog. Jellyfin.cpp comes with them because
+    # the builders read Jellyfin::UnionItem and ask Jellyfin::isVideoCollection which libraries to show.
     add_executable(probe_browse tools/probe_browse.cpp
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/browse/JellyfinCatalogs.cpp src/browse/JellyfinCatalogs.h
+        src/core/Jellyfin.cpp src/core/Jellyfin.h
         src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         # The catalog builder and the record remap must agree on ONE item id. probe_browse is the only
@@ -2550,6 +2571,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h   # localLibrary / photos / opds rows
         src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/browse/MusicCatalogs.cpp src/browse/MusicCatalogs.h      # the music rows (see the exception above)
+        src/browse/JellyfinCatalogs.cpp src/browse/JellyfinCatalogs.h # #83's keyed leaf kind + its rows
+        src/core/Jellyfin.cpp src/core/Jellyfin.h                    # ...and the UnionItem those rows read
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h            # MusicCatalogs -> the Index it renders
         src/media/AudioTags.cpp   src/media/AudioTags.h              # MusicLibrary -> the ONE tag reader
         src/media/CueSheet.cpp    src/media/CueSheet.h               # MusicLibrary -> the cue parser
