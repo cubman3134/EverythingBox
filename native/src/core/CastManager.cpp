@@ -125,8 +125,74 @@ void CastManager::startDiscovery()
     }
     sendSsdpQuery();
     sendMdnsQuery();
+    sendPlayOnQuery();
     // A second burst shortly after, since UDP discovery packets are lossy.
-    QTimer::singleShot(1500, this, [this] { sendSsdpQuery(); sendMdnsQuery(); });
+    QTimer::singleShot(1500, this, [this] { sendSsdpQuery(); sendMdnsQuery(); sendPlayOnQuery(); });
+}
+
+// ---------------------------------------------------------------- mDNS / EverythingBox peers (#143) ----
+void CastManager::sendPlayOnQuery()
+{
+    if (!mdns_) return;
+    mdns_->writeDatagram(PlayOn::mdnsQuery(), QHostAddress(kMdnsAddr), kMdnsPort);
+}
+
+quint32 CastManager::firstLanIpv4()
+{
+    for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces())
+    {
+        if (!(iface.flags() & QNetworkInterface::IsUp)) continue;
+        if (iface.flags() & QNetworkInterface::IsLoopBack) continue;
+        for (const QNetworkAddressEntry& e : iface.addressEntries())
+            if (e.ip().protocol() == QAbstractSocket::IPv4Protocol)
+                return e.ip().toIPv4Address();
+    }
+    return 0;
+}
+
+void CastManager::answerPlayOnQuery()
+{
+    if (!advertising_ || !mdns_) return;
+    // Rate limit. Two instances on one LAN both browse AND answer; without this, a packet either of them
+    // mis-read as a question would start a reply-to-the-reply loop that saturates the multicast group.
+    // isServiceQuery already refuses to answer a response, so this is the second of two independent guards.
+    if (lastAnswer_.isValid() && lastAnswer_.elapsed() < 400) return;
+    lastAnswer_.restart();
+    const QByteArray pkt = PlayOn::mdnsResponse(advert_, firstLanIpv4());
+    if (!pkt.isEmpty()) mdns_->writeDatagram(pkt, QHostAddress(kMdnsAddr), kMdnsPort);
+}
+
+void CastManager::setPlayOnAdvert(const PlayOn::Advert& advert)
+{
+    if (!PlayOn::advertValid(advert)) { clearPlayOnAdvert(); return; }
+    advert_ = advert;
+    advertising_ = true;
+    lastAnswer_.invalidate();
+    startDiscovery();                       // make sure the socket exists before announcing on it
+    answerPlayOnQuery();                    // one unsolicited announcement, so browsers see us immediately
+}
+
+void CastManager::clearPlayOnAdvert()
+{
+    advertising_ = false;
+    advert_ = PlayOn::Advert();
+}
+
+void CastManager::addOrUpdatePeer(const PlayOn::Peer& p)
+{
+    for (PlayOn::Peer& e : peers_)
+        if (e.id == p.id)
+        {
+            const bool same = e.name == p.name && e.host == p.host && e.port == p.port
+                              && e.version == p.version;
+            e = p;
+            // Only signal on a real change. mDNS bursts repeat the same advert several times a second, and a
+            // picker that rebuilds on every repeat is a picker whose selection moves under the user's thumb.
+            if (!same) emit peersChanged();
+            return;
+        }
+    peers_.push_back(p);
+    emit peersChanged();
 }
 
 // ---------------------------------------------------------------- SSDP / DLNA ----
@@ -235,7 +301,26 @@ void CastManager::onMdnsDatagram()
 {
     while (mdns_ && mdns_->hasPendingDatagrams())
     {
-        const QByteArray pkt = mdns_->receiveDatagram().data();
+        const QNetworkDatagram dg = mdns_->receiveDatagram();
+        const QByteArray pkt = dg.data();
+        const QHostAddress from = dg.senderAddress();
+        const quint32 fromV4 = from.protocol() == QAbstractSocket::IPv4Protocol ? from.toIPv4Address() : 0u;
+
+        // #143, and it must come FIRST. parseMdns below claims any response carrying an A record as a
+        // Chromecast, so an EverythingBox advertisement read in that order would list every peer twice: once
+        // correctly, and once as a Chromecast that cannot be cast to. Recognised here, it never reaches that
+        // path.
+        {
+            PlayOn::Peer peer;
+            if (PlayOn::parseAdvert(pkt, fromV4, peer))
+            {
+                addOrUpdatePeer(peer);
+                continue;
+            }
+        }
+        // A question about our service: answer it, and do not try to read it as a device.
+        if (PlayOn::isServiceQuery(pkt)) { answerPlayOnQuery(); continue; }
+
         QString ip, name;
         if (parseMdns(pkt, ip, name) && !ip.isEmpty())
         {

@@ -1,8 +1,12 @@
 #include "EbookView.h"
 #include "../core/AppBrand.h"
 #include "EpubBook.h"
+#include "Fb2Book.h"
+#include "Fb2Meta.h"
 #include "MobiBook.h"
+#include "MobiHeader.h"
 #include "PdfTextBook.h"
+#include "TextBook.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 #include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
@@ -501,19 +505,29 @@ static QString bookKey(const QString& path)
     return QStringLiteral("ebook/") + QString::fromLatin1(h) + QStringLiteral("/");
 }
 
-// Sniff the file and create the matching parser. MOBI is detected by the PalmDB signature at offset 60
-// (works even when an Allarr book was cached under a ".epub" name); a "%PDF-" header is read as a reflowable
-// text book; anything else is treated as EPUB.
+// Sniff the file and create the matching parser. CONTENT FIRST, then the name, and the order is the point:
+// a Palm/MOBI container (.mobi, .azw, .azw3) and a PDF both announce themselves in their first bytes, and
+// that is what makes them open correctly when an Allarr book was cached under a ".epub" name. FB2 announces
+// itself too (a FictionBook root element), but only in its PLAIN form - the zipped .fb2.zip is a zip like an
+// EPUB is, so that one is decided by its name. Anything left is treated as EPUB, which is what an unknown
+// zip has always been read as here.
 static std::unique_ptr<EbookSource> makeSource(const QString& path)
 {
     QFile f(path);
     QByteArray head;
-    if (f.open(QIODevice::ReadOnly)) { head = f.read(68); f.close(); }
-    const QByteArray sig = head.mid(60, 8);
-    if (sig == QByteArray("BOOKMOBI") || sig == QByteArray("TEXtREAd"))
+    // 512 bytes rather than 68: enough to see an XML declaration, a doctype and the root element that follows
+    // them, which is where a plain .fb2 says what it is. The MOBI signature at 60 is well inside it.
+    if (f.open(QIODevice::ReadOnly)) { head = f.read(512); f.close(); }
+    if (MobiHeader::isMobiContainer(head))
         return std::make_unique<MobiBook>();
     if (head.startsWith("%PDF-"))
         return std::make_unique<PdfTextBook>();
+    if (head.contains("<FictionBook"))
+        return std::make_unique<Fb2Book>();
+    if (Fb2Meta::isFb2Path(path))
+        return std::make_unique<Fb2Book>();
+    if (TextBook::isTextBookPath(path))
+        return std::make_unique<TextBook>();
     return std::make_unique<EpubBook>();
 }
 

@@ -94,11 +94,15 @@ QString StreamHeaders::canonicalName(const QString& raw)
 
 StreamHeaders::Headers StreamHeaders::parseProxyHeaders(const QJsonObject& behaviorHints)
 {
+    return parseHeaderMap(behaviorHints.value(QStringLiteral("proxyHeaders"))
+                              .toObject()
+                              .value(QStringLiteral("request"))
+                              .toObject());
+}
+
+StreamHeaders::Headers StreamHeaders::parseHeaderMap(const QJsonObject& req)
+{
     Headers out;
-    const QJsonObject req = behaviorHints.value(QStringLiteral("proxyHeaders"))
-                                .toObject()
-                                .value(QStringLiteral("request"))
-                                .toObject();
     for (auto it = req.begin(); it != req.end(); ++it)
     {
         const QString name = canonicalName(it.key());

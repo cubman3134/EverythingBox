@@ -3,6 +3,7 @@
 #include "Settings.h"
 
 #include <QDateTime>
+#include <QStringList>
 #include <QTimer>
 
 namespace {
@@ -16,14 +17,23 @@ constexpr int kRetryMaxSec   = 300;
 
 } // namespace
 
+// One provider plus the delivery state that belongs to it alone. See Scrobbler.h for why the backoff and the
+// in-flight latch are PER PROVIDER: sharing them would make a ListenBrainz outage stop Last.fm being written
+// to for five minutes at a time, and the user's symptom would be the second service silently lagging.
+struct Scrobbler::Slot
+{
+    ScrobbleProvider* provider = nullptr;
+    bool    pumping  = false;   // one submission in flight at a time: the queue is a FIFO, and two
+                                // overlapping submissions could drop the wrong prefix off the front
+    int     retrySec = 0;       // current backoff, 0 == not backing off
+    QTimer* retry    = nullptr; // owned by the Scrobbler (parented), stopped and dropped with the slot
+};
+
 Scrobbler::Scrobbler(QObject* parent) : QObject(parent)
 {
-    retry_ = new QTimer(this);
-    retry_->setSingleShot(true);
-    connect(retry_, &QTimer::timeout, this, [this] { retrySec_ = 0; pump(); });
     // A launch after an offline stretch delivers what is waiting without the user doing anything. Deferred to
-    // the event loop rather than run in the constructor: the provider is set immediately after us, and a pump
-    // with no provider is a no-op that would then have to be re-armed from somewhere.
+    // the event loop rather than run in the constructor: the providers are installed immediately after us,
+    // and a pump with none installed is a no-op that would then have to be re-armed from somewhere.
     QTimer::singleShot(0, this, [this] { pump(); });
 }
 
@@ -31,19 +41,49 @@ Scrobbler::~Scrobbler()
 {
     // A track that has passed its threshold when the app closes has been LISTENED TO, and the queue is on
     // disk — so finishing here is the difference between the last track of the evening landing tomorrow and
-    // never landing at all. Nothing is submitted from a destructor; this only writes the row.
+    // never landing at all. Nothing is submitted from a destructor; this only writes the rows.
     finishCurrent();
-    delete provider_;
-    provider_ = nullptr;
+    clearProviders();
+}
+
+void Scrobbler::clearProviders()
+{
+    for (Slot* s : slots_)
+    {
+        if (s->retry) s->retry->stop();
+        delete s->provider;
+        delete s;
+    }
+    slots_.clear();
 }
 
 void Scrobbler::setProvider(ScrobbleProvider* provider)
 {
-    if (provider_ == provider) return;
-    delete provider_;
-    provider_ = provider;
+    if (slots_.size() == 1 && slots_.first()->provider == provider) return;
+    clearProviders();
+    addProvider(provider);
+}
+
+void Scrobbler::addProvider(ScrobbleProvider* provider)
+{
+    if (!provider) return;
+    for (const Slot* s : slots_) if (s->provider == provider) return;
+    Slot* s = new Slot;
+    s->provider = provider;
+    s->retry = new QTimer(this);
+    s->retry->setSingleShot(true);
+    connect(s->retry, &QTimer::timeout, this, [this, s] { s->retrySec = 0; pumpSlot(s); });
+    slots_.push_back(s);
     emit statusChanged();
     pump();
+}
+
+QVector<ScrobbleProvider*> Scrobbler::providers() const
+{
+    QVector<ScrobbleProvider*> out;
+    out.reserve(slots_.size());
+    for (const Slot* s : slots_) out.push_back(s->provider);
+    return out;
 }
 
 Scrobble::Policy Scrobbler::policy()
@@ -73,8 +113,10 @@ void Scrobbler::trackStarted(const Scrobble::Track& track)
     if (!watch_.counts) return;
 
     // "Now playing" is EPHEMERAL: sent on the way past, never queued, never retried. If it does not arrive,
-    // nothing is owed — the listen itself is a separate, durable thing.
-    if (provider_ && provider_->configured()) provider_->nowPlaying(track);
+    // nothing is owed — the listen itself is a separate, durable thing. Announced to EVERY configured
+    // service, because the listener is listening to it on all of them.
+    for (Slot* s : slots_)
+        if (s->provider->configured()) s->provider->nowPlaying(track);
 }
 
 void Scrobbler::positionTick(double positionSec)
@@ -87,12 +129,13 @@ void Scrobbler::positionTick(double positionSec)
     Scrobble::Play play;
     play.track      = watch_.track;
     play.listenedAt = watch_.startedAt;
-    if (provider_ && provider_->configured())
-    {
-        ScrobbleQueue::append(provider_->id(), play);
-        emit statusChanged();
-        pump();
-    }
+    // ONE listen, filed once PER SERVICE. Each queue is keyed by provider id (ScrobbleQueue's whole reason
+    // for taking one) so a listen delivered to ListenBrainz is still owed to Last.fm, with the SAME original
+    // timestamp — which is what makes the two histories agree rather than differ by the length of an outage.
+    bool queued = false;
+    for (Slot* s : slots_)
+        if (s->provider->configured()) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
+    if (queued) { emit statusChanged(); pump(); }
 }
 
 void Scrobbler::playbackStopped()
@@ -104,50 +147,57 @@ void Scrobbler::playbackStopped()
 void Scrobbler::finishCurrent()
 {
     if (!Scrobble::finish(watch_)) return;   // nothing owed: not eligible, not far enough, or already sent
-    if (!provider_ || !provider_->configured()) return;
     Scrobble::Play play;
     play.track      = watch_.track;
     play.listenedAt = watch_.startedAt;
-    ScrobbleQueue::append(provider_->id(), play);
-    emit statusChanged();
-    pump();
+    bool queued = false;
+    for (Slot* s : slots_)
+        if (s->provider->configured()) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
+    if (queued) { emit statusChanged(); pump(); }
 }
 
 void Scrobbler::retryNow()
 {
-    retry_->stop();
-    retrySec_ = 0;
+    // EVERY provider's backoff is cancelled, not just one. This is what a settings change calls, and a user
+    // who has just fixed a credential must not be made to wait out a delay earned before they fixed it — for
+    // either service, since the surface does not make them press it twice.
+    for (Slot* s : slots_) { s->retry->stop(); s->retrySec = 0; }
     pump();
 }
 
 void Scrobbler::pump()
 {
-    if (pumping_ || !provider_ || !provider_->configured()) return;
-    if (retry_->isActive()) return;          // backing off; the timer will call us
-    const QVector<Scrobble::Play> batch = ScrobbleQueue::head(provider_->id(), ScrobbleQueue::kBatchSize);
+    for (Slot* s : slots_) pumpSlot(s);
+}
+
+void Scrobbler::pumpSlot(Slot* s)
+{
+    if (!s || s->pumping || !s->provider || !s->provider->configured()) return;
+    if (s->retry->isActive()) return;        // this service is backing off; its own timer will call us
+    const QVector<Scrobble::Play> batch = ScrobbleQueue::head(s->provider->id(), ScrobbleQueue::kBatchSize);
     if (batch.isEmpty()) return;
 
-    pumping_ = true;
+    s->pumping = true;
     const int n = int(batch.size());
-    provider_->submit(batch, [this, n](ScrobbleResult r) {
-        pumping_ = false;
-        recordResult(r, n);
+    s->provider->submit(batch, [this, s, n](ScrobbleResult r) {
+        s->pumping = false;
+        recordResult(s, r, n);
     });
 }
 
-void Scrobbler::recordResult(const ScrobbleResult& r, int submitted)
+void Scrobbler::recordResult(Slot* s, const ScrobbleResult& r, int submitted)
 {
-    if (!provider_) return;
-    const QString pid = provider_->id();
+    if (!s || !s->provider) return;
+    const QString pid = s->provider->id();
     switch (r.outcome)
     {
         case ScrobbleResult::Outcome::Ok:
             ScrobbleQueue::dropFront(pid, submitted);
             ScrobbleQueue::noteDelivered(pid, submitted);
             ScrobbleQueue::setLastError(pid, QString());
-            retrySec_ = 0;
+            s->retrySec = 0;
             emit statusChanged();
-            pump();          // there may be more behind this batch
+            pumpSlot(s);     // there may be more behind this batch, for THIS service
             return;
 
         case ScrobbleResult::Outcome::Rejected:
@@ -169,35 +219,46 @@ void Scrobbler::recordResult(const ScrobbleResult& r, int submitted)
 
         case ScrobbleResult::Outcome::Retryable:
             ScrobbleQueue::setLastError(pid, r.message);
-            scheduleRetry();
+            scheduleRetry(s);
             emit statusChanged();
             return;
     }
 }
 
-void Scrobbler::scheduleRetry()
+void Scrobbler::scheduleRetry(Slot* s)
 {
-    retrySec_ = retrySec_ <= 0 ? kRetryFirstSec : qMin(retrySec_ * 2, kRetryMaxSec);
-    retry_->start(retrySec_ * 1000);
+    if (!s) return;
+    s->retrySec = s->retrySec <= 0 ? kRetryFirstSec : qMin(s->retrySec * 2, kRetryMaxSec);
+    s->retry->start(s->retrySec * 1000);
 }
 
 int Scrobbler::deliveredCount() const
-{ return provider_ ? ScrobbleQueue::delivered(provider_->id()) : 0; }
+{
+    int n = 0;
+    for (const Slot* s : slots_) n += ScrobbleQueue::delivered(s->provider->id());
+    return n;
+}
 
 int Scrobbler::queuedCount() const
-{ return provider_ ? ScrobbleQueue::count(provider_->id()) : 0; }
-
-QString Scrobbler::statusLine() const
 {
-    if (!provider_) return tr("Scrobbling is not set up.");
-    if (!Settings::scrobbleEnabled())
-        return tr("Scrobbling is off. Nothing is being sent to %1.").arg(provider_->displayName());
-    if (!provider_->configured())
-        return tr("Enter your %1 token to start scrobbling.").arg(provider_->displayName());
+    int n = 0;
+    for (const Slot* s : slots_) n += ScrobbleQueue::count(s->provider->id());
+    return n;
+}
 
-    const QString pid = provider_->id();
+QString Scrobbler::statusLineFor(const ScrobbleProvider* provider) const
+{
+    if (!provider) return QString();
+    // PROVIDER-NEUTRAL WORDING. Increment 1 said "Enter your %1 token", which is true of ListenBrainz and
+    // false of Last.fm — there is no token to enter there, only an account to authorise. The orchestrator
+    // must not know which is which (that is the whole point of the seam), so it says the one thing that is
+    // true of both and leaves the how-to to the provider's own row in Settings.
+    if (!provider->configured())
+        return tr("%1 is not connected yet.").arg(provider->displayName());
+
+    const QString pid = provider->id();
     QString s = tr("Scrobbled %n track(s) to %1.", "", ScrobbleQueue::delivered(pid))
-                    .arg(provider_->displayName());
+                    .arg(provider->displayName());
     const int waiting = ScrobbleQueue::count(pid);
     if (waiting > 0) s += QLatin1Char(' ') + tr("%n waiting to send.", "", waiting);
     const int lost = ScrobbleQueue::dropped(pid);
@@ -210,18 +271,33 @@ QString Scrobbler::statusLine() const
     return s;
 }
 
+QString Scrobbler::statusLine() const
+{
+    if (slots_.isEmpty()) return tr("Scrobbling is not set up.");
+    if (!Settings::scrobbleEnabled()) return tr("Scrobbling is off. Nothing is being sent.");
+    QStringList parts;
+    // ONE SENTENCE PER SERVICE, never an average. "It is working" can be true of one and false of the other,
+    // and a single merged number is exactly the shape in which a half-broken feature looks healthy.
+    for (const Slot* s : slots_) parts << statusLineFor(s->provider);
+    return parts.join(QLatin1Char(' '));
+}
+
 void Scrobbler::noteFavorite(const Scrobble::Track& track, bool loved)
 {
-    if (!provider_ || !provider_->supportsLove() || !provider_->configured()) return;
     const Scrobble::Policy p = policy();
     // The SAME gate a listen passes. A user who has scrobbling switched off has not asked this app to tell
     // anybody what they like either, and an untagged file has nothing to love.
     if (!Scrobble::eligible(track, p)) return;
-    const QString pid = provider_->id();
-    provider_->love(track, loved, [this, pid](ScrobbleResult r) {
-        // A love is not queued (see the header), so the only thing to do with a failure is SAY so. Silence
-        // here is the exact failure the confidence indicator exists to prevent.
-        if (r.outcome != ScrobbleResult::Outcome::Ok) ScrobbleQueue::setLastError(pid, r.message);
-        emit statusChanged();
-    });
+    for (Slot* s : slots_)
+    {
+        ScrobbleProvider* pr = s->provider;
+        if (!pr->supportsLove() || !pr->configured()) continue;
+        const QString pid = pr->id();
+        pr->love(track, loved, [this, pid](ScrobbleResult r) {
+            // A love is not queued (see the header), so the only thing to do with a failure is SAY so.
+            // Silence here is the exact failure the confidence indicator exists to prevent.
+            if (r.outcome != ScrobbleResult::Outcome::Ok) ScrobbleQueue::setLastError(pid, r.message);
+            emit statusChanged();
+        });
+    }
 }

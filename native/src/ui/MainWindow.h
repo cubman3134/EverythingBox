@@ -18,6 +18,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
 #include "../media/BackgroundAudio.h" // BackgroundAudio::Session is returned by value (issue #193 inc 3)
@@ -187,7 +188,9 @@ private slots:
     // `handoffGen` names the chapter crossing this open belongs to, or -1 for an ordinary open from a chapter
     // list. The page downloads outlive the resolve that started them, so the crossing's latch and its sticky
     // notice are released HERE, on whichever of this function's endings is reached.
-    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls,
+    // `pages` are the addon's page list (#188): a url each, plus the request headers that url needs — many
+    // image CDNs gate on a Referer, and a bare url list had nowhere to carry one.
+    void openImagePages(const QString& title, const QString& key, const QVector<AddonPage>& pages,
                         const ChapterRun& run, bool landOnLastPage = false, int handoffGen = -1);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
@@ -388,7 +391,11 @@ private:
     // be in the directory and would order it by filename alone. A multi-file book is therefore an ordinary
     // queue, which is what makes it play continuously and resume across a file boundary with nothing in the
     // player having to know what a book is.
-    void openAudiobook(const QString& bookKey, const QString& startPath);
+    // `startSec` < 0 means "wherever the resume marks say", which is every route but one. The chapter list
+    // (#139 increment 2) is the exception: it knows a position inside `startPath` that no mark holds, and 0
+    // is a real value there — jumping to part three means the TOP of part three, not the spot in it somebody
+    // left months ago.
+    void openAudiobook(const QString& bookKey, const QString& startPath, int startSec = -1);
     // The tail both cross-record queue producers share: turn MusicQueue entries into the paths/titles/album
     // map a PlaybackSession queue is, and start it. Extracted when the reach verbs (#193 increment 2) became
     // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and
@@ -627,6 +634,39 @@ private:
     class RemoteServer* remoteServer_ = nullptr;
     void updateRemoteServer();
     QString curPlayTitle_;
+
+    // ---- "Play on device" (issue #143). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowPlayOn.cpp ----
+    // Not in MainWindow.cpp, and deliberately: that file is the busiest merge surface in the repository, and
+    // this feature reaches the rest of the class only through members that already existed, so it costs it
+    // four short insertions instead of four hundred lines. See the header comment there for the whole shape.
+    class PlayOnHost*   playOnHost_ = nullptr;     // pairing tokens, both directions; device-local
+    class PlayOnClient* playOnClient_ = nullptr;   // the source side of a peer's #76 surface
+    bool         playOnRemoteActive_ = false;      // this instance is acting as a remote for a peer
+    PlayOn::Peer playOnRemotePeer_;
+    class PlayOnClient* playOnClient();            // lazily built; never null
+
+    void updatePlayOnAdvert();                     // reconcile the mDNS advert with the #76 server's state
+
+    // As a SOURCE: what is playing here, as a reference a peer could resolve (ok=false => unnameable).
+    PlayOn::Handoff playOnCurrentHandoff(bool* ok) const;
+    // As a TARGET: what this device knows about an arriving reference, and the answer it returns.
+    PlayOn::OpenEnv    playOnClassify(const PlayOn::Handoff& h) const;
+    PlayOn::OpenResult playOnOpen(const PlayOn::Handoff& h);   // the /open hook; DEFERS the actual open
+    void               playOnPerformOpen(const PlayOn::Handoff& h);
+    bool          playOnPairBegin();                           // put a code on THIS screen
+    QString       playOnPairRedeem(const QString& code);       // "" on refusal; never logs either side
+    QSet<QString> playOnIssuedTokens() const;
+
+    QList<PlayOn::Target> playOnTargets() const;               // the merged picker: three kinds, never self
+    PlayOn::Peer          playOnPeerById(const QString& instanceId) const;
+    void playOnHandOffTo(const PlayOn::Peer& peer);
+    void playOnRedeemAndHandOff(const PlayOn::Peer& peer, const QString& code, const PlayOn::Handoff& h);
+    void playOnSendHandoff(const PlayOn::Peer& peer, const QString& token, const PlayOn::Handoff& h);
+    void playOnShowRemote(const PlayOn::Peer& peer);
+    void playOnRemoteMenu(const PlayOn::Peer& peer, const PlayOn::RemoteView& v);
+    void playOnContinueHere(const PlayOn::Peer& peer);
+    void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
+    void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.
@@ -1000,6 +1040,9 @@ private:
     // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
+    // Custom home rows (issue #161): the D-pad editor for the profile's home row list. Reached from BOTH
+    // settings builders (themed "home.rows" / classic "Choose home rows…"), so there is one editor.
+    void openHomeRowsEditor();
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
     // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
     // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
@@ -1474,6 +1517,14 @@ private:
     // completed, timestamped, offline-safe listen. Everything that decides WHETHER and WHEN lives in
     // core/Scrobble.h; this window only reports three facts to it (see Scrobbler.h).
     class Scrobbler* scrobbler_ = nullptr;
+    // The Last.fm provider (#192 increment 2), kept as a member ONLY because its link is a user action the
+    // settings surfaces drive: connect, disconnect, and the authorisation URL it emits on the way. NULL in a
+    // build with no application key, which is what both builders test before offering anything.
+    class LastFmClient* lastfm_ = nullptr;
+    // Show an authorisation page the user has to approve. Opens a browser where there is one and does
+    // nothing where there is not (a TV), which is why the URL is always SHOWN as well as opened - the Trakt
+    // device-code row beside it has been read-and-type from the start for exactly that reason.
+    static void openAuthPage(const QString& url);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // The counterpart to the scrobbler above and, like it, fed from the seams the window already has. This

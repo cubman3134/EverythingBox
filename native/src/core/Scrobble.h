@@ -301,6 +301,29 @@ namespace Scrobble
     // The half a settings transaction must not snapshot or revert. What SettingsTxn::inScope asks.
     inline bool isBackgroundStateKey(const QString& key) { return key.startsWith(stateKeyPrefix()); }
 
+    // ...AND THE OTHER HALF IT MUST NOT REVERT, which is NOT the same rule and was learned the hard way.
+    //
+    // settingsKeyPrefix() was described above as "the things the user TYPES or TOGGLES", and for increment 1
+    // that was the whole truth: a ListenBrainz token is pasted, so pasting the wrong one and pressing Discard
+    // has to put the old one back. Last.fm's credential is not typed at all. It is a SESSION KEY the service
+    // hands back after the user has approved this app in a browser, and it arrives from a background poll
+    // reply that can land in the middle of a settings visit the user is making about something else.
+    //
+    // In scope it is wrong twice over. The exit prompt says "2 setting(s) changed" about two values nobody
+    // touched — observed, not theorised: it is what the #192 increment 2 live drive saw the first time it
+    // connected an account and pressed Back — and Discard silently unlinks an account that cost a browser
+    // round trip to link, which a typed token does not, because a typed token can simply be typed again.
+    //
+    // This is exactly the "ra/user" / "ra/token" case SettingsTxn.cpp already spells out beside it (sign in,
+    // then Discard, and the stored token reverts while the live session stays signed in), and the same split
+    // as trakt/access-vs-trakt/clientId. The group is matched through the writer's OWN prefix rather than a
+    // literal, so an exclusion cannot drift from the key Settings.cpp writes.
+    inline QString authorisedCredentialGroup() { return QStringLiteral("/lastfm/"); }
+    inline bool isAuthorisedCredentialKey(const QString& key)
+    {
+        return key.startsWith(settingsKeyPrefix()) && key.contains(authorisedCredentialGroup());
+    }
+
     // An empty profile id means "no profile chosen yet" and maps to "default", exactly as the Trakt backfill
     // cursor's slot does — so the keys a pre-profile launch writes are the ones the default profile reads.
     inline QString profileSlot(const QString& profileId)

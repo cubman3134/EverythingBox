@@ -1,6 +1,7 @@
 #include "EmulatorManager.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "NativePorts.h"   // issue #248: record the release tag a native port's install landed on
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -364,6 +365,7 @@ void EmulatorManager::startInstall()
     // holds nothing (LaunchCancel.h).
     installing_ = true;
     releasesFallbackTried_ = false;   // #233: this flow has not retried its release lookup yet
+    resolvedTag_.clear();             // #248: and it has not resolved a release tag yet either
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
 }
 
@@ -421,6 +423,11 @@ void EmulatorManager::fetchArtifactListFrom(const QString& lookupUrl)
         // asset matching below is unchanged and applies to both.
         const QJsonDocument doc = QJsonDocument::fromJson(body);
         const QJsonObject root = doc.isArray() ? EmulatorRegistry::newestRelease(doc.array()) : doc.object();
+        // #248: whichever of the two GitHub shapes answered, this is the release we are about to install.
+        // Recorded here and written down in finishInstall, because this is the only point in the whole chain
+        // where the tag exists. Absent on a Dolphin-style update JSON or an HTML scrape, which is fine — an
+        // unknown version is a first-class answer there (see NativePorts::readInstalledTag).
+        resolvedTag_ = root.value(QStringLiteral("tag_name")).toString().trimmed();
         const QString want = platformArtifact();
         QString url;
         if (root.contains(QStringLiteral("artifacts")))
@@ -672,6 +679,12 @@ void EmulatorManager::finishInstall()
         emit failed(tr("Installed %1 but couldn't locate its program in %2.").arg(em_.displayName, installDir(em_)));
         return;
     }
+    // #248: record which release this is, for a NATIVE PORT only. The Recomps section derives `update
+    // available` by comparing this against the release its catalogue entry pins, and there is nowhere else the
+    // answer could come from — the port's own folder is the upstream's zip, unchanged. Best-effort: a failed
+    // write leaves the install with an unknown version, which reads as `installed` and never as out-of-date.
+    if (em_.isNativePort() && !resolvedTag_.isEmpty())
+        NativePorts::writeInstalledTag(installDir(em_), resolvedTag_);
     emit installed(em_.displayName);
     if (launchAfterInstall_) launch(bin);
     else busy_ = false;

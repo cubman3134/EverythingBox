@@ -4,11 +4,20 @@
 //   - DLNA / UPnP MediaRenderers: SSDP discovery (UDP multicast) + SOAP AVTransport (SetAVTransportURI+Play).
 // In both cases the device fetches the media URL itself, so this works for addon/debrid http(s) streams (a
 // local file would need to be served over HTTP first — not supported here).
+//
+// #143 lodges here too, and on purpose: an EverythingBox instance is a THIRD kind of playback target, found
+// on the same mDNS socket by the same burst of queries. This class browses for `_everythingbox._tcp` and, when
+// an advert has been set (i.e. the #76 server is on), ANSWERS for it as well -- one socket, both directions,
+// because two sockets bound to 5353 in one process is a needless second thing to get wrong. It carries no
+// hand-off logic: the peers it finds are handed to PlayOn::mergeTargets and everything after that lives in
+// PlayOnDevice / PlayOnClient.
 #pragma once
 #include <QObject>
 #include <QString>
 #include <QList>
 #include <QByteArray>
+#include <QElapsedTimer>
+#include "PlayOnDevice.h"
 
 class QUdpSocket;
 class QSslSocket;
@@ -35,6 +44,16 @@ public:
 
     void startDiscovery();                 // (re)issue SSDP + mDNS queries; devices arrive via devicesChanged
     QList<CastDevice> devices() const { return devices_; }
+
+    // ---- "Play on device" (#143) ----
+    // Start/stop ANSWERING for _everythingbox._tcp. Called only when the #76 server is listening: an instance
+    // with no controllable surface has nothing to advertise, and advertising it would put a row in every peer's
+    // picker that fails the moment it is pressed. Setting an advert also sends one unsolicited announcement,
+    // so a freshly started instance appears on a peer that is already browsing without waiting for a query.
+    void setPlayOnAdvert(const PlayOn::Advert& advert);
+    void clearPlayOnAdvert();
+    bool isAdvertising() const { return advertising_; }
+    QList<PlayOn::Peer> peers() const { return peers_; }
     bool isCasting() const { return casting_; }
     QString currentDeviceName() const { return castingName_; }
 
@@ -44,6 +63,7 @@ public:
 
 signals:
     void devicesChanged();
+    void peersChanged();                   // #143: the EverythingBox peer list grew or changed
     void castStarted(const QString& deviceName);
     void castError(const QString& message);
     void castStopped();
@@ -57,6 +77,11 @@ private:
     void dlnaSoap(const QString& action, const QString& xmlBody);
     // ---- mDNS / Chromecast ----
     void sendMdnsQuery();
+    // ---- mDNS / EverythingBox peers (#143) ----
+    void sendPlayOnQuery();
+    void answerPlayOnQuery();
+    void addOrUpdatePeer(const PlayOn::Peer& p);
+    static quint32 firstLanIpv4();         // host-order IPv4 for the advert's A record; 0 if none
     void onMdnsDatagram();
     static bool parseMdns(const QByteArray& pkt, QString& ipOut, QString& nameOut);
     // ---- Chromecast CASTV2 session ----
@@ -66,6 +91,10 @@ private:
     void ccTeardown();
 
     QList<CastDevice> devices_;
+    QList<PlayOn::Peer> peers_;            // #143: discovered EverythingBox instances (never this one)
+    PlayOn::Advert advert_;                // what we answer with; only valid while advertising_
+    bool advertising_ = false;
+    QElapsedTimer lastAnswer_;             // rate limit: two instances must not answer each other in a loop
     QUdpSocket* ssdp_ = nullptr;
     QUdpSocket* mdns_ = nullptr;
     QNetworkAccessManager* nam_ = nullptr;
