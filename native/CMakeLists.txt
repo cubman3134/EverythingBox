@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.189 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.190 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -803,6 +803,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h  # #102 local photo library scan (viewer = ComicView photo mode)
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h  # #74 local music library scan + Artists/Albums/Tracks index
         src/core/AudiobookLibrary.cpp src/core/AudiobookLibrary.h  # #139 local audiobook scan + Authors/Narrators/Series
+        # #198 audiobook metadata matching: the pure rule (narrator/series/cover/year, local tags always
+        # win), the match + rejection record, the provider fan-out, and the sweep that re-derives the index.
+        src/core/AudiobookMeta.cpp        src/core/AudiobookMeta.h
+        src/core/AudiobookMatchStore.cpp  src/core/AudiobookMatchStore.h
+        src/addons/AudiobookMetaAggregator.cpp src/addons/AudiobookMetaAggregator.h
+        src/ui/MainWindowAudiobookMeta.cpp
         src/core/BookLibrary.cpp  src/core/BookLibrary.h    # #134 local book/comic scan + Authors/Series index
         src/core/BookMeta.cpp     src/core/BookMeta.h       # ...and the EPUB/PDF/CBZ container reader behind it
         src/core/MusicQueue.cpp   src/core/MusicQueue.h    # multi-album queues (play all / shuffle all) over that index
@@ -2808,6 +2814,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # would prove only that the builders agree with a hand-built index.
     add_executable(probe_audiobooks tools/probe_audiobooks.cpp
         src/core/AudiobookLibrary.cpp src/core/AudiobookLibrary.h
+        # #198: the enrichment rule and the match/rejection record. Both are pure or ini-only, so the probe
+        # drives the WHOLE precedence path (a real scan -> a match -> a rebuilt index) with no addon, no
+        # network and no aggregator linked.
+        src/core/AudiobookMeta.cpp       src/core/AudiobookMeta.h
+        src/core/AudiobookMatchStore.cpp src/core/AudiobookMatchStore.h
         src/browse/AudiobookCatalogs.cpp src/browse/AudiobookCatalogs.h
         src/core/MusicLibrary.cpp src/core/MusicLibrary.h    # the OTHER reading of the same file
         src/media/AudioTags.cpp   src/media/AudioTags.h

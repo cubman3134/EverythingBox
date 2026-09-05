@@ -377,6 +377,24 @@ namespace AudiobookLibrary
     void         installIndex(Index idx);
     const Index& index();
 
+    // WHAT ONE SCAN PRODUCED, kept together: the entries exactly as the tags read them, and the index built
+    // from them. The pair travels out of the scan worker as one value because ENRICHMENT IS RE-DERIVED and
+    // never persisted (issue #198 — see AudiobookMeta::applyToEntries for why writing a matched narrator
+    // into audiobookindex.json would make it indistinguishable from a tag on the next scan, and so
+    // unrejectable). Holding the entries is what lets a match arriving a second later, or a rejection
+    // arriving a week later, rebuild the whole browse index on the spot: no second walk of the disk, no
+    // second tag read, and the narrator/series BUCKETS minted by exactly the code that files a tagged one.
+    struct ScanResult
+    {
+        QVector<FileEntry> entries;   // what the TAGS said; never enriched, and what the index file holds
+        Index              index;     // what the browse walks
+    };
+
+    // The entries the installed index was built from. Main-thread only, exactly like installIndex — this is
+    // the same cached layer, holding the same scan's other half. Empty until a scan has finished.
+    void installScanEntries(QVector<FileEntry> entries);
+    const QVector<FileEntry>& scanEntries();
+
     // Has a scan finished since the app started? The browse needs to tell "we have not looked yet" from "we
     // looked and there is nothing there" — the two want opposite sentences on screen.
     bool indexReady();

@@ -65,6 +65,8 @@
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../core/AudiobookMatchStore.h"   // #198: what was matched for a book, and the rejection
+#include "../core/AudiobookMeta.h"
 #include "../core/MetaOverrides.h"
 #include "../core/AniListTracker.h"   // isConfigured() - the tracker verb is hidden until it is (#156)
 #include "../core/TrackerLinks.h"     // ...and whether THIS item is already linked, for the pill label
@@ -2565,10 +2567,21 @@ void HomeView::openAudiobookBookLevel(const QString& bookKey)
     populateAudiobookBook(bookKey);
 }
 
+// What an online provider was matched to for this book, as the one line the match row shows — or "" for a
+// book nothing was matched for, which adds no row at all (issue #198). The store read is HERE rather than in
+// the catalog builder because that unit opens nothing: it is handed the cover, the progress and now the note.
+static QString audiobookMatchNote(const QString& bookKey)
+{
+    const AudiobookMeta::Match m = AudiobookMatches::get(bookKey);
+    if (m.rejected || !m.hasFields()) return QString();
+    return AudiobookMeta::matchSummary(m);
+}
+
 void HomeView::populateAudiobookBook(const QString& bookKey)
 {
     showSyntheticCatalog(browse::audiobookBookCatalog(AudiobookLibrary::index(), bookKey, audiobookCover(),
-                                                      audiobookProgress()));
+                                                      audiobookProgress(),
+                                                      audiobookMatchNote(bookKey)));
 }
 
 // THE CHAPTER LIST (#139 increment 2) — an .m4b's chapter atoms or a folder's parts, whichever the book is,
@@ -8092,6 +8105,20 @@ void HomeView::activateItem(int row)
         // ordinary resume then puts the listener back where they stopped.
         emit playAudiobookRequested(browse::audiobookKeyOf(it.mime, browse::kAudiobookPlayPrefix), QString(),
                                     -1);
+        return;
+    }
+    if (it.type == QString::fromLatin1(browse::kAudiobookMatchType))
+    {
+        // #198: what was matched, and the door to un-matching it. Straight to the per-item metadata editor
+        // (#24) rather than to a surface of its own — a bad match is a wrong VALUE, which is what that
+        // editor is for. DEFERRED A TURN for the reason the chapters row below is: the editor opens nested
+        // modal loops and we are standing inside the emission of the still-live delegate that was activated
+        // (issue #28 / #211). The key is the BOOK ROW's own id, which is what MetaCache/MetaOverrides key by.
+        const QString metaKey = QString::fromLatin1(browse::kAudiobookBookPrefix)
+                                + browse::audiobookKeyOf(it.mime, browse::kAudiobookMatchPrefix);
+        QMetaObject::invokeMethod(this, [this, metaKey] {
+            emit editMetadataRequested(metaKey, MediaDetail{});
+        }, Qt::QueuedConnection);
         return;
     }
     if (it.type == QString::fromLatin1(browse::kAudiobookChaptersType))
