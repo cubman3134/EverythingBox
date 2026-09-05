@@ -39,6 +39,12 @@
 //      readings of a mime is three answers waiting to drift. Also pins the split that makes both surfaces
 //      necessary — a TRACK is claimed by the chooser (themedEnterFor says Chooser) and a RECORD can only be
 //      claimed by the context menu (themedEnterFor says Drill, on every layout).
+//   §6 A STARRED LIVE TV CHANNEL ON THE ★ FAVORITES SHELF (issue #244). The producer that puts it there
+//      (browse::liveTvFavoriteRows) and the route that opens it, together, because the shipped bug needed
+//      both halves: the shelf produced no row for a channel at all, and a channel row carries no url — so
+//      even once produced, every file route in the table would have refused it. Pins that a legacy
+//      url-shaped favourite is NOT listed, that no row carries a `://` anywhere, and that the channel LIST's
+//      own rows (which do have a url) are untouched by the new prefix.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
 #include "JellyfinCatalogs.h"
@@ -433,6 +439,106 @@ int main(int argc, char** argv)
 
         // ...and it is not a music row, so it carries no queue verbs. (#193's question, asked of #83's row.)
         CHECK(!browse::queueTargetFor(it).ok());
+    }
+
+    // ---- §6 A STARRED LIVE TV CHANNEL ON THE ★ FAVORITES SHELF (issue #244) ----------------------------
+    // The shelf is an intersection of the level you are standing on with the favourites store, and a channel
+    // is starred from a folder INSIDE the video catalogue rather than from the catalogue page — so the
+    // intersection was empty by construction and a themed layout showed a starred channel nowhere at all.
+    // browse::liveTvFavoriteRows is the producer that closes it. This section pins the producer AND the
+    // route, because the bug needed both: a row nothing produced, and (had it been produced) a row with no
+    // url, which every file route in the table above refuses.
+    {
+        const QString idA = QStringLiteral("livetv:bbc.one.uk");          // the tvg-id spelling
+        const QString idB = QStringLiteral("livetv:name:film four hd");   // the name spelling — two colons
+
+        auto chanFav = [](const QString& id, const QString& title) {
+            FavoriteItem f;
+            f.itemId = id; f.path = id;                   // the identity in BOTH, exactly as #203 files it
+            f.title = title; f.type = QStringLiteral("livetv"); f.kind = QStringLiteral("livetv");
+            return f;
+        };
+
+        // A MOVIE favourite and a starred LOCAL GAME sit in the same store. Neither may be drawn as a
+        // channel: the producer's filter is on `type`, not on the id's shape.
+        FavoriteItem movie;
+        movie.itemId = QStringLiteral("tt0816692"); movie.title = QStringLiteral("Interstellar");
+        movie.type = QStringLiteral("movie");
+        FavoriteItem game;
+        game.itemId = QStringLiteral("C:/roms/snes/Chrono Trigger.sfc"); game.type = QStringLiteral("game");
+        game.path = game.itemId; game.kind = QStringLiteral("game");
+
+        // A LEGACY row: an id that is still a url, which is what a build before #203 wrote. It has no
+        // identity to resolve, so the shelf — whose whole contract is "resolved at open, never a stale url"
+        // — must not list it. It is ALSO the row that must never be handed around, which is why this is the
+        // assertion that matters most in this section.
+        FavoriteItem legacy = chanFav(QStringLiteral("livetv:http://iptv.example.test/live/abc/def/12.ts"),
+                                      QStringLiteral("Legacy Channel"));
+
+        const QList<FavoriteItem> favs{ movie, chanFav(idA, QStringLiteral("BBC One")), game,
+                                        legacy, chanFav(idB, QStringLiteral("Film4 HD")) };
+        const QVector<MediaItem> rows = browse::liveTvFavoriteRows(favs);
+
+        // 6a. THE PRODUCER: the two real channels, in the store's own order, and nothing else.
+        CHECK(rows.size() == 2);
+        if (rows.size() == 2)
+        {
+            CHECK(rows.at(0).id == idA);
+            CHECK(rows.at(1).id == idB);
+            CHECK(rows.at(0).title == QStringLiteral("BBC One"));
+            // NO URL, on purpose. This is the field the shelf must not carry and the reason the row needs a
+            // route of its own — a file route would claim it and open nothing.
+            CHECK(rows.at(0).url.isEmpty());
+            CHECK(rows.at(1).url.isEmpty());
+            // ...and not one byte of the legacy row's url is anywhere in what the shelf produces.
+            for (const MediaItem& r : rows)
+            {
+                CHECK(!r.id.contains(QStringLiteral("://")));
+                CHECK(!r.mime.contains(QStringLiteral("://")));
+                CHECK(!r.url.contains(QStringLiteral("://")));
+            }
+
+            // 6b. THE ROUTE, on BOTH surfaces — the chooser opens (it is a leaf, not a drill) and Play
+            // reaches a player. This is the chain the themed layout takes, and the one #244 had no row for.
+            for (const MediaItem& r : rows)
+            {
+                const LeafRoute lr = enterAndPlay(r);
+                CHECK(lr.play == LeafPlay::LiveTvChannel);
+                CHECK(lr.isLocal());
+            }
+            // The key is the WHOLE identity, colons and all. "livetv:name:film four hd" has two of them
+            // before the name even begins, so any section(':') reader would hand back "livetv" and resolve
+            // nothing — the same trap #83's qualified id sets one section up.
+            CHECK(enterAndPlay(rows.at(0)).key == idA);
+            CHECK(enterAndPlay(rows.at(1)).key == idB);
+            CHECK(enterAndPlay(rows.at(1)).key.count(QLatin1Char(':')) == 2);
+            CHECK(LiveTvIdentity::isLiveTvId(enterAndPlay(rows.at(1)).key));
+
+            // ...and a channel is not a music row, so it carries no queue verbs.
+            CHECK(!browse::queueTargetFor(rows.at(0)).ok());
+        }
+
+        // 6c. A row carrying the prefix and nothing after it names no channel: NOT claimed, so it falls
+        // through to the resolve it would have taken rather than being consumed and dropped.
+        MediaItem empty;
+        empty.type = QStringLiteral("livetv");
+        empty.mime = QString::fromLatin1(LiveTvIdentity::kLiveTvChannelPrefix);
+        CHECK(browse::localLeafRoute(empty).play == LeafPlay::NotLocal);
+
+        // 6d. THE NEIGHBOURING SURFACE IS UNTOUCHED. A row from the CHANNEL LIST carries mime "livetv" and a
+        // real url, and opens through that url; the new prefix must not claim it, or #75's list would start
+        // re-resolving every channel it already holds a link for.
+        M3uEntry e;
+        e.tvgId = QStringLiteral("bbc.one.uk"); e.title = QStringLiteral("BBC One");
+        e.url = QStringLiteral("http://iptv.example.test/live/abc/def/12.ts");
+        const MediaCatalog chans = browse::liveTvChannelsCatalog(QStringLiteral("Src"), { e }, {});
+        for (const MediaItem& r : chans.items)
+            CHECK(browse::localLeafRoute(r).play != LeafPlay::LiveTvChannel);
+
+        // 6e. An EMPTY store produces no rows at all — the shelf's gate asks this exact question, and a
+        // producer that invented a row would put an "★ Favorites" shelf on every video root.
+        CHECK(browse::liveTvFavoriteRows({}).isEmpty());
+        CHECK(browse::liveTvFavoriteRows({ movie, game }).isEmpty());
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

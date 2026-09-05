@@ -90,4 +90,46 @@ namespace LiveTvIdentity
     // human-readable title the row kept. A row with no title at all still gets a name rather than nothing, so
     // the merge below always has something to match on.
     QString wireId(const QString& title);
+
+    // WHAT A `recent/` ROW RECORDS FOR A CHANNEL (issue #245; the rule was #203's, this is it as a function).
+    //
+    // `resumeKey` is what the open was keyed by and `streamUrl` is the link that was just minted from it.
+    // The answer is the KEY whenever the key is a channel identity this device can re-resolve, and the url
+    // otherwise. Two reasons, and neither is cosmetic:
+    //
+    //   * `recent/` is a SYNCED per-item store. #200's scrub takes the QUERY off a stored url and cannot
+    //     touch its PATH — and an IPTV url is the one this project has already ruled "routinely embeds
+    //     provider credentials", commonly as `…/live/<user>/<pass>/<id>.ts`. Recording the url therefore
+    //     puts a credential on the CloudMerge document to every device on the account.
+    //   * The url is a fact about the provider's credential TODAY. Recording it makes Continue Watching stop
+    //     working the moment that credential rotates, when the identity would still have resolved.
+    //
+    // A LEGACY `livetv:<url>` KEY IS DELIBERATELY NOT CLAIMED. Such a row (LiveTvMigrate's third outcome)
+    // has nothing else to be re-opened from, so it keeps replaying its url exactly as it always did; the
+    // caller's own dispatch refuses it for the same reason. isCredentialShaped is what tells the two apart.
+    //
+    // It lives HERE, pure and QtCore-only, rather than inline at the write site, because the write site is
+    // MainWindow — which links nothing headlessly — and this one boolean is the whole distance between a
+    // synced store that holds a credential and one that does not. probe_cloudmerge §40 pins it.
+    QString recentPathFor(const QString& resumeKey, const QString& streamUrl);
+
+    // ---- LOCAL LEAF KIND (declared with the feature that stamps it — see browse/LeafRoute.h) -------------
+    // A STARRED CHANNEL SHOWN AS A BROWSE ROW (issue #244): the themed Favourites shelf's channel rows carry
+    // this prefix followed by the channel identity, and channelKeyOf reads it back. Keyed, and carrying NO
+    // url on purpose — the whole point of #203 is that the url is minted at open from this device's sources
+    // — which is why it needs a route of its own rather than the generic "open this row's file" one.
+    //
+    // The spelling is NOT "livetv:", the identity's own prefix, and not "livetv" either, which is the mime
+    // the CHANNEL LIST's rows carry (those DO have a url and open through it). A prefix that matched either
+    // would re-route a surface this issue is not about.
+    inline const char* kLiveTvChannelPrefix = "livetvchan:";
+
+    // The key a keyed mime carries: EVERYTHING after the prefix, never a section(':') — a channel identity
+    // is itself full of colons ("livetv:name:bbc one"), so a split would truncate every one of them into a
+    // different channel's id. The same rule, and the same reason, as browse::jellyfinKeyOf.
+    inline QString channelKeyOf(const QString& mime, const char* prefix)
+    {
+        const QString p = QString::fromLatin1(prefix);
+        return mime.startsWith(p) ? mime.mid(p.size()) : QString();
+    }
 }

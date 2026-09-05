@@ -147,6 +147,32 @@ namespace browse
     // now (MainWindow::openLiveTvChannel). Mirrors localGameFavorite.
     FavoriteItem liveTvChannelFavorite(const QVector<M3uEntry>& entries, int index);
 
+    // ---- A STARRED CHANNEL AS A BROWSE ROW (issue #244) --------------------------------------------------
+    // The starred Live TV channels of `favs`, as rows for the ★ Favorites SHELF — the one thing on that shelf
+    // that is not drawn from the catalogue page under it.
+    //
+    // WHY A CHANNEL IS THE EXCEPTION. That shelf is an intersection: it lists the rows of the level you are
+    // standing on which happen to be starred, which is why it needs no store of its own and why it is
+    // correctly scoped. A channel is starred from a folder INSIDE the video catalogue (Live TV → a source),
+    // never from the catalogue page itself, so the intersection is empty by construction and the star put the
+    // favourite somewhere with no surface at all on a themed layout — stored, synced, shown by the classic
+    // Home row, and invisible on the layout this app is used through. It is not the general case: no other
+    // favourite is unreachable from the level it was starred on, so nothing else is added here and the
+    // shelf's scoping is not widened for anything else.
+    //
+    // A ROW CARRIES NO URL, ON PURPOSE — the identity is the whole of #203, and the url is minted at open
+    // from this device's sources. `kLiveTvChannelPrefix` + the identity is its mime, which is what routes it
+    // (browse::localLeafRoute → LeafPlay::LiveTvChannel → openRecent → MainWindow::openLiveTvChannel).
+    //
+    // A LEGACY `livetv:<url>` FAVOURITE IS NOT LISTED. It has no identity to resolve — LiveTvMigrate keeps
+    // such a row precisely because its url is the only thing that can play it — and a shelf whose contract is
+    // "resolved at open, never a stale url" cannot honour it. It stays exactly where it already was (the
+    // classic Home Favourites row, unchanged) and joins this shelf the moment a loaded source names it.
+    //
+    // Pure: favourites in, rows out. No store read, no network, no ordering of its own — `favs` arrives in
+    // FavoritesStore's own newest-first order and keeps it.
+    QVector<MediaItem> liveTvFavoriteRows(const QList<FavoriteItem>& favs);
+
     // One playlist's contents: PlaylistEntry -> MediaItem. Each entry carries its OWN addonId (playlists are
     // category-scoped and may be mixed-source), stamped onto the row's sourceAddonId so activateItem resolves
     // the right addon per entry — the playlist level itself is addon-less. A "steam:" itemId launches natively

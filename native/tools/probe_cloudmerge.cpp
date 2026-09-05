@@ -5524,6 +5524,117 @@ int main(int argc, char** argv)
         useProfile(QStringLiteral("cmA"));
     }
 
+    // ========================================================================================================
+    // §40 — WHAT A `recent/` ROW RECORDS WHEN A LIVE TV CHANNEL PLAYS (issue #245, the #203 leftover)
+    // ========================================================================================================
+    // #203 taught MainWindow::playStream to file a channel under its IDENTITY rather than under the stream
+    // link that had just been minted for it. That was one guarded line in a function that links nothing
+    // headlessly: it was driven by hand, twice, and after that nothing in the suite could tell the fixed
+    // build from the broken one. `recent/` is a per-item SYNCED store (§34's whole subject), #200's scrub
+    // takes the QUERY off a stored url and CANNOT touch its PATH, and an IPTV provider puts its credential
+    // in the path — so a regression there would have put a credential back onto the sync document in
+    // silence, which is the failure mode this whole family of issues exists about.
+    //
+    // So the decision is now LiveTvIdentity::recentPathFor, pure and QtCore-only, and this section drives it
+    // over a fixture whose url carries a token in its PATH and then SCANS THE SERIALISED ROW — the bytes
+    // RecentStore actually wrote into the ini, which is the thing CloudMerge reads and sends. Asserting the
+    // return value alone would pass on a build that recorded the identity and then leaked the url through
+    // some other field of the same row.
+    //
+    // The token is only ever named through a variable, never spelled into an assertion: CHECK() prints the
+    // condition TEXT on failure, so `CHECK(!blob.contains("…the bytes…"))` would put them in the transcript
+    // of every red run — which is the very thing being tested for.
+    {
+        useProfile(QStringLiteral("r40"));
+        wipeStores();
+
+        // The fixture. A real IPTV url's shape: the provider's user and secret are PATH SEGMENTS, which is
+        // exactly why #200's query scrub is no defence here.
+        const QString token   = QStringLiteral("Zq7-fixture-secret-4b81");
+        const QString chanUrl = QStringLiteral("http://iptv.example.test/live/probeuser/") + token
+                                + QStringLiteral("/4231.ts");
+        CHECK(chanUrl.contains(token));          // the fixture is actually carrying one
+        CHECK(chanUrl.indexOf(QLatin1Char('?')) < 0);  // ...in the PATH: there is no query to scrub
+
+        // 40a. THE RULE. A channel identity in, the identity back — never the freshly minted link.
+        const QString idTvg  = LiveTvIdentity::idForTvgId(QStringLiteral("sky.sports.uk"));
+        const QString idName = LiveTvIdentity::idForName(QStringLiteral("Film4 HD"));
+        CHECK(LiveTvIdentity::recentPathFor(idTvg,  chanUrl) == idTvg);
+        CHECK(LiveTvIdentity::recentPathFor(idName, chanUrl) == idName);
+
+        // 40b. EVERY OTHER ROUTE THROUGH THE WRITE SITE IS BYTE-IDENTICAL. This is the no-regression half,
+        // and it is the reason the helper takes both arguments rather than being a bare predicate: a pasted
+        // link, a debrid stream keyed by a catalog id, a bare-path replay and a keyless open must each reach
+        // their row exactly as they did before #203 existed.
+        const QString debrid = QStringLiteral("https://cdn.example.test/dl/movie.mkv?token=abc");
+        CHECK(LiveTvIdentity::recentPathFor(QString(), debrid) == debrid);              // keyless
+        CHECK(LiveTvIdentity::recentPathFor(QStringLiteral("tt0816692"), debrid) == debrid);  // a catalog id
+        CHECK(LiveTvIdentity::recentPathFor(QStringLiteral("C:/films/a.mkv"), debrid) == debrid);
+        // ...and a LEGACY `livetv:<url>` key is NOT claimed. Such a row has nothing else to be re-opened
+        // from (LiveTvMigrate's third outcome), so it keeps replaying its url exactly as it always did.
+        const QString legacyKey = QStringLiteral("livetv:") + chanUrl;
+        CHECK(LiveTvIdentity::isCredentialShaped(legacyKey));
+        CHECK(LiveTvIdentity::recentPathFor(legacyKey, chanUrl) == chanUrl);
+
+        // 40c. THE SERIALISED ROW. Written the way playStream writes it — path from the helper, key the
+        // identity, title the channel's — and then read back RAW out of the ini, which is the byte sequence
+        // CloudMerge::serializeAll puts on the document.
+        RecentItem row;
+        row.path  = LiveTvIdentity::recentPathFor(idTvg, chanUrl);
+        row.title = QStringLiteral("Sky Sports");
+        row.kind  = QStringLiteral("video");
+        row.key   = idTvg;
+        RecentStore::add(row);
+
+        QString blob;
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            blob = raw.value(QStringLiteral("recent/r40/items")).toString();
+        }
+        CHECK(!blob.isEmpty());                                  // the row reached the store at all
+        CHECK(blob.contains(idTvg));                             // ...under its identity
+        // THE ASSERTION THIS SECTION EXISTS FOR. Not one byte of the token, and no url shape at all — a
+        // stored `livetv:<tvg-id>` has no scheme, so a `://` anywhere in this row means a link got in.
+        CHECK(!blob.contains(token));
+        CHECK(!blob.contains(QStringLiteral("://")));
+        CHECK(!blob.contains(QStringLiteral("iptv.example.test")));
+        // The same two questions asked of the row as the READER hands it back, so a future writer that kept
+        // the ini clean and reconstituted a url on the way out would still be caught.
+        {
+            const QVector<RecentItem> back = RecentStore::list();
+            CHECK(back.size() == 1);
+            if (back.size() == 1)
+            {
+                CHECK(back.first().path == idTvg);
+                CHECK(back.first().key  == idTvg);
+                CHECK(!back.first().path.contains(token));
+                CHECK(!back.first().path.contains(QStringLiteral("://")));
+            }
+        }
+
+        // 40d. THE CONTROL. The SAME fixture recorded the way a build without this rule records it — the
+        // url — does reach the ini, and the scan above does see it. Without this the four negatives are
+        // satisfied by a probe that simply never wrote anything, which is the shape of green that gets a
+        // working assertion deleted.
+        wipeStores();
+        RecentItem urlRow;
+        urlRow.path  = chanUrl;                     // deliberately NOT through recentPathFor
+        urlRow.title = QStringLiteral("Sky Sports");
+        urlRow.kind  = QStringLiteral("video");
+        urlRow.key   = idTvg;
+        RecentStore::add(urlRow);
+        QString urlBlob;
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            urlBlob = raw.value(QStringLiteral("recent/r40/items")).toString();
+        }
+        CHECK(urlBlob.contains(token));             // #200's scrub cannot reach a PATH segment...
+        CHECK(urlBlob.contains(QStringLiteral("://")));  // ...so the credential IS on the sync document
+
+        wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
     std::fprintf(stderr, "CLOUDMERGE: %d check(s) failed\n", failures);
     return 1;
