@@ -25,7 +25,8 @@ QString iconTypeForKind(const QString& kind)
     return QString();
 }
 
-MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
+MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker,
+                            const std::function<QString(const QString&, const QString&)>& displayArt)
 {
     // marker = "<kind>" or "<kind>|<system>": the optional system scopes a games console (its SystemCatalog id,
     // or "pc"); empty system = all of that kind (the catalogue-root Recent).
@@ -57,7 +58,8 @@ MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
         it.mime = r.kind;                                      // routing kind
         it.type = iconTypeForKind(r.kind);                    // drives the placeholder icon + resume bar
         // Offline-first artwork: a downloaded item's locally cached poster wins over the remote url.
-        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, r.thumb);
+        const QString artKey = it.id.isEmpty() ? it.url : it.id;
+        it.thumbnailUrl = displayArt ? displayArt(artKey, r.thumb) : MetaCache::displayImage(artKey, r.thumb);
         it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
         cat.items.push_back(it);
     }
