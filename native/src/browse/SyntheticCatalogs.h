@@ -36,7 +36,13 @@ namespace browse
 
     // marker = "<kind>" or "<kind>|<system>": the optional system scopes a games console (its SystemCatalog id,
     // or "pc"); empty system = all of that kind (the catalogue-root Recent). PC games count as "game".
-    MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker);
+    // `displayArt` injects the offline-first artwork lookup: (meta key, stored thumb url) -> the url to
+    // show. Default {} uses MetaCache::displayImage, which is this builder's ONLY filesystem touch (it
+    // opens the item's cached meta.json once per art role). Injecting it is what lets a perf probe time
+    // THIS MAPPING instead of the disk it was really timing (#270) - the same seam downloadsCatalog's
+    // fileExists already is.
+    MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker,
+                                const std::function<QString(const QString&, const QString&)>& displayArt = {});
 
     // marker = "<kind>|<system>": kind filters the catalogue; system (a SystemCatalog id, or "pc") scopes a
     // games console. An empty system matches any (non-game catalogues). fileExists lets a test inject a fake
