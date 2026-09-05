@@ -266,7 +266,7 @@ int main(int argc, char** argv)
         CHECK(ContentRecipe::verdictForScalar(true, QStringLiteral("C:\\emu\\pkgs\\ours.nsp"), QStringLiteral("x"), ours) == Verdict::Write);
         #else
         // On Unix it is not the same path, so the value is simply somebody else's and is left alone.
-        const QString oursBackslash = QStringLiteral("C:\emu\pkgs\ours.nsp");
+        const QString oursBackslash = QStringLiteral("C:\\emu\\pkgs\\ours.nsp");
         CHECK(ContentRecipe::verdictForScalar(true, oursBackslash, QStringLiteral("x"), ours) == Verdict::LeaveAlone);
         #endif
 
@@ -660,7 +660,7 @@ int main(int argc, char** argv)
         CHECK(ContentInstall::weInstalled(t, QStringLiteral("C:\\emu\\pkgs\\u.nsp")));
         #else
         // On Unix that string names a different file, so the record does not claim it.
-        const QString uBackslash = QStringLiteral("C:\emu\pkgs\u.nsp");
+        const QString uBackslash = QStringLiteral("C:\\emu\\pkgs\\u.nsp");
         CHECK(!ContentInstall::weInstalled(t, uBackslash));
         #endif
         CHECK(!ContentInstall::weInstalled(t, QStringLiteral("D:/mine/u.nsp")));
@@ -696,7 +696,7 @@ int main(int argc, char** argv)
         #else
         // On Unix it is a DIFFERENT name — a backslash is a legal character in a file name there — so it
         // is not found, and that is the answer we want rather than two files comparing equal.
-        const QString dBackslash = QStringLiteral("C:\d.nsp");
+        const QString dBackslash = QStringLiteral("C:\\d.nsp");
         CHECK(!ContentInstall::jsonNamesPath(dentry, dBackslash));
         #endif
         CHECK(!ContentInstall::jsonNamesPath(dentry, QStringLiteral("C:/other.nsp")));
