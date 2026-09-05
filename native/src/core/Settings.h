@@ -190,6 +190,29 @@ namespace Settings
     int  gestureEdgeInset();
     void setGestureEdgeInset(int px);
 
+    // Touch reading (issue #147), in the SAME gestures/ home the video player's keys use — a reader gesture
+    // and a player gesture are one vocabulary, so they are one group of settings. All three are inert off a
+    // touch form factor (ReaderGestureConfig applies FormFactor exactly as #162 does), which is what keeps a
+    // phone's preset out of the TV profile.
+    //
+    // readerTapZones is a PRESET, stored as ReaderGestures::TapPreset's int: 0 left-goes-back (the default),
+    // 1 its left-thumb mirror, 2 menu-only (paging by swipe alone). Clamped on read AND on write, so a
+    // hand-edited ini reads as the default rather than as no zones at all. readerKeepAwake defaults OFF —
+    // holding a device awake is a promise about someone's battery and it is theirs to make.
+    int  readerTapZones();
+    void setReaderTapZones(int preset);
+    bool readerSwipePaging();
+    void setReaderSwipePaging(bool on);
+    bool readerKeepAwake();
+    void setReaderKeepAwake(bool on);
+
+    // Dual-page landscape for BOOKS (issue #147): a two-column spread when the viewport is wide. A pagination
+    // geometry change in the existing text flow — not a comic's two-up, which is issue #154's and untouched.
+    // Default ON, matching the comic spread's own default: two columns on a wide screen is better reading,
+    // and the row below turns it off for anyone who disagrees.
+    bool readerDualPage();
+    void setReaderDualPage(bool on);
+
     // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
     // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
     // a button you ignored, and invisible when it is a seek that already happened).

@@ -21650,6 +21650,21 @@ void MainWindow::openGeneralSettings()
         QString curReaderThemeDisp = readerThemeOpts.first();
         for (const auto& t : readerThemePairs) if (t.second == Settings::readerTheme()) { curReaderThemeDisp = t.first; break; }
 
+        // --- Touch reading (issue #147). The tap-zone PRESET, three of them and no matrix. The same three
+        // display<->value pairs back the classic builder's QComboBox below, so one list decides what the
+        // rows offer and what they store. The strings say what the zones DO rather than naming a grip:
+        // "left turns back" is checkable against the page in front of you; "for a left-thumb grip" is a
+        // claim about the reader. ---
+        const QList<QPair<QString, int>> readerZonePairs = {
+            { tr("Left goes back, right goes forward"), 0 },
+            { tr("Left goes forward, right goes back"), 1 },
+            { tr("Every tap opens the menu (swipe to turn pages)"), 2 },
+        };
+        QStringList readerZoneOpts;
+        for (const auto& z : readerZonePairs) readerZoneOpts << z.first;
+        QString curReaderZoneDisp = readerZoneOpts.first();
+        for (const auto& z : readerZonePairs) if (z.second == Settings::readerTapZones()) { curReaderZoneDisp = z.first; break; }
+
         // --- Audio output (issue #69). The device picker enumerates mpv's audio-device-list from the live
         // player; "Auto" (stored as an empty id) is always the first entry and the default. The handler maps the
         // picked display back to the stored device id through this same list, so nothing but a listed id is ever
@@ -22119,6 +22134,24 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("reader.hint"),
              tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the page but keep your place."),
              QString());
+        // --- Touch reading (issue #147). The tap-zone preset, swipe paging and keep-awake are inert unless
+        // this device reports a touch form factor (ReaderGestureConfig applies the same FormFactor gate the
+        // video player's gestures do), which is also what keeps a phone's preset out of the TV profile; the
+        // hint says so outright rather than hiding the rows, so a phone-and-television household can still
+        // find them from either. Dual-page landscape is NOT gated: a wide window is a wide window whether
+        // you are holding it or not. Classic twins are in the QWidget builder below (GS_TWINS). ---
+        choice(QStringLiteral("reader.zones"), tr("Tap zones"), readerZoneOpts, curReaderZoneDisp);
+        toggle(QStringLiteral("reader.swipe"), tr("Swipe sideways to turn the page"),
+               Settings::readerSwipePaging());
+        toggle(QStringLiteral("reader.keepawake"), tr("Keep the screen on while reading"),
+               Settings::readerKeepAwake());
+        toggle(QStringLiteral("reader.dualpage"), tr("Two pages side by side on a wide screen"),
+               Settings::readerDualPage());
+        info(QStringLiteral("reader.touchhint"),
+             tr("Tap zones and swiping apply on touch screens only — a mouse, a keyboard and a remote behave "
+                "exactly as they always have, and a tap across the top of the page always opens the menu. "
+                "Two pages side by side applies to books whenever the window is wider than it is tall."),
+             QString());
         // Read aloud (issue #145). An INFO row, not a control: the things you actually set — start, speed,
         // voice — belong in the reader, where you are when you want them. What belongs here is the one thing
         // the reader cannot tell you in a button, and the thing users are otherwise left to discover by being
@@ -22305,7 +22338,7 @@ void MainWindow::openGeneralSettings()
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
 #endif
-             subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, setInfo, setAction](const QString& id, const QString& val) {
+             subColorPairs, subPosOptPairs, audioDevPairs, readerThemePairs, readerZonePairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -22813,6 +22846,21 @@ void MainWindow::openGeneralSettings()
                     for (const auto& t : readerThemePairs) if (t.first == val) { th = t.second; break; }
                     Settings::setReaderTheme(th);
                     applyReaderTypographyLive();
+                }
+                // Touch reading (issue #147). The two gesture rows need no live re-apply and are owed none:
+                // the reader rebuilds its whole Config from these keys on the NEXT tap, exactly as the video
+                // player does, so a row flipped here is in force by the time a finger next touches a page.
+                // The other two DO re-apply, through #135's existing hook — dual-page repaginates the open
+                // book on the same words, and keep-awake takes or drops the lock without waiting for a turn.
+                else if (id == QStringLiteral("reader.zones")) {
+                    for (const auto& z : readerZonePairs) if (z.first == val) { Settings::setReaderTapZones(z.second); break; }
+                }
+                else if (id == QStringLiteral("reader.swipe")) Settings::setReaderSwipePaging(on);
+                else if (id == QStringLiteral("reader.keepawake")) {
+                    Settings::setReaderKeepAwake(on); applyReaderTypographyLive();
+                }
+                else if (id == QStringLiteral("reader.dualpage")) {
+                    Settings::setReaderDualPage(on); applyReaderTypographyLive();
                 }
                 else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
                 else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
@@ -24655,6 +24703,51 @@ void MainWindow::openGeneralSettings()
         connect(readerJustify, &QCheckBox::toggled, this, [this](bool c) { Settings::setReaderJustify(c);
                                                                            applyReaderTypographyLive(); });
         v->addWidget(readerJustify);
+        // Touch reading (issue #147): the classic twins of the themed reader.zones / reader.swipe /
+        // reader.keepawake / reader.dualpage rows. Same keys, same setters, same live re-apply — one write
+        // path, no drift. A user who has not enabled the themed home reaches all four here.
+        auto* readerZonesRow = new QHBoxLayout();
+        readerZonesRow->addWidget(new QLabel(tr("Tap zones")));
+        auto* readerZones = new QComboBox();
+        readerZones->setMinimumHeight(30);
+        readerZones->addItem(tr("Left goes back, right goes forward"), 0);
+        readerZones->addItem(tr("Left goes forward, right goes back"), 1);
+        readerZones->addItem(tr("Every tap opens the menu (swipe to turn pages)"), 2);
+        readerZones->setCurrentIndex(qMax(0, readerZones->findData(Settings::readerTapZones())));
+        connect(readerZones, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [readerZones](int) { Settings::setReaderTapZones(readerZones->currentData().toInt()); });
+        readerZonesRow->addWidget(readerZones, 1);
+        v->addLayout(readerZonesRow);
+
+        auto* readerSwipe = new QCheckBox(tr("Swipe sideways to turn the page"));
+        readerSwipe->setStyleSheet(QStringLiteral("font-size:15px;"));
+        readerSwipe->setChecked(Settings::readerSwipePaging());
+        connect(readerSwipe, &QCheckBox::toggled, this, [](bool c) { Settings::setReaderSwipePaging(c); });
+        v->addWidget(readerSwipe);
+
+        auto* readerAwake = new QCheckBox(tr("Keep the screen on while reading"));
+        readerAwake->setStyleSheet(QStringLiteral("font-size:15px;"));
+        readerAwake->setChecked(Settings::readerKeepAwake());
+        connect(readerAwake, &QCheckBox::toggled, this, [this](bool c) { Settings::setReaderKeepAwake(c);
+                                                                        applyReaderTypographyLive(); });
+        v->addWidget(readerAwake);
+
+        auto* readerDual = new QCheckBox(tr("Two pages side by side on a wide screen"));
+        readerDual->setStyleSheet(QStringLiteral("font-size:15px;"));
+        readerDual->setChecked(Settings::readerDualPage());
+        connect(readerDual, &QCheckBox::toggled, this, [this](bool c) { Settings::setReaderDualPage(c);
+                                                                       applyReaderTypographyLive(); });
+        v->addWidget(readerDual);
+
+        auto* readerTouchNote = new QLabel(tr("Tap zones and swiping apply on touch screens only — a mouse, a "
+                                              "keyboard and a remote behave exactly as they always have, and a "
+                                              "tap across the top of the page always opens the menu. Two pages "
+                                              "side by side applies to books whenever the window is wider than "
+                                              "it is tall."));
+        readerTouchNote->setWordWrap(true);
+        readerTouchNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(readerTouchNote);
+
         auto* readerNote = new QLabel(tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the "
                                          "page but keep your place."));
         readerNote->setWordWrap(true);

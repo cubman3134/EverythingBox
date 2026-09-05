@@ -211,6 +211,9 @@ private:
     QPointF touchStart_;
     bool    sawMulti_ = false;
     qreal   pinchBaseDist_ = 0.0;
+    // Issue #147: did this sequence START in the OS's reserved edge band? Latched on the press, because a
+    // band is a property of where the finger went DOWN, not of where it happened to be when it came up.
+    bool    touchInert_ = false;
 
     // Mouse state, for telling a click from the tail of a drag. The reader is read with a mouse at least as
     // often as with a finger, and until now the zone map was reachable only by touch.

@@ -8,6 +8,7 @@
 #include "EbookSource.h"
 #include "ReaderTypography.h"
 #include "ReadAloudTarget.h"
+#include "../core/KeepAwake.h"
 #include "../theme2/HostedReader.h"
 
 class QListWidget;
@@ -16,6 +17,7 @@ class QFrame;
 class QPushButton;
 class QTimer;
 class QTextDocument;
+class QTouchEvent;
 
 // Renders one page of a chapter and turns clicks into page/menu requests. The owner (EbookView) drives
 // chapter flow; this widget only knows how to paginate and paint the chapter it was given.
@@ -39,6 +41,20 @@ public:
     void setTypography(const ReaderTypography::Resolved& r);
     void setTopInset(int px);          // reserve space up top so the menu bar overlays margin, not text
     void setFooter(const QString& s);  // small centered line painted in the bottom margin (page x / y)
+
+    // Dual-page landscape (issue #147). This sets the PREFERENCE, not the answer: relayout() asks
+    // ReaderSpread whether this particular viewport is wide enough to earn a spread. It is a pagination
+    // geometry change and nothing else — the text flow, the numbering and topPos_ (the reading anchor, a
+    // document character offset) are untouched, which is why turning it on mid-book keeps the same words
+    // under the reader's eye.
+    void setDualPage(bool on);
+    int  columnCount() const { return columns_; }   // 1 or 2, for the UI-test snapshot and the probes
+
+    // Hosted (themed) mode: the surrounding chrome owns the finger, so this widget declines touch and
+    // lets Qt propagate it up to the reader ReaderChromeHost filters. Without this the page would
+    // answer the gesture ITSELF and its menuRequested would land on EbookView::revealMenu, which is a
+    // deliberate no-op under hosted chrome - so taps paged but never opened the themed menu.
+    void setChromeHosted(bool on) { chromeHosted_ = on; }
 
     // Page count this chapter's HTML would paginate to at the current geometry/font, without disturbing the
     // live view - used to total a book's pages across chapters.
@@ -85,20 +101,37 @@ protected:
     void resizeEvent(QResizeEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
+    // Touch, for the CLASSIC layout (issue #147). The themed layout's finger is answered by
+    // ReaderChromeHost's filter, which runs before this and consumes what it claims; this is the same
+    // vocabulary for the reader a user opens without the themed home. Off a touch form factor it declines
+    // the event outright, so Qt synthesizes the mouse press it always did and the click behaviour above is
+    // untouched — the point of the gate, applied in the direction that is easy to get wrong.
+    bool event(QEvent*) override;
 
 private:
     struct LineGeom { qreal y; qreal h; int pos; }; // document-space top, height, and start offset of a line
+    // One column of the page being shown: the first and last whole line in it. A single-column page has one
+    // of these; a spread has two. Painting and the hyperlink hit-test both walk this, so a footnote in the
+    // right-hand column is found by exactly the arithmetic that drew it.
+    struct PageColumn { int startLine; int endLine; };
 
+    bool handleTouch(QTouchEvent* te);   // returns true when the gesture was ours (no synthesized mouse)
     void relayout();           // re-lay the document and rebuild lines_/pageTops_, keeping topPos_'s line
     void rebuildLines();       // flatten the laid-out document into lines_
     void buildPageTops();      // walk lines_ from the start into whole-line pages (for the x / y count)
     void applyDocFormatting(); // (re)apply line spacing + justification to the current document (#135)
     qreal contentH() const { return qMax(1.0, qreal(height()) - topMargin_ - botMargin_); }
     qreal sideMargin() const;  // left/right paper margin in px, derived from marginPct_ and the current width
-    qreal contentW() const;    // text column width (fills the available width)
-    qreal contentLeft() const; // left edge of the text column
+    qreal pageBoxW() const;    // the whole text box between the paper margins (one OR two columns wide)
+    qreal gutterPx() const;    // the inner margin between the two columns of a spread
+    qreal contentW() const;    // ONE column's text width — what the document is laid out at
+    qreal contentLeft() const; // left edge of the first column
+    qreal columnLeftX(int i) const;          // left edge of column i, honouring the reading direction
+    QVector<PageColumn> pageColumns() const; // the columns of the page that starts at topPos_
     int  lineIndexForPos(int pos) const;     // index into lines_ of the line containing a document offset
-    int  lastFittingLine(int startLine) const; // last whole line that fits a page starting at startLine
+    int  lastFittingInColumn(int startLine) const; // last whole line that fits ONE column from startLine
+    int  lastFittingLine(int startLine) const; // last whole line on the whole PAGE (every column of it)
+    int  firstLineOfColumnEndingAt(int endLine) const; // the column walk, backwards (pageBackward)
     qreal anchorXInLine() const; // x-shift so the anchored word starts the first line (0 if at line start)
     void recomputeCurrentPage(); // curPage_ = which from-start page holds topPos_
 
@@ -117,6 +150,20 @@ private:
     qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text
     qreal botMargin_  = 40.0; // leaves room for the page-number footer
     QString footer_;
+    // Dual-page landscape (#147). dualPage_ is what the user asked for; columns_ is what this viewport
+    // actually earns (ReaderSpread::columns, recomputed on every relayout). rtl_ is the seam issue #152's
+    // reading direction plugs into — books pass false today, because no book format's declared
+    // page-progression-direction is read yet and pretending otherwise would be a claim, not a feature.
+    bool  dualPage_ = true;
+    int   columns_  = 1;
+    bool  rtl_      = false;
+    // Touch state for the classic layout (#147): where the finger went down, and whether that press landed
+    // in the OS's reserved edge band — latched on the press, because a band is a property of where the
+    // sequence STARTED, not of wherever the finger happened to be when it was lifted.
+    QPointF touchStart_;
+    bool    touchInert_ = false;
+    bool    chromeHosted_ = false; // themed chrome is up: the host answers the finger, not this widget
+    bool    touchMulti_ = false;   // a second finger latches the sequence off: a pinch is not a page turn
 };
 
 class EbookView : public QWidget, public HostedReader, public ReadAloudTarget
@@ -211,6 +258,10 @@ signals:
 protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
+    // Keep the screen awake while reading (issue #147) follows the reader's VISIBILITY, not an open/close
+    // pair somebody has to remember to write: the reader is a page in a stack, and leaving it hides it.
+    void showEvent(QShowEvent*) override;
+    void hideEvent(QHideEvent*) override;
 
 private slots:
     void biggerFont();
@@ -232,6 +283,9 @@ private:
     void restoreState();
     void layoutOverlays();
     void recomputeBookPages(); // tally each chapter's page count for a book-wide "page x / y"
+    // Take or drop the wake lock to match "a book is open, the reader is on screen, the toggle is on".
+    // Idempotent, so every caller can just say "reconsider" without tracking what it did last time.
+    void updateKeepAwake();
     int  globalPage() const;   // 1-based page within the whole book at the current spot
 
     std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / Fb2Book / TextBook / PdfTextBook, chosen by content then name
@@ -257,5 +311,8 @@ private:
     double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
     bool   hosted_ = false;        // hosted mode: themed chrome drives us; suppress our own menu/toc/reveal
     class ReadAloudController* readAloud_ = nullptr;  // owned; null when the build has no TextToSpeech module
+    // The wake lock (issue #147). A unique_ptr member and NOT a bool, so the release is structural: the
+    // reader being destroyed by a teardown nobody wrote a handler for still lets the screen sleep again.
+    std::unique_ptr<KeepAwake::Guard> awake_;
     static constexpr int kMenuHeight = 38; // overlay menu height; the page reserves this much up top
 };
