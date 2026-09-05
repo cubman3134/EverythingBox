@@ -34,6 +34,13 @@
 //  13. PROGRESS (increment 2): the pure formula — finished parts' lengths plus the current part's position,
 //      over the total — including the three answers that are NOT a number (unstarted, unknown length,
 //      finished-by-mark), and the words the book page puts them in.
+//  15. ENRICHMENT (issue #198): a provider's reply read by LABEL (and the series position taken from the
+//      match rather than parsed out of a title that says "Book 3"), the confidence threshold, the merge when
+//      two providers answer - and, above all, LOCAL TAGS ALWAYS WIN: a fully tagged book is unmoved by a
+//      99%-confidence match that contradicts every field, while a tag that is PRESENT AND EMPTY is a blank
+//      and fills. Plus: an enriched narrator mints a real Narrators bucket, a book with no match is exactly
+//      what the scan found, and a REJECTION survives a re-scan and cannot be overwritten by the sweep that
+//      stored it.
 //  14. CHAPTERS (increment 2): the list for both book shapes — an .m4b's atoms and a folder's parts — the
 //      row the listener is standing in, the natural order surviving into it, and the door that is not
 //      offered for a book of one row.
@@ -44,6 +51,8 @@
 // is written under it and goes away at exit. Nothing is written beside the exe.
 #include "AudiobookLibrary.h"
 #include "AudiobookCatalogs.h"
+#include "AudiobookMeta.h"        // #198: the enrichment rule
+#include "AudiobookMatchStore.h"  // #198: the match + rejection record
 #include "MusicLibrary.h"     // §9: the same file, read by the OTHER library
 #include "AppPaths.h"
 #include "MusicFixtures.h"
@@ -53,6 +62,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonObject>
 #include <QString>
 #include <cstdio>
 
@@ -859,6 +869,374 @@ int main(int argc, char** argv)
         QString r;
         CHECK(AudiobookLibrary::loadIndexFile(base + QStringLiteral("/missing.json"), &r).isEmpty());
         CHECK(r.isEmpty());
+    }
+
+    // ---- §15 ENRICHMENT (issue #198): narrator, series position, cover, year — and what may NOT land ----
+    //
+    // A SECOND, SEPARATE fixture root, scanned on its own, because everything here is about the difference
+    // between "what the tags said" and "what a provider said" and the §1-§14 library is deliberately
+    // well-tagged. Three books:
+    //   BARE      — an album title and an artist, and nothing else. The population the feature exists for.
+    //   TAGGED    — a narrator, a series, a series place, a year and a cover, ALL of them tagged. The match
+    //               below contradicts every one of them, and not one of them may move.
+    //   BLANKTAG  — a NARRATOR and a SERIES frame that are present and hold only whitespace. The commonest
+    //               shape a bulk converter leaves behind, and the case a naive "the file has the field"
+    //               test reads as "the file said so" — which would make the feature dormant on exactly the
+    //               libraries it is for, and leave a whitespace narrator no re-scan could ever clear.
+    {
+        using AudiobookMeta::Match;
+        const QString eroot = base + QStringLiteral("/enrich");
+
+        {
+            Mp3Tags t;
+            t.artist = QStringLiteral("J. R. R. Tolkien");
+            t.album  = QStringLiteral("The Silmarillion");
+            for (int i = 1; i <= 2; ++i)
+            { t.title = QStringLiteral("Part %1").arg(i); t.track = QString::number(i);
+              CHECK(writeMp3(eroot + QStringLiteral("/Bare/part%1.mp3").arg(i), t)); }
+        }
+        {
+            Mp3Tags t;
+            t.artist     = QStringLiteral("Frank Herbert");
+            t.album      = QStringLiteral("Dune");
+            t.title      = QStringLiteral("Dune");
+            t.narrator   = QStringLiteral("Scott Brick");
+            t.series     = QStringLiteral("Dune Chronicles");
+            t.seriesPart = QStringLiteral("1");
+            t.year       = QStringLiteral("1965");
+            t.cover      = jpeg;
+            CHECK(writeMp3(eroot + QStringLiteral("/Tagged/dune.mp3"), t));
+        }
+        {
+            Mp3Tags t;
+            t.artist   = QStringLiteral("William Gibson");
+            t.album    = QStringLiteral("Neuromancer");
+            t.title    = QStringLiteral("Neuromancer");
+            t.narrator = QStringLiteral("   ");   // PRESENT, and empty. See the note above.
+            t.series   = QStringLiteral("  ");
+            CHECK(writeMp3(eroot + QStringLiteral("/Blank/neuro.mp3"), t));
+        }
+
+        const QVector<FileEntry> scanned = AudiobookLibrary::scanFolder(eroot);
+        CHECK(scanned.size() == 4);
+        const Index bare = AudiobookLibrary::buildIndex(scanned);
+        CHECK(bare.bookCount == 3);
+
+        // The three book keys, from the SCAN's own grouping rule rather than rebuilt here.
+        QString keyBare, keyTagged, keyBlank;
+        for (const FileEntry& e : scanned)
+        {
+            if (e.book == QStringLiteral("The Silmarillion")) keyBare   = AudiobookLibrary::bookKeyFor(e);
+            if (e.book == QStringLiteral("Dune"))             keyTagged = AudiobookLibrary::bookKeyFor(e);
+            if (e.book == QStringLiteral("Neuromancer"))      keyBlank  = AudiobookLibrary::bookKeyFor(e);
+        }
+        CHECK(!keyBare.isEmpty());
+        CHECK(!keyTagged.isEmpty());
+        CHECK(!keyBlank.isEmpty());
+
+        // "Is this book filed under a narrator bucket of this name?" — the question the Narrators view is,
+        // asked of an index. The TAGGED book already mints one bucket ("Scott Brick") off its own tag, so a
+        // bare `narrators.isEmpty()` would be asserting the wrong thing entirely.
+        const auto filedUnder = [](const Index& ix, const QString& who, const QString& bk) {
+            for (const AudiobookLibrary::Narrator& n : ix.narrators)
+                if (n.name == who)
+                    for (const Book& nb : n.books) if (nb.key == bk) return true;
+            return false;
+        };
+
+        // -- (a) THE PRECEDENCE RULE ITSELF, as three functions ------------------------------------------
+        CHECK(AudiobookMeta::tagCarries(QStringLiteral("Rob Inglis")));
+        CHECK(!AudiobookMeta::tagCarries(QString()));
+        CHECK(!AudiobookMeta::tagCarries(QStringLiteral("   ")));      // present-and-empty IS a blank
+        CHECK(AudiobookMeta::fill(QStringLiteral("Mine"), QStringLiteral("Theirs"))
+              == QStringLiteral("Mine"));
+        CHECK(AudiobookMeta::fill(QStringLiteral("   "), QStringLiteral("Theirs"))
+              == QStringLiteral("Theirs"));
+        CHECK(AudiobookMeta::fill(QString(), QStringLiteral("Theirs")) == QStringLiteral("Theirs"));
+        CHECK(AudiobookMeta::fillInt(7, 3) == 7);
+        CHECK(AudiobookMeta::fillInt(0, 3) == 3);
+        CHECK(AudiobookMeta::fillInt(0, 0) == 0);
+
+        // -- (b) READING A PROVIDER'S REPLY, by LABEL and never by title --------------------------------
+        MediaDetail reply;
+        reply.title    = QStringLiteral("The Silmarillion: Book 3 of the Middle-earth Chronicles");
+        reply.overview = QStringLiteral("The elder days of Middle-earth.");
+        reply.imageUrl = QStringLiteral("https://example.invalid/silm.jpg");
+        reply.facts.push_back({ QStringLiteral("Author"),      QStringLiteral("J. R. R. Tolkien") });
+        reply.facts.push_back({ QStringLiteral("Narrated by"), QStringLiteral("Martin Shaw") });
+        reply.facts.push_back({ QStringLiteral("Series"),      QStringLiteral("Middle-earth") });
+        reply.facts.push_back({ QStringLiteral("Published"),   QStringLiteral("1977-09-15") });
+        reply.facts.push_back({ QStringLiteral("Runtime"),     QStringLiteral("14h 20m") });
+        Match m = AudiobookMeta::fromDetail(reply, QStringLiteral("com.everythingbox.openlibrary"));
+        CHECK(m.narrator == QStringLiteral("Martin Shaw"));
+        CHECK(m.series == QStringLiteral("Middle-earth"));
+        CHECK(m.year == 1977);
+        CHECK(m.runtimeSec == 14 * 3600 + 20 * 60);
+        CHECK(m.coverUrl == QStringLiteral("https://example.invalid/silm.jpg"));
+        CHECK(m.matchAuthor == QStringLiteral("J. R. R. Tolkien"));
+        CHECK(m.hasFields());
+        // THE POSITION IS NOT PARSED OUT OF THE TITLE. The reply's title says "Book 3" and carries no
+        // position field, so the position stays 0 — the book keeps the place the scan gave it, and a boxed-
+        // set volume number never becomes a series index. This is the assertion #198 asks for by name.
+        CHECK(m.seriesIndex == 0);
+        // ...and WITH a position field it is taken, from that field.
+        reply.facts.push_back({ QStringLiteral("Series position"), QStringLiteral("#2") });
+        CHECK(AudiobookMeta::fromDetail(reply, QStringLiteral("p")).seriesIndex == 2);
+
+        // The value parsers, each refusing rather than guessing.
+        CHECK(AudiobookMeta::parseYear(QStringLiteral("1977")) == 1977);
+        CHECK(AudiobookMeta::parseYear(QStringLiteral("April 1998")) == 1998);
+        CHECK(AudiobookMeta::parseYear(QStringLiteral("no idea")) == 0);
+        CHECK(AudiobookMeta::parseSeriesIndex(QStringLiteral("3.5")) == 3);
+        CHECK(AudiobookMeta::parseSeriesIndex(QStringLiteral("Book 3")) == 3);
+        CHECK(AudiobookMeta::parseSeriesIndex(QString()) == 0);
+        CHECK(AudiobookMeta::parseRuntimeSec(QStringLiteral("14:20:00")) == 14 * 3600 + 20 * 60);
+        CHECK(AudiobookMeta::parseRuntimeSec(QStringLiteral("860 min")) == 860 * 60);
+        CHECK(AudiobookMeta::parseRuntimeSec(QStringLiteral("51600")) == 51600);
+        CHECK(AudiobookMeta::parseRuntimeSec(QStringLiteral("ages")) == 0);
+
+        // -- (c) CONFIDENCE, and the threshold that keeps a bad match off the shelf ----------------------
+        const Book* bookBare = bare.book(keyBare);
+        CHECK(bookBare != nullptr);
+        if (bookBare)
+        {
+            Match good = AudiobookMeta::fromDetail(reply, QStringLiteral("com.everythingbox.openlibrary"));
+            good.confidence = AudiobookMeta::confidenceFor(*bookBare, good);
+            CHECK(good.confidence >= AudiobookMeta::kAcceptThreshold);
+
+            Match wrong = good;
+            wrong.matchTitle  = QStringLiteral("A Brief History of Time");
+            wrong.matchAuthor = QStringLiteral("Stephen Hawking");
+            CHECK(AudiobookMeta::confidenceFor(*bookBare, wrong) < AudiobookMeta::kAcceptThreshold);
+
+            Match unnamed = good;
+            unnamed.matchTitle = QString();
+            CHECK(AudiobookMeta::confidenceFor(*bookBare, unnamed) == 0);
+        }
+        // Articles and punctuation are not a difference.
+        CHECK(AudiobookMeta::normalizedName(QStringLiteral("The Hobbit"))
+              == AudiobookMeta::normalizedName(QStringLiteral("Hobbit, The")));
+
+        // -- (d) TAGS WIN, FIELD BY FIELD, and a blank is not a value -----------------------------------
+        Match forBare = AudiobookMeta::fromDetail(reply, QStringLiteral("com.everythingbox.openlibrary"));
+        forBare.seriesIndex = 2;
+        forBare.confidence  = 99;
+        // A match that CONTRADICTS every tag the well-tagged book carries.
+        Match forTagged;
+        forTagged.matchTitle  = QStringLiteral("Dune");
+        forTagged.narrator    = QStringLiteral("Somebody Else");
+        forTagged.series      = QStringLiteral("Another Series");
+        forTagged.seriesIndex = 9;
+        forTagged.year        = 2001;
+        forTagged.runtimeSec  = 60;
+        forTagged.confidence  = 99;
+        Match forBlank;
+        forBlank.matchTitle  = QStringLiteral("Neuromancer");
+        forBlank.narrator    = QStringLiteral("Robertson Dean");
+        forBlank.series      = QStringLiteral("Sprawl");
+        forBlank.seriesIndex = 1;
+        forBlank.year        = 1984;
+        forBlank.confidence  = 99;
+
+        QHash<QString, Match> matches;
+        matches.insert(keyBare, forBare);
+        matches.insert(keyTagged, forTagged);
+        matches.insert(keyBlank, forBlank);
+
+        QVector<FileEntry> enriched = scanned;
+        const int touched = AudiobookMeta::applyToEntries(enriched, matches);
+        CHECK(touched == 3);        // both parts of the bare book, and the blank-tagged one
+        const Index eidx = AudiobookLibrary::buildIndex(enriched);
+        CHECK(eidx.bookCount == 3);
+
+        const Book* eb = eidx.book(keyBare);
+        CHECK(eb != nullptr);
+        if (eb)
+        {
+            CHECK(eb->narrator == QStringLiteral("Martin Shaw"));
+            CHECK(eb->series == QStringLiteral("Middle-earth"));
+            CHECK(eb->seriesIndex == 2);
+            CHECK(eb->year == 1977);
+        }
+        // THE TAGGED BOOK IS UNTOUCHED, every field, at 99% confidence, from a provider that disagreed
+        // about all of them. This is the whole safety of the feature.
+        const Book* et = eidx.book(keyTagged);
+        CHECK(et != nullptr);
+        if (et)
+        {
+            CHECK(et->narrator == QStringLiteral("Scott Brick"));
+            CHECK(et->series == QStringLiteral("Dune Chronicles"));
+            CHECK(et->seriesIndex == 1);
+            CHECK(et->year == 1965);
+        }
+        // ...and the PRESENT-AND-EMPTY tags are blanks, so they fill.
+        const Book* ez = eidx.book(keyBlank);
+        CHECK(ez != nullptr);
+        if (ez)
+        {
+            CHECK(ez->narrator == QStringLiteral("Robertson Dean"));
+            CHECK(ez->series == QStringLiteral("Sprawl"));
+            CHECK(ez->seriesIndex == 1);
+        }
+        // A PART'S LENGTH IS NEVER TAKEN FROM A MATCH — the progress bar divides by it.
+        for (int i = 0; i < scanned.size(); ++i)
+            CHECK(enriched.at(i).durationSec == scanned.at(i).durationSec);
+
+        // -- (e) NARRATOR IS A BROWSE DIMENSION FOR ENRICHED BOOKS TOO ----------------------------------
+        // Before: only the TAGGED book names a narrator, so that is the only bucket there is and neither of
+        // the other two books is reachable from the Narrators view at all.
+        CHECK(bare.narrators.size() == 1);
+        CHECK(filedUnder(bare, QStringLiteral("Scott Brick"), keyTagged));
+        CHECK(!filedUnder(bare, QStringLiteral("Martin Shaw"), keyBare));
+        // After: the bucket is minted by exactly the code that files a TAGGED narrator, so the enriched
+        // book opens from either side and plays the same queue. THIS is #198's payoff.
+        CHECK(eidx.narrators.size() == 3);
+        CHECK(filedUnder(eidx, QStringLiteral("Martin Shaw"), keyBare));
+        CHECK(filedUnder(eidx, QStringLiteral("Robertson Dean"), keyBlank));
+        CHECK(filedUnder(eidx, QStringLiteral("Scott Brick"), keyTagged));   // ...and the tagged one is still there
+        CHECK(catalogHasType(browse::audiobookRootCatalog(eidx, browse::AudiobookEmptyNote{}),
+                             browse::kAudiobookNarratorsType));
+
+        // -- (f) NO MATCH, A WEAK MATCH AND A REJECTED MATCH ALL LEAVE THE SCAN ALONE -------------------
+        {
+            QVector<FileEntry> untouched = scanned;
+            CHECK(AudiobookMeta::applyToEntries(untouched, {}) == 0);
+            const Index n = AudiobookLibrary::buildIndex(untouched);
+            CHECK(n.narrators.size() == bare.narrators.size());   // no placeholder, no half-filled record
+            CHECK(!filedUnder(n, QStringLiteral("Martin Shaw"), keyBare));
+            CHECK(n.bookCount == bare.bookCount);
+            const Book* nb = n.book(keyBare);
+            CHECK(nb != nullptr);
+            if (nb) { CHECK(nb->narrator.isEmpty()); CHECK(nb->series.isEmpty()); CHECK(nb->year == 0); }
+        }
+        {
+            Match weak = forBare;
+            weak.confidence = AudiobookMeta::kAcceptThreshold - 1;
+            QVector<FileEntry> e2 = scanned;
+            QHash<QString, Match> only; only.insert(keyBare, weak);
+            CHECK(AudiobookMeta::applyToEntries(e2, only) == 0);
+        }
+        {
+            Match no = forBare;
+            no.rejected = true;
+            QVector<FileEntry> e3 = scanned;
+            QHash<QString, Match> only; only.insert(keyBare, no);
+            CHECK(AudiobookMeta::applyToEntries(e3, only) == 0);
+        }
+
+        // -- (g) TWO PROVIDERS ANSWERED: role precedence, field by field --------------------------------
+        CHECK(AudiobookMeta::providerPriority(QStringLiteral("com.everythingbox.openlibrary"))
+              < AudiobookMeta::providerPriority(QStringLiteral("com.everythingbox.googlebooks")));
+        CHECK(AudiobookMeta::providerPriority(QStringLiteral("com.everythingbox.googlebooks"))
+              < AudiobookMeta::providerPriority(QStringLiteral("org.example.someaddon")));
+        {
+            Match hi;   // the leading provider: an identity, a narrator, no description, no cover
+            hi.provider   = QStringLiteral("com.everythingbox.openlibrary");
+            hi.matchId    = QStringLiteral("OL1W");
+            hi.matchTitle = QStringLiteral("The Silmarillion");
+            hi.narrator   = QStringLiteral("Martin Shaw");
+            hi.year       = 1977;
+            Match lo;   // the backfiller: disagrees about the narrator, has the description and the cover
+            lo.provider    = QStringLiteral("com.everythingbox.googlebooks");
+            lo.matchId     = QStringLiteral("GB9");
+            lo.matchTitle  = QStringLiteral("Silmarillion (Illustrated)");
+            lo.narrator    = QStringLiteral("Somebody Else");
+            lo.description = QStringLiteral("The elder days.");
+            lo.coverUrl    = QStringLiteral("https://example.invalid/gb.jpg");
+            lo.year        = 1999;
+            lo.seriesIndex = 4;
+            const Match merged = AudiobookMeta::mergeLowerPriority(hi, lo);
+            CHECK(merged.provider == QStringLiteral("com.everythingbox.openlibrary"));
+            CHECK(merged.matchId == QStringLiteral("OL1W"));
+            CHECK(merged.narrator == QStringLiteral("Martin Shaw"));   // the leader keeps what it has
+            CHECK(merged.year == 1977);
+            CHECK(merged.description == QStringLiteral("The elder days."));   // ...the other backfills
+            CHECK(merged.coverUrl == QStringLiteral("https://example.invalid/gb.jpg"));
+            CHECK(merged.seriesIndex == 4);
+            // A leader that matched NOTHING hands the identity over, so "reject this match" can never name
+            // a provider that supplied no fields.
+            const Match onlyLo = AudiobookMeta::mergeLowerPriority(Match{}, lo);
+            CHECK(onlyLo.provider == QStringLiteral("com.everythingbox.googlebooks"));
+            CHECK(onlyLo.matchTitle == QStringLiteral("Silmarillion (Illustrated)"));
+        }
+
+        // -- (h) THE STORE: a match is remembered, and a REJECTION outlives a re-scan -------------------
+        AudiobookMatches::clearAll();
+        CHECK(!AudiobookMatches::has(keyBare));
+        CHECK(AudiobookMatches::forBooks({ keyBare, keyTagged }).isEmpty());
+        AudiobookMatches::set(keyBare, forBare);
+        CHECK(AudiobookMatches::has(keyBare));
+        CHECK(AudiobookMatches::count() == 1);
+        CHECK(AudiobookMatches::get(keyBare).narrator == QStringLiteral("Martin Shaw"));
+        CHECK(AudiobookMatches::get(keyBare).updatedAt > 0);
+        CHECK(!AudiobookMatches::isRejected(keyBare));
+        CHECK(AudiobookMatches::forBooks({ keyBare }).size() == 1);
+        // The canonical JSON round-trips, omitting everything unset.
+        {
+            const QJsonObject j = AudiobookMeta::toJson(AudiobookMatches::get(keyBare));
+            CHECK(!j.contains(QStringLiteral("rejected")));
+            CHECK(AudiobookMeta::fromJson(j).narrator == QStringLiteral("Martin Shaw"));
+            CHECK(AudiobookMeta::toJson(Match{}).isEmpty());
+        }
+        // ...and the whole point: reject it.
+        AudiobookMatches::reject(keyBare);
+        CHECK(AudiobookMatches::isRejected(keyBare));
+        CHECK(AudiobookMatches::rejectedCount() == 1);
+        CHECK(AudiobookMatches::count() == 0);
+        CHECK(AudiobookMatches::get(keyBare).narrator.isEmpty());                // the fields are gone
+        CHECK(AudiobookMatches::get(keyBare).matchTitle == forBare.matchTitle);  // ...what it WAS is not
+        // A SWEEP CANNOT PUT IT BACK. This is the bit that makes the rejection permanent rather than a
+        // pause: the very code path that stored it in the first place is refused.
+        AudiobookMatches::set(keyBare, forBare);
+        CHECK(AudiobookMatches::isRejected(keyBare));
+        CHECK(AudiobookMatches::get(keyBare).narrator.isEmpty());
+        // AND IT SURVIVES A RE-SCAN — a fresh scan of the same root, a fresh store read, a fresh index.
+        AudiobookMatches::invalidate();
+        const QVector<FileEntry> rescanned = AudiobookLibrary::scanFolder(eroot);
+        CHECK(rescanned.size() == scanned.size());
+        QVector<FileEntry> reapplied = rescanned;
+        QStringList allKeys;
+        for (const FileEntry& e : rescanned) allKeys << AudiobookLibrary::bookKeyFor(e);
+        CHECK(AudiobookMeta::applyToEntries(reapplied, AudiobookMatches::forBooks(allKeys)) == 0);
+        const Index ridx = AudiobookLibrary::buildIndex(reapplied);
+        CHECK(ridx.narrators.size() == bare.narrators.size());   // still exactly what the tags said
+        CHECK(!filedUnder(ridx, QStringLiteral("Martin Shaw"), keyBare));
+        const Book* rb = ridx.book(keyBare);
+        CHECK(rb != nullptr);
+        if (rb) { CHECK(rb->narrator.isEmpty()); CHECK(rb->year == 0); }
+        // Clearing the record is the deliberate act that makes it matchable again.
+        AudiobookMatches::clear(keyBare);
+        CHECK(!AudiobookMatches::has(keyBare));
+        CHECK(AudiobookMatches::rejectedCount() == 0);
+
+        // -- (i) THE MATCH IS SURFACED: the row on the book's own level ---------------------------------
+        CHECK(!catalogHasType(browse::audiobookBookCatalog(eidx, keyBare), browse::kAudiobookMatchType));
+        {
+            const QString note = AudiobookMeta::matchSummary(forBare);
+            CHECK(note.contains(QStringLiteral("Martin Shaw")));
+            CHECK(note.contains(QStringLiteral("99%")));
+            const MediaCatalog withRow = browse::audiobookBookCatalog(eidx, keyBare, {}, {}, note);
+            CHECK(catalogHasType(withRow, browse::kAudiobookMatchType));
+            for (const MediaItem& it : withRow.items)
+                if (it.type == QString::fromLatin1(browse::kAudiobookMatchType))
+                {
+                    CHECK(browse::audiobookKeyOf(it.mime, browse::kAudiobookMatchPrefix) == keyBare);
+                    CHECK(it.subtitle.contains(QStringLiteral("Martin Shaw")));
+                    CHECK(!it.expandable);
+                }
+            // A stale route offers no match row either.
+            CHECK(!catalogHasType(
+                browse::audiobookBookCatalog(eidx, QStringLiteral("no-such-book"), {}, {}, note),
+                browse::kAudiobookMatchType));
+        }
+
+        // -- (j) A WELL-TAGGED BOOK IS NEVER EVEN ASKED ABOUT ------------------------------------------
+        if (bookBare) CHECK(AudiobookMeta::wantsEnrichment(*bookBare));
+        {
+            const Book* full = eidx.book(keyTagged);
+            CHECK(full != nullptr);
+            if (full) CHECK(!AudiobookMeta::wantsEnrichment(*full));
+        }
     }
 
     if (g_fails == 0)

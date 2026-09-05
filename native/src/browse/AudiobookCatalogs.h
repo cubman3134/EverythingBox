@@ -72,6 +72,12 @@ namespace browse
     // which is what sends it down the ordinary browse path on every one of the four layouts rather than to
     // the themed per-leaf action chooser.
     inline const char* kAudiobookChaptersType  = "_abchapters";
+    // WHAT WAS MATCHED, and the door to un-matching it (issue #198). A row rather than a button, for the
+    // reason the Play and Chapters rows above are rows: this app has four layouts and only one of them has
+    // chrome a button could live in, while a row is D-pad reachable in all four BY CONSTRUCTION. It is
+    // offered ONLY for a book that actually carries a match, so a library nothing was matched in looks
+    // exactly as it did — the compatibility rule every level of this feature follows.
+    inline const char* kAudiobookMatchType     = "_abmatch";
     // A part of a book IS a real, playable leaf, so its type has no leading '_': that is what gives it a
     // media tile rather than a synthetic row, and — on the themed layouts — what sends its Enter through the
     // per-leaf action chooser (browse::themedEnterFor splits on exactly that character). "audiobook" is
@@ -86,6 +92,7 @@ namespace browse
     inline const char* kAudiobookBookPrefix       = "audiobookbook:";
     inline const char* kAudiobookPlayPrefix       = "audiobookplay:";
     inline const char* kAudiobookChaptersPrefix   = "audiobookchapters:";
+    inline const char* kAudiobookMatchPrefix      = "audiobookmatch:";
     // A file row's mime carries the BOOK it belongs to, which is what the router needs to queue the right
     // set in the right order. Declared in LeafRoute.h's kinds block too? No — a KEYED kind's contract lives
     // with its feature, exactly as kMusicTrackPrefix lives in MusicCatalogs.h. LeafRoute.cpp names this
@@ -170,9 +177,17 @@ namespace browse
     // `progress` also decides what the Play row SAYS: "14h 20m left" or "Finished" leads its subtitle when
     // the book has been started, and nothing at all is added when it has not (or when some part's length is
     // unknown, which is the case that must never be guessed at).
+    //
+    // ...and last, when `matchNote` is non-empty, the MATCH ROW (#198): one line naming what an online
+    // provider was matched to for this book, leading to the per-item metadata editor where the match can be
+    // rejected. The note is a STRING PARAMETER rather than a store read for the reason the cover and the
+    // progress are injected: this translation unit opens nothing. An empty note (the default, and every
+    // caller that has no match to report) adds no row at all, so a level with nothing matched is byte-for-
+    // byte the level it was.
     MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QString& bookKey,
                                       const AudiobookCoverFn& cover = {},
-                                      const AudiobookProgressFn& progress = {});
+                                      const AudiobookProgressFn& progress = {},
+                                      const QString& matchNote = QString());
 
     // ---- The chapter list itself -------------------------------------------------------------------------
     // The rows AudiobookLibrary::chapterRows produced, as the strings a NavMenu shows: the chapter/part name,

@@ -44,7 +44,9 @@ Everything lives under [`native/`](native/):
 - `native/addons/` — a bundled sample media-source addon.
 - `native/docs/` — feature notes, including
   [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
-  and `dlc/` sidecar convention and what each emulator does with them).
+  and `dlc/` sidecar convention and what each emulator does with them) and
+  [**Audiobooks**](native/docs/audiobooks.md) (how a folder becomes a book, and what
+  online matching fills in — narrator, series, cover — and how to reject a bad match).
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf

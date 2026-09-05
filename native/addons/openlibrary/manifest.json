@@ -1,0 +1,12 @@
+{
+  "id": "com.everythingbox.openlibrary",
+  "name": "Open Library",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "EverythingBox",
+  "description": "Audiobook metadata provider (Open Library). Fills in a scanned audiobook's missing narrator, series, cover, description and year. Official, public and keyless — no account, no API key. Your own tags always win.",
+  "permissions": ["network"],
+  "metaFor": ["audiobook"],
+  "catalogs": []
+}
