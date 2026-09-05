@@ -96,34 +96,94 @@ int main(int argc, char** argv)
     CHECK(restartOk, "begin-overwrite restarts the clock");
 
     // ---- Component budgets: real hot-path builders/parsers over synthetic worst-case inputs ----------
-    // Each budget = max(measured worst-of-3 on the 2026-07 dev box x 3, a 50ms floor so CI jitter can't
+    // Each budget = max(the measured cost on the 2026-07 dev box x 3, a 50ms floor so CI jitter can't
     // false-fail a low-single-digit-ms measurement). Numbers captured with EB_PERF off, offscreen QPA.
-    auto worstOf3 = [](const std::function<void()>& run) {
-        qint64 w = 0;
-        for (int r = 0; r < 3; ++r) { QElapsedTimer t; t.start(); run(); w = qMax(w, t.elapsed()); }
-        return w;
+    // EVERY budget below is CPU-bound and says so in its failure text; a measurement whose cost is dominated
+    // by the filesystem is PRINTED, never gated - a gate on one of those fails on a busy machine instead of
+    // on a bad branch, which is the whole of #270.
+    //
+    // BEST of three, not worst (#270). A budget here exists to catch an ALGORITHMIC regression, and a
+    // regression is present in every run; what differs between the three runs is only how much unrelated
+    // machine load landed in each. The best run is therefore the least-polluted estimate of OUR cost, and
+    // the worst is the run most decided by whatever else was touching the disk or the scheduler - taking it
+    // let one hiccup in three decide the verdict, and the same binary scored 400 ms quiet against 891 ms
+    // inside a loaded gate. None of these budgets is measuring jitter, so none of them wants the worst run.
+    // (The disabled-span overhead check above is a different measurement - one straight-line CPU loop, timed
+    // once - and keeps its shape.)
+    auto bestOf3 = [](const std::function<void()>& run) {
+        qint64 best = -1;
+        for (int r = 0; r < 3; ++r) {
+            QElapsedTimer t; t.start(); run();
+            const qint64 e = t.elapsed();
+            best = (best < 0) ? e : qMin(best, e);
+        }
+        return best;
     };
 
-    // recentsCatalog over 5,000 synthetic RecentItems. NOTE: the item mapping calls MetaCache::displayImage
-    // per item (disk-path existence checks for cached art), so the cost includes real filesystem stat's —
-    // there's no injection point. The budget carries that I/O in, with headroom scaled up accordingly.
+    // recentsCatalog over 5,000 synthetic RecentItems, with the per-item artwork lookup INJECTED (#270).
+    // Un-stubbed, the mapping calls MetaCache::displayImage per item and that opens the item's cached
+    // meta.json once per art role, so what this budget used to time was 15,000 filesystem opens with our
+    // mapping somewhere inside them - a number that moved with the disk instead of with the code (400 ms
+    // quiet against 891 ms during a loaded gate, same binary). Stubbed, the budget times the MAPPING: the
+    // kind/system filtering, the art-key choice, the title fallback and the list growth, which is where an
+    // algorithmic regression in this builder would actually land. The real lookup still runs below, so the
+    // seam cannot rot into a stub nobody exercises.
+    QList<RecentItem> recents;
+    recents.reserve(5000);
+    for (int i = 0; i < 5000; ++i) {
+        RecentItem r;
+        r.path = QStringLiteral("C:/games/rom_%1.nes").arg(i);
+        r.title = QStringLiteral("Game %1").arg(i);
+        r.kind = QStringLiteral("game");
+        r.system = QStringLiteral("nes");
+        r.ts = 1700000000 + i;
+        r.thumb = QStringLiteral("http://art.example/%1.png").arg(i);
+        recents << r;
+    }
+
+    // The injected fn is genuinely the one the mapping goes through - pinned as a VALUE on two items, so an
+    // implementation that took the parameter and then called MetaCache anyway is caught too, not only one
+    // that never calls it at all.
     {
-        QList<RecentItem> recents;
-        recents.reserve(5000);
-        for (int i = 0; i < 5000; ++i) {
-            RecentItem r;
-            r.path = QStringLiteral("C:/games/rom_%1.nes").arg(i);
-            r.title = QStringLiteral("Game %1").arg(i);
-            r.kind = QStringLiteral("game");
-            r.system = QStringLiteral("nes");
-            r.ts = 1700000000 + i;
-            recents << r;
-        }
+        QList<RecentItem> two = recents.mid(0, 2);
+        const MediaCatalog cat = browse::recentsCatalog(
+            two, QStringLiteral("game"),
+            [](const QString& key, const QString& url) { return QStringLiteral("stub:") + key + QLatin1Char('|') + url; });
+        CHECK(cat.items.size() == 2
+              && cat.items[0].thumbnailUrl
+                     == QStringLiteral("stub:C:/games/rom_0.nes|http://art.example/0.png"),
+              "injected art fn is what recentsCatalog maps through");
+    }
+
+    {
         int mapped = 0;
-        const qint64 ms = worstOf3([&] { mapped = browse::recentsCatalog(recents, QStringLiteral("game")).items.size(); });
-        printf("MEASURE recentsCatalog 5k: %lld ms (%d mapped)\n", (long long)ms, mapped);
-        const int RECENTS_BUDGET_MS = 700; // measured worst 213ms on 2026-07 dev box (per-item MetaCache::displayImage disk stats dominate & vary run-to-run 183-213ms); 3x+ headroom, extra for slower CI disk
-        CHECK(mapped == 5000 && ms < RECENTS_BUDGET_MS, "budget: recentsCatalog 5k under budget");
+        qint64 artCalls = 0;
+        const auto stubArt = [&artCalls](const QString&, const QString& url) -> QString { ++artCalls; return url; };
+        const qint64 ms = bestOf3([&] {
+            mapped = browse::recentsCatalog(recents, QStringLiteral("game"), stubArt).items.size();
+        });
+        printf("MEASURE recentsCatalog 5k (art stubbed, CPU-bound): %lld ms (%d mapped, %lld art calls)\n",
+               (long long)ms, mapped, (long long)artCalls);
+        // 30x the 4-5ms this measures on the 2026-09 dev box under a deliberately loaded machine (20 CPU +
+        // 4 disk workers), and far BELOW the 440-613ms the same mapping costs when a per-item filesystem
+        // touch is in it - so the regression that matters most here, someone putting I/O back into this
+        // builder, still trips the budget by 3x while ordinary machine load cannot reach it.
+        const int RECENTS_BUDGET_MS = 150;
+        // artCalls pins the stub as the thing the three budgeted runs actually called: 3 x 5,000, once per item.
+        CHECK(mapped == 5000 && artCalls == 15000 && ms < RECENTS_BUDGET_MS,
+              "budget: recentsCatalog 5k under budget (CPU-bound: artwork lookup stubbed)");
+    }
+
+    // ...and one run through the REAL MetaCache::displayImage, so the seam above cannot drift away from the
+    // code the app runs. NO BUDGET, deliberately: this measurement is I/O-BOUND - it is dominated by per-item
+    // filesystem opens and tracks whatever else is using the disk, not this repository's code. It is printed
+    // so a human can watch it; it is not gated, because gating it is the mistake #270 records.
+    {
+        QElapsedTimer t; t.start();
+        const int mappedReal = browse::recentsCatalog(recents, QStringLiteral("game")).items.size();
+        printf("MEASURE recentsCatalog 5k (real MetaCache::displayImage, I/O-bound, NOT budgeted): %lld ms (%d mapped)\n",
+               (long long)t.elapsed(), mappedReal);
+        CHECK(mappedReal == 5000, "recentsCatalog real-artwork path still maps every item");
     }
 
     // pcGamesCatalog over 5,000 synthetic games with an injected pure poster fn (no librarycache I/O). This
@@ -144,12 +204,13 @@ int main(int argc, char** argv)
             return v.isEmpty() ? QString() : QStringLiteral("poster:") + v.first().launchId;
         };
         int mapped = 0;
-        const qint64 ms = worstOf3([&] {
+        const qint64 ms = bestOf3([&] {
             mapped = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), poster).items.size();
         });
         printf("MEASURE pcGamesCatalog 5k: %lld ms (%d mapped)\n", (long long)ms, mapped);
         const int PCGAMES_BUDGET_MS = 200; // measured worst 23ms on 2026-07 dev box (per-title normalise + group + two sorts); 8x headroom for a slower CI box
-        CHECK(mapped == 5000 && ms < PCGAMES_BUDGET_MS, "budget: pcGamesCatalog 5k under budget");
+        CHECK(mapped == 5000 && ms < PCGAMES_BUDGET_MS,
+              "budget: pcGamesCatalog 5k under budget (CPU-bound: poster fn injected)");
     }
 
     // parseM3u on a generated 10,000-entry IPTV-style playlist string.
@@ -160,10 +221,11 @@ int main(int argc, char** argv)
             playlist += QStringLiteral("#EXTINF:-1,Channel %1\nhttp://host.example/path/stream_%1.ts\n").arg(i);
         const QString src = QStringLiteral("http://host.example/lists/playlist.m3u8");
         int parsed = 0;
-        const qint64 ms = worstOf3([&] { parsed = StreamResolver::parseM3u(playlist, src).size(); });
+        const qint64 ms = bestOf3([&] { parsed = StreamResolver::parseM3u(playlist, src).size(); });
         printf("MEASURE parseM3u 10k: %lld ms (%d parsed)\n", (long long)ms, parsed);
         const int M3U_BUDGET_MS = 50; // measured worst 12ms on 2026-07 dev box; 3x+ headroom (50ms floor dominates)
-        CHECK(parsed == 10000 && ms < M3U_BUDGET_MS, "budget: parseM3u 10k-entry under budget");
+        CHECK(parsed == 10000 && ms < M3U_BUDGET_MS,
+              "budget: parseM3u 10k-entry under budget (CPU-bound: string parsing only)");
     }
 
     // acceptResult over 10,000 items with 50% duplicates (each title|type appears exactly twice).
@@ -177,7 +239,7 @@ int main(int argc, char** argv)
             items << it;
         }
         int accepted = 0;
-        const qint64 ms = worstOf3([&] {
+        const qint64 ms = bestOf3([&] {
             QSet<QString> seen;
             accepted = 0;
             for (const MediaItem& it : items)
@@ -185,7 +247,8 @@ int main(int argc, char** argv)
         });
         printf("MEASURE acceptResult 10k(50%% dup): %lld ms (%d accepted)\n", (long long)ms, accepted);
         const int DEDUP_BUDGET_MS = 50; // measured worst 3ms on 2026-07 dev box; 3x+ headroom (50ms floor dominates)
-        CHECK(accepted == 5000 && ms < DEDUP_BUDGET_MS, "budget: acceptResult 10k 50%-dup under budget");
+        CHECK(accepted == 5000 && ms < DEDUP_BUDGET_MS,
+              "budget: acceptResult 10k 50%-dup under budget (CPU-bound: in-memory set)");
     }
 
     if (fails == 0) printf("PERF-OK\n");
