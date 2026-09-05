@@ -272,7 +272,8 @@ MediaCatalog audiobookSeriesListCatalog(const AudiobookLibrary::Index& idx, cons
 }
 
 MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QString& bookKey,
-                                  const AudiobookCoverFn& cover, const AudiobookProgressFn& progress)
+                                  const AudiobookCoverFn& cover, const AudiobookProgressFn& progress,
+                                  const QString& matchNote)
 {
     MediaCatalog cat; cat.hasMore = false;
     const AudiobookLibrary::Book* b = idx.book(bookKey);
@@ -313,6 +314,14 @@ MediaCatalog audiobookBookCatalog(const AudiobookLibrary::Index& idx, const QStr
         cat.items.push_back(syntheticRow(kAudiobookChaptersType, kAudiobookChaptersPrefix, b->key,
                                          /*expandable*/ false, QObject::tr("☰  Chapters"), what, art));
     }
+
+    // THE MATCH ROW (#198), last of the three synthetic rows so it never stands between somebody and the
+    // play verb. It says what was matched — that is the whole point of surfacing a confidence — and leads to
+    // the metadata editor, which is where a match is rejected. Nothing is offered when nothing was matched.
+    if (!matchNote.trimmed().isEmpty())
+        cat.items.push_back(syntheticRow(kAudiobookMatchType, kAudiobookMatchPrefix, b->key,
+                                         /*expandable*/ false, QObject::tr("ⓘ  Matched online"),
+                                         matchNote.trimmed(), art));
 
     const bool numbered = b->files.size() > 1;   // "1." on a single-file book is noise
     int n = 0;

@@ -1,0 +1,12 @@
+{
+  "id": "com.everythingbox.googlebooks",
+  "name": "Google Books",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "EverythingBox",
+  "description": "Audiobook metadata provider (Google Books). Backfills the description, cover and publication year Open Library did not supply. Official, public and keyless. Your own tags always win.",
+  "permissions": ["network"],
+  "metaFor": ["audiobook"],
+  "catalogs": []
+}

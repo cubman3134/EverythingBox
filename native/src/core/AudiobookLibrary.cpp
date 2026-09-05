@@ -631,12 +631,17 @@ bool saveIndexFile(const QString& filePath, const QVector<FileEntry>& entries, c
 }
 
 // Cached process-wide index (main-thread only): the async scan installs it, browse reads it.
-namespace { Index g_index; bool g_indexReady = false; }
+namespace { Index g_index; bool g_indexReady = false; QVector<FileEntry> g_scanEntries; }
 
 QString root() { return Settings::audiobookFolder(); }
 QString indexFilePath() { return AppPaths::dataDir() + QStringLiteral("/audiobookindex.json"); }
 void installIndex(Index idx) { g_index = std::move(idx); g_indexReady = true; }
 const Index& index() { return g_index; }
+// The scan's other half (issue #198). Same cached layer, same main-thread-only contract, and deliberately
+// NOT folded into installIndex: a caller that RE-DERIVES the index from these entries (a match arriving, a
+// rejection) installs a new index without re-installing the entries it was built from.
+void installScanEntries(QVector<FileEntry> entries) { g_scanEntries = std::move(entries); }
+const QVector<FileEntry>& scanEntries() { return g_scanEntries; }
 bool indexReady() { return g_indexReady; }
 
 bool hasLibrary()

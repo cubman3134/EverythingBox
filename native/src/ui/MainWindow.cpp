@@ -3161,12 +3161,18 @@ void MainWindow::rescanAudiobookLibrary()
     const QString artDir    = MusicArt::cacheDir();                // ...and so does this one
     const QStringList seps  = Settings::musicTagSeparatorList();   // ONE separator setting, both libraries
     const quint64 gen = ++audiobookScanGen_;
-    auto* w = new QFutureWatcher<AudiobookLibrary::Index>(this);
-    connect(w, &QFutureWatcher<AudiobookLibrary::Index>::finished, this, [this, w, gen] {
+    auto* w = new QFutureWatcher<AudiobookLibrary::ScanResult>(this);
+    connect(w, &QFutureWatcher<AudiobookLibrary::ScanResult>::finished, this, [this, w, gen] {
         if (gen == audiobookScanGen_)                              // ignore a scan superseded by a newer one
         {
-            AudiobookLibrary::installIndex(w->result());
+            // BOTH HALVES (issue #198): the entries as the tags read them and the index built from them.
+            // The entries are what a match arriving later re-derives the index from — see
+            // MainWindowAudiobookMeta.cpp; nothing enriched is ever persisted or fed back into a scan.
+            AudiobookLibrary::installScanEntries(w->result().entries);
+            AudiobookLibrary::installIndex(w->result().index);
+            applyAudiobookMatches();       // fill blanks from what is already stored (no-op when nothing is)
             if (home_) home_->onAudiobookLibraryChanged();          // a level on screen picks it up at once
+            sweepAudiobookMatches();       // ...and ask the providers about the books still carrying blanks
         }
         w->deleteLater();
     });
@@ -3197,7 +3203,7 @@ void MainWindow::rescanAudiobookLibrary()
             for (const AudiobookLibrary::Book& b : a.books)
                 MusicArt::extractCoverFor(b.key, b.coverSourcePath, artDir);
 
-        return idx;
+        return AudiobookLibrary::ScanResult{ entries, idx };
     }));
 }
 
@@ -10840,6 +10846,12 @@ void MainWindow::editItemMetadata(QString key, MediaDetail scrapedIn)
         }
         const int resetIdx = ov.isEmpty() ? -1 : rows.size();
         if (resetIdx >= 0) rows << tr("↺  Reset to scraped");
+        // #198: an AUDIOBOOK whose blanks were filled from an online match offers one more row — reject it.
+        // Here rather than on a surface of its own because a bad match is a wrong VALUE, which is what this
+        // editor is for; "" for everything that is not a matched audiobook, i.e. for every other item.
+        const QString abRow = audiobookMatchEditorRow(key);
+        const int abIdx = abRow.isEmpty() ? -1 : rows.size();
+        if (abIdx >= 0) rows << abRow;
 
         const int pick = NavMenu::pick(tr("Fix info"), rows, this);
         if (pick < 0) return;                        // Back leaves everything as it is
@@ -10852,6 +10864,11 @@ void MainWindow::editItemMetadata(QString key, MediaDetail scrapedIn)
             MetaOverrides::reset(key);
             refreshAfterMetaEdit(key);
             continue;
+        }
+        if (abIdx >= 0 && pick == abIdx)
+        {
+            if (rejectAudiobookMatch(key)) refreshAfterMetaEdit(key);
+            continue;                                // re-present, with the row gone once it was rejected
         }
         if (pick < 0 || pick >= fields.size()) continue;
 
