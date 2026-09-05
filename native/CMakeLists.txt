@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.190 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.191 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -769,8 +769,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FollowScheduler.cpp src/core/FollowScheduler.h # ...and the polite background refresh
         src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
+        src/core/HighlightStore.cpp src/core/HighlightStore.h  # per-book highlights: the same anchor with its range end (issue #136)
         src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
+        src/ebook/ReaderSelection.h                          # the pure D-pad selection state machine (issue #136, header-only)
+        src/ebook/ReaderAnnotations.h                        # the document-order bookmarks+highlights list (issue #136, header-only)
         src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h  # pure read-aloud divider/stripper/position map (issue #145)
         src/core/GameFilter.cpp   src/core/GameFilter.h  # pure game-library filter model + evaluator (#63)
         src/core/FilterPresetStore.cpp src/core/FilterPresetStore.h  # per-profile saved filter presets (#63)
@@ -1185,6 +1188,25 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
         lzma7z unarr)
+
+    # Text SELECTION and HIGHLIGHTS in the reader (issue #136, the half after bookmarks). The pure D-pad
+    # selection model (ReaderSelection.h, header-only), the range-anchor round-trip, the HighlightStore and its
+    # OVERLAP-MERGE rule, the document-order annotation list, and - the reason Qt6::Gui is here - a real
+    # QTextDocument laid out at two font sizes, which is the only honest way to assert that the same anchor
+    # finds the same words after a reflow. No widgets: probe_readerbookmarks owns the real-reader end of #136,
+    # and the pdf/comic "no highlight verb" case is a property of HostedReader's DEFAULTS, asserted through a
+    # stub. Needs ProfileStore.cpp (per-profile namespace) + Tombstones.cpp (remove()); BookmarkStore.cpp is
+    # the annotation list's other half.
+    add_executable(probe_highlights tools/probe_highlights.cpp
+        src/core/HighlightStore.cpp src/core/HighlightStore.h
+        src/core/BookmarkStore.cpp  src/core/BookmarkStore.h
+        src/ebook/ReaderAnchor.h    src/ebook/ReaderSelection.h   # header-only: the anchor + the key map
+        src/ebook/ReaderAnnotations.h                             # header-only: the document-order merge
+        src/theme2/HostedReader.h                                 # header-only: the interface the stub implements
+        src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records a delete tombstone
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_highlights PRIVATE src src/core src/ebook src/theme2)
+    target_link_libraries(probe_highlights PRIVATE Qt6::Core Qt6::Gui)
 
     # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
     # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
@@ -1967,6 +1989,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # linked here) and AUTOMOC handles its QObject, so this costs the target nothing but one TU.
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        # issue #136: the per-book HIGHLIGHT store. Section 24d-2 drives the REAL store rather than raw ini
+        # rows, because what it pins is that the store and the merge agree on the key AND on the id - which a
+        # hand-built fixture would paper over. QtCore-only, and every dependency it has (Tombstones,
+        # ProfileStore) is already linked here for favourites.
+        src/core/HighlightStore.cpp  src/core/HighlightStore.h
         # issue #184: saved filter presets, now a synced per-profile store. CloudMerge calls
         # FilterPresetStore::syncIdForName (legacy-id back-fill) and §33 asserts through the store accessor;
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.
@@ -2019,7 +2046,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
-    target_include_directories(probe_cloudmerge PRIVATE src src/core src/media src/theme2 third_party)
+    target_include_directories(probe_cloudmerge PRIVATE src src/core src/ebook src/media src/theme2 third_party)
     target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 

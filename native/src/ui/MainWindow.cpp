@@ -109,6 +109,7 @@
 #include "../core/FavoritesStore.h"
 #include "../core/HomeRows.h"          // issue #161: the per-profile home row list + its pure planner
 #include "../core/BookmarkStore.h"
+#include "../core/HighlightStore.h"   // per-book highlights: the bookmark store's twin (issue #136)
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
@@ -1949,6 +1950,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     FollowStore::setChangeHook(armProgressSync);     // issue #155: a follow is user data, so it syncs
 
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
+    HighlightStore::setChangeHook(armProgressSync);  // issue #136: so is a highlight - it is about the book, not this device
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
     HomeRowStore::setChangeHook(armProgressSync); // issue #161: the home arrangement is user data, so it syncs
@@ -4803,6 +4805,11 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("readerPage"), rh->readerPage());
             o.insert(QStringLiteral("readerPageCount"), rh->readerPageCount());
             if (rh->kind() == ReaderKind::Book) o.insert(QStringLiteral("readerFont"), book_->fontPt());
+            // Selection + highlights (issue #136): the caret mode and the annotation list, so a drive can
+            // assert WHICH words were highlighted rather than squint at a wash of colour in a screenshot.
+            o.insert(QStringLiteral("readerCursor"), rh->readerCursorMode());
+            o.insert(QStringLiteral("readerAnnotations"), rh->annotationCount());
+            o.insert(QStringLiteral("readerAnnotationList"), rh->annotationLabels());
             if (rh->kind() == ReaderKind::Comic) o.insert(QStringLiteral("readerTwoUp"), rh->readerTwoUp());
         }
         // The themed settings-panel host: its QQuickWidget focus is opaque, so surface the graph selection +

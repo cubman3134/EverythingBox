@@ -11,6 +11,10 @@
 #include "../core/ConsumptionStats.h"
 #include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
 #include "../core/Settings.h"
+#include "../core/BookmarkStore.h"     // the annotation panel's other half (issue #136)
+#include "../core/HighlightStore.h"    // per-book highlights: the range anchor + the fixed palette (issue #136)
+#include "ReaderAnnotations.h"         // the ONE document-order merge of bookmarks + highlights (issue #136)
+#include "../ui/nav/NavOverlay.h"      // NavMenu: the colour picker and the annotation list (nav kit only)
 #include "ReadAloud.h"                 // the pure divider/stripper/position map (issue #145)
 #include "ReaderGestureConfig.h"        // issue #147: the reader's ONE touch vocabulary, from stored prefs
 #include "ReaderSpread.h"               // issue #147: dual-page landscape geometry
@@ -45,6 +49,7 @@
 #include <QImage>
 #include <QSettings>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QUrl>
 #include <QFileInfo>
 
@@ -462,6 +467,98 @@ void BookPageWidget::ensurePosVisible(int pos)
     update();
 }
 
+// ---- Selection + highlights (issue #136) -----------------------------------------------------------------
+// Three setters and two read-outs; every one of them is state the PAINT uses, so nothing here re-lays or
+// re-paginates anything. A highlight band that lies outside the page being shown simply never gets drawn - the
+// clip does that, exactly as it already does for the spoken range.
+
+void BookPageWidget::setHighlightBands(const QVector<TextBand>& bands)
+{
+    bands_ = bands;
+    update();
+}
+
+void BookPageWidget::setSelectionRange(int start, int end)
+{
+    const int s = (end > start) ? start : -1;
+    const int e = (end > start) ? end   : -1;
+    if (s == selStart_ && e == selEnd_) return;
+    selStart_ = s;
+    selEnd_   = e;
+    update();
+}
+
+void BookPageWidget::setCaretPos(int pos)
+{
+    const int p = (pos >= 0) ? pos : -1;
+    if (p == caretPos_) return;
+    caretPos_ = p;
+    update();
+}
+
+QVector<int> BookPageWidget::lineStarts() const
+{
+    QVector<int> out;
+    out.reserve(lines_.size());
+    for (const LineGeom& l : lines_) out.push_back(l.pos);
+    return out;
+}
+
+int BookPageWidget::textLength() const
+{
+    return doc_ ? qMax(0, doc_->characterCount() - 1) : 0;
+}
+
+// Which character a point is over. It walks the SAME PageColumn list the paint and the hyperlink hit-test walk
+// and applies the same first-line anchor shift, so on a two-column spread a hold in the right-hand column
+// cannot resolve to whatever text happens to sit at that x in the left one.
+int BookPageWidget::positionAt(const QPointF& pos) const
+{
+    if (!doc_ || lines_.isEmpty()) return -1;
+    const QVector<PageColumn> cols = pageColumns();
+    const qreal cw = contentW();
+    for (int c = 0; c < cols.size(); ++c)
+    {
+        const qreal cl = columnLeftX(c);
+        if (pos.x() < cl || pos.x() > cl + cw) continue;
+        const int startLine = cols[c].startLine;
+        const qreal y0 = lines_[startLine].y, firstH = lines_[startLine].h;
+        const qreal shift = (c == 0 && pos.y() < topMargin_ + firstH) ? anchorXInLine() : 0.0;
+        const QPointF docPos(pos.x() - cl + shift, pos.y() - topMargin_ + y0);
+        const int hit = doc_->documentLayout()->hitTest(docPos, Qt::FuzzyHit);
+        if (hit >= 0) return hit;
+    }
+    return -1;
+}
+
+// Where a document offset sits on screen. It walks the SAME columns the paint walks and applies the same
+// first-line anchor shift, so the caret cannot land a pixel away from the character it is pointing at.
+bool BookPageWidget::caretRect(int pos, QRectF& out) const
+{
+    if (!doc_ || lines_.isEmpty() || pos < 0) return false;
+    const QVector<PageColumn> cols = pageColumns();
+    if (cols.isEmpty()) return false;
+
+    const int li = lineIndexForPos(pos);
+    int col = -1;
+    for (int c = 0; c < cols.size(); ++c)
+        if (li >= cols[c].startLine && li <= cols[c].endLine) { col = c; break; }
+    if (col < 0) return false;   // not on the page being shown
+
+    const qreal y0 = lines_[cols[col].startLine].y;
+    const qreal ax = (col == 0 && li == cols[col].startLine) ? anchorXInLine() : 0.0;
+
+    qreal x = 0.0;
+    const QTextBlock blk = doc_->findBlock(pos);
+    if (QTextLayout* tl = blk.layout())
+    {
+        const QTextLine ln = tl->lineForTextPosition(pos - blk.position());
+        if (ln.isValid()) x = ln.cursorToX(pos - blk.position());
+    }
+    out = QRectF(columnLeftX(col) - ax + x, topMargin_ + (lines_[li].y - y0), 2.0, lines_[li].h);
+    return true;
+}
+
 int BookPageWidget::countPages(const QString& html, const QString& baseDir) const
 {
     // Count whole-line pages for a chapter in a throwaway document with the live view's font and width -
@@ -542,6 +639,38 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette = palette();                  // text drawn in QPalette::Text
 
+    // The stored highlights (issue #136) and, over them, the selection being made right now. Both ride the
+    // same PaintContext::selections mechanism the spoken range proved out, for the same reason: a document
+    // selection is clipped, shifted and page-broken by the layout that drew the text, so a highlight cannot end
+    // up a line away from its words after a reflow. Order matters — highlights first, so the live selection
+    // reads clearly ON TOP of a passage that is already highlighted.
+    const int lastChar = qMax(0, doc_->characterCount() - 1);
+    auto addSelection = [&](int s, int e, const QColor& tint) {
+        if (e <= s) return;
+        QTextCursor sc(doc_);
+        sc.setPosition(qBound(0, s, lastChar));
+        sc.setPosition(qBound(0, e, lastChar), QTextCursor::KeepAnchor);
+        QAbstractTextDocumentLayout::Selection sel;
+        sel.cursor = sc;
+        sel.format.setBackground(tint);
+        ctx.selections.append(sel);
+    };
+    for (const TextBand& b : bands_)
+    {
+        QColor tint = b.color;
+        // The palette's tints are drawn at partial alpha so the ink stays the reading theme's ink: a highlight
+        // is a wash behind the words, never a block that replaces them (which is what an opaque fill does on
+        // the dark and true-black themes).
+        tint.setAlpha(96);
+        addSelection(b.start, b.end, tint);
+    }
+    if (selEnd_ > selStart_ && selStart_ >= 0)
+    {
+        QColor sel = palette().color(QPalette::Highlight);
+        sel.setAlpha(110);
+        addSelection(selStart_, selEnd_, sel);
+    }
+
     // The spoken paragraph (issue #145), as a document SELECTION on the one PaintContext both draws below
     // share - so the highlight is clipped, shifted and page-broken by exactly the same arithmetic as the text
     // it sits behind, instead of a rectangle drawn over it that a reflow could leave stranded. The tint is the
@@ -593,6 +722,20 @@ void BookPageWidget::paintEvent(QPaintEvent*)
             doc_->documentLayout()->draw(&p, ctx);
             p.restore();
         }
+    }
+
+    // The cursor-mode caret (issue #136), drawn LAST so it is never washed out by a highlight it sits inside.
+    // A caret that is not on the page being shown simply is not drawn — caretRect says so — which is what makes
+    // paging away from the caret honest instead of leaving a mark at an arbitrary place.
+    QRectF caret;
+    if (caretPos_ >= 0 && caretRect(caretPos_, caret))
+    {
+        p.fillRect(caret, palette().color(QPalette::Highlight));
+        // A one-pixel bar is invisible on a television across a room, so the caret gets a foot and a head — the
+        // same "make the small thing findable" the OSK's cursor takes.
+        p.fillRect(QRectF(caret.left() - 3.0, caret.top(), 8.0, 2.0), palette().color(QPalette::Highlight));
+        p.fillRect(QRectF(caret.left() - 3.0, caret.bottom() - 2.0, 8.0, 2.0),
+                   palette().color(QPalette::Highlight));
     }
 
     // Page-number footer, centered in the bottom margin in a muted colour.
@@ -698,6 +841,7 @@ bool BookPageWidget::handleTouch(QTouchEvent* te)
     case QEvent::TouchBegin:
         touchMulti_ = (pts.size() >= 2);
         touchStart_ = pts.isEmpty() ? QPointF() : pts.first().position();
+        touchStartMs_ = QDateTime::currentMSecsSinceEpoch();   // the long-press clock (issue #136)
         // The OS's reserved band, latched on the PRESS: a sequence that began in it stays inert to the end,
         // and is not claimed either, so the system's own back swipe is never half-fought.
         touchInert_ = pts.isEmpty()
@@ -725,6 +869,18 @@ bool BookPageWidget::handleTouch(QTouchEvent* te)
         const QPointF end = pts.isEmpty() ? touchStart_ : pts.first().position();
         const double dx = end.x() - touchStart_.x();
         const double dy = end.y() - touchStart_.y();
+        // A HOLD first (issue #136): a finger that stayed on a word past the shared long-press duration opens
+        // the selection caret there instead of turning the page. Resolved on the release rather than on a
+        // timer, so the whole gesture is still one decision made from one set of numbers - and a hold that
+        // travelled is not a hold at all, which longPressAction enforces with the same slop a tap uses.
+        const qint64 heldRaw = QDateTime::currentMSecsSinceEpoch() - touchStartMs_;
+        const int heldMs = int(qBound(qint64(0), heldRaw, qint64(60000)));
+        if (ReaderGestures::longPressAction(cfg, end.x(), end.y(), double(width()), double(height()),
+                                            heldMs, dx, dy) == ReaderGestures::Kind::Select)
+        {
+            const int at = positionAt(end);
+            if (at >= 0) { emit selectAtRequested(at); return true; }
+        }
         // A swipe first, then a tap. Between the two thresholds is a deliberate dead band - the same one the
         // video player leaves - so a finger that slipped while resting on a word does nothing at all.
         ReaderGestures::Kind k = ReaderGestures::swipeAction(cfg, dx, dy);
@@ -797,6 +953,14 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     connect(page_, &BookPageWidget::prevRequested, this, &EbookView::prevPage);
     connect(page_, &BookPageWidget::menuRequested, this, &EbookView::revealMenu);
     connect(page_, &BookPageWidget::anchorClicked, this, &EbookView::onAnchorClicked);
+    // A finger held on a word opens the caret there (issue #136) - the touch way into the mode the pad enters
+    // from the menu. Both end up in the same place, which is the point of routing it through the reader.
+    connect(page_, &BookPageWidget::selectAtRequested, this, [this](int at) {
+        if (!book_ || !book_->isOpen()) return;
+        cursor_.enter(at);
+        syncCursorVisuals();
+        emit pageInfoChanged();
+    });
     connect(page_, &BookPageWidget::layoutChanged, this, &EbookView::updatePageLabel);
 
     auto* v = new QVBoxLayout(this);
@@ -832,13 +996,22 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     streamIssueBtn_->setVisible(false);
     auto* homeBtn  = new QPushButton(tr("Home"), menu_);
     auto* contents = new QPushButton(tr("Contents"), menu_);
+    // Selection + highlights (issue #136) on the classic bar, the twin of the themed chrome's two controls.
+    // "Select" enters cursor mode (the pad/keyboard caret); "Marks" opens this book's annotation list. Both
+    // call exactly what the themed bridge calls, so the feature is one implementation on two surfaces.
+    selectBtn_ = new QPushButton(tr("Select"), menu_);
+    selectBtn_->setToolTip(tr("Select text to highlight: arrows move the caret by word and line, "
+                              "Enter starts and finishes the selection"));
+    marksBtn_  = new QPushButton(tr("Marks"), menu_);
+    marksBtn_->setToolTip(tr("Bookmarks and highlights in this book"));
     auto* smaller  = new QPushButton(tr("A−"), menu_);
     auto* bigger   = new QPushButton(tr("A+"), menu_);
     auto* prev     = new QPushButton(tr("‹ Prev"), menu_);
     auto* next     = new QPushButton(tr("Next ›"), menu_);
     pageLabel_ = new QLabel(menu_);
     pageLabel_->setAlignment(Qt::AlignCenter);
-    for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, smaller, bigger, prev, next })
+    for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, selectBtn_, marksBtn_,
+                            smaller, bigger, prev, next })
         b->setFocusPolicy(Qt::NoFocus); // keep arrow-key focus on the view, not a button
 
     connect(backBtn,  &QPushButton::clicked, this, &EbookView::backRequested);
@@ -849,11 +1022,15 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     connect(prev,     &QPushButton::clicked, this, &EbookView::prevPage);
     connect(next,     &QPushButton::clicked, this, &EbookView::nextPage);
     connect(streamIssueBtn_, &QPushButton::clicked, this, &EbookView::streamIssueRequested);
+    connect(selectBtn_, &QPushButton::clicked, this, &EbookView::beginCursorMode);
+    connect(marksBtn_,  &QPushButton::clicked, this, &EbookView::openAnnotationsMenu);
 
     bar->addWidget(backBtn);
     bar->addWidget(streamIssueBtn_);
     bar->addWidget(homeBtn);
     bar->addWidget(contents);
+    bar->addWidget(selectBtn_);
+    bar->addWidget(marksBtn_);
     bar->addWidget(smaller);
     bar->addWidget(bigger);
 
@@ -902,6 +1079,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
 bool EbookView::openBook(const QString& path, QString* error)
 {
     if (readAloudActive()) toggleReadAloud();   // stop narrating the book we are leaving (issue #145)
+    endCursorMode();   // a caret belongs to the book it was placed in (issue #136)
     persist(); // save the book we're leaving, if any
 
     book_ = makeSource(path); // EPUB / MOBI / PDF, by file content
@@ -1016,6 +1194,10 @@ void EbookView::loadChapter(int index, bool toLast)
     if (f.open(QIODevice::ReadOnly)) { html = QString::fromUtf8(f.readAll()); f.close(); }
     page_->setContent(html, QFileInfo(files[chapter_]).absolutePath());
     if (toLast) page_->showLastPage(); else page_->showFirstPage();
+    // The new chapter's highlights (issue #136). Done here rather than at the call sites because EVERY route
+    // into a chapter comes through loadChapter - a page turn across a boundary, a toc jump, a bookmark
+    // restore, a highlight jump - and a chapter shown without its bands is a highlight the reader lost.
+    refreshHighlightBands();
     updatePageLabel();
 
     // Reflect the current chapter in the contents list (best-effort by file name).
@@ -1477,11 +1659,252 @@ void EbookView::raNarrationChanged()
 
 void EbookView::keyPressEvent(QKeyEvent* e)
 {
+    // Cursor mode owns the keyboard while it is on (issue #136), which is the whole point of it being a MODE:
+    // the arrows move the caret instead of turning pages, and Escape leaves the mode rather than the book. It
+    // is asked FIRST and only answers when it is active, so a reader who never opens it sees no change at all.
+    if (handleCursorKey(e->key())) return;
+
     switch (e->key())
     {
     case Qt::Key_Right: case Qt::Key_PageDown: case Qt::Key_Space: nextPage(); return;
     case Qt::Key_Left:  case Qt::Key_PageUp:                       prevPage(); return;
     case Qt::Key_Backspace: case Qt::Key_Escape:                   emit backRequested(); return;
+    // 'S' enters cursor mode from the page itself, the way 'B' drops a bookmark - a keyboard route to a
+    // control that otherwise lives in a menu, and the one both layouts share (the themed chrome does not
+    // intercept it, so it falls through to here in either).
+    case Qt::Key_S: beginCursorMode(); return;
     default: QWidget::keyPressEvent(e);
     }
+}
+
+// ---- Selection + highlights (issue #136) -----------------------------------------------------------------
+// The MODE, its key map and the colour menu live here, in the reader, not in either chrome. That is what makes
+// the feature identical in the classic layout and the themed one: both chromes have a control that calls
+// beginCursorMode() and a key router that asks handleCursorKey() first, and everything after that is one
+// implementation. ReaderSelection.h holds the pure state machine (and probe_highlights drives it directly);
+// this is the part that needs a laid-out document: the caret's line units, the excerpt, and the page turning
+// itself to follow a caret that walked off the bottom.
+
+void EbookView::beginCursorMode()
+{
+    if (!book_ || !book_->isOpen() || !page_) return;
+    // Start where the reader is looking: the top of the page being shown. Never at the top of the chapter,
+    // which on page 30 would be a caret nobody can see and a first arrow press that appears to do nothing.
+    cursor_.enter(page_->topTextPosition());
+    syncCursorVisuals();
+    emit pageInfoChanged();   // the hosted chrome mirrors "the caret is live"
+}
+
+// The caret at a POINT - the touch way in, and the one the themed host calls when its long-press fires. Falls
+// back to nothing (false) when the point is off the text, so the host can still let the gesture mean whatever
+// it meant before rather than swallowing a finger that landed in a margin.
+bool EbookView::beginCursorModeAt(const QPointF& pos)
+{
+    if (!book_ || !book_->isOpen() || !page_) return false;
+    const int at = page_->positionAt(page_->mapFrom(this, pos.toPoint()));
+    if (at < 0) return false;
+    cursor_.enter(at);
+    syncCursorVisuals();
+    emit pageInfoChanged();
+    return true;
+}
+
+void EbookView::endCursorMode()
+{
+    if (!cursor_.active) return;
+    cursor_.leave();
+    if (page_)
+    {
+        page_->setCaretPos(-1);
+        page_->setSelectionRange(-1, -1);
+    }
+    emit pageInfoChanged();
+}
+
+bool EbookView::handleCursorKey(int key)
+{
+    if (!cursor_.active || !page_) return false;
+
+    const QString text = page_->plainText();
+
+    // Enter on a spot that is already inside a stored highlight, with no selection in flight, means "this
+    // one": the D-pad's version of the issue's "tap an existing highlight to extend, recolor, or remove".
+    if ((key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Select) && !cursor_.selecting())
+    {
+        const HighlightStore::Highlight hit = HighlightStore::at(itemKey(), chapter_, cursor_.caret);
+        if (!hit.id.isEmpty()) { offerHighlightEdit(hit.id); return true; }
+    }
+
+    const ReaderSelection::Result r = cursor_.key(key, text, page_->lineStarts());
+    switch (r)
+    {
+    case ReaderSelection::Result::Ignored:
+        return false;                       // not ours: the reader own keys still work inside the mode
+    case ReaderSelection::Result::Exited:
+        endCursorMode();
+        return true;
+    case ReaderSelection::Result::Committed:
+    {
+        const ReaderAnchor range = cursor_.toAnchor(chapter_, text);
+        if (!range.isRange()) { cursor_.anchor = -1; syncCursorVisuals(); return true; }  // nothing but space
+        offerHighlightColour(range);
+        return true;
+    }
+    default:
+        syncCursorVisuals();
+        return true;
+    }
+}
+
+// Push the caret and the live selection onto the page, and keep the caret ON the page: a caret that stepped
+// off the bottom turns the page after it, which is what makes Down at the last line feel like reading rather
+// than like a wall.
+void EbookView::syncCursorVisuals()
+{
+    if (!page_) return;
+    if (!cursor_.active)
+    {
+        page_->setCaretPos(-1);
+        page_->setSelectionRange(-1, -1);
+        return;
+    }
+    page_->ensurePosVisible(cursor_.caret);
+    page_->setCaretPos(cursor_.caret);
+    if (cursor_.hasSelection()) page_->setSelectionRange(cursor_.selStart(), cursor_.selEnd());
+    else                        page_->setSelectionRange(-1, -1);
+    updatePageLabel();   // the page may have turned under the caret; re-emits pageInfoChanged()
+}
+
+// This chapter stored highlights, as paint bands. Called on every chapter load, every reflow and every store
+// change, so what is on the page is what is in the store and never a cached copy of it.
+void EbookView::refreshHighlightBands()
+{
+    if (!page_) return;
+    QVector<BookPageWidget::TextBand> bands;
+    const QString key = itemKey();
+    if (!key.isEmpty())
+        for (const HighlightStore::Highlight& h : HighlightStore::list(key))
+        {
+            if (!h.anchor.isRange() || h.anchor.spine != chapter_) continue;
+            BookPageWidget::TextBand b;
+            b.start = h.anchor.offset;
+            b.end   = h.anchor.endOffset;
+            b.color = QColor(HighlightStore::colorHex(h.color));
+            bands.push_back(b);
+        }
+    page_->setHighlightBands(bands);
+}
+
+void EbookView::annotationsChanged()
+{
+    refreshHighlightBands();
+    emit pageInfoChanged();   // the hosted chrome re-reads the annotation list off the same stores
+}
+
+// The colour menu for a FRESH selection. NavMenu, not a popup: the nav kit is the only menu this app has, and
+// on a pad each colour is one press. The merge happens in the store, so choosing a colour over a passage that
+// touches an existing highlight extends THAT one rather than laying a second band beside it.
+void EbookView::offerHighlightColour(const ReaderAnchor& range)
+{
+    const QString key = itemKey();
+    if (key.isEmpty()) return;
+
+    QStringList rows;
+    for (int i = 0; i < HighlightStore::colorCount(); ++i) rows << HighlightStore::colorName(i);
+
+    new NavMenu(tr("Highlight"), rows, [this, key, range](int row) {
+        if (row < 0 || row >= HighlightStore::colorCount()) { syncCursorVisuals(); return; }
+        // The excerpt has to describe the MERGED range, not the words this selection happened to cover: an
+        // extension of an existing highlight is one passage, and listing it by its newest fragment would put
+        // the wrong words in the annotation panel.
+        const HighlightStore::MergePlan plan = HighlightStore::planMerge(key, range);
+        const QString excerpt = ReaderSelection::textOf(page_ ? page_->plainText() : QString(), plan.merged);
+        HighlightStore::add(key, range, row, excerpt);
+        endCursorMode();          // the deliberate act is finished; the page goes back to being a page
+        annotationsChanged();
+    }, window());
+}
+
+// An EXISTING highlight, re-selected: recolour or remove, exactly what the issue asks a tap on one to offer.
+void EbookView::offerHighlightEdit(const QString& id)
+{
+    if (id.isEmpty()) return;
+    QStringList rows;
+    rows << tr("Recolour...") << tr("Remove highlight");
+    new NavMenu(tr("Highlight"), rows, [this, id](int row) {
+        if (row == 0)
+        {
+            QStringList colours;
+            for (int i = 0; i < HighlightStore::colorCount(); ++i) colours << HighlightStore::colorName(i);
+            new NavMenu(tr("Colour"), colours, [this, id](int c) {
+                if (c >= 0) { HighlightStore::setColor(id, c); annotationsChanged(); }
+            }, window());
+            return;
+        }
+        if (row == 1) { HighlightStore::remove(id); endCursorMode(); annotationsChanged(); }
+    }, window());
+}
+
+// Jump to a highlight and land the caret INSIDE it, so the next Enter offers recolour/remove. The jump itself
+// is the bookmark jump - one passage-restoring path, not two.
+void EbookView::gotoHighlight(int spine, int offset)
+{
+    gotoSpineOffset(spine, offset);
+    if (!page_) return;
+    cursor_.enter(offset);
+    syncCursorVisuals();
+}
+
+// The CLASSIC layout annotation panel (the themed layout has the readerBookmarks list). One list, document
+// order, bookmarks and highlights together - ReaderAnnotations::merged decides that order for both surfaces,
+// so the two cannot disagree about what comes first.
+void EbookView::openAnnotationsMenu()
+{
+    const QString key = itemKey();
+    const QVector<ReaderAnnotations::Entry> entries =
+        key.isEmpty() ? QVector<ReaderAnnotations::Entry>()
+                      : ReaderAnnotations::merged(BookmarkStore::list(key), HighlightStore::list(key));
+
+    QStringList rows;
+    rows << tr("Bookmark this page");
+    for (const ReaderAnnotations::Entry& e : entries) rows << ReaderAnnotations::rowLabel(e);
+
+    new NavMenu(tr("Bookmarks & highlights"), rows, [this, key, entries](int row) {
+        if (row < 0) return;
+        if (row == 0)
+        {
+            if (key.isEmpty()) return;
+            ReaderAnchor a;
+            a.kind   = ReaderAnchor::Book;
+            a.spine  = chapter_;
+            a.offset = textOffset();
+            const QStringList toc = tocTitles();
+            BookmarkStore::add(key, a, (a.spine >= 0 && a.spine < toc.size()) ? toc.at(a.spine) : QString());
+            annotationsChanged();
+            return;
+        }
+        const int i = row - 1;
+        if (i < 0 || i >= entries.size()) return;
+        const ReaderAnnotations::Entry e = entries.at(i);
+        if (!e.isHighlight()) { gotoSpineOffset(e.anchor.spine, e.anchor.offset); return; }
+        // A highlight row goes one level deeper, because "go to it" and "change it" are different intentions
+        // and guessing wrong costs the reader an annotation.
+        QStringList verbs;
+        verbs << tr("Go to it") << tr("Recolour...") << tr("Remove highlight");
+        const QString id = e.id;
+        const int spine = e.anchor.spine, offset = e.anchor.offset;
+        new NavMenu(e.excerpt, verbs, [this, id, spine, offset](int v) {
+            if (v == 0) { gotoHighlight(spine, offset); return; }
+            if (v == 1)
+            {
+                QStringList colours;
+                for (int c = 0; c < HighlightStore::colorCount(); ++c) colours << HighlightStore::colorName(c);
+                new NavMenu(tr("Colour"), colours, [this, id](int c) {
+                    if (c >= 0) { HighlightStore::setColor(id, c); annotationsChanged(); }
+                }, window());
+                return;
+            }
+            if (v == 2) { HighlightStore::remove(id); annotationsChanged(); }
+        }, window());
+    }, window());
 }

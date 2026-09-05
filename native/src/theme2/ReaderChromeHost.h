@@ -26,6 +26,7 @@ class QTouchEvent;
 
 #include "../ui/nav/NavThemeGraph.h"
 #include "HostedReader.h"
+#include "../ebook/ReaderAnnotations.h"   // issue #136: the one document-order bookmarks+highlights list
 
 class NavGraph;
 class QQuickWidget;
@@ -48,9 +49,20 @@ class ReaderBridge : public QObject
     Q_PROPERTY(int fontIndex READ fontIndex NOTIFY changed)
     Q_PROPERTY(QStringList toc READ toc NOTIFY tocChanged)
     Q_PROPERTY(bool twoUp READ twoUp NOTIFY changed)   // comic: is the two-up spread on
-    // Bookmarks (issue #136): the current book's bookmark labels in reading order, refreshed on add/remove.
+    // Annotations (issue #136): this book's bookmarks AND its highlights, interleaved in document order - the
+    // "review before book club" list the issue asks for. `bookmarks` keeps its name because the zone, the QML
+    // panel and the nav graph are all spelled readerBookmarks; what it CARRIES is now the whole list, which is
+    // why the colours parallel array exists (a highlight row draws its swatch, a bookmark row draws none).
     Q_PROPERTY(QStringList bookmarks READ bookmarkLabels NOTIFY bookmarksChanged)
+    Q_PROPERTY(QStringList bookmarkColors READ bookmarkColors NOTIFY bookmarksChanged)
     Q_PROPERTY(int bookmarkCount READ bookmarkCount NOTIFY bookmarksChanged)
+    // Selection (issue #136). selectionSupported gates the whole control: false for a pdf/comic, which have no
+    // text layer to select in. selectSettingIndex is the index the Select control occupies in the top row -
+    // stated ONCE here so the host that fires the row and the QML that draws it cannot disagree about which
+    // number it is (the same discipline read-aloud's bookSettingsRowCount established).
+    Q_PROPERTY(bool selectionSupported READ selectionSupported NOTIFY changed)
+    Q_PROPERTY(bool cursorMode READ cursorMode NOTIFY changed)
+    Q_PROPERTY(int selectSettingIndex READ selectSettingIndex NOTIFY changed)
     // Reading look (book). The engine for all of this already exists — ReaderTypography maps it and the reader
     // applies it live — so these only carry it to a menu that can finally show it.
     Q_PROPERTY(QStringList themeNames READ themeNames CONSTANT)
@@ -84,7 +96,13 @@ public:
     // Bookmarks (issue #136): the current book's bookmarks in reading order (a label per bookmark), and their
     // count (the readerBookmarks zone count a future list panel feeds). Empty when the reader has no item key.
     QStringList bookmarkLabels() const;
+    QStringList bookmarkColors() const;   // per row: a highlight's "#RRGGBB", or "" for a bookmark
     int  bookmarkCount() const;
+
+    bool selectionSupported() const;      // the reader has a text layer (book yes; pdf/comic no)
+    bool cursorMode() const;              // the caret is live right now
+    int  selectSettingIndex() const;      // where the Select control sits in the top row (-1 = not offered)
+    int  settingsRowCount() const;        // the whole row's length, Select included - what the host feeds the zone
 
     QStringList themeNames() const;      // the reading themes, in ReaderTypography's own order
     int  themeIndex() const;             // the stored theme, as an index into themeNames()
@@ -120,6 +138,10 @@ public slots:
     void addBookmark();
     void gotoBookmark(int i);
     void removeBookmark(int i);
+    // Selection (issue #136): enter the reader's cursor mode. The MODE, its key map and the colour menu all
+    // live in the reader (EbookView), so this is a one-line forward - the themed chrome and the classic bar
+    // press the same button.
+    void beginSelection();
 
     // Reading look. Each writes the stored preference and asks the reader to re-read it, so the ONE definition
     // of what a preference means stays in the reader and this never applies anything itself.
@@ -135,6 +157,10 @@ signals:
     void exitRequested();
 
 private:
+    // This item's bookmarks and highlights in document order - the ONE list the panel draws and the ONE the
+    // goto/remove verbs index into, so a row cannot mean one thing to the eye and another to the press.
+    QVector<ReaderAnnotations::Entry> annotations() const;
+
     HostedReader* reader_;
     ReaderKind    kind_;
 };
@@ -152,6 +178,13 @@ public:
     int  readerPage() const;         // reader_->currentPage() — UI-test snapshot
     int  readerPageCount() const;    // reader_->pageCount()
     bool readerTwoUp() const;        // comic: reader_->twoUp()
+    // Selection + highlights (issue #136) in the UI-test snapshot. A caret and a colour wash are STATE a
+    // screenshot can only suggest, so the harness reads them: whether the mode is live, and the annotation
+    // list exactly as the panel draws it (a highlight's row is the words it covers, which is what makes
+    // "it highlighted the right phrase" assertable rather than eyeballed).
+    bool readerCursorMode() const;
+    int  annotationCount() const;
+    QString annotationLabels() const;   // the panel's rows, joined with " | " 
 
     // Called each time a book is (re)opened into this host: toggle themed vs classic chrome, refresh the
     // bridge/toc, (re)push the reader level, and — themed — flash the chrome so it's discoverable.
@@ -214,6 +247,9 @@ private:
     // Issue #147: did this sequence START in the OS's reserved edge band? Latched on the press, because a
     // band is a property of where the finger went DOWN, not of where it happened to be when it came up.
     bool    touchInert_ = false;
+    // When the press landed, for the long-press-to-select duration (issue #136). The number itself is #162's,
+    // read off PlayerGestures::Config through ReaderGestures - this only remembers WHEN.
+    qint64  touchStartMs_ = 0;
 
     // Mouse state, for telling a click from the tail of a drag. The reader is read with a mouse at least as
     // often as with a finger, and until now the zone map was reachable only by touch.

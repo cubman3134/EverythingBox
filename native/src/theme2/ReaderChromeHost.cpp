@@ -8,6 +8,8 @@
 #include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "../ui/nav/NavGraph.h"
 #include "../core/BookmarkStore.h"   // issue #136: the per-book bookmark store the bridge drives
+#include "../core/HighlightStore.h"  // issue #136: the per-book highlight store, the bookmark store's twin
+#include "../ebook/ReaderAnnotations.h" // issue #136: the ONE document-order merge of the two
 #include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
 #include "../ebook/ReadAloud.h"     // issue #145: the pure settings-row count (and the divider behind it)
 #include "../core/Settings.h"        // the reading look is a stored preference, not chrome state
@@ -23,6 +25,7 @@
 #include <QTouchEvent>
 #include <QLineF>
 #include <QColor>
+#include <QDateTime>
 #include <QUrl>
 #include <algorithm>
 
@@ -221,26 +224,61 @@ static QString defaultLabelForReader(HostedReader* reader, ReaderKind kind, cons
                   : QStringLiteral("Page %1").arg(reader->currentPage());
 }
 
+// This item's annotations, in document order. A pdf or a comic has no highlights - it has no text layer to
+// anchor one in - so its list is exactly the bookmark list it always was, which is the "comics and PDFs are
+// unchanged, but the panel must still behave for them" half of the issue, expressed as an empty second input
+// rather than as a branch.
+QVector<ReaderAnnotations::Entry> ReaderBridge::annotations() const
+{
+    if (!reader_) return {};
+    const QString key = reader_->itemKey();
+    if (key.isEmpty()) return {};
+    const QVector<HighlightStore::Highlight> hl =
+        (kind_ == ReaderKind::Book) ? HighlightStore::list(key) : QVector<HighlightStore::Highlight>();
+    return ReaderAnnotations::merged(BookmarkStore::list(key), hl);
+}
+
 QStringList ReaderBridge::bookmarkLabels() const
 {
     QStringList out;
-    if (!reader_) return out;
-    const QString key = reader_->itemKey();
-    if (key.isEmpty()) return out;
-    int n = 0;
-    for (const BookmarkStore::Bookmark& b : BookmarkStore::list(key))
-    {
-        ++n;
-        out << (b.label.isEmpty() ? QStringLiteral("Bookmark %1").arg(n) : b.label);
-    }
+    for (const ReaderAnnotations::Entry& e : annotations()) out << ReaderAnnotations::rowLabel(e);
     return out;
 }
 
-int ReaderBridge::bookmarkCount() const
+QStringList ReaderBridge::bookmarkColors() const
 {
-    if (!reader_) return 0;
-    const QString key = reader_->itemKey();
-    return key.isEmpty() ? 0 : BookmarkStore::list(key).size();
+    QStringList out;
+    for (const ReaderAnnotations::Entry& e : annotations())
+        out << (e.isHighlight() ? HighlightStore::colorHex(e.color) : QString());
+    return out;
+}
+
+int ReaderBridge::bookmarkCount() const { return annotations().size(); }
+
+bool ReaderBridge::selectionSupported() const { return reader_ && reader_->selectionSupported(); }
+bool ReaderBridge::cursorMode() const { return reader_ && reader_->cursorMode(); }
+
+// The Select control sits at the END of the row, after everything read-aloud may have added. Appending rather
+// than inserting is deliberate: every index before it keeps the meaning it already had, so nothing that fires
+// by number - the host's switch, the QML model, probe_readaloud's count - has to move.
+int ReaderBridge::selectSettingIndex() const
+{
+    if (kind_ != ReaderKind::Book || !selectionSupported()) return -1;
+    return ReadAloud::bookSettingsRowCount(readAloudAvailable());
+}
+
+int ReaderBridge::settingsRowCount() const
+{
+    if (kind_ == ReaderKind::Book)
+        return ReadAloud::bookSettingsRowCount(readAloudAvailable()) + (selectionSupported() ? 1 : 0);
+    return (kind_ == ReaderKind::Comic) ? 5 : 4;
+}
+
+void ReaderBridge::beginSelection()
+{
+    if (!reader_ || !reader_->selectionSupported()) return;
+    reader_->beginCursorMode();
+    emit changed();
 }
 
 void ReaderBridge::refreshBookmarks() { emit bookmarksChanged(); }
@@ -255,26 +293,28 @@ void ReaderBridge::addBookmark()
     emit bookmarksChanged();
 }
 
+// Jump to the i-th ANNOTATION (the list the panel draws). A highlight lands the caret inside itself, so the
+// next Enter offers recolour/remove - the D-pad's "tap an existing highlight". A bookmark restores its spot,
+// exactly as it always did.
 void ReaderBridge::gotoBookmark(int i)
 {
     if (!reader_) return;
-    const QString key = reader_->itemKey();
-    if (key.isEmpty()) return;
-    const QVector<BookmarkStore::Bookmark> items = BookmarkStore::list(key); // reading order
+    const QVector<ReaderAnnotations::Entry> items = annotations();
     if (i < 0 || i >= items.size()) return;
-    const ReaderAnchor& a = items.at(i).anchor;
-    if (kind_ == ReaderKind::Book) reader_->gotoSpineOffset(a.spine, a.offset);
-    else                           reader_->gotoPage(a.page);
+    const ReaderAnnotations::Entry& e = items.at(i);
+    if (kind_ != ReaderKind::Book)          { reader_->gotoPage(e.anchor.page); return; }
+    if (e.isHighlight())                      reader_->gotoHighlight(e.anchor.spine, e.anchor.offset);
+    else                                      reader_->gotoSpineOffset(e.anchor.spine, e.anchor.offset);
 }
 
 void ReaderBridge::removeBookmark(int i)
 {
     if (!reader_) return;
-    const QString key = reader_->itemKey();
-    if (key.isEmpty()) return;
-    const QVector<BookmarkStore::Bookmark> items = BookmarkStore::list(key);
+    const QVector<ReaderAnnotations::Entry> items = annotations();
     if (i < 0 || i >= items.size()) return;
-    BookmarkStore::remove(items.at(i).id);
+    const ReaderAnnotations::Entry& e = items.at(i);
+    if (e.isHighlight()) HighlightStore::remove(e.id);
+    else                 BookmarkStore::remove(e.id);
     emit bookmarksChanged();
 }
 
@@ -307,6 +347,11 @@ void ReaderBridge::activateSetting(int index)
     // Index 0 is Exit for every kind, and returns immediately: leaving is not a reader command and must not
     // fall through to one.
     if (index == 0) { exitReader(); return; }
+
+    // Select (issue #136) is the LAST control in a book's row, at selectSettingIndex(). Checked before the
+    // switch because the number it sits at depends on whether read-aloud is available - so a literal case here
+    // would be right in one build and wrong in the other.
+    if (index == selectSettingIndex()) { beginSelection(); return; }
 
     if (kind_ == ReaderKind::Book)
     {
@@ -402,11 +447,27 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
     rw->setAttribute(Qt::WA_AcceptTouchEvents, true);
 }
 
-void ReaderChromeHost::onReaderPageInfo() { bridge_->refresh(); }
+// The reader moved - a page, a chapter, the caret, or an annotation the reader itself just stored (adding a
+// highlight emits this). The annotation list is re-read too rather than only on the chrome's own add/remove,
+// because the colour menu that writes one lives in the READER now, and a panel that only hears about the
+// chrome's own edits is a panel that lies after every highlight.
+void ReaderChromeHost::onReaderPageInfo()
+{
+    bridge_->refresh();
+    bridge_->refreshBookmarks();
+    if (themed_ && graph_)
+        graph_->setZoneCount(QStringLiteral("readerBookmarks"), bridge_->bookmarkCount());
+}
 
 int  ReaderChromeHost::readerPage() const      { return reader_ ? reader_->currentPage() : 0; }
 int  ReaderChromeHost::readerPageCount() const { return reader_ ? reader_->pageCount() : 0; }
 bool ReaderChromeHost::readerTwoUp() const     { return reader_ && reader_->twoUp(); }
+bool ReaderChromeHost::readerCursorMode() const { return reader_ && reader_->cursorMode(); }
+int  ReaderChromeHost::annotationCount() const  { return bridge_ ? bridge_->bookmarkCount() : 0; }
+QString ReaderChromeHost::annotationLabels() const
+{
+    return bridge_ ? bridge_->bookmarkLabels().join(QStringLiteral(" | ")) : QString();
+}
 
 void ReaderChromeHost::buildStrips()
 {
@@ -479,11 +540,10 @@ void ReaderChromeHost::present(bool themed)
     // A BOOK's count is ReadAloud::bookSettingsRowCount(): 5 without read-aloud (the row it has always been)
     // and 9 with it. The count comes from that pure function rather than a literal here so the number the nav
     // cursor can reach and the number probe_readaloud pins are the same statement, not two that agree today.
-    const int settingsRows = (kind_ == ReaderKind::Book)
-                                 ? ReadAloud::bookSettingsRowCount(bridge_->readAloudAvailable())
-                           : (kind_ == ReaderKind::Comic) ? 5
-                                                          : 4;
-    graph_->setZoneCount(QStringLiteral("readerSettings"), settingsRows);
+    // ...plus, for a kind with a text layer, the Select control issue #136 appends (ReaderBridge::
+    // settingsRowCount states the whole length once, so the zone the cursor can reach and the row the QML
+    // draws are the same statement rather than two that agree today).
+    graph_->setZoneCount(QStringLiteral("readerSettings"), bridge_->settingsRowCount());
     graph_->setZoneCount(QStringLiteral("readerToc"), bridge_->tocCount());
     // The bookmark list zone (issue #136): fed from the bridge's live bookmark count, so an empty list gates
     // the zone off (never a crossing target — focus can't strand on it) and the first 'B' brings it live.
@@ -566,6 +626,9 @@ void ReaderChromeHost::onGraphActivated(const QString& zone, int index)
         // cursor. Book used to be the exception because its single control was a ThemedChoice that owned its own
         // activation; with a real row there is nothing left for that exception to mean.
         bridge_->activateSetting(index);
+        // Entering cursor mode (issue #136) dismisses the chrome, exactly as a chapter jump does: the caret is
+        // ON the page, and a strip over the page is a strip over the words being selected.
+        if (reader_ && reader_->cursorMode()) { hideChrome(); return; }
         armAutoHide();
     }
 }
@@ -749,6 +812,7 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
         sawMulti_ = false;
         pinchBaseDist_ = 0.0;
         touchStart_ = pts.isEmpty() ? QPointF() : pts.first().position();
+        touchStartMs_ = QDateTime::currentMSecsSinceEpoch();   // the long-press clock (issue #136)
         // Issue #147: a sequence that STARTS in the OS's reserved band is inert for its whole life and is
         // not claimed, so the system's own back and notification swipes are never half-fought.
         touchInert_ = pts.isEmpty()
@@ -768,6 +832,20 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
         if (sawMulti_) { sawMulti_ = false; return true; } // the pinch's final frame - not a tap/swipe
         const QPointF end = pts.isEmpty() ? touchStart_ : pts.first().position();
         const double dx = end.x() - touchStart_.x(), dy = end.y() - touchStart_.y();
+        // A HOLD first (issue #136): a finger that stayed on a word past the shared long-press duration opens
+        // the selection caret there. Same rule, same numbers and the same table as the classic layout's - the
+        // touch selection the issue asks for rides #147/#162's recogniser rather than being a third
+        // vocabulary. It defers to the reader: a kind with no text layer answers false and the gesture goes
+        // on to mean what it always did.
+        const qint64 heldRaw = QDateTime::currentMSecsSinceEpoch() - touchStartMs_;
+        const int heldMs = int(qBound(qint64(0), heldRaw, qint64(60000)));
+        if (ReaderGestures::longPressAction(cfg, end.x(), end.y(), vw, vh, heldMs, dx, dy)
+                == ReaderGestures::Kind::Select
+            && reader_->beginCursorModeAt(end))
+        {
+            if (chromeVisible_) hideChrome();   // the caret is on the page; a strip over it is a strip over it
+            return true;
+        }
         // A swipe first, then a tap - and both through the shared rules, so the reader's swipe and the
         // video player's mean the same travel (#162's thresholds, read off its own Config).
         const ReaderGestures::Kind k = ReaderGestures::swipeAction(cfg, dx, dy);
@@ -784,6 +862,16 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
 bool ReaderChromeHost::arbitrateKey(int key)
 {
     if (!themed_) return false;    // classic: the reader owns its own keys entirely
+
+    // Cursor mode (issue #136) owns the keyboard while the caret is live: the arrows move it, Enter selects,
+    // Escape leaves the MODE rather than the reader. Checked before everything - including Back - because a
+    // mode that the chrome can steal arrows from is not a mode. The chrome comes down with it, so the caret is
+    // never behind a strip. Once the reader drops the mode this returns false again and arbitration resumes.
+    if (reader_ && reader_->cursorMode())
+    {
+        if (chromeVisible_) hideChrome();
+        return false;
+    }
 
     if (key == Qt::Key_Backspace || key == Qt::Key_Escape) { handleBack(); return true; }
 

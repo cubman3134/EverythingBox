@@ -143,6 +143,13 @@ Rectangle {
                                     brows.push({ i: 7, t: chrome.br.readAloudSpeedLabel })
                                     brows.push({ i: 8, t: chrome.br.readAloudVoiceLabel })
                                 }
+                                // Select (issue #136), LAST. Its index comes from the bridge rather than from
+                                // a literal here, because where it sits depends on whether the four read-aloud
+                                // controls are in the row - and a number stated twice is a number that drifts.
+                                if (chrome.br.selectionSupported && chrome.br.selectSettingIndex >= 0)
+                                    brows.push({ i: chrome.br.selectSettingIndex,
+                                                 t: chrome.br.cursorMode ? "▍ Selecting" : "▍ Select",
+                                                 on: chrome.br.cursorMode })
                                 return brows
                             }
                             var rows = [{ i: 1, t: "−" }, { i: 2, t: "+" }, { i: 3, t: "Fit" }]
@@ -199,10 +206,13 @@ Rectangle {
                 }
             }
 
-            // Bookmark list (readerBookmarks) — the ToC's sibling panel (issue #136). Shown only while its zone
-            // holds the cursor; the host grows the top strip the same way it does for the ToC, so the two panels
-            // share the expanded area (only one is ever visible at once). model = the bridge's live bookmark
-            // labels; activating a row fires the reader's gotoBookmark; the × affordance fires removeBookmark.
+            // Annotation list (readerBookmarks) — the ToC's sibling panel (issue #136). Shown only while its
+            // zone holds the cursor; the host grows the top strip the same way it does for the ToC, so the two
+            // panels share the expanded area (only one is ever visible at once). model = the bridge's live
+            // annotation labels — this book's bookmarks AND its highlights in document order, a highlight
+            // listed by the words it covers. Activating a row jumps to it (a highlight lands the caret inside
+            // itself, so the next Enter offers recolour/remove); the × affordance removes it from whichever
+            // store it came from. A pdf or a comic has no highlights, so its list is bookmarks alone.
             Rectangle {
                 width: parent.width
                 height: parent.height - chrome.barH
@@ -230,8 +240,24 @@ Rectangle {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             onClicked: { if (chrome.g) { chrome.g.select("readerBookmarks", index); chrome.g.activate() } }
                         }
-                        Text {
+                        // A highlight row carries its colour as a swatch (issue #136); a bookmark row has no
+                        // colour and draws none, so the two kinds are told apart at a glance in a list that
+                        // now holds both. bookmarkColors is parallel to the label model, index for index.
+                        Rectangle {
+                            id: swatch
+                            readonly property string hex: (chrome.br && chrome.br.bookmarkColors
+                                                           && index < chrome.br.bookmarkColors.length)
+                                                          ? chrome.br.bookmarkColors[index] : ""
+                            visible: hex !== ""
                             anchors.left: parent.left; anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.round(10 * chrome.ffs); height: width; radius: width / 2
+                            color: hex === "" ? "transparent" : hex
+                            border.color: "#2A3540"; border.width: 1
+                        }
+                        Text {
+                            anchors.left: swatch.visible ? swatch.right : parent.left
+                            anchors.leftMargin: swatch.visible ? 8 : 10
                             anchors.right: rmBtn.left; anchors.rightMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
                             text: modelData; elide: Text.ElideRight

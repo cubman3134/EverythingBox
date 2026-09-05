@@ -9,6 +9,7 @@
 // zoom + fit; comic additionally: a two-up spread toggle); every other method keeps a harmless default so a view
 // never has to spell out a command it does not offer. The wrappers are thin — they call exactly what the reader's
 // own bar buttons already call, so there is ZERO render/scroll-logic change behind this interface.
+#include <QPointF>
 #include <QStringList>
 
 class QWidget;
@@ -69,4 +70,22 @@ public:
     virtual void readAloudCycleSpeed() {}
     virtual QString readAloudVoiceName() const { return {}; }
     virtual void readAloudCycleVoice() {}
+
+    // Text selection and highlights (issue #136). Selection is a MODE, entered on purpose from the reader's
+    // menu, because the pad has no pointer to sweep a paragraph with — see ReaderSelection.h for the key map.
+    // Only a kind with a TEXT LAYER can offer it: a comic has no text at all and a pdf is drawn, not flowed, so
+    // both keep the inert defaults here and their chrome draws no selection control (the panel still lists
+    // their bookmarks — highlights are simply not a verb they have).
+    virtual bool selectionSupported() const { return false; }
+    virtual bool cursorMode() const { return false; }   // is the caret live right now (the host stops arbitrating keys)
+    virtual void beginCursorMode() {}
+    // ...and the TOUCH way in: a finger held on a word opens the caret THERE. `pos` is in the reader widget's
+    // own coordinates; false means the point was not over text (or the kind has none), and the host then falls
+    // through to whatever the gesture would otherwise have meant.
+    virtual bool beginCursorModeAt(const QPointF& /*pos*/) { return false; }
+    virtual void endCursorMode() {}
+    // Jump to a highlight: the same spine+offset jump a bookmark takes, plus landing the caret inside the
+    // passage so the very next Enter offers recolour/remove — which is what "tap an existing highlight" means
+    // when the tap is a D-pad.
+    virtual void gotoHighlight(int /*spine*/, int /*offset*/) {}
 };

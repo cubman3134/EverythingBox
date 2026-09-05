@@ -54,11 +54,13 @@ inline TapPreset presetFromInt(int v)
 inline int presetToInt(TapPreset p) { return int(p); }
 
 // What a gesture asks the reader to do. Prev/Next are the reader's own page turns (which already know about
-// chapter boundaries and reading direction); Menu is the chrome toggle each host already had.
-enum class Kind { None = 0, Prev, Next, Menu };
+// chapter boundaries and reading direction); Menu is the chrome toggle each host already had; Select opens the
+// selection caret at the spot the finger held (issue #136).
+enum class Kind { None = 0, Prev, Next, Menu, Select };
 
 // The three numbers shared with the video player (#162), read off ITS Config so the two cannot drift. They
 // are functions rather than constants precisely so this file never states a value of its own.
+inline int sharedLongPressMs()  { return PlayerGestures::Config().longPressMs; }
 inline int sharedTapSlopPx()    { return PlayerGestures::Config().tapSlopPx; }
 inline int sharedSwipeStartPx() { return PlayerGestures::Config().swipeStartPx; }
 inline int sharedEdgeInsetPx()  { return PlayerGestures::Config().edgeInsetPx; }
@@ -69,7 +71,13 @@ struct Config
     bool      enabled = false;
     TapPreset preset  = TapPreset::RightForward;
     bool      swipe   = true;        // swipe paging; off leaves the tap zones as the only way to turn a page
+    // Long-press to select (issue #136). ON where the recogniser is on: holding a finger on a word is the
+    // gesture every reading app on a touch device trains, and it is the touch END of the same feature the pad
+    // reaches through cursor mode. Deliberately NOT a third gesture vocabulary - the hold duration, the travel
+    // that cancels it and the reserved edge band are #162's numbers, read off the player's Config below.
+    bool      longPressSelect = true;
 
+    int longPressMs  = sharedLongPressMs();
     int tapSlopPx    = sharedTapSlopPx();
     int swipeStartPx = sharedSwipeStartPx();
     int edgeInsetPx  = sharedEdgeInsetPx();
@@ -160,6 +168,21 @@ inline Kind swipeAction(const Config& cfg, double dx, double dy)
     if (!cfg.swipe) return Kind::None;
     if (qAbs(dx) < double(cfg.swipeStartPx) || qAbs(dx) <= qAbs(dy)) return Kind::None;
     return dx < 0 ? Kind::Next : Kind::Prev;
+}
+
+// A finger held still on the page (issue #136): the touch entry into selection, and the exact shape #162's
+// long-press already has — hold longer than longPressMs, travel less than the tap slop. It is refused on the
+// legacy path (a desktop with a touchscreen keeps the behaviour it had), inside the reserved edge band, and in
+// the top menu band, where a hold is somebody reaching for the chrome and not for a word.
+inline Kind longPressAction(const Config& cfg, double x, double y, double vw, double vh,
+                            int heldMs, double dx, double dy)
+{
+    if (!cfg.enabled || !cfg.longPressSelect) return Kind::None;
+    if (heldMs < cfg.longPressMs) return Kind::None;
+    if (!isTap(cfg, dx, dy)) return Kind::None;      // it travelled: that is a swipe, not a hold
+    if (inertStart(cfg, x, y, vw, vh)) return Kind::None;
+    if (y <= cfg.topBandPx) return Kind::None;
+    return Kind::Select;
 }
 
 } // namespace ReaderGestures
