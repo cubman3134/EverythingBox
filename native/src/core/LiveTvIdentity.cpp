@@ -132,3 +132,13 @@ QString LiveTvIdentity::wireId(const QString& title)
     if (id.isEmpty() || isCredentialShaped(id)) return kNamePrefix + QStringLiteral("(untitled channel)");
     return id;
 }
+
+QString LiveTvIdentity::recentPathFor(const QString& resumeKey, const QString& streamUrl)
+{
+    // The two tests are the ones the header argues for, in that order and with no third: a key that is a
+    // channel identity, and one this device can actually re-resolve. Everything else — a catalog stream's
+    // id, a debrid link, a local path, an empty key — is returned as the url it was, byte for byte, so
+    // every other route through the write site reaches its row exactly as it did before this existed.
+    if (isLiveTvId(resumeKey) && !isCredentialShaped(resumeKey)) return resumeKey;
+    return streamUrl;
+}

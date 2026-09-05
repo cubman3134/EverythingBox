@@ -5359,7 +5359,14 @@ void HomeView::toggleLiveTvChannelFavorite(const MediaItem& it)
             FavoritesStore::add(f);
         }
     }
-    if (!liveTvCacheSourceId_.isEmpty()) populateLiveTvChannels(liveTvCacheSourceId_); // re-render the ★ mark
+    // Re-render the ★ mark — but ONLY while the channel list is the level on screen. #244 made a channel row
+    // reachable from the ★ Favorites SHELF as well, and this re-render is a level rebuild: un-starring from
+    // the shelf would have walked the user out of it and into the source's channel list, which reads as the
+    // press having navigated somewhere. The cache id alone cannot tell the two apart — it stays set for the
+    // whole session once a source has been opened.
+    if (!liveTvCacheSourceId_.isEmpty() && !stack_.isEmpty()
+        && stack_.last().item.type == QStringLiteral("_livetvchannels"))
+        populateLiveTvChannels(liveTvCacheSourceId_);
 }
 
 // ---- OPDS book catalogs (issue #146) ----------------------------------------------------------------------
@@ -7032,6 +7039,19 @@ QVector<MediaItem> HomeView::shelfMatches(const MediaItem& folder) const
             if (gamefilter::matches(p.filter, gameFactsFor(it))) out.push_back(it);
         }
     }
+    // #244: AND THE STARRED LIVE TV CHANNELS, on the ★ Favorites shelf of the VIDEO catalogue root — the one
+    // thing on this shelf that does not come from the level above it. browse::liveTvFavoriteRows says at
+    // length why a channel is the exception and why nothing else joins it; in short, it is the only favourite
+    // that CANNOT be starred from the level its shelf is built over, so the intersection above is empty for
+    // it by construction and a themed layout had no surface for it at all.
+    //
+    // Appended AFTER the intersection, so the shelf's existing order is byte-for-byte what it was and the
+    // channels are a suffix rather than an interleaving. Scoped to the video root by the same question the
+    // Live TV FOLDER is scoped by (catalogRecentKind), so a starred channel never appears under Games or
+    // Music. catalogRecentKind reads stack_.first(), the ROOT — unchanged by the drill this snapshots for.
+    if (mime == QStringLiteral("favshelf:") && catalogRecentKind() == QStringLiteral("video"))
+        for (const MediaItem& ch : browse::liveTvFavoriteRows(FavoritesStore::list()))
+            if (!isHiddenItem(ch)) out.push_back(ch);   // the same hidden-mark rule the rows above obey
     return out;
 }
 
@@ -7933,6 +7953,13 @@ void HomeView::activateItem(int row)
         // credential design: what gets written down is the id (Jellyfin::recordedPath), and the id is what
         // the next open re-mints from.
         case browse::LeafPlay::JellyfinItem:
+            emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
+        // #244: a starred Live TV channel on the ★ Favorites shelf. Through openRecent for the reason the
+        // arm above it is: the row names a channel and only MainWindow can turn that name into a playable
+        // link (openLiveTvChannel → LiveTvResolver, across this device's sources). Passing the identity as
+        // BOTH path and resume key is the same deliberate shape — what is written down is the identity, and
+        // the identity is what the next open resolves from.
+        case browse::LeafPlay::LiveTvChannel:
             emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: fall through
     }
@@ -10577,6 +10604,10 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         // for why this goes through openRecent rather than openItem.
         case browse::LeafPlay::JellyfinItem:
             emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
+        // #244: the themed twin of activateItem's arm, and the surface the whole issue is about — a starred
+        // channel had nowhere to BE on this layout, so this is the site that has to be able to play it.
+        case browse::LeafPlay::LiveTvChannel:
+            emit openRecent(lr.key, QStringLiteral("video"), lr.key, it.title, it.thumbnailUrl); return;
         case browse::LeafPlay::NotLocal:   break;                      // an addon's row: resolve it below
     }
     // Audiobookshelf (#197), the SAME call activateItem makes. These rows all drill (every type starts with
@@ -11678,8 +11709,15 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                         return true;
                 return false;
             };
-            if (favoritesShelf && any([](const MediaItem& it) {
-                    return !isHiddenItem(it) && FavoritesStore::isFavorite(MetaCache::keyFor(it)); }))
+            // #244: …OR a starred Live TV channel, on the video root. The gate has to ask the SAME question
+            // the shelf answers (shelfMatches), or the row is offered and opens onto nothing — or, as it did
+            // until now, the channel exists in the store and no row is ever offered for it at all.
+            bool anyChannel = false;
+            if (catalogRecentKind() == QStringLiteral("video"))
+                for (const MediaItem& ch : browse::liveTvFavoriteRows(FavoritesStore::list()))
+                    if (!isHiddenItem(ch)) { anyChannel = true; break; }
+            if (favoritesShelf && (anyChannel || any([](const MediaItem& it) {
+                    return !isHiddenItem(it) && FavoritesStore::isFavorite(MetaCache::keyFor(it)); })))
                 add(QStringLiteral("_favshelf"), QStringLiteral("_favshelf"), tr("★ Favorites"),
                     QStringLiteral("favshelf:"));
             for (const QString& tag : ItemMarks::pinnedTags())

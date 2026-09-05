@@ -80,6 +80,16 @@ namespace browse
         // here is exactly what LeafRoute.h's opening paragraph says it means: no addon can resolve this
         // row, so both surfaces have to claim it or one of them answers "Nothing to play".
         JellyfinItem,
+        // A STARRED LIVE TV CHANNEL, shown on the ★ Favorites shelf (#244). `key` is the channel identity
+        // (`livetv:<tvg-id>` / `livetv:name:<name>`), and the row carries NO url for exactly the reason a
+        // Jellyfin row carries none: the stream link is minted at open from this device's own sources and is
+        // never written into a row — an IPTV url puts the provider's credential in its PATH, which #200's
+        // scrub cannot touch, which is the whole of #203.
+        //
+        // A route of its own rather than a reuse of JellyfinItem, though both end in the same openRecent
+        // call: the two name keys in two different namespaces, resolved by two different subsystems, and one
+        // enumerator covering both would let a mis-stamped mime send a channel at a media server.
+        LiveTvChannel,
     };
 
     struct LeafRoute
