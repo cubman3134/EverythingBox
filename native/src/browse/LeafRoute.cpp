@@ -2,6 +2,8 @@
 #include "AudiobookCatalogs.h"  // kAudiobookFilePrefix + audiobookKeyOf — likewise, for #139's books
 #include "JellyfinCatalogs.h"   // kJellyfinItemPrefix + jellyfinKeyOf — and again, for #83's server items
 #include "MusicCatalogs.h"   // kMusicTrackPrefix + musicKeyOf — a keyed kind's contract lives with its feature
+#include "../core/LiveTvIdentity.h" // kLiveTvChannelPrefix + channelKeyOf — ditto, for #244's starred channel
+                                    // (QtCore-only and header-only here: this adds no link dependency)
 
 #include <QLatin1String>
 
@@ -23,6 +25,7 @@ const QVector<LocalLeafKind>& localLeafKinds()
         { kMusicTrackPrefix, LocalLeafKind::Mime, true,  LeafPlay::MusicAlbum },
         { kAudiobookFilePrefix, LocalLeafKind::Mime, true, LeafPlay::AudiobookBook },
         { kJellyfinItemPrefix,  LocalLeafKind::Mime, true, LeafPlay::JellyfinItem },
+        { LiveTvIdentity::kLiveTvChannelPrefix, LocalLeafKind::Mime, true, LeafPlay::LiveTvChannel },
     };
     return kinds;
 }
@@ -61,6 +64,15 @@ LeafRoute localLeafRoute(const MediaItem& it)
             // AND NOTHING BELOW ASKS FOR A URL. A Jellyfin row carries none by design; the empty-url refusal
             // in the next arm would reject every one of them.
             r.key = jellyfinKeyOf(it.mime, k.id);
+            if (r.key.isEmpty()) return {};
+        }
+        else if (k.play == LeafPlay::LiveTvChannel)
+        {
+            // Same "everything after the prefix" rule and the same reason: a channel identity is
+            // "livetv:name:bbc one", so any section(':') split would hand back "livetv" and resolve nothing.
+            // A row naming no channel falls through rather than being claimed and dropped — and NOTHING
+            // below asks for a url, which a starred channel deliberately does not have.
+            r.key = LiveTvIdentity::channelKeyOf(it.mime, k.id);
             if (r.key.isEmpty()) return {};
         }
         else if (it.url.isEmpty())

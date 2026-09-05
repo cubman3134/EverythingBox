@@ -8158,8 +8158,13 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // it exactly as the favourite does, so Continue Watching survives the rotation instead of replaying a
     // link that has stopped working. Only when the key is a repaired identity: a legacy url-shaped row has
     // nothing else to be re-opened from, and is left replaying its url exactly as it always did.
-    const bool liveTvId = LiveTvIdentity::isLiveTvId(resumeKey)
-                          && !LiveTvIdentity::isCredentialShaped(resumeKey);
+    //
+    // #245: THE CHOICE IS LiveTvIdentity::recentPathFor, NOT A BOOLEAN SPELLED OUT HERE. It was one guarded
+    // line in a function that links nothing headlessly, so nothing could reach it and a regression would put
+    // a credential back into a synced store in silence. As a pure function it is asserted directly, over a
+    // fixture url that carries a token in its PATH — probe_cloudmerge §40, which reads the SERIALISED row
+    // back out of the ini and scans its bytes.
+    const QString liveTvPath = LiveTvIdentity::recentPathFor(resumeKey, url);
     // #83: A JELLYFIN ROW RECORDS ITS ITEM, NOT THE LINK - the same rule one source along, and the same
     // two reasons. The link carries the token in its query (#200's scrub takes the query off, so nothing
     // leaks either way, but a query-less Jellyfin stream url is not playable and not re-mintable), and the
@@ -8167,7 +8172,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // resolves a qualified id back into a fresh link. Jellyfin::recordedPath is the one place that decision
     // is made, and it returns everything that is NOT a qualified id byte for byte - so the Live TV rule
     // above and every other route reach this line exactly as they did.
-    RecentItem row{ Jellyfin::recordedPath(resumeKey, liveTvId ? resumeKey : url), t,
+    RecentItem row{ Jellyfin::recordedPath(resumeKey, liveTvPath), t,
                     QStringLiteral("video"), recipe ? recipe->thumbnailUrl : QString(), resumeKey };
     if (recipe) applyRemintRecipe(row, *recipe);
     RecentStore::add(row);

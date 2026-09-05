@@ -319,6 +319,31 @@ FavoriteItem liveTvChannelFavorite(const QVector<M3uEntry>& entries, int index)
     return f;
 }
 
+QVector<MediaItem> liveTvFavoriteRows(const QList<FavoriteItem>& favs)
+{
+    QVector<MediaItem> out;
+    for (const FavoriteItem& f : favs)
+    {
+        // TYPE, not kind: a movie favourite must never be drawn as a channel because its id happens to
+        // start the same way — the rule liveTvChannelsCatalog's ★ mark already uses one file over.
+        if (f.type != QStringLiteral("livetv")) continue;
+        // …and the id has to be an identity this device can look a url up from. See the header for why a
+        // legacy url-shaped row is left where it is rather than listed here.
+        if (!LiveTvIdentity::isLiveTvId(f.itemId) || LiveTvIdentity::isCredentialShaped(f.itemId)) continue;
+        MediaItem it;
+        it.id           = f.itemId;                    // the identity: the star's own key, so ★/un-★ agree
+        it.type         = QStringLiteral("livetv");    // the channel tile, the same one the source list draws
+        it.mime         = QString::fromLatin1(LiveTvIdentity::kLiveTvChannelPrefix) + f.itemId;
+        it.title        = f.title;
+        it.subtitle     = f.subtitle;
+        it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl);   // offline-first tvg-logo
+        // it.url stays EMPTY. Not an oversight and not a missing field: a row with a url is opened through
+        // it, and there is deliberately no url to store (#203).
+        out.push_back(it);
+    }
+    return out;
+}
+
 MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
 {
     MediaCatalog cat; cat.title = QObject::tr("Live TV");
