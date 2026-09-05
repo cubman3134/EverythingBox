@@ -292,6 +292,21 @@ notification swipes are never fought, and no gesture registers while a menu or o
 The readers have their own touch handling — tap zones for page turns, a swipe to turn, and pinch-to-zoom in
 the PDF and comic views.
 
+## When something won't open
+
+A press that ends without opening anything leaves a mark that stays, rather than a message you have to be
+looking at to catch. The toast still appears; what is new is that it is no longer the only trace.
+
+- The item's **detail page** carries the failure — what went wrong and when it was last tried — with
+  **Try again** beside it, **Choose another source…** where the item has more than one release, and
+  **Dismiss** when you have had enough of it.
+- The item's **row on the shelf** carries a small **⚠ didn't open** marker, so a glance down a folder shows
+  which thing refused instead of inviting you to press it again blind.
+
+The mark clears the moment the item opens, when you dismiss it, or on its own after seven days. It is
+**local to this device and never synced**: it is a fact about this machine's last attempt on this network,
+and the same title may open perfectly well on another device on the same account.
+
 ## After a crash
 
 On Windows a crash records itself. `crash_report.log` gets the faulting module and offset, the

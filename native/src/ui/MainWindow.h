@@ -621,6 +621,28 @@ private:
     // reach player_->play ends here, because they all leave the app in the same wrong place: a transport
     // still reading the FINISHED part's timeline, in the playing state, on a queue row that never started.
     void reportBookPartUnavailable(const QString& message);
+    // WHAT failed, and HOW FAR the press got before it did (#239). `id` is the catalog item's id — the same
+    // identity the "on disk" badge and FollowStore key on — and it is the whole reason the state can persist:
+    // a title is not an identity (two dumps of one game share one), and marking the wrong row tells the user
+    // the copy that works is the broken one. An EMPTY id is honest and supported: it means "nothing on any
+    // shelf is about to be marked", which is what a failure with no catalog row in hand really is.
+    struct OpenFailSubject
+    {
+        QString id;
+        QString title;
+        // Three distances a press can die at, and they owe the screen different things:
+        //   * Player  — mpv had the file and refused it (or went silent). The transport is left reading
+        //               "playing" unless something corrects it, so this stage runs the #228 correction. This
+        //               is the DEFAULT, because it is what the two existing callers are.
+        //   * Fetch   — the bytes never arrived, so no player was ever involved and nothing is playing. The
+        //               correction must NOT run here: an album playing in the background is not the thing
+        //               that failed, and stopping it would be a new bug wearing this one's hat.
+        //   * Resolve — no link was even minted, and the surface that noticed has ALREADY said so out loud.
+        //               Persist without announcing, so the sentence is not shown twice in two voices.
+        enum class Stage { Player, Fetch, Resolve };
+        Stage stage = Stage::Player;
+    };
+
     // THE STATE CORRECTION BOTH FAILURE PATHS OWE (#228), and the reason it is a function rather than a
     // paragraph repeated twice. "Nothing is playing" has to be said to three places that are otherwise fed
     // only by mpv's own signals — the play/pause glyph, the classic seek bar and time label, and the app's
@@ -635,7 +657,27 @@ private:
     // not, so both build their own sentence and hand it here: PlaybackFailure::plan, then showPlaybackStopped,
     // then the sticky-notice ownership record. Kept out of the two lambdas so a third failure shape cannot
     // pick up the message half and forget the correction half, which is exactly how #228 happened.
-    void reportOpenFailure(const QString& message);
+    //
+    // ...AND THE ONE PLACE A FAILURE BECOMES SOMETHING THAT STAYS (#239). A toast is the right shape for
+    // "saved" or "added to favourites"; it is the wrong shape for "the thing you asked for did not happen".
+    // The toast fades in seconds and the shelf then looks exactly as it did before the press — which is how
+    // #236 came to be filed against the emulator backend when the real event was a download that came back
+    // empty. So a failure that names an ITEM is written to OpenFailStore here, on the way past, and the
+    // item's detail page carries it (on both layouts) until the item opens, the user dismisses it, or seven
+    // days go by. Everything hangs off this one call deliberately: a second reporting route is a second
+    // chance for a new failure shape to reach the screen and not the store.
+    void reportOpenFailure(const QString& message, const OpenFailSubject& subject = {});
+    // ---- #239, defined in ui/MainWindowOpenFail.cpp (a feature TU, not another hunk of MainWindow.cpp) --
+    // Write the failure down against its item and re-render whatever is currently showing that item, so the
+    // detail page the user is standing on grows its banner and verbs without a navigation. Empty id -> no-op.
+    void noteOpenFailure(const OpenFailSubject& subject, const QString& message);
+    // Forget it. TWO occasions, one primitive: the item opened successfully, or the user dismissed the
+    // notice. Both mean the same thing to every surface — there is no longer anything to say about this item
+    // — and giving them separate code paths is how one of them ends up forgetting to repaint.
+    void clearOpenFailure(const QString& itemId);
+    // Re-push the themed detail page's data (the classic page repaints itself through HomeView). Called
+    // after any write above, and safe when no detail page is open.
+    void refreshOpenFailureSurfaces();
     // …and whether that message is the one currently on screen. It is STICKY, so nothing takes it down on a
     // timer, and the next part the listener reaches must not play under a notice about the last one that
     // would not. Tracked rather than blanket-hiding, because the notice channel is shared: a sticky phase

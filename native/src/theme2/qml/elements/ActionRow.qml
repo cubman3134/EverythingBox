@@ -42,6 +42,10 @@ Item {
     }
     // This row holds the nav cursor when the host parks the detail selection in the "actions" zone.
     // Following (issue #155): whether this item is followed, and how many unseen children it holds.
+    // The failed-open state (issue #239), supplied by themedDetailData only when there IS one. `failure` is
+    // the sentence the toast showed, kept verbatim so the page and the toast cannot say different things.
+    readonly property string failure: (sel && sel.failure) ? sel.failure : ""
+    readonly property string failureWhen: (sel && sel.failureWhen) ? sel.failureWhen : ""
     readonly property bool followed: !!(sel && sel.followed)
     readonly property int  newCount: (sel && sel.newCount) ? sel.newCount : 0
     readonly property bool zoneFocused: !!(host && host.detailZone === "actions")
@@ -64,6 +68,11 @@ Item {
     // verb -> { label, color, textColor } (favourite flips its label/colour with the item's current state).
     function metaFor(verb) {
         if (verb === "play")     return { label: (readable ? "📖  Read" : "▶  Play"), color: "#3FA95E", textColor: "#FFFFFF" }
+        // The two verbs a recorded failure earns (issue #239). "Try again" is the press that failed, repeated;
+        // "Dismiss" is one of the three ways the record goes away (the others are a successful open and seven
+        // days). "Choose another source…" is NOT a third pill — `source` above already is exactly that.
+        if (verb === "retry")    return { label: "↻  Try again",  color: "#B3261E", textColor: "#FFFFFF" }
+        if (verb === "dismiss")  return { label: "✕  Dismiss",    color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "source")   return { label: "🔀  Choose source…",                 color: "#EDE4FF", textColor: "#3A2A7A" }
         if (verb === "download") return { label: "⬇  Download",                       color: "#5A8CFF", textColor: "#FFFFFF" }
         // The PC-game merge override (issue #44) — offered only on a merged PC game, whose identity is a
@@ -111,6 +120,36 @@ Item {
         anchors.verticalCenter: topAligned ? undefined : parent.verticalCenter
         anchors.top: topAligned ? parent.top : undefined
         spacing: Math.max(8, fs * 0.5)
+        // The failure sentence, ABOVE the pills (issue #239). A full-width Flow CHILD rather than a pill or a
+        // separately-anchored Text: the Flow lays it out on a line of its own and wraps the pills onto the
+        // next one, so it needs no geometry of its own AND the block's implicitHeight grows — which is what
+        // `bottomOverflow` above already reports to ThemeView, so every theme's detail page slides its lower
+        // elements down instead of drawing them through this.
+        //
+        // TWO THINGS THAT LOOK LIKE TIDINESS AND ARE NOT. It takes NO explicit height: a wrapping Text's
+        // implicitHeight is a function of its width, and `height: visible ? implicitHeight : 0` made the
+        // engine report a binding loop on `height` (seen live, in the log, on the Night theme) — a positioner
+        // skips an invisible child anyway, so the zero case needs no help. And its width comes from
+        // `rowEl.width`, not `btnRow.width`: a Flow's own width is derived from the children it lays out, so
+        // sizing a child off it is a second loop, and a line whose width settles late is one whose HEIGHT the
+        // Flow was measured without — which is exactly the miscount that leaves the wrapped pills drawn over
+        // whatever the theme puts beneath them. btnRow spans the element box, so the two are the same number.
+        Text {
+            id: failLine
+            visible: rowEl.failure.length > 0
+            width: rowEl.width
+            // ONE LINE, the sentence and its timestamp together. Two lines was tried first and cost too
+            // much height: this block grows about its own CENTRE (ThemeView's positioner says so in as
+            // many words, and only slides the elements BELOW it), so every line added here is half a line
+            // pushed up into the rating/facts row and half a line pushed down into whatever the theme
+            // rules off beneath the pills. Both overlaps were seen on real themes during the #239 live
+            // drive — Triple above, Night below — and neither is worth a second row of text.
+            text: rowEl.failure + (rowEl.failureWhen.length ? ("   \u00b7   " + rowEl.failureWhen) : "")
+            color: "#E86A62"
+            font.bold: true
+            font.pixelSize: Math.max(10, rowEl.fs * 0.85)
+            wrapMode: Text.WordWrap
+        }
         Repeater {
             model: rowEl.verbs
             delegate: Rectangle {

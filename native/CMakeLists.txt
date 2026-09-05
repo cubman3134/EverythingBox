@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.185 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.186 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -709,6 +709,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/ArchiveSafePath.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
+        src/core/OpenFailStore.cpp src/core/OpenFailStore.h    # issue #239: the last failed open, per item -- device-local, seven-day, never synced
         src/core/StoredUrl.h                              # issue #200: what a synced store may write down about a signed url (pure)
         src/core/CredentialScrub.cpp src/core/CredentialScrub.h  # issue #200: the one-time sweep of what earlier builds wrote
         src/core/StoredIdentity.cpp src/core/StoredIdentity.h    # issue #203: the durable name a row is filed under (+ its repeatable sweep)
@@ -846,6 +847,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.
@@ -1808,6 +1810,35 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_romreuse tools/probe_romreuse.cpp src/core/RomReuse.h)
     target_include_directories(probe_romreuse PRIVATE src src/core)
     target_link_libraries(probe_romreuse PRIVATE Qt6::Core)
+
+    # THE FAILURE THAT OUTLIVES THE TOAST (src/core/OpenFailStore, issue #239). A press that ends without
+    # opening anything used to leave a toast and nothing else, and #236 was filed against the wrong subsystem
+    # because of it. The store is a QSettings wrapper over the shared everythingbox.ini keyed by catalog item
+    # id, with a read-side seven-day expiry on an INJECTED clock -- a test that had to sleep seven days would
+    # not be written, so the expiry would never be exercised. Needs ProfileStore.cpp (the rows are namespaced
+    # by the active profile). CloudSync is linked in for the device-local assertion: the carve-out is asserted
+    # against the REAL predicate and the REAL settings.json bytes rather than restated, which is what catches
+    # someone loosening it later. That drags the same lean subset probe_audioout documents (SettingsTxn,
+    # BrandMigration, TraktSync/TraktRead, PendingPush, the two SyncBackends and miniz); Qt6::Gui is
+    # CloudSync's QDesktopServices, Qt6::Network its QNetworkAccessManager.
+    add_executable(probe_openfail tools/probe_openfail.cpp
+        src/core/OpenFailStore.cpp   src/core/OpenFailStore.h
+        src/core/ProfileStore.cpp    src/core/ProfileStore.h
+        src/core/Settings.cpp        src/core/Settings.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
+        src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
+        src/core/SyncBackend.h
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h
+        src/core/BrandMigration.cpp  src/core/BrandMigration.h
+        src/core/TraktSync.cpp       src/core/TraktSync.h
+        src/core/TraktRead.cpp       src/core/TraktRead.h
+        src/core/PendingPush.cpp     src/core/PendingPush.h
+        third_party/miniz.c)
+    target_include_directories(probe_openfail PRIVATE src src/core src/video src/theme2 third_party)
+    target_compile_definitions(probe_openfail PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_openfail PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # The other direction of launch supersession (src/launch/LaunchContexts.h): which of GameLauncher's pending
     # in-app continuations — the archive extraction, the core/BIOS download — a newly committed EXTERNAL launch

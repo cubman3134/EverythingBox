@@ -2182,6 +2182,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (ok) { notifier_->hidePlayerNotice(); }
         else    { showNextSourceFeedback(msg); }
     });
+    // A press that died before any bytes (#239): no source resolved, so nothing opened and no player was
+    // involved. HomeView has already shown its own toast — the Resolve stage says so, and the funnel then
+    // only records, rather than putting a second sentence on screen for one event.
+    connect(home_, &HomeView::openFailedRequested, this,
+            [this](const QString& id, const QString& title, const QString& msg) {
+        reportOpenFailure(msg, { id, title, OpenFailSubject::Stage::Resolve });
+    });
     // The classic transport's skip step: the configured audio jump interval (issue #140) when audio is playing,
     // the unchanged 10 s for video (jump intervals are an audiobook-context affordance, so video seeking is
     // untouched). audioSkipStep() gates on session_->mediaIsVideo(), the same isAudio signal the speed path uses.
@@ -8689,8 +8696,24 @@ void MainWindow::showPlaybackStopped(const QString& message, int noticeMs)
     notify(message, noticeMs);
 }
 
-void MainWindow::reportOpenFailure(const QString& message)
+void MainWindow::reportOpenFailure(const QString& message, const OpenFailSubject& subject)
 {
+    // FIRST, THE PART THAT OUTLIVES EVERYTHING BELOW (#239). Whatever the screen is owed in the next four
+    // seconds, the item is owed a record that is still there in four minutes: a press that ended without
+    // opening anything used to leave nothing at all once the toast faded. Written before the announcing, so
+    // that no early return further down can skip it, and a no-op for a subject with no id.
+    noteOpenFailure(subject, message);
+
+    // A RESOLVE-STAGE failure has already been said out loud by the surface that noticed it (HomeView's own
+    // toast names the title and the reason). Saying it again here would put two sentences on screen for one
+    // event, in two voices; the persistence above is the whole of what this door adds for that stage.
+    if (subject.stage == OpenFailSubject::Stage::Resolve) return;
+
+    // A FETCH-STAGE failure never reached a player, so there is no transport reading "playing" to correct —
+    // and running the correction anyway would stop an album that is playing in the background and had
+    // nothing to do with the download that failed. It gets the message, and nothing else.
+    if (subject.stage == OpenFailSubject::Stage::Fetch) { notify(message, kFeedbackLong); return; }
+
     // GAPLESS IS THE ONE FAILURE THAT IS NOT THE END, which is why this asks a table rather than just doing
     // it. With gapless armed (#141) the app feeds mpv's OWN playlist one entry ahead, so mpv holds two or more
     // files and moves between them itself — a bad entry in that playlist arrives as the same END_FILE/ERROR
@@ -10554,6 +10577,25 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // The manual release picker for this leaf. HomeView resolves the index to its item and hands it back
     // through chooseSourceRequested — the picker (and the BingeStore it writes) lives here.
     else if (verb == QStringLiteral("source"))   home_->requestChooseSource(idx);
+    // "Try again" (#239) IS the press that failed, repeated — the same playThemedLeaf the Play pill runs.
+    // A distinct verb rather than a relabelled Play because the page has to say WHICH press it is offering
+    // to repeat, and because the two are not always both offered. Nothing is cleared here: the record clears
+    // when an open actually reaches content, so a retry that fails again leaves the page honest.
+    else if (verb == QStringLiteral("retry"))    home_->playThemedLeaf(idx);
+    // "Dismiss" — the second of the three ways the record goes away.
+    //
+    // DEFERRED A TURN, and not as a nicety: clearing re-pushes the WHOLE detailData map, and the verb list
+    // itself shrinks by two, so the ActionRow Repeater is re-sourced underneath the very pill delegate whose
+    // emission is still on the stack. That is crash #28's exact shape (see deferPastQmlEmission). The id is
+    // resolved HERE, synchronously, for the reason the library-management verbs resolve theirs here: a row
+    // index only means something against the browseRowMap_ that produced it, and a turn is long enough for
+    // an async re-present to rebuild that map.
+    else if (verb == QStringLiteral("dismiss"))
+    {
+        const QString id = home_ ? home_->themedLeafId(idx) : QString();
+        if (id.isEmpty()) return;
+        deferPastQmlEmission([this, id] { clearOpenFailure(id); });
+    }
     else if (verb == QStringLiteral("download")) home_->downloadThemedLeaf(idx);
     else if (verb == QStringLiteral("playlist")) home_->addBrowseItemToPlaylist(idx);
     // One-off external/built-in override for THIS play. Two leak-free channels (see routePlay): the member
@@ -19700,6 +19742,11 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     // prefer-local re-entry). openLocal is the cache-copy shorthand used by the existing call sites.
     auto openFrom = [this, item](const QString& path) {
         hideNotice(); // resolve+download feedback done; the content view takes over
+        // ...and the item HAS opened, so any failure recorded against it stops being true (#239). This is
+        // the one join point all four ways in reach — the ROMs-folder reuse, the cache hit, the finished
+        // curl download and the finished QNetworkReply download — which is why the clear is here and not at
+        // each of them: a "Try again" that works has to take its own banner down.
+        clearOpenFailure(item.id);
         MediaItem local = item;
         local.url = path; // a local path now -> openLibraryItem dispatches to the file-based reader
         // Same re-derivation as the prefer-local re-entry, for the same reason: the url changed, so the
@@ -19792,7 +19839,8 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         progress->start(1000);
 
         connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, p, progress, partPath, localPath, promoteAndOpen, title = item.title](int code, QProcess::ExitStatus) {
+                [this, p, progress, partPath, localPath, promoteAndOpen,
+                 title = item.title, id = item.id](int code, QProcess::ExitStatus) {
             progress->stop();
             p->deleteLater();
             if (code != 0)
@@ -19800,14 +19848,17 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
                 QFile::remove(partPath);
                 mwLog(QStringLiteral("download(curl): FAILED \"%1\" (curl exit %2)").arg(title).arg(code));
                 const QString e = tr("Couldn't download “%1” (the source may be down).").arg(title);
-                statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
+                statusBar()->showMessage(e, kFeedbackLong);
+                reportOpenFailure(e, { id, title, OpenFailSubject::Stage::Fetch });
                 return;
             }
             if (QFileInfo(partPath).size() == 0)
             {
                 QFile::remove(partPath);
                 mwLog(QStringLiteral("download(curl): empty (0 bytes) for \"%1\"").arg(title));
-                notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
+                reportOpenFailure(
+                    tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title),
+                    { id, title, OpenFailSubject::Stage::Fetch });
                 return;
             }
             QFile::remove(localPath);
@@ -19885,14 +19936,19 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     // writes into the same cache and has to reject a truncated or 404-bodied file in exactly the same ways.
     // What stays here is the half that is about the USER — where a message is shown, and what happens next.
     streamReplyToFile(reply, partPath, localPath, item.title, QStringLiteral("download"),
-                      [this, promoteAndOpen, localPath, title = item.title](bool ok, const QString& message) {
+                      [this, promoteAndOpen, localPath,
+                       title = item.title, id = item.id](bool ok, const QString& message) {
         if (!ok)
         {
             // Both surfaces for every failure. The empty-body case used to reach only the toast; showing it
             // in the status bar as well is the one behaviour this extraction changes, deliberately, because
             // the alternative was a second parameter whose only job was to reproduce that inconsistency.
+            //
+            // ...and, since #239, a THIRD surface that does not expire. This is the exact press #236 was
+            // filed about: the resolver picked a release, the body came back empty, and the only trace was a
+            // toast that had faded by the time anyone looked. The funnel keeps the toast and adds the record.
             statusBar()->showMessage(message, kFeedbackLong);
-            notify(message, kFeedbackLong);
+            reportOpenFailure(message, { id, title, OpenFailSubject::Stage::Fetch });
             return;
         }
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening")

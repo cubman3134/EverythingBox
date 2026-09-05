@@ -71,6 +71,7 @@
 #include "../core/TrackerRules.h"     // ...and tracker::itemKeyFor, the one key rule
 #include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
 #include "../core/FollowStore.h"     // Following a series (#155): the synced per-item follow mark
+#include "../core/OpenFailStore.h"   // #239: the last failed open, per item (device-local, seven-day)
 #include "../core/FollowSnapshot.h"  // ...and the device-local snapshot the New shelf is built from
 #include "../core/FollowPlan.h"      // ...and the pure rules both layouts share (followability, the shelf)
 #include "../core/PerfTrace.h"
@@ -736,6 +737,42 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     arl->setContentsMargins(0, 0, 0, 0);
     arl->setSpacing(8);
 
+    // "Try again" and "Dismiss" (issue #239), built FIRST so they sit at the head of the row: when they are
+    // visible at all, the page is answering "that press did nothing" and they are the two things worth
+    // pressing. Both are hidden for every ordinary item; applyOpenFailureToDetail reveals them.
+    retryBtn_ = new QPushButton(tr("↻  Try again"), actionRow_);
+    retryBtn_->setCursor(Qt::PointingHandCursor);
+    retryBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#B3261E;border:2px solid #7F1B15;border-radius:6px;"
+        "padding:6px 18px;color:#fff;font-weight:bold;}"
+        "QPushButton:hover{background:#C9382F;}"
+        "QPushButton:focus{background:#DC4A40;border-color:#5E120E;}"));
+    retryBtn_->setVisible(false);
+    // The SAME press that failed, not a variant of it — see playDetailItem. The record is not cleared here:
+    // it clears when the open actually reaches content, so a retry that fails again leaves the page honest.
+    connect(retryBtn_, &QPushButton::clicked, this, [this] { playDetailItem(); });
+    retryBtn_->installEventFilter(this); // Backspace here = Back, like every other button on this row
+    arl->addWidget(retryBtn_);
+
+    dismissBtn_ = new QPushButton(tr("✕  Dismiss"), actionRow_);
+    dismissBtn_->setCursor(Qt::PointingHandCursor);
+    dismissBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E7EBF2;border:2px solid #A9B4C6;border-radius:6px;"
+        "padding:6px 14px;color:#33405A;font-weight:bold;}"
+        "QPushButton:hover{background:#D8DFEA;}"
+        "QPushButton:focus{background:#C7D1E0;border-color:#8695AC;}"));
+    dismissBtn_->setVisible(false);
+    connect(dismissBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem it = stack_.last().item;
+        OpenFailStore::clear(it.id);
+        // Repaint from here rather than waiting for a navigation: the button that was just pressed is one of
+        // the things that has to disappear, and so is the marker on the row behind this page.
+        refreshOpenFailureMarks();
+    });
+    dismissBtn_->installEventFilter(this);
+    arl->addWidget(dismissBtn_);
+
     playBtn_ = new QPushButton(tr("▶  Play"), actionRow_);
     playBtn_->setCursor(Qt::PointingHandCursor);
     playBtn_->setVisible(false); // shown only for Steam games
@@ -744,20 +781,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         "padding:6px 18px;color:#fff;font-weight:bold;}"
         "QPushButton:hover{background:#48BE6B;}"
         "QPushButton:focus{background:#54CE78;border-color:#1E5E32;}"));
-    connect(playBtn_, &QPushButton::clicked, this, [this] {
-        if (stack_.isEmpty() || !stack_.last().detail) return;
-        const Level& top = stack_.last();
-        const MediaItem it = top.item;
-        // The console/platform we drilled in from (if any). Stamped onto a resolved game so the launcher can
-        // pick the right emulator even when the file extension is shared (e.g. a PSP .iso vs a GameCube .iso).
-        QString console;
-        if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
-            console = stack_.at(stack_.size() - 2).item.title.trimmed();
-        // The volume/series we drilled in from (used to build a comic issue's bridge query).
-        const QString parentTitle = (stack_.size() >= 2) ? stack_.at(stack_.size() - 2).item.title.trimmed()
-                                                         : QString();
-        resolvePlay(top.addon, it, parentTitle, console, playImdbId_, playStremioType_);
-    });
+    connect(playBtn_, &QPushButton::clicked, this, [this] { playDetailItem(); });
     playBtn_->installEventFilter(this); // Backspace here = Back
     arl->addWidget(playBtn_);
 
@@ -935,6 +959,18 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
 
     arl->addStretch(1);
     mc->addWidget(actionRow_);
+
+    // The failed-open banner (issue #239). Placed at the TOP of the text column by layoutMetaSections,
+    // deliberately outside the theme's declared section order: it is not a section of the item's metadata,
+    // it is the app answering "why did nothing happen when I pressed that", and it has to be the first thing
+    // read. Hidden for every item that has no record.
+    metaFailure_ = new QLabel(meta_);
+    metaFailure_->setWordWrap(true);
+    metaFailure_->setTextFormat(Qt::RichText);
+    metaFailure_->setVisible(false);
+    metaFailure_->setStyleSheet(QStringLiteral(
+        "background:#3A100D;border:2px solid #B3261E;border-radius:6px;padding:8px;color:#FFD9D6;"));
+    mc->addWidget(metaFailure_);
 
     metaTitle_ = new QLabel(meta_);
     metaTitle_->setWordWrap(true);
@@ -1626,6 +1662,7 @@ void HomeView::layoutMetaSections(const QString& itemType)
     metaTextCol_->removeWidget(metaTitle_);
     metaTextCol_->removeWidget(metaFacts_);
     metaTextCol_->removeWidget(metaOverview_);
+    metaTextCol_->removeWidget(metaFailure_);
 
     QSet<QString> added;
     auto place = [&](const QString& key) {
@@ -1639,11 +1676,111 @@ void HomeView::layoutMetaSections(const QString& itemType)
     for (const QString& k : order) place(k);
     for (const QString& k : { QStringLiteral("favorite"), QStringLiteral("title"),
                               QStringLiteral("facts"), QStringLiteral("overview") }) place(k);
+    // The #239 banner is not one of the theme's sections and takes no key: it goes at the TOP of whatever
+    // order the theme asked for. A theme cannot reorder it away, and a theme written before it existed does
+    // not have to be updated to show it — which is the same reason it is added here rather than in `place`.
+    if (metaFailure_) metaTextCol_->insertWidget(0, metaFailure_);
+}
+
+// The classic detail page's Play. A method rather than the lambda it used to be because "Try again" (#239)
+// IS this press repeated — the same addon, the same console stamp, the same bridged stream id — and the one
+// thing a retry must not be is a SECOND resolve path that drifts from the first. Two buttons, one body.
+void HomeView::playDetailItem()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    const Level& top = stack_.last();
+    const MediaItem it = top.item;
+    // The console/platform we drilled in from (if any). Stamped onto a resolved game so the launcher can
+    // pick the right emulator even when the file extension is shared (e.g. a PSP .iso vs a GameCube .iso).
+    QString console;
+    if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
+        console = stack_.at(stack_.size() - 2).item.title.trimmed();
+    // The volume/series we drilled in from (used to build a comic issue's bridge query).
+    const QString parentTitle = (stack_.size() >= 2) ? stack_.at(stack_.size() - 2).item.title.trimmed()
+                                                     : QString();
+    resolvePlay(top.addon, it, parentTitle, console, playImdbId_, playStremioType_);
+}
+
+// The failed-open state (#239) on the classic detail page: the banner at the top of the text column, and the
+// two verbs it earns. "Choose another source…" is deliberately NOT a third button — sourceBtn_ already is
+// exactly that, already gated on the item having several releases to choose between, and a second control
+// meaning the same thing is how two surfaces start disagreeing about what is resolvable.
+void HomeView::applyOpenFailureToDetail(const MediaItem& it)
+{
+    const OpenFailure f = OpenFailStore::lookup(it.id);
+    const bool show = !f.isNull();
+    if (metaFailure_)
+    {
+        if (show)
+        {
+            const QString when = QDateTime::fromSecsSinceEpoch(f.ts).toString(QStringLiteral("d MMM, HH:mm"));
+            metaFailure_->setText(QStringLiteral("<b>%1</b><br>%2<br><span style='color:#E8A9A4'>%3</span>")
+                                      .arg(tr("This didn't open.").toHtmlEscaped(),
+                                           f.message.toHtmlEscaped(),
+                                           tr("Last tried %1").arg(when).toHtmlEscaped()));
+        }
+        metaFailure_->setVisible(show);
+    }
+    if (retryBtn_)   retryBtn_->setVisible(show);
+    if (dismissBtn_) dismissBtn_->setVisible(show);
+}
+
+// The classic grid row's text. Lifted out of fillGrid so refreshOpenFailureMarks can re-derive it in place:
+// the failure usually happens WITH THE SHELF ON SCREEN, so waiting for the next model rebuild would mean the
+// marker appeared only after the user navigated away and back — which is the fading toast's problem again.
+QString HomeView::browseRowLabel(const MediaItem& it) const
+{
+    QString label = it.title;
+    // The unread badge on a followed series' tile (issue #155), CLASSIC half. The themed grid draws a
+    // "N NEW" corner badge from browseItems()'s newCount; this list has no delegate to badge, so the
+    // same number rides the tile text — the idiom the Recents rows already use for their resume
+    // percentage. Both are counted through the one filter (followUnreadCount), so they cannot disagree.
+    if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable))
+    {
+        const int unread = followUnreadCount(it.id);
+        if (unread > 0) label += QStringLiteral("   \u25cf %1 new").arg(unread);
+    }
+    // ...and the #239 marker, in the same idiom for the same reason: quiet, on the tile text, so a user
+    // scanning the shelf can see which thing refused rather than pressing it again blind.
+    if (!it.id.isEmpty() && OpenFailStore::marked(it.id))
+        label += QStringLiteral("   \u26a0 ") + tr("didn't open");
+    if (!it.subtitle.isEmpty()) label += QStringLiteral("\n") + it.subtitle;
+    return label;
+}
+
+// The catalog id behind a themed browse row (see the header): empty for a header/synthetic row.
+QString HomeView::themedLeafId(int themedIndex) const
+{
+    if (themedIndex < 0 || themedIndex >= browseRowMap_.size()) return QString();
+    return items_[browseRowMap_[themedIndex]].id;
+}
+
+// Repaint everything this view owns that shows a failed-open state. Cheap by construction: no network, no
+// re-resolve, no level reload — the classic page re-reads one store row, the classic grid re-derives its own
+// labels, and the themed shelf is re-emitted from the model it already holds.
+void HomeView::refreshOpenFailureMarks()
+{
+    if (!stack_.isEmpty() && stack_.last().detail) applyOpenFailureToDetail(stack_.last().item);
+    // fillGrid appends one row per items_ entry, in order, so the two are index-aligned. The equality test is
+    // the guard rather than a comment: any future path that puts a different number of rows in the list would
+    // silently relabel the wrong ones, and skipping the repaint is the harmless outcome.
+    if (grid_ && grid_->count() == items_.size())
+        for (int i = 0; i < items_.size(); ++i)
+            grid_->item(i)->setText(browseRowLabel(items_[i]));
+    // DELIBERATELY NO browseItemsChanged(false) HERE. That signal means "a load, drill or page moved my
+    // stack": MainWindow's handler mirrors the stack onto the nav graph, forces currentView back to
+    // "browse" and re-selects browseRestoreIndex() — so firing it to repaint a badge CLOSED the themed
+    // detail page the user was standing on and threw the cursor back to the first tile. (Seen live during
+    // the #239 drive: pressing "Try again" bounced the page.) The themed half is MainWindow's own
+    // refreshOpenFailureSurfaces(), which patches the model it is already holding.
 }
 
 // The focusable action on the current detail page: Play for a Steam game, otherwise Favorite.
 QWidget* HomeView::detailActionButton() const
 {
+    // "Try again" first when it is showing at all (issue #239): the page is then answering "that press did
+    // nothing", and the button the D-pad should already be on is the one that repeats it.
+    if (retryBtn_ && retryBtn_->isVisible()) return retryBtn_;
     if (playBtn_ && playBtn_->isVisible()) return playBtn_;
     if (favBtn_  && favBtn_->isVisible())  return favBtn_;
     // Last resort: "Fix info…" is shown on every real detail card, so on a page where neither Play nor
@@ -1986,6 +2123,12 @@ QVariantList HomeView::browseItems()
             const int eps = LocalLibrary::index().ownedEpisodes(it.id);
             if (eps > 0) m[QStringLiteral("onDiskCount")] = eps;
         }
+        // The row marker for an item whose last open failed (issue #239). Deliberately the SAME affordance
+        // the "on disk" badge above uses -- a small corner rectangle on the card -- because it is the same
+        // kind of statement about the item, and a new vocabulary for it would be one more thing to learn.
+        // Absent rather than present-and-false on a clean row (a theme binds it with a plain truth test and
+        // an absent key reads as undefined), so every other tile renders byte-for-byte as it did.
+        if (!it.id.isEmpty() && OpenFailStore::marked(it.id)) m[QStringLiteral("openFailed")] = true;
         // Following (issue #155): a followed series' tile says so, and carries its unread count so the
         // themed grid can badge it. Purely additive — an un-followed tile carries neither key, so every
         // other row renders byte-for-byte as it did.
@@ -7497,7 +7640,8 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
         // -first app. Adding "⚙ Fix this entry…" (#44) to a row a D-pad cannot traverse would have made that
         // three. The row is walked in its real left-to-right order instead, so every visible action is
         // reachable and a button added later is reachable by construction.
-        const QVector<QWidget*> actionRowBtns{ playBtn_, favBtn_, downloadBtn_, sourceBtn_, pcFixBtn_, manualBtn_ };
+        const QVector<QWidget*> actionRowBtns{ retryBtn_, dismissBtn_, playBtn_, favBtn_, downloadBtn_,
+                                               sourceBtn_, pcFixBtn_, manualBtn_ };
         if (actionRowBtns.contains(static_cast<QWidget*>(obj)))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
@@ -9474,13 +9618,16 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be
                 // caching; for anything else it's simply no usable link.
                 const QString notice = mgr_->takeStreamNotice();
-                if (!notice.isEmpty())
-                    showToast(notice, kFeedbackLong);
-                else if (fileProvider)
-                    showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
-                                 "minutes; if it never appears, there may be no copy.").arg(it.title), kFeedbackLong);
-                else
-                    showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), kFeedbackLong);
+                const QString said = !notice.isEmpty() ? notice
+                    : fileProvider
+                        ? tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
+                             "minutes; if it never appears, there may be no copy.").arg(it.title)
+                        : tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title);
+                showToast(said, kFeedbackLong);
+                // ...and the same sentence into the one funnel, so it is still there when the toast is not
+                // (issue #239). This press died BEFORE any bytes -- nothing opened, no player was involved --
+                // which is the shape a fading toast hides best: the shelf a moment later looks untouched.
+                emit openFailedRequested(it.id, it.title, said);
             }
         }, /*attempt=*/0,
         // The release already chosen for this series, if any. Only the Stremio leg reads it (a file provider
@@ -9505,12 +9652,21 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                                                         const StreamHeaders::Headers& headers) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; m.requestHeaders = headers; emit openItem(m); }
-            else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
-                              "(check that Allarr is configured and returning results).").arg(it.title), kFeedbackLong);
+            else
+            {
+                const QString said = tr("No sources found for “%1”. No stream addon returned a playable link "
+                                        "(check that Allarr is configured and returning results).").arg(it.title);
+                showToast(said, kFeedbackLong);
+                emit openFailedRequested(it.id, it.title, said);   // #239: outlives the toast, on the item
+            }
         }, /*attempt=*/0, BingeStore::preferredGroup(bingeStore_, imdbId)); // the release already chosen, if any
         return;
     }
-    showToast(tr("Nothing to play for “%1”.").arg(it.title), kFeedbackLong);
+    {
+        const QString said = tr("Nothing to play for “%1”.").arg(it.title);
+        showToast(said, kFeedbackLong);
+        emit openFailedRequested(it.id, it.title, said);           // #239: outlives the toast, on the item
+    }
 }
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
@@ -10345,6 +10501,24 @@ QVariantMap HomeView::themedDetailData(int idx)
     if (Settings::collapseRegionalDuplicates() && systemForGameItem(it)
         && !RomLibrary::otherRegionVersions(it.url).isEmpty())
         verbs << QStringLiteral("otherversions");
+    // THE FAILED OPEN (issue #239). A record for this item turns the page into an answer to "why did nothing
+    // happen when I pressed that": the sentence the ActionRow draws above its pills, when it was said, and
+    // two verbs the page does not otherwise offer. "Choose another source..." is NOT added here -- `source`
+    // above already IS it, and it is already gated on the item having several releases to choose between,
+    // which is exactly the case the verb is wanted in.
+    if (!it.id.isEmpty())
+    {
+        const OpenFailure of = OpenFailStore::lookup(it.id);
+        if (!of.isNull())
+        {
+            out.insert(QStringLiteral("failure"), of.message);
+            out.insert(QStringLiteral("failureWhen"),
+                       tr("Last tried %1").arg(QDateTime::fromSecsSinceEpoch(of.ts)
+                                                   .toString(QStringLiteral("d MMM, HH:mm"))));
+            verbs.prepend(QStringLiteral("retry"));   // first: on this page it is the one worth pressing
+            verbs << QStringLiteral("dismiss");       // last: it is the giving-up one
+        }
+    }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
     // The correction composites LAST, over every source above — the session art cache, a gamelist entry and
@@ -10796,6 +10970,9 @@ void HomeView::requestMeta(const MediaItem& item)
     // the user may need to overrule (issue #44).
     if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
+    // The failed-open banner and its two verbs (issue #239). Applied on every detail build, so an item with
+    // no record clears the widgets the PREVIOUS item may have shown them for.
+    applyOpenFailureToDetail(item);
     // "Fix info…" needs only a stable key, not a resolvable source — a mis-scrape is exactly as wrong on an
     // item that will not play. Its label says whether this item already carries a correction.
     if (editMetaBtn_)
@@ -11869,18 +12046,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     for (int i = from; i < items_.size(); ++i)
     {
         const MediaItem& it = items_[i];
-        QString label = it.title;
-        // The unread badge on a followed series' tile (issue #155), CLASSIC half. The themed grid draws a
-        // "N NEW" corner badge from browseItems()'s newCount; this list has no delegate to badge, so the
-        // same number rides the tile text — the idiom the Recents rows already use for their resume
-        // percentage. Both are counted through the one filter (followUnreadCount), so they cannot disagree.
-        if (!it.id.isEmpty() && follow::isFollowable(it.type, it.expandable))
-        {
-            const int unread = followUnreadCount(it.id);
-            if (unread > 0) label += QStringLiteral("   \u25cf %1 new").arg(unread);
-        }
-        if (!it.subtitle.isEmpty()) label += QStringLiteral("\n") + it.subtitle;
-        auto* w = new QListWidgetItem(label, grid_);
+        auto* w = new QListWidgetItem(browseRowLabel(it), grid_);
         w->setSizeHint(QSize(kPoster.width() + 16, kPoster.height() + 48));
         w->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
         if (it.type == QStringLiteral("_open"))
