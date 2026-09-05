@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.189 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.190 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -520,6 +520,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         # cover WITHOUT unpacking the book - two walks over one grammar is how a shelf comes to disagree
         # with the open book about who wrote it.
         src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
+        # Issue #147: the READER's touch vocabulary, the same shape #162 gave the player's. ReaderGestures.h
+        # is pure (tap presets, swipe, the pre-#147 fallback) and reads its thresholds off PlayerGestures.h
+        # so the two cannot drift; ReaderGestureConfig.h is the one place Settings + FormFactor become a
+        # Config; ReaderSpread.h is the dual-page landscape geometry. All headers, so there is no .cpp to
+        # also add here (the issue-#182 trap).
+        src/ebook/ReaderGestures.h
+        src/ebook/ReaderGestureConfig.h
+        src/ebook/ReaderSpread.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
@@ -582,6 +590,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/input/InputMode.cpp   src/input/InputMode.h
         src/input/PadGlyphs.cpp   src/input/PadGlyphs.h
         src/input/Keymap.cpp      src/input/Keymap.h
+        # Issue #147: the keep-screen-awake refcount. The ONE platform #if in that feature lives in this
+        # .cpp; the header is plain C++ so the transitions are probeable without a screen.
+        src/core/KeepAwake.cpp    src/core/KeepAwake.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/OverrideLayer.cpp src/core/OverrideLayer.h  # per-game override layering (#95): pure baseline+delta fold
         src/core/SyncOffsets.cpp  src/core/SyncOffsets.h  # player audio/sub sync-offset store (Task 2 wires the card onto it)
@@ -3314,6 +3325,25 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_playergestures PRIVATE src src/video src/core src/theme2)
     target_link_libraries(probe_playergestures PRIVATE Qt6::Core)
+
+    # Touch reading (issue #147): the reader's tap-zone presets and their mirror, the swipe threshold and
+    # axis test, the OS edge band, the legacy (pre-#147) behaviour the form-factor gate falls through to,
+    # the dual-page landscape predicate and its boundary, and the keep-screen-awake refcount including a
+    # guard released by DESTRUCTION rather than by a close() nobody called. ReaderGestures.h reads its
+    # thresholds off PlayerGestures.h (#162) so the two vocabularies cannot drift, which is why the video
+    # player's header comes along; Settings + FormFactor come along for the same reason they do in
+    # probe_playergestures. KeepAwake.cpp is the one TU with a platform #if in it.
+    add_executable(probe_readergestures tools/probe_readergestures.cpp
+        src/ebook/ReaderGestures.h
+        src/ebook/ReaderGestureConfig.h
+        src/ebook/ReaderSpread.h
+        src/video/PlayerGestures.h
+        src/core/KeepAwake.cpp    src/core/KeepAwake.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/LifecyclePolicy.h)
+    target_include_directories(probe_readergestures PRIVATE src src/ebook src/video src/core src/theme2)
+    target_link_libraries(probe_readergestures PRIVATE Qt6::Core)
 
     # Headless test for BulkSelect (the multi-select set + collision-safe reassign target path, issue #65).
     # Header-only unit; links nothing but Qt6::Core.

@@ -81,6 +81,36 @@ All of them share one reader: the same pagination, font sizing, contents panel, 
 and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
 
+### Reading on a touch screen
+
+On a phone or a tablet the reader answers a finger, using the same gesture vocabulary the video player
+does — the same travel means the same thing in both.
+
+**Tap zones** are a preset, not a matrix. Three of them: *left goes back, right goes forward* (the default),
+its mirror for a left-thumb grip, and *every tap opens the menu* for readers who would rather turn pages by
+swiping alone. In all three, a tap across the top of the page opens the menu, and the middle of the page
+opens it too unless you are in the menu-only preset — where everything does.
+
+**Swipe** sideways to turn the page: leftward for the next one, rightward for the previous. A short slide is
+enough, and the direction is the same in every preset — a preset mirrors where your thumb reaches, not which
+way the book runs.
+
+**Keep the screen on while reading** is a toggle, off by default, and it is released the moment you leave
+the reader. On Windows it holds the display awake for as long as the reader is on screen; other platforms do
+not have an inhibitor wired up yet.
+
+Tap zones and swiping apply on **touch screens only**. A mouse, a keyboard and a remote behave exactly as
+they always have — the settings are there on every device so a phone-and-television household can find them
+from either, but nothing a phone stores changes what the TV does.
+
+**Two pages side by side** shows a book as a spread whenever the window is wider than it is tall and wide
+enough for two readable columns. It is a pagination change and nothing more: your place, the page numbering
+and the text itself are untouched, so turning it on or off mid-book leaves you on the same words. It applies
+to books; a comic's two-up spread is its own, and already knows about right-to-left series.
+
+Not here yet, and each deliberately its own pass: **auto-scroll** (paged and smooth), the **brightness
+swipe**, and **volume-key paging**.
+
 ### Book servers (OPDS)
 
 Point the reader at a self-hosted book server that speaks OPDS 1.2 — Calibre-web, Komga, Kavita,

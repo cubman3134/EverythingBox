@@ -12,6 +12,8 @@
 #include "../ui/PlayerIcons.h"   // the drawn warning mark (a colour emoji font ignores the chip's ink)
 #include "../core/Settings.h"
 #include "ReadAloud.h"                 // the pure divider/stripper/position map (issue #145)
+#include "ReaderGestureConfig.h"        // issue #147: the reader's ONE touch vocabulary, from stored prefs
+#include "ReaderSpread.h"               // issue #147: dual-page landscape geometry
 #ifdef EB_HAVE_TTS
 #  include "ReadAloudController.h"      // compiled only when the build has Qt TextToSpeech
 #endif
@@ -35,6 +37,9 @@
 #include <QColor>
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
+#include <QTouchEvent>
+#include <QShowEvent>
+#include <QHideEvent>
 #include <QKeyEvent>
 #include <QLocale>
 #include <QImage>
@@ -80,6 +85,10 @@ BookPageWidget::BookPageWidget(QWidget* parent) : QWidget(parent)
 
     setMouseTracking(true);            // so we get moves without a button held -> reveal the menu
     setAttribute(Qt::WA_OpaquePaintEvent, true);
+    // Issue #147: ask Qt for real touch events instead of only the mouse it synthesizes from them.
+    // Without this the widget never sees a finger at all, which is why the classic layout had no swipe.
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
+    dualPage_ = Settings::readerDualPage();
     setFocusPolicy(Qt::NoFocus);       // keep keyboard focus on EbookView for arrow paging
     setCursor(Qt::PointingHandCursor);
 }
@@ -199,8 +208,33 @@ void BookPageWidget::setFooter(const QString& s)
 // Page margin (issue #135): marginPct_ of the current width, with a small floor so text never kisses the edge
 // even at 0%. Derived (not stored in px) so it tracks a resize automatically.
 qreal BookPageWidget::sideMargin() const { return qMax(12.0, marginPct_ / 100.0 * qreal(width())); }
-qreal BookPageWidget::contentW() const { return qMax(1.0, qreal(width()) - 2 * sideMargin()); }
-qreal BookPageWidget::contentLeft() const { return sideMargin(); }
+
+// The whole text box between the paper margins. On a single-column page this IS the text width; on a
+// spread it is what the two columns and their gutter share.
+qreal BookPageWidget::pageBoxW() const { return qMax(1.0, qreal(width()) - 2 * sideMargin()); }
+qreal BookPageWidget::gutterPx() const { return ReaderSpread::gutterFor(pageBoxW()); }
+
+// ONE column's width - the width the document is laid out at, so every line in lines_ is a line of a
+// column rather than a line of the page. That single substitution is most of what dual-page IS.
+qreal BookPageWidget::contentW() const
+{
+    return ReaderSpread::columnWidth(pageBoxW(), columns_, gutterPx());
+}
+qreal BookPageWidget::columnLeftX(int i) const
+{
+    return ReaderSpread::columnLeft(sideMargin(), contentW(), gutterPx(), i, columns_, rtl_);
+}
+qreal BookPageWidget::contentLeft() const { return columnLeftX(0); }
+
+// The user's preference. Re-laying is what turns it into a column count for THIS viewport; topPos_ is
+// not touched, so the reader keeps the words it was on across the change.
+void BookPageWidget::setDualPage(bool on)
+{
+    if (dualPage_ == on) return;
+    dualPage_ = on;
+    relayout();
+    update();
+}
 
 // Re-lay the document at the current width and rebuild the line table. Crucially, topPos_ (the reading
 // anchor - a document offset) is NOT touched here: a resize must not move the reading position. The page
@@ -208,6 +242,10 @@ qreal BookPageWidget::contentLeft() const { return sideMargin(); }
 // accumulate drift.)
 void BookPageWidget::relayout()
 {
+    // Dual-page landscape (#147): the PREFERENCE plus this viewport decide the column count, and
+    // everything downstream - the layout width, the page walk, the paint and the hyperlink hit-test -
+    // reads columns_.
+    columns_ = ReaderSpread::columns(dualPage_, width(), height());
     doc_->setTextWidth(contentW());
     rebuildLines();
     buildPageTops();
@@ -260,7 +298,7 @@ int BookPageWidget::lineIndexForPos(int pos) const
     return ans;
 }
 
-int BookPageWidget::lastFittingLine(int startLine) const
+int BookPageWidget::lastFittingInColumn(int startLine) const
 {
     const qreal ph = contentH();
     const qreal y0 = lines_[startLine].y;
@@ -268,6 +306,46 @@ int BookPageWidget::lastFittingLine(int startLine) const
     while (m + 1 < lines_.size() && (lines_[m + 1].y + lines_[m + 1].h - y0) <= ph)
         ++m;
     return m; // always >= startLine, so paging makes progress even if one line exceeds the page
+}
+
+// The last line on the PAGE - which on a spread means: fill one column, then fill the next from the
+// line after it. Expressing dual-page as "the column walk, run twice" is what lets pageForward,
+// atLast, buildPageTops and ensurePosVisible all get the spread for free: none of them mentions a
+// column at all.
+int BookPageWidget::lastFittingLine(int startLine) const
+{
+    int m = lastFittingInColumn(startLine);
+    for (int c = 1; c < columns_; ++c)
+    {
+        if (m + 1 >= lines_.size()) break;
+        m = lastFittingInColumn(m + 1);
+    }
+    return m;
+}
+
+// The same walk backwards: the first line of the column that ENDS at endLine.
+int BookPageWidget::firstLineOfColumnEndingAt(int endLine) const
+{
+    const qreal endBottom = lines_[endLine].y + lines_[endLine].h;
+    int s = endLine;
+    while (s - 1 >= 0 && (endBottom - lines_[s - 1].y) <= contentH()) --s;
+    return s;
+}
+
+// The columns of the page that starts at topPos_, in reading order. One entry on a single-column page,
+// two on a spread; the last may be short (or absent) at the end of a chapter.
+QVector<BookPageWidget::PageColumn> BookPageWidget::pageColumns() const
+{
+    QVector<PageColumn> cols;
+    if (lines_.isEmpty()) return cols;
+    int s = lineIndexForPos(topPos_);
+    for (int c = 0; c < columns_ && s < lines_.size(); ++c)
+    {
+        const int e = lastFittingInColumn(s);
+        cols.push_back(PageColumn{ s, e });
+        s = e + 1;
+    }
+    return cols;
 }
 
 void BookPageWidget::recomputeCurrentPage()
@@ -318,11 +396,17 @@ bool BookPageWidget::pageBackward()
 {
     const int start = lineIndexForPos(topPos_);
     if (start <= 0) return false;
-    // The previous page ends just above the current top: walk back from start-1 while the lines still fit.
-    const qreal endBottom = lines_[start - 1].y + lines_[start - 1].h;
-    int s = start - 1;
-    while (s - 1 >= 0 && (endBottom - lines_[s - 1].y) <= contentH()) --s;
-    topPos_ = lines_[s].pos;
+    // The previous page ends just above the current top, so walk back a COLUMN at a time: on a spread
+    // the page we are returning to had two of them, and stepping back one would show half of it twice.
+    int end = start - 1;
+    int top = end;
+    for (int c = 0; c < columns_; ++c)
+    {
+        top = firstLineOfColumnEndingAt(end);
+        if (top <= 0) { top = 0; break; }
+        end = top - 1;
+    }
+    topPos_ = lines_[top].pos;
     recomputeCurrentPage();
     update();
     return true;
@@ -417,14 +501,19 @@ int BookPageWidget::countPages(const QString& html, const QString& baseDir) cons
     }
     if (ls.isEmpty()) return 1;
 
+    // The same column walk the live view uses (#147): a page holds columns_ columns' worth of whole
+    // lines, so an off-screen chapter's total matches what it will actually paginate to on a spread.
     int pages = 0, i = 0;
     while (i < ls.size())
     {
         ++pages;
-        const qreal y0 = ls[i].y;
-        int m = i;
-        while (m + 1 < ls.size() && (ls[m + 1].y + ls[m + 1].h - y0) <= ph) ++m;
-        i = m + 1;
+        for (int c = 0; c < columns_ && i < ls.size(); ++c)
+        {
+            const qreal y0 = ls[i].y;
+            int m = i;
+            while (m + 1 < ls.size() && (ls[m + 1].y + ls[m + 1].h - y0) <= ph) ++m;
+            i = m + 1;
+        }
     }
     return qMax(1, pages);
 }
@@ -441,14 +530,13 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     p.fillRect(rect(), palette().color(QPalette::Base));
     if (!doc_ || lines_.isEmpty()) return;
 
-    const qreal cw = contentW(), cl = contentLeft();
-    const int startLine = lineIndexForPos(topPos_);
-    const int endLine = lastFittingLine(startLine);
-    const qreal y0 = lines_[startLine].y;
-    const qreal firstH = lines_[startLine].h;
+    const qreal cw = contentW();
+    const QVector<PageColumn> cols = pageColumns();
+    if (cols.isEmpty()) return;
 
     // If the anchor fell mid-line (after a reflow), shift the first line left so the anchored word sits at
-    // the left edge - so the exact first word stays put. anchorX is 0 when the anchor is a line start.
+    // the left edge - so the exact first word stays put. anchorX is 0 when the anchor is a line start, and
+    // it can only ever apply to the FIRST column: every later column starts at a line start by construction.
     const qreal anchorX = anchorXInLine();
 
     QAbstractTextDocumentLayout::PaintContext ctx;
@@ -472,27 +560,39 @@ void BookPageWidget::paintEvent(QPaintEvent*)
         ctx.selections.append(sel);
     }
 
-    // First line: drawn shifted by anchorX; the words before the anchor fall left of the clip and vanish.
-    p.save();
-    p.setClipRect(QRectF(cl, topMargin_, cw, firstH));
-    p.translate(cl - anchorX, topMargin_ - y0);
-    ctx.clip = QRectF(anchorX, y0, cw, firstH);
-    doc_->documentLayout()->draw(&p, ctx);
-    p.restore();
-
-    // The remaining whole lines, drawn normally below the first. Clip to the bottom of the LAST whole line
-    // (not to the full content height): QTextDocumentLayout draws a whole paragraph if any of it is in view,
-    // so without a tight clip the next line would bleed partway into the leftover space at the bottom.
-    if (endLine > startLine)
+    // One column, and then - on a dual-page spread (#147) - the next, each drawn exactly the way the single
+    // column always was. The two draws inside the loop are the original pair verbatim; all that changed is
+    // that the x origin and the line range now come from the column rather than from the whole page.
+    for (int c = 0; c < cols.size(); ++c)
     {
-        const qreal y1 = lines_[startLine + 1].y;
-        const qreal pageBottom = lines_[endLine].y + lines_[endLine].h - y0; // height down to last whole line
+        const int startLine = cols[c].startLine, endLine = cols[c].endLine;
+        const qreal cl = columnLeftX(c);
+        const qreal y0 = lines_[startLine].y;
+        const qreal firstH = lines_[startLine].h;
+        const qreal ax = (c == 0) ? anchorX : 0.0;
+
+        // First line: drawn shifted by ax; the words before the anchor fall left of the clip and vanish.
         p.save();
-        p.setClipRect(QRectF(cl, topMargin_ + firstH, cw, pageBottom - firstH));
-        p.translate(cl, topMargin_ - y0);
-        ctx.clip = QRectF(0, y1, cw, pageBottom - (y1 - y0));
+        p.setClipRect(QRectF(cl, topMargin_, cw, firstH));
+        p.translate(cl - ax, topMargin_ - y0);
+        ctx.clip = QRectF(ax, y0, cw, firstH);
         doc_->documentLayout()->draw(&p, ctx);
         p.restore();
+
+        // The remaining whole lines, drawn normally below the first. Clip to the bottom of the LAST whole
+        // line (not to the full content height): QTextDocumentLayout draws a whole paragraph if any of it is
+        // in view, so without a tight clip the next line would bleed into the leftover space at the bottom.
+        if (endLine > startLine)
+        {
+            const qreal y1 = lines_[startLine + 1].y;
+            const qreal pageBottom = lines_[endLine].y + lines_[endLine].h - y0; // down to the last whole line
+            p.save();
+            p.setClipRect(QRectF(cl, topMargin_ + firstH, cw, pageBottom - firstH));
+            p.translate(cl, topMargin_ - y0);
+            ctx.clip = QRectF(0, y1, cw, pageBottom - (y1 - y0));
+            doc_->documentLayout()->draw(&p, ctx);
+            p.restore();
+        }
     }
 
     // Page-number footer, centered in the bottom margin in a muted colour.
@@ -525,16 +625,26 @@ void BookPageWidget::mousePressEvent(QMouseEvent* e)
 {
     const QPoint pos = e->pos();
 
-    // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
+    // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones. On a
+    // spread the click has to be mapped through the column it landed in, or a footnote in the right-hand
+    // column would resolve to whatever text sits at that x in the LEFT one - the exact class of bug a
+    // second column invites, which is why this walks the same PageColumn list that painted them.
     if (!lines_.isEmpty())
     {
-        const int startLine = lineIndexForPos(topPos_);
-        const qreal y0 = lines_[startLine].y, firstH = lines_[startLine].h;
-        // The first line is shifted by anchorX; rows below it are not.
-        const qreal shift = (pos.y() < topMargin_ + firstH) ? anchorXInLine() : 0.0;
-        const QPointF docPos(pos.x() - contentLeft() + shift, pos.y() - topMargin_ + y0);
-        const QString href = doc_->documentLayout()->anchorAt(docPos);
-        if (!href.isEmpty()) { emit anchorClicked(href); return; }
+        const QVector<PageColumn> hitCols = pageColumns();
+        const qreal cw = contentW();
+        for (int c = 0; c < hitCols.size(); ++c)
+        {
+            const qreal cl = columnLeftX(c);
+            if (pos.x() < cl || pos.x() > cl + cw) continue;
+            const int startLine = hitCols[c].startLine;
+            const qreal y0 = lines_[startLine].y, firstH = lines_[startLine].h;
+            // The first line of the FIRST column is shifted by anchorX; nothing else is.
+            const qreal shift = (c == 0 && pos.y() < topMargin_ + firstH) ? anchorXInLine() : 0.0;
+            const QPointF docPos(pos.x() - cl + shift, pos.y() - topMargin_ + y0);
+            const QString href = doc_->documentLayout()->anchorAt(docPos);
+            if (!href.isEmpty()) { emit anchorClicked(href); return; }
+        }
     }
 
     if (pos.y() < topMargin_)           { emit menuRequested(); return; } // the strip the menu lives in
@@ -545,6 +655,94 @@ void BookPageWidget::mousePressEvent(QMouseEvent* e)
 void BookPageWidget::mouseMoveEvent(QMouseEvent*)
 {
     emit menuRequested(); // any movement wakes the menu (it re-arms its own auto-hide)
+}
+
+bool BookPageWidget::event(QEvent* e)
+{
+    switch (e->type())
+    {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel:
+        if (handleTouch(static_cast<QTouchEvent*>(e))) { e->accept(); return true; }
+        break;
+    default:
+        break;
+    }
+    return QWidget::event(e);
+}
+
+// Touch reading in the CLASSIC layout (issue #147). Nothing here decides what a gesture MEANS - that is
+// ReaderGestures.h, which the themed layout's host asks the same questions of, so a tap in the top-left of
+// a page does the same thing whichever home the user runs. This translates: points in, prevRequested /
+// nextRequested / menuRequested out, which are the three signals the mouse path has always emitted.
+//
+// The form-factor gate is applied by DECLINING the event (returning false) rather than by consuming it and
+// doing nothing: Qt then synthesizes the mouse press it always did and the click-to-flip halves above keep
+// working untouched on a desktop machine with a touchscreen. Consuming the stream and re-implementing the
+// old behaviour on top of the new rules is exactly how a fallback comes to disagree with what it replaced.
+bool BookPageWidget::handleTouch(QTouchEvent* te)
+{
+    // Under themed chrome the HOST answers the finger (ReaderChromeHost::handleReaderTouch), through
+    // the very same ReaderGestures rules. Declining here rather than duplicating them is what keeps one
+    // vocabulary: an unaccepted TouchBegin propagates up to the reader widget the host filters, which is
+    // exactly where the touch went before this widget started accepting any.
+    if (chromeHosted_) return false;
+    const ReaderGestures::Config cfg = ReaderGestures::configFromSettings(topMargin_);
+    if (!cfg.enabled) return false;
+
+    const auto pts = te->points();
+    switch (te->type())
+    {
+    case QEvent::TouchBegin:
+        touchMulti_ = (pts.size() >= 2);
+        touchStart_ = pts.isEmpty() ? QPointF() : pts.first().position();
+        // The OS's reserved band, latched on the PRESS: a sequence that began in it stays inert to the end,
+        // and is not claimed either, so the system's own back swipe is never half-fought.
+        touchInert_ = pts.isEmpty()
+            || ReaderGestures::inertStart(cfg, touchStart_.x(), touchStart_.y(),
+                                          double(width()), double(height()));
+        // The inert sequence is still CONSUMED. That is where the reader has to differ from the video
+        // player, which declines an edge-band touch so it rides synthesized mouse "as if it were never
+        // seen": over a video a stray synthesized click does nothing, but over a PAGE it turns one -
+        // click-to-flip has been there since the reader shipped. Declining here therefore made the
+        // system back swipe page the book, which is the exact double-action the band exists to prevent.
+        return true;
+    case QEvent::TouchUpdate:
+        if (pts.size() >= 2) touchMulti_ = true;
+        return true;
+    case QEvent::TouchCancel:
+        touchInert_ = true;
+        touchMulti_ = false;
+        return false;
+    case QEvent::TouchEnd:
+    {
+        if (touchInert_) { touchInert_ = false; touchMulti_ = false; return true; }
+        const bool multi = touchMulti_;
+        touchMulti_ = false;
+        if (multi) return true;   // a second finger was down at some point: not a page turn, and not a tap
+        const QPointF end = pts.isEmpty() ? touchStart_ : pts.first().position();
+        const double dx = end.x() - touchStart_.x();
+        const double dy = end.y() - touchStart_.y();
+        // A swipe first, then a tap. Between the two thresholds is a deliberate dead band - the same one the
+        // video player leaves - so a finger that slipped while resting on a word does nothing at all.
+        ReaderGestures::Kind k = ReaderGestures::swipeAction(cfg, dx, dy);
+        if (k == ReaderGestures::Kind::None && ReaderGestures::isTap(cfg, dx, dy))
+            k = ReaderGestures::tapAction(cfg, end.x(), end.y(), double(width()), double(height()));
+        switch (k)
+        {
+        case ReaderGestures::Kind::Prev: emit prevRequested(); break;
+        case ReaderGestures::Kind::Next: emit nextRequested(); break;
+        case ReaderGestures::Kind::Menu: emit menuRequested(); break;
+        case ReaderGestures::Kind::None:
+        default: break;
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 // ---- EbookView: chapter flow, persistence, overlays ---------------------------------------------------
@@ -738,7 +936,35 @@ bool EbookView::openBook(const QString& path, QString* error)
 #endif
     revealMenu();      // flash the controls so they're discoverable, then auto-hide
     setFocus();
+    updateKeepAwake(); // a book is open: take the wake lock if the reader is on screen and the toggle is on
     return true;
+}
+
+// Keep the screen awake while reading (issue #147). The lock follows three facts and is re-derived from
+// them rather than tracked: a book is open, the reader is the thing on screen, and the user asked for it.
+// Idempotent, so a caller only ever has to say "reconsider".
+//
+// Visibility rather than an explicit close() is the honest signal here: the reader is a page in a stack and
+// leaving it hides it, and a hide is something Qt guarantees, unlike anybody remembering to write a handler.
+// The guard is a member, so a teardown that hides nothing still releases the lock through ~EbookView.
+void EbookView::updateKeepAwake()
+{
+    const bool want = isVisible() && book_ && Settings::readerKeepAwake();
+    if (want == bool(awake_)) return;
+    if (want) awake_.reset(new KeepAwake::Guard(true));
+    else      awake_.reset();
+}
+
+void EbookView::showEvent(QShowEvent* e)
+{
+    QWidget::showEvent(e);
+    updateKeepAwake();
+}
+
+void EbookView::hideEvent(QHideEvent* e)
+{
+    QWidget::hideEvent(e);
+    updateKeepAwake();   // the reader was left: the screen may sleep again, at once and not on a timer
 }
 
 void EbookView::setStreamIssueVisible(bool on)
@@ -881,6 +1107,12 @@ void EbookView::applyReaderTypography()
     setPalette(pal);
     setAutoFillBackground(true);
 
+    // Touch reading (issue #147). The Reading settings rows share one live-apply hook with #135's
+    // typography, so a spread appearing (or the wake lock being taken) is the same round trip as changing
+    // the font: the page reflows once, on the same words, and nothing needs a change-notification of its own.
+    page_->setDualPage(Settings::readerDualPage());
+    updateKeepAwake();
+
     recomputeBookPages();
     updatePageLabel();
     persist();
@@ -968,6 +1200,7 @@ void EbookView::gotoPage(int page0)
 void EbookView::setHostedChrome(bool on)
 {
     hosted_ = on;
+    if (page_) page_->setChromeHosted(on);   // themed: the host owns touch, as it did before #147
     if (on)
     {
         if (menuTimer_) menuTimer_->stop();

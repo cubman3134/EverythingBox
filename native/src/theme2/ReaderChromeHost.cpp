@@ -1,4 +1,9 @@
 #include "ReaderChromeHost.h"
+
+// Issue #147: the reader's ONE touch vocabulary. This file decides nothing about what a tap or a swipe
+// MEANS any more - it asks, and translates the answer into the page turns and the chrome toggle it
+// already had. The classic layout's reader (BookPageWidget) asks the same header the same questions.
+#include "../ebook/ReaderGestureConfig.h"
 #include "FormFactor.h"
 #include "../input/InputMode.h"   // the `input` context property (controller-aware help chips)
 #include "../ui/nav/NavGraph.h"
@@ -689,21 +694,26 @@ bool ReaderChromeHost::claimsClickAt(const QPointF& pos) const
     return kind_ != ReaderKind::Book;
 }
 
+// The zone map, now a PRESET (issue #147) instead of a fixed left/right/centre. The Config is rebuilt on
+// every tap rather than cached, exactly as the video player rebuilds its own: a preset changed in Settings
+// is therefore in force for the very next tap with no change-notification wiring at all.
+//
+// Off a touch form factor the Config comes back disabled and ReaderGestures falls through to the arrangement
+// this function used to hardcode, so a desktop mouse and a television are untouched in both directions.
 void ReaderChromeHost::tapAt(const QPointF& pos)
 {
     QWidget* rw = reader_->asWidget();
-    const int w = rw->width(), h = rw->height();
-    const qreal band = topBandHeight();
-
-    if (pos.y() <= band)
+    const ReaderGestures::Config cfg = ReaderGestures::configFromSettings(topBandHeight());
+    switch (ReaderGestures::tapAction(cfg, pos.x(), pos.y(), double(rw->width()), double(rw->height())))
     {
+    case ReaderGestures::Kind::Prev: reader_->prevPage(); break;
+    case ReaderGestures::Kind::Next: reader_->nextPage(); break;
+    case ReaderGestures::Kind::Menu:
         if (chromeVisible_) hideChrome(); else revealChrome();
-        return;
+        break;
+    case ReaderGestures::Kind::None:
+    default: break;      // the OS's edge band: the touch was never ours to answer
     }
-    if (pos.x() < w / 3.0)            reader_->prevPage();
-    else if (pos.x() > 2.0 * w / 3.0) reader_->nextPage();
-    else if (chromeVisible_)          hideChrome();
-    else                              revealChrome();
 }
 
 bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
@@ -728,27 +738,42 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
         return true;
     }
 
+    QWidget* rw = reader_->asWidget();
+    const ReaderGestures::Config cfg = ReaderGestures::configFromSettings(topBandHeight());
+    const double vw = rw ? double(rw->width()) : 1.0;
+    const double vh = rw ? double(rw->height()) : 1.0;
+
     switch (te->type())
     {
     case QEvent::TouchBegin:
         sawMulti_ = false;
         pinchBaseDist_ = 0.0;
         touchStart_ = pts.isEmpty() ? QPointF() : pts.first().position();
+        // Issue #147: a sequence that STARTS in the OS's reserved band is inert for its whole life and is
+        // not claimed, so the system's own back and notification swipes are never half-fought.
+        touchInert_ = pts.isEmpty()
+            || ReaderGestures::inertStart(cfg, touchStart_.x(), touchStart_.y(), vw, vh);
+        // The inert sequence is still CONSUMED. That is where the reader has to differ from the video
+        // player, which declines an edge-band touch so it rides synthesized mouse "as if it were never
+        // seen": over a video a stray synthesized click does nothing, but over a PAGE it turns one -
+        // click-to-flip has been there since the reader shipped. Declining here therefore made the
+        // system back swipe page the book, which is the exact double-action the band exists to prevent.
         return true;
     case QEvent::TouchUpdate:
-        return true;   // single-finger drag: consumed (swipe is resolved on release), no synthesized mouse
+        return true;   // single-finger drag: consumed (the swipe resolves on release), no mouse
     case QEvent::TouchEnd:
     {
         pinchBaseDist_ = 0.0;
-        if (sawMulti_) { sawMulti_ = false; return true; } // the pinch's final frame — not a tap/swipe
+        if (touchInert_) { touchInert_ = false; sawMulti_ = false; return true; }
+        if (sawMulti_) { sawMulti_ = false; return true; } // the pinch's final frame - not a tap/swipe
         const QPointF end = pts.isEmpty() ? touchStart_ : pts.first().position();
-        const qreal dx = end.x() - touchStart_.x(), dy = end.y() - touchStart_.y();
-        if (qAbs(dx) >= 80.0 && qAbs(dx) > qAbs(dy))
-        {
-            if (dx < 0) reader_->nextPage(); else reader_->prevPage(); // leftward swipe = next
-        }
-        else if (qAbs(dx) < 24.0 && qAbs(dy) < 24.0)                   // a tap (no meaningful travel)
-            tapAt(end);
+        const double dx = end.x() - touchStart_.x(), dy = end.y() - touchStart_.y();
+        // A swipe first, then a tap - and both through the shared rules, so the reader's swipe and the
+        // video player's mean the same travel (#162's thresholds, read off its own Config).
+        const ReaderGestures::Kind k = ReaderGestures::swipeAction(cfg, dx, dy);
+        if (k == ReaderGestures::Kind::Next)      reader_->nextPage();
+        else if (k == ReaderGestures::Kind::Prev) reader_->prevPage();
+        else if (ReaderGestures::isTap(cfg, dx, dy)) tapAt(end);
         return true;
     }
     default:

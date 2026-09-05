@@ -399,6 +399,25 @@ void Settings::setGesturePinch(bool on)       { store().setValue(QStringLiteral(
 int  Settings::gestureEdgeInset()   { return qBound(0, store().value(QStringLiteral("gestures/edgeInset"), 24).toInt(), 96); }
 void Settings::setGestureEdgeInset(int px)    { store().setValue(QStringLiteral("gestures/edgeInset"), qBound(0, px, 96)); store().sync(); }
 
+// ---- Touch reading (issue #147) ---------------------------------------------------------------------------
+// Same gestures/ home as the video player's keys above, because a reader gesture and a player gesture are one
+// vocabulary. The preset is clamped on read as well as on write: an ini that has been hand-edited (or written
+// by a future build with a fourth preset) reads as the DEFAULT arrangement, never as a reader with no zones.
+int  Settings::readerTapZones()     { return qBound(0, store().value(QStringLiteral("gestures/readerTapZones"), 0).toInt(), 2); }
+void Settings::setReaderTapZones(int preset)  { store().setValue(QStringLiteral("gestures/readerTapZones"), qBound(0, preset, 2)); store().sync(); }
+bool Settings::readerSwipePaging()  { return store().value(QStringLiteral("gestures/readerSwipe"), true).toBool(); }
+void Settings::setReaderSwipePaging(bool on)  { store().setValue(QStringLiteral("gestures/readerSwipe"), on); store().sync(); }
+// OFF by default. Everything else in this group only changes what a gesture means; this one spends somebody's
+// battery, and a default that does that without being asked is not a default.
+bool Settings::readerKeepAwake()    { return store().value(QStringLiteral("gestures/readerKeepAwake"), false).toBool(); }
+void Settings::setReaderKeepAwake(bool on)    { store().setValue(QStringLiteral("gestures/readerKeepAwake"), on); store().sync(); }
+
+// Dual-page landscape for books (issue #147). A reader/ key, not a gestures/ one: it is a typography and
+// pagination preference that a mouse-and-keyboard reader on a wide window benefits from just as much as a
+// tablet held sideways, and unlike the rows above it is NOT gated on the form factor.
+bool Settings::readerDualPage()     { return store().value(QStringLiteral("reader/dualPageLandscape"), true).toBool(); }
+void Settings::setReaderDualPage(bool on)     { store().setValue(QStringLiteral("reader/dualPageLandscape"), on); store().sync(); }
+
 // Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
 // before the next flush cannot lose the user's choice.
 bool Settings::skipSegments() { return store().value(QStringLiteral("playback/skipSegments"), true).toBool(); }
