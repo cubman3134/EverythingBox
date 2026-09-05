@@ -450,6 +450,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // bundle would write the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a
         // deleted bookmark. probe_cloudmerge asserts it is per-item-synced and NOT device-local.
         || key.startsWith(QStringLiteral("bookmarks/"))
+        // Per-book highlights (issue #136). A highlight is a statement about the BOOK — the passage a reader
+        // marked — not about this device, so it syncs on exactly the bookmark terms above: per-item, per-
+        // profile, NOT device-local, riding the CloudMerge document with the union-by-id + newest-ts + delete-
+        // tombstone rule. (Contrast #239's open-failure state, which really IS about this device and stays
+        // local.) The prefix is "highlights/" with the slash; probe_cloudmerge asserts it is per-item-synced
+        // and NOT device-local so a later edit to either table cannot reclassify it silently.
+        || key.startsWith(QStringLiteral("highlights/"))
         // Per-item audio bookmarks (issue #140). A bookmarked POSITION in an audiobook/podcast is a property of
         // the CONTENT the issue wants to "survive switching devices", exactly like #136's reading bookmarks and
         // resume — so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge document with

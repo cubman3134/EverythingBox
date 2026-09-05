@@ -24,6 +24,7 @@
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
 //     "follow":  { "<profile>": { "items": [<follow>...], "tombs": [{key,ts}] } },  // followed series (#155)
 //     "bookmarks":{ "<profile>": { "items": [<bookmark>...], "tombs": [{key,ts}] } },  // per-book reading marks (#136)
+//     "highlights":{ "<profile>": { "items": [<highlight>...], "tombs": [{key,ts}] } }, // per-book highlights (#136)
 //     "audiobookmarks":{ "<profile>": { "items": [<abm>...], "tombs": [{key,ts}] } },  // per-item audio marks (#140)
 //     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
 //     "presets":  { "<profile>": { "items": [<preset>...],   "tombs": [{key,ts}] } },   // saved filters (#184)
@@ -57,6 +58,10 @@
 //   * bookmarks  — per stable id keep newest ts; tombstone-vs-ts exactly as favourites (issue #136). The id is
 //                  the book+position (BookmarkStore::idFor), so the same passage on two devices folds to one
 //                  row; a remove tombstones so a peer cannot resurrect it.
+//   * highlights — byte-for-byte the bookmarks rule (issue #136), for book RANGES: per stable id keep newest
+//                  ts, tombstone-vs-ts exactly as favourites. The id is the book+range (HighlightStore::idFor)
+//                  and does NOT include the colour, so a recolour is the same row with a newer ts (the last
+//                  colour a person chose wins) and a merge that swallowed a narrower range tombstones it.
 //   * audiobookmarks — byte-for-byte the bookmarks rule (issue #140), for audio TIME anchors: per stable id keep
 //                  newest ts, tombstone-vs-ts as favourites. The id is the item+whole-second (AudioBookmarkStore
 //                  ::idFor), so the same spot on two devices folds to one row; a remove tombstones.

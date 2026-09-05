@@ -3,11 +3,15 @@
 // bottom line can never be clipped behind anything. Left/right clicks flip pages; a top-band click or any
 // mouse movement reveals an auto-hiding menu; arrow keys page through. Mirrors the Unity ereader UX.
 #pragma once
+#include <QColor>
+#include <QRectF>
+#include <QVector>
 #include <QWidget>
 #include <memory>
 #include "EbookSource.h"
 #include "ReaderTypography.h"
 #include "ReadAloudTarget.h"
+#include "ReaderSelection.h"
 #include "../core/KeepAwake.h"
 #include "../theme2/HostedReader.h"
 
@@ -89,12 +93,33 @@ public:
     // is already visible, so narration inside a page does not shuffle the text under the reader's eye.
     void ensurePosVisible(int pos);
 
+    // ---- Selection + highlights (issue #136) ---------------------------------------------------------------
+    // All three of these are drawn through the SAME document PaintContext the spoken range uses, so a tint is
+    // clipped, shifted and page-broken by exactly the arithmetic that drew the text under it - never a
+    // rectangle painted over the page that a reflow could strand.
+    struct TextBand { int start = 0; int end = 0; QColor color; };
+    void setHighlightBands(const QVector<TextBand>& bands);  // the stored highlights on THIS chapter
+    void setSelectionRange(int start, int end);              // the selection being made right now (-1,-1 clears)
+    void setCaretPos(int pos);                               // the cursor-mode caret; -1 hides it
+    int  caretPos() const { return caretPos_; }
+    // Every line's start offset in this chapter, ascending - the units the caret's Up/Down move in. The WHOLE
+    // chapter, not just the page being shown, so a caret at the foot of a page steps onto the next line and the
+    // page follows it (ensurePosVisible) rather than the caret stopping at a page edge that is not in the text.
+    QVector<int> lineStarts() const;
+    int  textLength() const;
+    // The document offset under a point in THIS widget's coordinates, mapped through the same columns and the
+    // same first-line anchor shift the paint and the hyperlink hit-test use. -1 when the point is off the text.
+    int  positionAt(const QPointF& pos) const;
+
 signals:
     void prevRequested();   // left half clicked
     void nextRequested();   // right half clicked
     void menuRequested();   // top band clicked, or the mouse moved
     void anchorClicked(const QString& href); // an in-book hyperlink under the click
     void layoutChanged();   // repaginated (resize / font change): page count may have changed
+    // A finger was held on a word (issue #136): open the selection caret at that document offset. The touch
+    // end of the same feature cursor mode is the pad end of - one mode, two ways in.
+    void selectAtRequested(int docPos);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -133,6 +158,9 @@ private:
     int  lastFittingLine(int startLine) const; // last whole line on the whole PAGE (every column of it)
     int  firstLineOfColumnEndingAt(int endLine) const; // the column walk, backwards (pageBackward)
     qreal anchorXInLine() const; // x-shift so the anchored word starts the first line (0 if at line start)
+    // Where a document offset sits ON SCREEN, as a thin upright rect (the caret). False when the offset is not
+    // on the page being shown - which is also how the caret stops being drawn after a page turn away from it.
+    bool caretRect(int pos, QRectF& out) const;
     void recomputeCurrentPage(); // curPage_ = which from-start page holds topPos_
 
     QTextDocument* doc_ = nullptr;
@@ -147,6 +175,10 @@ private:
     bool  justify_ = false;       // justify paragraphs vs. ragged-right (#135)
     int   spokenStart_ = -1;   // the spoken paragraph's highlight range; -1 = nothing is being narrated (#145)
     int   spokenEnd_   = -1;
+    QVector<TextBand> bands_;  // stored highlights on this chapter, painted behind the text (#136)
+    int   selStart_ = -1;      // the selection being made right now (#136); -1 = none
+    int   selEnd_   = -1;
+    int   caretPos_ = -1;      // the cursor-mode caret (#136); -1 = not in cursor mode
     qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text
     qreal botMargin_  = 40.0; // leaves room for the page-number footer
     QString footer_;
@@ -164,6 +196,7 @@ private:
     bool    touchInert_ = false;
     bool    chromeHosted_ = false; // themed chrome is up: the host answers the finger, not this widget
     bool    touchMulti_ = false;   // a second finger latches the sequence off: a pinch is not a page turn
+    qint64  touchStartMs_ = 0;     // when the press landed, for the #162 long-press-to-select duration (#136)
 };
 
 class EbookView : public QWidget, public HostedReader, public ReadAloudTarget
@@ -236,6 +269,23 @@ public:
     QString raPreferredLanguage() const override;
     void raNarrationChanged() override;
 
+    // ---- Selection + highlights (issue #136) ---------------------------------------------------------------
+    // A book has a text layer, so it is the one reader kind that offers this. The mode, its key map and the
+    // colour menu live HERE rather than in either chrome, which is what makes the feature identical in the
+    // classic layout and the themed one instead of built twice and drifting.
+    bool selectionSupported() const override { return true; }
+    bool cursorMode() const override { return cursor_.active; }
+    void beginCursorMode() override;
+    bool beginCursorModeAt(const QPointF& pos) override;
+    void endCursorMode() override;
+    void gotoHighlight(int spine, int offset) override;
+    // Drive one key through cursor mode. True when the mode consumed it — both chromes ask this BEFORE their
+    // own arbitration, so while the caret is live the arrows move it instead of turning pages.
+    bool handleCursorKey(int key);
+    // The classic layout's annotation list (the themed layout has the readerBookmarks panel): this book's
+    // bookmarks and highlights in document order, jump-to on select, recolour/remove on a highlight.
+    void openAnnotationsMenu();
+
 public slots:
     void nextPage() override;   // advance one page (crossing into the next chapter at a chapter end)
     void prevPage() override;   // retreat one page (crossing into the previous chapter at a chapter start)
@@ -288,6 +338,13 @@ private:
     void updateKeepAwake();
     int  globalPage() const;   // 1-based page within the whole book at the current spot
 
+    // ---- Selection + highlights (issue #136) ---------------------------------------------------------------
+    void refreshHighlightBands();   // re-read this chapter's stored highlights into the page's paint bands
+    void syncCursorVisuals();       // push the caret + live selection to the page, and keep the caret on screen
+    void offerHighlightColour(const ReaderAnchor& range);  // the four-colour NavMenu for a fresh selection
+    void offerHighlightEdit(const QString& id);            // an EXISTING highlight: recolour / remove
+    void annotationsChanged();      // stores moved: repaint the bands and tell the hosted chrome
+
     std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / Fb2Book / TextBook / PdfTextBook, chosen by content then name
     BookPageWidget* page_ = nullptr;
     QFrame* menu_ = nullptr;            // auto-hiding top control bar (overlay)
@@ -311,6 +368,10 @@ private:
     double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
     bool   hosted_ = false;        // hosted mode: themed chrome drives us; suppress our own menu/toc/reveal
     class ReadAloudController* readAloud_ = nullptr;  // owned; null when the build has no TextToSpeech module
+    // Cursor mode (issue #136): the whole selection state, in the pure model both layouts drive.
+    ReaderSelection::Model cursor_;
+    QPushButton* selectBtn_ = nullptr;   // classic bar: "Select" (enter cursor mode)
+    QPushButton* marksBtn_  = nullptr;   // classic bar: "Marks" (the annotation list)
     // The wake lock (issue #147). A unique_ptr member and NOT a bool, so the release is structural: the
     // reader being destroyed by a teardown nobody wrote a handler for still lets the screen sleep again.
     std::unique_ptr<KeepAwake::Guard> awake_;

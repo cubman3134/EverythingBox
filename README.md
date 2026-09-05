@@ -79,9 +79,40 @@ The reader opens these directly — no conversion step, no external tool:
 | **Books** | `.epub` · `.fb2` (and the zipped `.fb2.zip` / `.fbz`) · `.mobi` · `.azw` · `.azw3` (KF8) · `.txt` · `.md` · `.pdf` |
 | **Comics** | `.cbz` · `.cbr` · `.cb7` · `.cbt` (and a bare `.zip` of page images) |
 
-All of them share one reader: the same pagination, font sizing, contents panel, bookmarks, per-book resume
-and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
+All of them share one reader: the same pagination, font sizing, contents panel, bookmarks and highlights,
+per-book resume and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
+
+### Selecting text, and highlights
+
+Selection in the reader is a **mode you enter on purpose**, because the reader is used on a television with a
+pad and there is no pointer to sweep across a paragraph with. Press **Select** in the reader menu (or `S` on a
+keyboard) and a caret appears at the top of the page:
+
+| | |
+|---|---|
+| **Left / Right** | move the caret by a **word** |
+| **Up / Down** | move it by a **line** |
+| **Enter** | first press starts the selection here; second press finishes it |
+| **Back / Escape** | drops the selection, and again leaves the mode |
+
+Finishing a selection offers four colours. On a phone or a tablet, **hold a finger on a word** to open the
+caret there instead — the same hold the video player already uses, so the gesture means the same thing in
+both.
+
+A highlight is anchored to the *characters* it covers, not to a page, so changing the font size, the
+typeface or the window keeps it on the same words. Move the caret into an existing highlight and press
+Enter to **recolour or remove** it. Two highlights that overlap — or that merely touch, end to start —
+become one, because that is what they look like on the page.
+
+**Bookmarks and highlights are one list**, in the order they appear in the book, beside the contents panel
+(**Marks** in the classic reader's menu). A bookmark is listed by its label, a highlight by the words it
+covers; selecting a row jumps to it. Both **sync**: a highlight is a statement about the book, not about the
+device you made it on, so it follows you the way a bookmark does, with deletes that stay deleted.
+
+Comics and PDFs keep their bookmarks and simply have no highlights — there is no text layer to anchor one in.
+
+Not here yet: **notes** on a highlight, an **export** of a book's annotations, and PDF region highlights.
 
 ### Reading on a touch screen
 

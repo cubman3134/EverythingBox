@@ -44,6 +44,8 @@
 #include "PlaylistStore.h"
 #include "Tombstones.h"
 #include "CloudMerge.h"
+#include "HighlightStore.h"   // issue #136: the real store the highlights section drives
+#include "ReaderAnchor.h"      // issue #136: the range anchor a highlight is
 #include "Tracker.h"         // issue #156: the credentials/links carve-out split, asserted below
 #include "TrackerLinks.h"
 #include "TrackerRules.h"
@@ -347,7 +349,7 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "bookmarks", "audiobookmarks", "playlists", "filterpresets",
+        for (const char* g : {"marks", "favorites", "bookmarks", "highlights", "audiobookmarks", "playlists", "filterpresets",
                               "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset", "missed", "follow", "followsnap", "trackerlink", "channels"})
             raw.remove(QLatin1String(g));
         raw.sync();
@@ -868,6 +870,12 @@ int main(int argc, char** argv)
         // (dropped from the per-item set, or leaking into the device-local table) turns one of them red.
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("bookmarks/default/items")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("bookmarks/default/items"))  == false);
+        // Per-book HIGHLIGHTS (issue #136) are PER-ITEM-SYNCED, NOT device-local, on exactly the bookmark
+        // terms: a highlight is a statement about the BOOK - the passage a reader marked - so it follows them
+        // everywhere. Asserted both ways so a later edit to either table cannot reclassify it silently, which
+        // would either double-sync it through the heavy bundle or strand it on one device.
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("highlights/default/items")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("highlights/default/items"))  == false);
         // Per-item audio bookmarks (issue #140) are PER-ITEM-SYNCED, NOT device-local — a bookmarked POSITION the
         // issue wants to survive switching devices, exactly like #136's reading bookmarks. Asserted both ways so a
         // mis-filing (dropped from the per-item set, or leaking into device-local) turns one red. The SECOND check
@@ -2373,6 +2381,76 @@ int main(int argc, char** argv)
         CHECK(bmIds() == (QStringList{ID}));                          // a newer re-add beats the older tombstone
 
         wipeStores();
+    }
+
+    // ---- 24d-2. Per-book HIGHLIGHTS (issue #136): the bookmarks section above, for RANGES -------------------
+    //
+    // The same {items, tombs} shape under its own root key, written through the REAL HighlightStore rather than
+    // raw - because the thing being pinned here is that the store and the merge agree on the spelling of the
+    // key and of the id, which a hand-built fixture would paper over. What this pins: it rides the document at
+    // all; a recolour (same id, newer ts) wins over a peer's older colour; a removed highlight is not
+    // resurrected by a peer that still holds it; and the range MERGE's tombstone - the one a narrower highlight
+    // gets when a wider one swallows it - holds across devices too, which is what stops a merge from being
+    // undone by the next sync.
+    {
+        useProfile(QStringLiteral("hl24"));
+        const QString hlk = QStringLiteral("highlights/hl24/items");
+        const QString book = QStringLiteral("/lib/H.epub");
+        auto range = [](int from, int to) {
+            ReaderAnchor a; a.kind = ReaderAnchor::Book; a.spine = 1; a.offset = from; a.endOffset = to;
+            return a;
+        };
+        auto hlIds = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(hlk).toString().toUtf8()).array())
+                out << v.toObject().value(QStringLiteral("id")).toString();
+            out.sort(); return out;
+        };
+        auto hlColor = [&](const QString& id) -> int {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(hlk).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("id")).toString() == id) return o.value(QStringLiteral("color")).toInt(-1); }
+            return -1;
+        };
+
+        // 24d2-a. It rides the document under its own root key, per profile.
+        wipeStores();
+        const QString hid = HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some words")).id;
+        CHECK(!hid.isEmpty());
+        const QJsonObject h1 = serializeNow();
+        CHECK(h1.contains(QStringLiteral("highlights")));
+        CHECK(h1.value(QStringLiteral("highlights")).toObject().contains(QStringLiteral("hl24")));
+
+        // 24d2-b. A RECOLOUR is the same row with a newer ts, so it wins over a peer's older colour - which is
+        // the whole reason the id does not include the colour.
+        wipeStores();
+        HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some words"));
+        const QJsonObject hYellow = serializeNow();          // the peer's copy: colour 0
+        HighlightStore::setColor(hid, 2);                    // this device recolours it, later
+        mergeDoc(hYellow);
+        CHECK(hlColor(hid) == 2);                            // the newer statement about the passage wins
+
+        // 24d2-c. THE RAIL, twice. A removed highlight is not resurrected by a peer that still holds it...
+        wipeStores();
+        HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some words"));
+        const QJsonObject hStale = serializeNow();           // the peer still has it, no tombstone
+        HighlightStore::remove(hid);
+        mergeDoc(hStale);
+        CHECK(hlIds().isEmpty());
+
+        // ...and neither is a NARROWER highlight that a merge swallowed. Without the tombstone the store
+        // records for an absorbed row, the next sync would bring the fragment back and the reader would see two
+        // overlapping bands where they had made one.
+        wipeStores();
+        const QString narrow = HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some")).id;
+        const QJsonObject hNarrow = serializeNow();          // the peer's copy: the pre-merge fragment
+        const QString wide = HighlightStore::add(book, range(18, 40), 1, QStringLiteral("some words more")).id;
+        CHECK(wide != narrow);
+        mergeDoc(hNarrow);
+        CHECK(hlIds() == (QStringList{wide}));
+
+        wipeStores();
+        useProfile(QString());
     }
 
     // ---- 24e. Per-item audio bookmarks (issue #140): rides the document, newest-ts wins, delete tombstone holds -
