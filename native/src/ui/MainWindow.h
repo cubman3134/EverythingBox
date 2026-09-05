@@ -666,7 +666,13 @@ private:
     // item's detail page carries it (on both layouts) until the item opens, the user dismisses it, or seven
     // days go by. Everything hangs off this one call deliberately: a second reporting route is a second
     // chance for a new failure shape to reach the screen and not the store.
-    void reportOpenFailure(const QString& message, const OpenFailSubject& subject = {});
+    // TWO OVERLOADS RATHER THAN A DEFAULT ARGUMENT. `= {}` here is a Windows-only spelling: OpenFailSubject
+    // carries a default member initializer, and inside the enclosing class body its initialization is not yet
+    // available to a default argument — MSVC accepts it, GCC refuses it, and the app target stopped building
+    // on Linux the moment this landed. The no-subject overload forwards a default-constructed one from the
+    // .cpp, where the type is complete by any compiler's reading.
+    void reportOpenFailure(const QString& message);
+    void reportOpenFailure(const QString& message, const OpenFailSubject& subject);
     // ---- #239, defined in ui/MainWindowOpenFail.cpp (a feature TU, not another hunk of MainWindow.cpp) --
     // Write the failure down against its item and re-render whatever is currently showing that item, so the
     // detail page the user is standing on grows its banner and verbs without a navigation. Empty id -> no-op.

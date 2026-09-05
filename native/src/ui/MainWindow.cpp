@@ -8701,6 +8701,14 @@ void MainWindow::showPlaybackStopped(const QString& message, int noticeMs)
     notify(message, noticeMs);
 }
 
+// The no-subject overload: the two callers that name no item (a failure that is about the app, not about a
+// row) get the same behaviour they always had. Defined here rather than in the header so the subject type is
+// complete — see the declaration for why the default argument had to go.
+void MainWindow::reportOpenFailure(const QString& message)
+{
+    reportOpenFailure(message, OpenFailSubject{});
+}
+
 void MainWindow::reportOpenFailure(const QString& message, const OpenFailSubject& subject)
 {
     // FIRST, THE PART THAT OUTLIVES EVERYTHING BELOW (#239). Whatever the screen is owed in the next four
