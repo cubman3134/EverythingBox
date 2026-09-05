@@ -260,7 +260,15 @@ int main(int argc, char** argv)
         CHECK(ContentRecipe::verdictForScalar(true, QStringLiteral("  "), QStringLiteral("x"), ours) == Verdict::Write);
         CHECK(ContentRecipe::verdictForScalar(true, QStringLiteral("x"), QStringLiteral("x"), ours) == Verdict::SkipIdentical);
         CHECK(ContentRecipe::verdictForScalar(true, QStringLiteral("D:/mine/user.nsp"), QStringLiteral("x"), ours) == Verdict::LeaveAlone);
+        #ifdef Q_OS_WIN
+        // A BACKSLASH SPELLING IS THE SAME PATH — on Windows. The comparison normalises with
+        // QDir::fromNativeSeparators, which converts backslashes only where the backslash IS the separator.
         CHECK(ContentRecipe::verdictForScalar(true, QStringLiteral("C:\\emu\\pkgs\\ours.nsp"), QStringLiteral("x"), ours) == Verdict::Write);
+        #else
+        // On Unix it is not the same path, so the value is simply somebody else's and is left alone.
+        const QString oursBackslash = QStringLiteral("C:\\emu\\pkgs\\ours.nsp");
+        CHECK(ContentRecipe::verdictForScalar(true, oursBackslash, QStringLiteral("x"), ours) == Verdict::LeaveAlone);
+        #endif
 
         // The override levers.
         CHECK(ContentRecipe::pinAccepts(QString(), QStringLiteral("upd v65536.nsp")));
@@ -647,7 +655,14 @@ int main(int argc, char** argv)
         CHECK(ContentInstall::alreadyInstalled(t, ContentRecipe::slotUpdates(), QStringLiteral("renamed.nsp"), 99, 1, QStringLiteral("ABC123")));
         CHECK(!ContentInstall::alreadyInstalled(t, ContentRecipe::slotUpdates(), QStringLiteral("u.nsp"), 43, 1700000000, QStringLiteral("ddd")));
         CHECK(!ContentInstall::alreadyInstalled(t, ContentRecipe::slotDlc(), QStringLiteral("u.nsp"), 42, 1700000000, QString()));
+        #ifdef Q_OS_WIN
+        // Same rule asked of the install record: the backslash twin of a path we installed is ours.
         CHECK(ContentInstall::weInstalled(t, QStringLiteral("C:\\emu\\pkgs\\u.nsp")));
+        #else
+        // On Unix that string names a different file, so the record does not claim it.
+        const QString uBackslash = QStringLiteral("C:\\emu\\pkgs\\u.nsp");
+        CHECK(!ContentInstall::weInstalled(t, uBackslash));
+        #endif
         CHECK(!ContentInstall::weInstalled(t, QStringLiteral("D:/mine/u.nsp")));
         CHECK(ContentInstall::ourPaths(t, ContentRecipe::slotUpdates()).size() == 1);
     }
@@ -675,7 +690,15 @@ int main(int argc, char** argv)
         const ContentInstall::MergeResult d2 = ContentInstall::mergeRegistry(d1.doc, QStringLiteral("array"), dentry, {});
         CHECK(!d2.changed && d2.doc.array().size() == 1);
         // jsonNamesPath finds a path at any depth, and normalises separators.
+        #ifdef Q_OS_WIN
+        // ...and of the registry search: on Windows the backslash spelling is the same name.
         CHECK(ContentInstall::jsonNamesPath(dentry, QStringLiteral("C:\\d.nsp")));
+        #else
+        // On Unix it is a DIFFERENT name — a backslash is a legal character in a file name there — so it
+        // is not found, and that is the answer we want rather than two files comparing equal.
+        const QString dBackslash = QStringLiteral("C:\\d.nsp");
+        CHECK(!ContentInstall::jsonNamesPath(dentry, dBackslash));
+        #endif
         CHECK(!ContentInstall::jsonNamesPath(dentry, QStringLiteral("C:/other.nsp")));
     }
 
