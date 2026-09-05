@@ -179,7 +179,9 @@ GridView {
             // exactly as it did. Top-LEFT, deliberately: the "on disk" badge below owns the top-right corner
             // and a local library series can be both.
             Rectangle {
-                visible: !!(modelData && modelData.newCount)
+                // Yields to the #239 marker below: a followed series that also refused to open has one piece
+                // of news worth reading first, and two badges in the same corner would overlap.
+                visible: !!(modelData && modelData.newCount) && !(modelData && modelData.openFailed)
                 anchors { top: parent.top; left: parent.left; margins: 4 }
                 radius: 3
                 color: "#1E5B33"
@@ -212,6 +214,30 @@ GridView {
                     anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
                     width: parent.width * Math.max(0, Math.min(1, modelData ? modelData.progress : 0))
                     color: T.val(gv.card, "progressColor", "#E53E3E")
+                }
+            }
+
+            // "This didn't open" marker (issue #239). browseItems() sets modelData.openFailed when the item's
+            // last open failed and the record has not expired, cleared, or been dismissed. Deliberately the
+            // SAME affordance as the "on disk" badge below -- same rectangle, same radius, same 10pt bold
+            // caption -- because it is the same kind of statement about the item; a new vocabulary for it
+            // would be one more thing to learn. Top-LEFT, where the "N NEW" badge lives (which yields to it
+            // above); the top-right corner stays the "on disk" badge's, and an item can be both.
+            Rectangle {
+                visible: !!(modelData && modelData.openFailed)
+                anchors { top: parent.top; left: parent.left; margins: 4 }
+                radius: 3
+                color: "#B3261E"
+                implicitWidth: failText.implicitWidth + 10
+                implicitHeight: failText.implicitHeight + 4
+                width: implicitWidth; height: implicitHeight
+                Text {
+                    id: failText
+                    anchors.centerIn: parent
+                    text: "⚠ DIDN'T OPEN"
+                    color: "white"
+                    font.pixelSize: 10
+                    font.bold: true
                 }
             }
 

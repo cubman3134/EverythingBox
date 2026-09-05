@@ -301,6 +301,16 @@ public:
     // lands on the screen it was made from. Reads MetaCache::cachedDetail, which composites the override —
     // no network, no re-scrape. No-op when no detail card is open.
     void refreshDetailMetaCard();
+    // ---- #239: the failed open that stays put -----------------------------------------------------------
+    // Repaint every surface THIS view owns that shows a failed-open state: the classic detail page's banner
+    // and its two verbs, the classic grid's row labels, and — by re-emitting the browse model — the themed
+    // shelf's badge. Called by MainWindow after the funnel writes a record or a successful open clears one,
+    // because the shelf the press was made from is usually still the surface on screen.
+    void refreshOpenFailureMarks();
+    // The catalog id of a themed browse row: the identity OpenFailStore keys on, and the one the "Dismiss"
+    // verb has to be handed BY VALUE (a row index is only meaningful against the browseRowMap_ that produced
+    // it, and the verb is dispatched a turn later).
+    QString themedLeafId(int themedIndex) const;
     // A row from items_ as the PROVIDERS gave it — the pre-correction copy when it carries a correction,
     // else the row itself. Anything that WRITES a row into the scrape cache must use this: the cache is the
     // scraped layer that the correction composites over on every read, so saving the composited row would
@@ -443,6 +453,12 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // A press that DIED BEFORE ANY BYTES (issue #239): no source resolved, so nothing was ever opened and
+    // no player was involved. This view has already said so in its own toast — what it cannot do is make the
+    // failure outlive that toast, because the store, the detail-page banner and the row marker are all
+    // driven from MainWindow's one reporting funnel. So it says WHICH item and WHAT was said, and the funnel
+    // records it without announcing it a second time (OpenFailSubject::Stage::Resolve).
+    void openFailedRequested(const QString& id, const QString& title, const QString& message);
     // The tracker verb (issue #156) was activated on this item, from the classic detail button or the
     // themed action row. MainWindow owns the NavMenu flows and the network object, exactly as it owns the
     // source picker above; HomeView only says WHICH item.
@@ -1096,6 +1112,13 @@ private:
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
     QPushButton* sourceBtn_ = nullptr;
+    // ---- #239, the classic half of "this did not open" ---------------------------------------------------
+    // The banner (top of the detail text column, above whatever the theme ordered) and the two verbs the
+    // failure earns. "Choose another source…" is NOT a third button: sourceBtn_ above already is it, and it
+    // is already gated on the item having several releases to choose between.
+    QLabel* metaFailure_ = nullptr;
+    QPushButton* retryBtn_ = nullptr;    // ↻ "Try again" — the press that failed, repeated
+    QPushButton* dismissBtn_ = nullptr;  // ✕ "Dismiss" — one of the three ways the record clears
     QPushButton* romhackBtn_ = nullptr;   // "Romhacks…" — retro game leaves only   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
     // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
     QPushButton* pcFixBtn_ = nullptr;
@@ -1122,6 +1145,15 @@ private:
     // ordinary download crawl rather than resolving a stream directly. Mutable because the verb is also
     // offered from a const query (romhackTargetAt).
     mutable DlNode romhackNode_;
+    // The classic detail page's Play, lifted out of playBtn_'s lambda: "Try again" (#239) IS that press
+    // repeated, and a second copy of it would be a second thing to keep in step with the resolve rules.
+    void playDetailItem();
+    // Apply this item's recorded failure (if any) to the classic detail page: the banner's text and
+    // visibility, and whether the two verbs above are offered.
+    void applyOpenFailureToDetail(const MediaItem& it);
+    // The classic grid row's text — title, the followed-series unread count, the #239 marker, the subtitle.
+    // A function rather than a block inside fillGrid because refreshOpenFailureMarks re-derives it in place.
+    QString browseRowLabel(const MediaItem& it) const;
     void startDownload();              // begin a crawl from the current detail item
     void dlNext();                     // process the next queued node
     void dlResolveLeaf(const DlNode& node); // resolve one leaf's source, then continue

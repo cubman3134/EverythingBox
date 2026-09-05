@@ -819,7 +819,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_cbr CBR-OK" "probe_ebookformats EBOOKFMT-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK" "probe_chapters CHAPTERS-OK" "probe_recipes RECIPES-OK" "probe_homerows HOMEROWS-OK" "probe_playon PLAYON-OK" "probe_jellyfin JELLYFIN-OK" "probe_readaloud READALOUD-OK" "probe_follow FOLLOW-OK" "probe_absclient ABSCLIENT-OK" "probe_contentinstall CONTENTINSTALL-OK" "probe_comicinfo COMICINFO-OK" "probe_pse PSE-OK" "probe_playergestures PLAYERGESTURES-OK" "probe_tracker TRACKER-OK" "probe_channels CHANNELS-OK" "probe_musicsources MUSICSOURCES-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_discgroup DISCGROUP-OK" "probe_regioncollapse REGIONCOLLAPSE-OK" "probe_playback PLAYBACK-OK" "probe_queueedit QUEUEEDIT-OK" "probe_bgaudio BGAUDIO-OK" "probe_playfail PLAYFAIL-OK" "probe_loadwatchdog LOADWATCHDOG-OK" "probe_browse BROWSE-OK" "probe_leafroute LEAFROUTE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_bookmarks BOOKMARKS-OK" "probe_readerbookmarks READERBM-OK" "probe_audiobookmarks AUDIOBM-OK" "probe_opds OPDS-OK" "probe_tar TAR-OK" "probe_cbr CBR-OK" "probe_ebookformats EBOOKFMT-OK" "probe_launchopts LAUNCHOPTS-OK" "probe_emutargets EMUTARGETS-OK" "probe_emulation_scope probe_emulation_scope:" "probe_pcscan PCSCAN-OK" "probe_emusettings EMUSETTINGS-OK" "probe_shaderpreset SHADERPRESET-OK" "probe_librashader LIBRASHADER-OK" "probe_shaderchain SHADERCHAIN-OK" "probe_shaderassets SHADERASSETS-OK" "probe_deviceprofile DEVICEPROFILE-OK" "probe_pad2key PAD2KEY-OK" "probe_padglyph PADGLYPH-OK" "probe_inputmode INPUTMODE-OK" "probe_rawinputsink RAWINPUTSINK-OK" "probe_seats SEATS-OK" "probe_aresinput ARESINPUT-OK" "probe_launchhooks LAUNCHHOOKS-OK" "probe_filterpreset FILTERPRESET-OK" "probe_hwdecode HWDECODE-OK" "probe_hardcore HARDCORE-OK" "probe_substyle SUBSTYLE-OK" "probe_readertypography READERTYPO-OK" "probe_refreshsync REFRESHSYNC-OK" "probe_hdroutput HDROUTPUT-OK" "probe_replaygain REPLAYGAIN-OK" "probe_crossfade CROSSFADE-OK" "probe_audioout AUDIOOUT-OK" "probe_contentlang CONTENTLANG-OK" "probe_softpatch SOFTPATCH-OK" "probe_romhack ROMHACK-OK" "probe_homebrew HOMEBREW-OK" "probe_overrides OVERRIDES-OK" "probe_hashverify HASHVERIFY-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_photos PHOTOS-OK" "probe_iptv IPTV-OK" "probe_xmltv XMLTV-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_remotebook REMOTEBOOK-OK" "probe_booktimeline BOOKTIMELINE-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_docbridge DOCBRIDGE-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_listening LISTENING-OK" "probe_lyrics LYRICS-OK" "probe_lyricseek LYRICSEEK-OK" "probe_lyricsources LYRICSOURCES-OK" "probe_cuesheet CUE-OK" "probe_musictags MUSICTAGS-OK" "probe_musiclibrary MUSICLIB-OK" "probe_musicbrowse MUSICBROWSE-OK" "probe_musicqueue MUSICQUEUE-OK" "probe_audiobooks AUDIOBOOKS-OK" "probe_books BOOKS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_serversync SERVERSYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_scrobble SCROBBLE-OK" "probe_presence PRESENCE-OK" "probe_subsonic SUBSONIC-OK" "probe_musicid MUSICID-OK" "probe_musicremap MUSICREMAP-OK" "probe_displaytitle DISPLAYTITLE-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK" "probe_miximage MIXIMAGE-OK" "probe_attract ATTRACT-OK" "probe_manual MANUAL-OK" "probe_stateslots STATESLOTS-OK" "probe_bezel BEZEL-OK" "probe_decopack DECOPACK-OK" "probe_cheatsearch CHEATSEARCH-OK" "probe_remoteapi REMOTEAPI-OK" "probe_syscatalog SYSCATALOG-OK" "probe_romrouting ROMROUTING-OK" "probe_archiverom ARCHIVEROM-OK" "probe_useremulators USEREMU-OK" "probe_ports PORTS-OK" "probe_bulkselect BULKSELECT-OK" "probe_chapterrun CHAPTERRUN-OK" "probe_remotedoccache REMOTEDOCCACHE-OK" "probe_comicfit COMICFIT-OK" "probe_retropark_input RETROPARK-INPUT-OK" "probe_coreopts COREOPTS-OK" "probe_ps3update PS3UPDATE-OK" "probe_ps3firmware PS3FIRMWARE-OK" "probe_launchcancel LAUNCHCANCEL-OK" "probe_launchcontexts LAUNCHCONTEXTS-OK" "probe_romreuse ROMREUSE-OK" "probe_openfail OPENFAIL-OK" "probe_riivolution RIIVOLUTION-OK" "probe_playerbar PLAYERBAR-OK" "probe_mpvlog MPVLOG-OK" "probe_chapters CHAPTERS-OK" "probe_recipes RECIPES-OK" "probe_homerows HOMEROWS-OK" "probe_playon PLAYON-OK" "probe_jellyfin JELLYFIN-OK" "probe_readaloud READALOUD-OK" "probe_follow FOLLOW-OK" "probe_absclient ABSCLIENT-OK" "probe_contentinstall CONTENTINSTALL-OK" "probe_comicinfo COMICINFO-OK" "probe_pse PSE-OK" "probe_playergestures PLAYERGESTURES-OK" "probe_tracker TRACKER-OK" "probe_channels CHANNELS-OK" "probe_musicsources MUSICSOURCES-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -3479,6 +3479,97 @@ else
   fi
 fi
 if [ "$rb_fail" -eq 0 ]; then echo "PASS: a multi-file audiobook plays as one book"; else echo "FAIL: a multi-file audiobook plays as one book"; fail=1; fi
+echo
+
+echo "=== a failed open outlives its toast (#239) ==="
+# WHY THIS GATE EXISTS. A press that ends without opening anything used to leave a toast and nothing else.
+# The toast fades in seconds and the shelf then looks exactly as it did before the press -- which is how #236
+# came to be filed as "the shelf's Play never reaches openGame", with the emulator backend suspected, when
+# the real event was a download that came back empty. The store itself is pinned by probe_openfail; what is
+# pinned HERE is everything a probe cannot reach: that the ONE funnel writes it, that a successful open
+# clears it, and that BOTH LAYOUTS carry it -- the two-code-paths rule this repository has been bitten by
+# repeatedly (#193 inc 2, #203, #218, and #236 itself).
+of_fail=0
+of_note() { echo "  $1"; of_fail=1; }
+OF_MW="$HERE/../src/ui/MainWindow.cpp"
+OF_HV="$HERE/../src/ui/HomeView.cpp"
+OF_CS="$HERE/../src/core/CloudSync.cpp"
+OF_AR="$HERE/../src/theme2/qml/elements/ActionRow.qml"
+OF_GR="$HERE/../src/theme2/qml/elements/Grid.qml"
+if [ ! -f "$OF_MW" ] || [ ! -f "$OF_HV" ] || [ ! -f "$OF_CS" ] || [ ! -f "$OF_AR" ] || [ ! -f "$OF_GR" ]; then
+  echo "FAIL: a failed open outlives its toast (#239) (a source file this gate reads was not found)"; fail=1
+else
+  # Comments stripped, and matched with `grep -c -F` against a FILE rather than a pipe, for the reason the
+  # audiobook gate above records at length (SIGPIPE under pipefail reports failure ON A MATCH).
+  of_mwt="$(mktemp)"; sed -E 's://.*$::' "$OF_MW" > "$of_mwt"
+  of_hvt="$(mktemp)"; sed -E 's://.*$::' "$OF_HV" > "$of_hvt"
+  [ "$(wc -l < "$of_mwt")" -gt 100 ] || of_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
+  [ "$(wc -l < "$of_hvt")" -gt 100 ] || of_note "the stripped HomeView.cpp corpus is empty -- this gate scanned nothing."
+
+  # (1) THE ONE FUNNEL WRITES IT. noteOpenFailure is called from INSIDE reportOpenFailure, not beside it, so
+  # a failure shape added later cannot reach the screen and miss the store.
+  of_open="$(awk '/^void MainWindow::reportOpenFailure/,/^}/' "$of_mwt")"
+  [ -n "$of_open" ] && [ "$(printf '%s\n' "$of_open" | grep -c 'noteOpenFailure(')" -ge 1 ] \
+    || of_note "reportOpenFailure no longer records the failure: every failed open would be a toast again, and the shelf a moment later would look untouched (#239)."
+  # ...and it still corrects the transport, which is the #228 half it must not have lost on the way.
+  [ "$(printf '%s\n' "$of_open" | grep -c 'showPlaybackStopped(')" -ge 1 ] \
+    || of_note "reportOpenFailure no longer reaches showPlaybackStopped: the #239 persistence was added over the top of #228 rather than beside it."
+
+  # (2) THE #236 PRESS ITSELF. The empty-body download reaches the funnel WITH a subject, at the Fetch stage
+  # (no player was involved, so the transport must not be corrected and background audio must not be stopped).
+  [ "$(grep -c -F 'OpenFailSubject::Stage::Fetch' "$of_mwt")" -ge 3 ] \
+    || of_note "the download failures no longer report at the Fetch stage with an item subject: the exact press #236 was filed about goes back to being a toast with no id attached."
+  [ "$(grep -c -F 'OpenFailSubject::Stage::Resolve' "$of_mwt")" -ge 1 ] \
+    || of_note "a press that died before any bytes (no source resolved) no longer reaches the funnel: HomeView's own toast would be its only trace again."
+
+  # (3) A SUCCESSFUL OPEN CLEARS IT, at the join point every way in returns through.
+  [ "$(grep -c -F 'clearOpenFailure(item.id);' "$of_mwt")" -ge 1 ] \
+    || of_note "a successful open no longer clears the recorded failure: a 'Try again' that WORKED would leave its own banner up until it expired."
+
+  # (4) BOTH LAYOUTS CARRY IT ON THE DETAIL PAGE. Themed: the data and the two verbs. Classic: the banner
+  # widget and the two buttons. A feature on one layout only is a feature that does not exist here.
+  [ "$(grep -c -F 'QStringLiteral("failure")' "$of_hvt")" -ge 1 ] \
+    || of_note "themedDetailData no longer publishes the failure sentence: the themed detail page would say nothing about a press that did nothing."
+  [ "$(grep -c -F 'verbs.prepend(QStringLiteral("retry"))' "$of_hvt")" -ge 1 ] \
+    || of_note "the themed detail page no longer offers 'Try again'."
+  [ "$(grep -c -F 'QStringLiteral("dismiss")' "$of_hvt")" -ge 1 ] \
+    || of_note "the themed detail page no longer offers 'Dismiss', so the only ways out would be a successful open or seven days."
+  [ "$(grep -c -F 'verb == QStringLiteral("retry")' "$of_mwt")" -ge 1 ] \
+    && [ "$(grep -c -F 'verb == QStringLiteral("dismiss")' "$of_mwt")" -ge 1 ] \
+    || of_note "the themed 'retry'/'dismiss' verbs are published but not routed: two pills that do nothing."
+  [ "$(grep -c -F 'applyOpenFailureToDetail(item);' "$of_hvt")" -ge 1 ] \
+    || of_note "the CLASSIC detail page no longer applies the failure state: the themed layout would carry it and the classic one would not, which is the two-code-paths rule (#193 inc 2, #203, #218)."
+  [ "$(grep -c -F 'retryBtn_' "$of_hvt")" -ge 3 ] && [ "$(grep -c -F 'dismissBtn_' "$of_hvt")" -ge 3 ] \
+    || of_note "the classic detail page's 'Try again'/'Dismiss' buttons are gone."
+  [ "$(grep -c -F 'metaFailure_' "$of_hvt")" -ge 3 ] \
+    || of_note "the classic detail page's failure banner is gone: the buttons would appear with nothing saying why."
+  # ...and the D-pad has to be able to REACH them, which on this page means the action-row ring.
+  [ "$(grep -c -F 'actionRowBtns{ retryBtn_, dismissBtn_' "$of_hvt")" -eq 1 ] \
+    || of_note "the two new buttons are not in the detail page's action-row ring: mouse-only controls on a controller-and-TV-first app (the #40 defect class)."
+
+  # (5) THE ROW MARKER, on both layouts, so a user scanning a shelf sees which thing refused.
+  [ "$(grep -c -F 'QStringLiteral("openFailed")' "$of_hvt")" -ge 1 ] \
+    || of_note "the themed browse model no longer carries the openFailed flag: the shelf badge would never appear."
+  [ "$(grep -c -F 'modelData.openFailed' "$OF_GR")" -ge 2 ] \
+    || of_note "Grid.qml no longer binds modelData.openFailed (the badge, and the 'N NEW' badge yielding to it): the model would carry a flag nothing draws."
+  [ "$(grep -c -F 'OpenFailStore::marked(it.id)' "$of_hvt")" -ge 2 ] \
+    || of_note "the row marker is asked for on one layout only -- browseItems() feeds the themed badge and browseRowLabel() feeds the classic list, and both have to ask."
+  [ "$(grep -c -F 'sel.failure' "$OF_AR")" -ge 1 ] \
+    && [ "$(grep -c -F 'visible: rowEl.failure.length > 0' "$OF_AR")" -eq 1 ] \
+    || of_note "ActionRow.qml no longer draws the failure sentence above its pills: the themed detail page would offer a Try again pill with nothing on it saying what failed."
+
+  # (6) DEVICE-LOCAL. Asserted here as well as in probe_openfail because this is the half a code change can
+  # break WITHOUT touching the store: a rewrite of the carve-out would silently start syncing one device's
+  # dead link to every other device on the account, where nothing can ever clear it.
+  [ "$(grep -c -F 'key.startsWith(QLatin1String("openfail/"))' "$OF_CS")" -eq 1 ] \
+    || of_note "CloudSync's device-local carve-out no longer names openfail/: a failed open on this machine would appear on every device on the account, with a 'Try again' that has nothing to retry."
+  of_peritem="$(awk '/^bool CloudSync::isPerItemStoreKey/,/^}/' "$OF_CS")"
+  [ "$(printf '%s\n' "$of_peritem" | grep -c 'openfail')" -eq 0 ] \
+    || of_note "openfail/ has been added to isPerItemStoreKey: that family rides the CloudMerge progress document, which is the OTHER way a per-item key reaches a peer."
+
+  rm -f "$of_mwt" "$of_hvt"
+fi
+if [ "$of_fail" -eq 0 ]; then echo "PASS: a failed open outlives its toast (#239)"; else echo "FAIL: a failed open outlives its toast (#239)"; fail=1; fi
 echo
 
 echo "=== a re-minted Recents row asks the addon that can answer (#224) ==="

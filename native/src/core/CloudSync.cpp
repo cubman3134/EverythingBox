@@ -288,6 +288,16 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     if (tracker::isDeviceLocalKey(key)) return true;    // Discord presence (see Settings.h): whether THIS machine announces what it is playing. A shared TV
     // must not start broadcasting because presence was switched on for a laptop on the same account.
     if (key.startsWith(QLatin1String("discord/"))) return true;
+
+    // openfail/* (issue #239): the last failed open, per item — "this press did nothing, and here is why",
+    // written down so it outlives the toast that used to be its only trace. DEVICE-LOCAL because it is a fact
+    // about THIS device's last attempt: this network, this source, this moment. The same title on the same
+    // account may well open on the tablet in the next room, so syncing it would put one device's dead link on
+    // another device's shelf, complete with a "Try again" that has nothing to retry — and it would linger
+    // there for the full seven days, because the device that could clear it by succeeding is not the device
+    // showing it. It is deliberately NOT in isPerItemStoreKey either: that family names the stores the
+    // CloudMerge progress document owns, which is the other way a per-item key reaches a peer.
+    if (key.startsWith(QLatin1String("openfail/"))) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)
