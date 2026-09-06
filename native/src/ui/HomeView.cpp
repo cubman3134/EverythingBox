@@ -48,6 +48,7 @@
 #include "../core/StoreBackend.h"  // #118: owned libraries from a store BACKEND (legendary), no client needed
 #include "../core/Settings.h"
 #include "../core/ItemMarks.h"
+#include "../core/ConsumptionStats.h"   // #134 inc 2: the high-water reading page behind a book row's badge
 #include "../core/GameFilter.h"        // pure filter model/evaluator for saved-filter shelves (#63)
 #include "../core/FilterPresetStore.h" // per-profile saved filter presets (#63)
 #include "../core/TraktClient.h"   // calendarAvailable()/cachedCalendar() — the Trakt shelf's only gate (#23)
@@ -3028,7 +3029,41 @@ static browse::BookCoverFn bookCover()
 {
     return [](const BookLibrary::Book& b) {
         static const QString dir = MusicArt::cacheDir();   // one AppPaths read per process, not one per tile
-        return MusicArt::keyedCover(b.key, b.folder, dir);
+        const QString local = MusicArt::keyedCover(b.key, b.folder, dir);
+        if (!local.isEmpty()) return local;
+        // ...AND ONLY THEN what a lookup filled in (#134 increment 2). LOCAL FIRST is not an optimisation
+        // here, it is the rule: a cover inside the file, or one somebody put beside it, is what they chose,
+        // and an online answer may only stand where there was nothing. The MetaCache read is gated on the
+        // setting AND on the book having no cover of its own, so an install that never opted in — and every
+        // tile in one that did but whose file carries a cover — pays not one file read for this.
+        if (b.hasCover || !Settings::booksEnrichOnline()) return QString();
+        return MetaCache::imagePath(b.key, QStringLiteral("poster"));
+    };
+}
+
+// WHERE SOMEBODY IS IN A BOOK, for every book row on every level. The DERIVATION is
+// BookLibrary::progressFor and is not repeated here; this only gathers its three inputs, which is the half
+// that needs the stores:
+//
+//   * the furthest page — ConsumptionStats, keyed by the book's PATH, because that is the identity all
+//     three readers already accrue under (PdfView, ComicView and EbookView each call addPagesRead with the
+//     file path on every page turn). It is a HIGH-WATER index by construction, so paging back a chapter
+//     cannot un-finish a book, and a book opened and left on page one accrues nothing at all.
+//   * the completion MARK, keyed by the row's own marks key — which for a book row is its id, i.e. the book
+//     key, exactly what MetaCache::keyFor returns for it and therefore exactly what the marks menu wrote.
+//   * how long the book is, off the index entry the row came from.
+//
+// Both lookups are cache-backed hash reads (ItemMarks and ConsumptionStats each keep a per-profile QHash),
+// which is what makes calling this once per tile the same order of cost as reading a field.
+static browse::BookProgressFn bookProgress()
+{
+    return [](const BookLibrary::Book& b) {
+        BookLibrary::ReadState st;
+        const ConsumptionStats::Totals t = ConsumptionStats::get(b.path);
+        st.furthestPage = int(qBound(qint64(0), t.pagesRead, qint64(1000000)));
+        st.lastRead     = t.lastActivity;
+        st.userMark     = ItemMarks::get(b.key).completion;
+        return BookLibrary::progressFor(b, st);
     };
 }
 
@@ -3052,7 +3087,8 @@ void HomeView::selectBooks()
 
 void HomeView::populateBooks()
 {
-    showSyntheticCatalog(browse::bookRootCatalog(visibleBookIndex(), bookEmptyNote(), bookCover()));
+    showSyntheticCatalog(browse::bookRootCatalog(visibleBookIndex(), bookEmptyNote(), bookCover(),
+                                                 bookProgress()));
 }
 
 // One push site per level, all the same shape. `type` is what loadTop dispatches on and `mime` is the marker
@@ -3076,7 +3112,8 @@ void HomeView::openBookAuthorLevel(const QString& authorKey)
 
 void HomeView::populateBookAuthor(const QString& authorKey)
 {
-    showSyntheticCatalog(browse::bookAuthorCatalog(visibleBookIndex(), authorKey, bookCover()));
+    showSyntheticCatalog(browse::bookAuthorCatalog(visibleBookIndex(), authorKey, bookCover(),
+                                                   bookProgress()));
 }
 
 void HomeView::openBookSeriesListLevel()
@@ -3097,6 +3134,27 @@ void HomeView::populateBookSeriesList()
     showSyntheticCatalog(browse::bookSeriesListCatalog(visibleBookIndex(), bookCover()));
 }
 
+// CONTINUE READING (#134 increment 2). One more level of exactly the shape the other three already have —
+// its own type to dispatch on and its own mime to rebuild from, so Back out of a book lands here rather than
+// on an empty page (the `synthetic level Back survival` gate is what catches a level that stored neither).
+void HomeView::openBookContinueLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Continue reading");
+    lvl.item.id = QStringLiteral("_bkcontinue");
+    lvl.item.type = QStringLiteral("_bkcontinue");
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(browse::kBookContinuePrefix);
+    stack_.push_back(lvl);
+    populateBookContinue();
+}
+
+void HomeView::populateBookContinue()
+{
+    showSyntheticCatalog(browse::bookContinueCatalog(visibleBookIndex(), bookProgress(), bookCover()));
+}
+
 void HomeView::openBookSeriesLevel(const QString& seriesKey)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -3115,7 +3173,41 @@ void HomeView::openBookSeriesLevel(const QString& seriesKey)
 
 void HomeView::populateBookSeries(const QString& seriesKey)
 {
-    showSyntheticCatalog(browse::bookSeriesCatalog(visibleBookIndex(), seriesKey, bookCover()));
+    showSyntheticCatalog(browse::bookSeriesCatalog(visibleBookIndex(), seriesKey, bookCover(),
+                                                   bookProgress()));
+}
+
+// A READER JUST CLOSED (#134 increment 2). A book row's badge and the Continue-reading shelf are derived at
+// POPULATE time, so the level the reader was opened from is still showing what it knew before somebody read
+// forty pages — which is precisely the moment the answer changed, and precisely the moment they look.
+//
+// IT REFRESHES A READING LEVEL AND NOTHING ELSE, which is what lets returnFromReader keep its rule. That
+// lambda deliberately does NOT rebuild the classic home, so a chapter or catalog list you came from keeps
+// its position; a Books level is the one list whose CONTENTS just went stale, and the cursor is carried
+// across by id (the repopulateKeepingCursor idiom, one screen up) so the tile you pressed is still the one
+// under the highlight when you land.
+void HomeView::refreshReadingProgress()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    const QString t = stack_.last().item.type;
+    if (t != QStringLiteral("_bkroot") && t != QStringLiteral("_bkauthor")
+        && t != QStringLiteral("_bkserieslist") && t != QStringLiteral("_bkseries")
+        && t != QStringLiteral("_bkcontinue")) return;
+
+    const int keepRow = grid_ ? grid_->currentRow() : -1;
+    const QString keepId = (keepRow >= 0 && keepRow < items_.size()) ? items_[keepRow].id : QString();
+    onBookLibraryChanged();
+    int row = -1;
+    if (!keepId.isEmpty())
+        for (int i = 0; i < items_.size(); ++i) if (items_[i].id == keepId) { row = i; break; }
+    // A row that has GONE (the Continue-reading shelf a book just left by being finished) falls back to the
+    // place it used to hold, which is where the next thing to read now is.
+    if (row < 0 && keepRow >= 0 && grid_ && keepRow < grid_->count()) row = keepRow;
+    if (row >= 0 && grid_ && row < grid_->count())
+    {
+        grid_->setCurrentRow(row);
+        grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
+    }
 }
 
 // A finished scan installed a new index (MainWindow::rescanBookLibrary). Refresh whichever Books level the
@@ -3131,6 +3223,7 @@ void HomeView::onBookLibraryChanged()
     if (top.item.type == QStringLiteral("_bkauthor"))
         { populateBookAuthor(browse::bookKeyOf(top.item.mime, browse::kBookAuthorPrefix)); return; }
     if (top.item.type == QStringLiteral("_bkserieslist")) { populateBookSeriesList(); return; }
+    if (top.item.type == QStringLiteral("_bkcontinue")) { populateBookContinue(); return; }
     if (top.item.type == QStringLiteral("_bkseries"))
         { populateBookSeries(browse::bookKeyOf(top.item.mime, browse::kBookSeriesPrefix)); return; }
 }
@@ -8184,6 +8277,8 @@ void HomeView::activateItem(int row)
         { openBookAuthorLevel(browse::bookKeyOf(it.mime, browse::kBookAuthorPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kBookSeriesListType))
         { openBookSeriesListLevel(); return; }
+    if (it.type == QString::fromLatin1(browse::kBookContinueType))
+        { openBookContinueLevel(); return; }
     if (it.type == QString::fromLatin1(browse::kBookSeriesType))
         { openBookSeriesLevel(browse::bookKeyOf(it.mime, browse::kBookSeriesPrefix)); return; }
     if (it.type == QString::fromLatin1(browse::kMusicComposerType))
@@ -9209,6 +9304,7 @@ void HomeView::loadTop()
     if (top.detail && top.item.type == QStringLiteral("_bkauthor"))
         { populateBookAuthor(browse::bookKeyOf(top.item.mime, browse::kBookAuthorPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_bkserieslist")) { populateBookSeriesList(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_bkcontinue")) { populateBookContinue(); return; }
     if (top.detail && top.item.type == QStringLiteral("_bkseries"))
         { populateBookSeries(browse::bookKeyOf(top.item.mime, browse::kBookSeriesPrefix)); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.

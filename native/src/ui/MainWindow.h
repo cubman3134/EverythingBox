@@ -143,6 +143,13 @@ private slots:
     // persisted index. A separate scan rather than a mode of either audio one, because three roots are
     // three different statements by the user and a shared walk would have to be told which it was doing.
     void rescanBookLibrary();
+    // ONLINE BLANK-FILLING FOR BOOKS (issue #134 increment 2) — defined in MainWindowBookMeta.cpp, which is
+    // where the whole of it is described. Asks the book-metadata provider addons about the books whose file
+    // left no author or no cover, and stores only what BookLibrary::acceptedFill lets through, in MetaCache
+    // and never in the index. Returns how many were asked about (0 = nothing to do, which is the steady
+    // state and is what the setting being OFF always produces).
+    int  sweepBookMetadata();
+    void onBookMetaReady(int requestId, const MediaDetail& detail);
     // Trakt calendar (#23): refresh the cached "my shows" calendar and tell the home to redraw. DEBOUNCED —
     // stamped before the request, not in the callback, so it rate-limits even though fetchMyShowsCalendar's
     // callback may never arrive (see TraktClient.h). Called from startup, from a fresh account link, and on
@@ -1466,6 +1473,11 @@ private:
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;
+    // #134 increment 2: the online blank-fill lookups this window owns, request id -> the book key it was
+    // asked for. Nothing else may interpret a metaReady, and an id that is not in here belongs to one of
+    // the aggregators. bookMetaAsked_ is the once-per-session guard, so a rescan never re-asks.
+    QHash<int, QString> bookMetaReq_;
+    QSet<QString>       bookMetaAsked_;
     // Local Library ID-resolver: the on-disk match cache + the background resolver that fills it. Constructed
     // after addons_ (its search source) and before the first rescan; the resolver's resolved() rebuilds the index.
     std::unique_ptr<LocalResolveCache> resolveCache_;

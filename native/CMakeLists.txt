@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.198 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.199 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -835,6 +835,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AudiobookMetaAggregator.cpp src/addons/AudiobookMetaAggregator.h
         src/ui/MainWindowAudiobookMeta.cpp
         src/core/BookLibrary.cpp  src/core/BookLibrary.h    # #134 local book/comic scan + Authors/Series index
+        src/ui/MainWindowBookMeta.cpp                       # ...and #134 inc 2 online blank-filling, off MainWindow.cpp
         src/core/BookMeta.cpp     src/core/BookMeta.h       # ...and the EPUB/PDF/CBZ container reader behind it
         src/core/MusicQueue.cpp   src/core/MusicQueue.h    # multi-album queues (play all / shuffle all) over that index
         src/core/MusicArt.cpp     src/core/MusicArt.h      # #74 album art: embedded-cover cache + cover.*/folder.*
@@ -3015,7 +3016,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        # #134 increment 2: the high-water reading page is DRIVEN through the real store rather than
+        # mirrored in the probe, so a backwards page turn failing to un-finish a book is a fact about
+        # ConsumptionStats and not about a rule this test wrote down twice. ProfileStore comes with it
+        # (the accumulators are namespaced by the active profile).
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/ProfileStore.cpp     src/core/ProfileStore.h
         third_party/miniz.c)
+    # It links NO ItemMarks either, and that is the structural half of "a hand-set completion is never
+    # overwritten" (#134 increment 2): BookLibrary and BookCatalogs read the mark as a VALUE handed in,
+    # so neither can call a line of that store, so nothing in this feature can write one. If a future
+    # change made an auto-mark write, this target would stop linking.
     target_include_directories(probe_books PRIVATE src src/core src/ebook src/comic src/browse src/addons
         src/theme2 third_party tools)
     target_compile_definitions(probe_books PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

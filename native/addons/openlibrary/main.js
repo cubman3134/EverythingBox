@@ -83,7 +83,11 @@ function isAudioEdition(e) {
 
 function getMeta(argJson) {
     var a = J(argJson) || {};
-    if (a.type !== "audiobook") return "{}";
+    // "book" as well as "audiobook" (issue #134 increment 2): this is a BOOK catalogue, and the reading
+    // library asks it the same question about the same work. The host sends whichever type this addon's
+    // manifest declares, so an install still carrying the older copy of that file is asked the older way
+    // and answers exactly as it did.
+    if (a.type !== "audiobook" && a.type !== "book") return "{}";
 
     var title = String(a.title || "").trim();
     if (!title) return "{}";

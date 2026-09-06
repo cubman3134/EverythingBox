@@ -43,6 +43,36 @@ QString coverFor(const BookLibrary::Book& b, const BookCoverFn& fn)
     return fn ? fn(b) : QString();   // no default: this unit touches no filesystem (see the header)
 }
 
+BookLibrary::Progress progressFor(const BookLibrary::Book& b, const BookProgressFn& fn)
+{
+    // No supplier -> the DEFAULT Progress, which is "nothing is known about this book". Every badge below
+    // is then absent and every row is exactly what it was before #134 increment 2 — the same posture
+    // coverFor takes, and what a probe that only cares about grouping gets for free.
+    return fn ? fn(b) : BookLibrary::Progress{};
+}
+
+// THE BADGE, in words. A percentage when there is a denominator, the STATE when there is not, and nothing
+// at all for a book nobody has opened.
+//
+// A container that never said how long it is gets "In progress" and no number — never a percentage computed
+// against a guess, and never "100%" because the denominator was zero. That refusal is BookLibrary's
+// (Progress::known); this only spells the two answers it produces.
+QString fmtProgress(const BookLibrary::Progress& p)
+{
+    switch (p.completion)
+    {
+    case ItemMarks::Completion::Finished:   return QObject::tr("Finished");
+    case ItemMarks::Completion::Abandoned:  return QObject::tr("Abandoned");
+    case ItemMarks::Completion::Planned:    return QObject::tr("Planned");
+    case ItemMarks::Completion::InProgress:
+        return p.known ? QObject::tr("%1%").arg(int(p.fraction * 100.0 + 0.5))
+                       : QObject::tr("In progress");
+    case ItemMarks::Completion::None:
+        break;
+    }
+    return QString();
+}
+
 // How many pages/chapters, in the noun that fits what the file actually is. A COMIC has pages and an EPUB
 // has chapters, and calling either by the other's name is the kind of small wrongness that makes a shelf
 // feel like it was written by somebody who had not looked at the files. Nothing at all for 0, which is what
@@ -60,7 +90,8 @@ QString fmtExtent(const BookLibrary::Book& b)
 // and the route it returns is OpenFile, so the surface hands the item over as it stands and MainWindow's
 // existing extension dispatch opens the .epub in the ebook reader, the .pdf in the PDF reader and the .cbz
 // in the comic reader. Not one line of that dispatch had to learn what a library is.
-MediaItem bookRow(const BookLibrary::Book& b, const QString& credit, const BookCoverFn& cover)
+MediaItem bookRow(const BookLibrary::Book& b, const QString& credit, const BookCoverFn& cover,
+                  const BookProgressFn& progress)
 {
     MediaItem it;
     it.id           = b.key;
@@ -71,7 +102,17 @@ MediaItem bookRow(const BookLibrary::Book& b, const QString& credit, const BookC
     it.expandable   = false;
     it.title        = b.title;
     it.thumbnailUrl = coverFor(b, cover);
-    it.subtitle     = joinDot({ credit, fmtExtent(b), b.year > 0 ? QString::number(b.year) : QString() });
+    // WHERE SOMEBODY IS LEADS THE LINE (#134 increment 2), because it is the news: a shelf you come back to
+    // is asked "which of these am I in the middle of" long before it is asked what year they came out.
+    const BookLibrary::Progress p = progressFor(b, progress);
+    it.subtitle     = joinDot({ fmtProgress(p), credit, fmtExtent(b),
+                                b.year > 0 ? QString::number(b.year) : QString() });
+    // ...AND THE BAR IS ONLY DRAWN WHERE THERE IS A DENOMINATOR. MediaItem::progress defaults to -1 = "look
+    // it up the usual way", and leaving it there is exactly right for a book nobody has opened and for one
+    // whose container never said how long it is: the row keeps its word and grows no bar. (#139 increment 2
+    // put this field on a row for the same reason — a local book's position is filed under a key the
+    // surface's own resume lookup cannot reach.)
+    if (p.known && p.started) it.progress = p.fraction;
     return it;
 }
 
@@ -103,13 +144,23 @@ QString bucketArt(const BookLibrary::Author& bucket, const BookCoverFn& cover)
     return QString();
 }
 
+// THE CONTINUE-READING SET, in the order the shelf shows it. One reader for the door's count and for the
+// shelf itself, so the row cannot say "3 books" over a level that holds four. The membership rule and the
+// ordering are BookLibrary's (continueReadingBooks); no supplier means nothing is known, so nothing is on
+// it — which is why a probe that injects no progress sees the shelf and its door absent entirely.
+QVector<BookLibrary::Book> continueBooks(const BookLibrary::Index& idx, const BookProgressFn& progress)
+{
+    if (!progress) return {};
+    return BookLibrary::continueReadingBooks(idx, progress);
+}
+
 // One bucket's books, rendered. THE shared level: an author's shelf and a series' shelf are the same rows
 // read from two sides, and a builder apiece would drift on the day one of them learned something. `credit`
 // decides only what a row names underneath itself.
 enum class Credit { Series, Author };
 
 MediaCatalog booksCatalog(const BookLibrary::Author* bucket, const QString& fallbackTitle,
-                          Credit credit, const BookCoverFn& cover)
+                          Credit credit, const BookCoverFn& cover, const BookProgressFn& progress)
 {
     MediaCatalog cat;
     cat.hasMore = false;
@@ -131,7 +182,7 @@ MediaCatalog booksCatalog(const BookLibrary::Author* bucket, const QString& fall
             // follows it — the one fact a series shelf cannot show any other way.
             line = joinDot({ fmtNumber(b), b.author.trimmed() });
         }
-        cat.items.push_back(bookRow(b, line, cover));
+        cat.items.push_back(bookRow(b, line, cover, progress));
     }
     return cat;
 }
@@ -139,7 +190,7 @@ MediaCatalog booksCatalog(const BookLibrary::Author* bucket, const QString& fall
 } // namespace
 
 MediaCatalog bookRootCatalog(const BookLibrary::Index& idx, const BookEmptyNote& note,
-                             const BookCoverFn& cover)
+                             const BookCoverFn& cover, const BookProgressFn& progress)
 {
     MediaCatalog cat; cat.title = QObject::tr("Books");
     cat.hasMore = false;
@@ -158,6 +209,23 @@ MediaCatalog bookRootCatalog(const BookLibrary::Index& idx, const BookEmptyNote&
             cat.items.push_back(info);
         }
         return cat;
+    }
+
+    // CONTINUE READING, first, and only when there is something to continue. It leads the shelf because it
+    // is the answer to the question somebody actually walked in with; it disappears entirely the moment
+    // nothing is part-way through, which is the same compatibility rule the Series door below follows and
+    // what stops a fresh library growing an idiom it did not ask for.
+    {
+        const QVector<BookLibrary::Book> cont = continueBooks(idx, progress);
+        if (!cont.isEmpty())
+        {
+            BookLibrary::Author bucket;   // just to reuse bucketArt: the first of them that has a picture
+            bucket.books = cont;
+            cat.items.push_back(syntheticRow(kBookContinueType, kBookContinuePrefix, QString(),
+                                             QObject::tr("Continue reading"),
+                                             QObject::tr("%n book(s)", "", int(cont.size())),
+                                             bucketArt(bucket, cover)));
+        }
     }
 
     // The DIMENSION door, only when the dimension exists. See the header: a collection of standalone books
@@ -182,19 +250,35 @@ MediaCatalog bookRootCatalog(const BookLibrary::Index& idx, const BookEmptyNote&
 }
 
 MediaCatalog bookAuthorCatalog(const BookLibrary::Index& idx, const QString& authorKey,
-                               const BookCoverFn& cover)
+                               const BookCoverFn& cover, const BookProgressFn& progress)
 {
     const BookLibrary::Author* a = idx.author(authorKey);
-    MediaCatalog cat = booksCatalog(a, QObject::tr("Books"), Credit::Series, cover);
+    MediaCatalog cat = booksCatalog(a, QObject::tr("Books"), Credit::Series, cover, progress);
     // displayAuthor rather than the raw name, so the UNKNOWN bucket has a title instead of a blank bar.
     if (a) cat.title = BookLibrary::displayAuthor(*a);
     return cat;
 }
 
 MediaCatalog bookSeriesCatalog(const BookLibrary::Index& idx, const QString& seriesKey,
-                               const BookCoverFn& cover)
+                               const BookCoverFn& cover, const BookProgressFn& progress)
 {
-    return booksCatalog(idx.seriesFor(seriesKey), QObject::tr("Series"), Credit::Author, cover);
+    return booksCatalog(idx.seriesFor(seriesKey), QObject::tr("Series"), Credit::Author, cover, progress);
+}
+
+MediaCatalog bookContinueCatalog(const BookLibrary::Index& idx, const BookProgressFn& progress,
+                                 const BookCoverFn& cover)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Continue reading");
+    cat.hasMore = false;
+    // Credit::Series: standing here the row is out of any bucket, so "which series, and where in it" is
+    // exactly the fact it cannot show any other way — the same line an author's shelf gives it.
+    for (const BookLibrary::Book& b : continueBooks(idx, progress))
+    {
+        const QString s = b.series.trimmed();
+        cat.items.push_back(bookRow(b, s.isEmpty() ? b.author.trimmed()
+                                                   : joinDot({ s, fmtNumber(b) }), cover, progress));
+    }
+    return cat;
 }
 
 MediaCatalog bookSeriesListCatalog(const BookLibrary::Index& idx, const BookCoverFn& cover)

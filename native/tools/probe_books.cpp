@@ -40,6 +40,20 @@
 //      cannot claim an audio file whatever root it is pointed at. (The strongest version of this claim is
 //      structural and lives in CMakeLists: this probe links no TagLib and no MusicLibrary.)
 //  12. Nothing configured / a missing root are dormant and instant, not errors.
+//  15. WHERE A PERSON IS IN A BOOK (increment 2), over the whole grid: never opened; page one only; mid-
+//      book with and without a page count; read to the end; a HAND-SET mark beating the automatic answer in
+//      BOTH directions; a cleared mark handing it back; and high-water through the REAL ConsumptionStats,
+//      so a backwards page turn cannot un-finish a book. Then Continue reading — its membership, its
+//      ordering, its three exclusions, and the door agreeing with the level it opens.
+//
+//      IT LINKS NO ItemMarks, and that is the structural half of "a hand-set mark is never overwritten":
+//      neither BookLibrary nor BookCatalogs can call one line of that store, so nothing in this feature can
+//      write a completion. The automatic state is derived at display and lives nowhere.
+//  16. THE ENRICHMENT GATE, as values rather than as intentions: with the setting off the target list over
+//      the entire library is EMPTY (which is what "zero requests" means when the requests are made from a
+//      list); with it on the targets are exactly the books missing an author or a cover, asserted per book
+//      in both directions; and the merge DROPS every field the file already carried, per field, with an
+//      empty answer (a failure) leaving the blank.
 //
 // Prints BOOKS-OK on success; any failure prints BOOKS-FAIL <cond> (line) and exits non-zero.
 //
@@ -53,6 +67,7 @@
 #include "EpubMeta.h"
 #include "LeafRoute.h"   // kLocalBookMime — header only; the routing itself is probe_leafroute's job
 #include "AppPaths.h"
+#include "ConsumptionStats.h"   // #134 inc 2: the REAL high-water page store, driven rather than mirrored
 #include "Settings.h"
 
 #include <QBuffer>
@@ -60,6 +75,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHash>
 #include <QImage>
 #include <QPainter>
 #include <QString>
@@ -1237,6 +1253,347 @@ int main(int argc, char** argv)
         QString rules3;
         BookLibrary::loadIndexFile(f2, &rules3);
         CHECK(rules3 == BookLibrary::parseStamp());
+    }
+
+    // ---- §15 WHERE A PERSON IS IN A BOOK (issue #134 increment 2) -------------------------------------
+    // ITS OWN ROOT, for the reason §14 gives: the sections above pin exact file counts over `lib`, and a
+    // feature that had to renumber another feature's assertions to be tested would be one nobody could
+    // safely change. Four REAL twelve-page comics, so `pageCount` is what a container actually reported and
+    // "the end" is a number this probe did not choose.
+    {
+        using ItemMarks::Completion;
+        const QString lib134 = base + QStringLiteral("/lib134");
+        for (const char* name : { "/Alpha.cbz", "/Bravo.cbz", "/Charlie.cbz", "/Delta.cbz" })
+            CHECK(writeCbz(lib134 + QString::fromLatin1(name), 12));
+        const Index r = BookLibrary::buildIndex(BookLibrary::scanFolder(lib134));
+        CHECK(r.authors.size() == 1);          // four untagged comics, one unknown-author bucket
+        CHECK(r.series.isEmpty());             // ...and no numbers, so no series dimension at all
+
+        const Book* alpha   = findBook(r, QStringLiteral("Alpha"));
+        const Book* bravo   = findBook(r, QStringLiteral("Bravo"));
+        const Book* charlie = findBook(r, QStringLiteral("Charlie"));
+        const Book* delta   = findBook(r, QStringLiteral("Delta"));
+        CHECK(alpha && bravo && charlie && delta);
+        if (!alpha || !bravo || !charlie || !delta) { QDir(base).removeRecursively(); return 1; }
+        CHECK(alpha->pageCount == 12);
+
+        auto st = [](int page, qint64 when = 100, Completion mark = Completion::None) {
+            BookLibrary::ReadState s;
+            s.furthestPage = page; s.lastRead = when; s.userMark = mark;
+            return s;
+        };
+        const int n = alpha->pageCount;
+
+        // (a) NEVER OPENED: no state, and NO percentage — not "0%".
+        const BookLibrary::Progress none0 = BookLibrary::progressFor(*alpha, st(0, 0));
+        CHECK(none0.completion == Completion::None);
+        CHECK(!none0.started);
+        CHECK(!none0.finished);
+        CHECK(!none0.known);
+        CHECK(!none0.fromUser);
+        CHECK(!BookLibrary::continueReading(none0));
+
+        // (b) PAGE ONE AND NO FURTHER IS NOT PROGRESS. Opening a file is not reading it, and a shelf that
+        // counted it would fill up with books nobody is reading — which is what Recents is for.
+        const BookLibrary::Progress p1 = BookLibrary::progressFor(*alpha, st(1));
+        CHECK(p1.completion == Completion::None);
+        CHECK(!p1.started);
+        CHECK(!BookLibrary::continueReading(p1));
+
+        // (c) MID-BOOK, WITH a page count: in progress, and a real fraction.
+        const BookLibrary::Progress mid = BookLibrary::progressFor(*alpha, st(6));
+        CHECK(mid.completion == Completion::InProgress);
+        CHECK(mid.started);
+        CHECK(!mid.finished);
+        CHECK(mid.known);
+        CHECK(mid.fraction == 0.5);
+        CHECK(BookLibrary::continueReading(mid));
+
+        // (d) AT THE END: finished, and exactly 1.0 — never 92% under the word "Finished".
+        const BookLibrary::Progress end = BookLibrary::progressFor(*alpha, st(n));
+        CHECK(end.completion == Completion::Finished);
+        CHECK(end.finished);
+        CHECK(end.known);
+        CHECK(end.fraction == 1.0);
+        CHECK(!BookLibrary::continueReading(end));
+
+        // (e) A HAND-SET MARK BEATS THE AUTOMATIC ONE, IN BOTH DIRECTIONS. This pair is what makes the marks
+        // menu mean anything: mid-book + "Finished" reads Finished, and read-to-the-end + "In progress"
+        // reads In progress. `fromUser` reports which way it was decided, and nothing in this feature ever
+        // writes ItemMarks — see the CMake note: this probe links none of it and still builds.
+        const BookLibrary::Progress saidDone = BookLibrary::progressFor(*alpha, st(6, 100, Completion::Finished));
+        CHECK(saidDone.completion == Completion::Finished);
+        CHECK(saidDone.finished);
+        CHECK(saidDone.fromUser);
+        CHECK(saidDone.fraction == 1.0);
+        CHECK(!BookLibrary::continueReading(saidDone));
+
+        const BookLibrary::Progress saidNotDone =
+            BookLibrary::progressFor(*alpha, st(n, 100, Completion::InProgress));
+        CHECK(saidNotDone.completion == Completion::InProgress);
+        CHECK(!saidNotDone.finished);
+        CHECK(saidNotDone.fromUser);
+        CHECK(BookLibrary::continueReading(saidNotDone));
+
+        // ...and the two states somebody picks ON PURPOSE that are not "part-way through" keep the book off
+        // the shelf however far into it they have read.
+        CHECK(!BookLibrary::continueReading(
+                  BookLibrary::progressFor(*alpha, st(6, 100, Completion::Abandoned))));
+        CHECK(!BookLibrary::continueReading(
+                  BookLibrary::progressFor(*alpha, st(6, 100, Completion::Planned))));
+
+        // (f) A CLEARED MARK IS NOT A MARK. None means "they never said", so the automatic answer stands —
+        // which is what "clear" has to mean, or the menu has no way back.
+        CHECK(BookLibrary::progressFor(*alpha, st(n, 100, Completion::None)).completion == Completion::Finished);
+
+        // (g) NO PAGE COUNT: a state, and NO number. `pageCount == 0` is exactly what an index entry holds
+        // for a container that did not say how long it is, so it is set here rather than mocked around.
+        {
+            Book noCount = *alpha;
+            noCount.pageCount = 0;
+            const BookLibrary::Progress p = BookLibrary::progressFor(noCount, st(6));
+            CHECK(p.completion == Completion::InProgress);
+            CHECK(p.started);
+            CHECK(!p.known);                 // <- the whole of "no percentage rather than a wrong one"
+            CHECK(p.fraction == 0.0);
+            CHECK(BookLibrary::continueReading(p));
+            // It can never reach Finished by reading alone: there is nothing to reach. Only a person can say
+            // so, and when they do it is 1.0 like any other finished book.
+            CHECK(BookLibrary::progressFor(noCount, st(99999)).completion == Completion::InProgress);
+            const BookLibrary::Progress said = BookLibrary::progressFor(noCount, st(6, 100, Completion::Finished));
+            CHECK(said.completion == Completion::Finished);
+            CHECK(said.known);
+            CHECK(said.fraction == 1.0);
+        }
+
+        // (h) HIGH-WATER, THROUGH THE REAL STORE. Not a rule mirrored in this file: ConsumptionStats is
+        // linked and driven, a turn to the last page is recorded, a turn BACKWARDS is recorded after it, and
+        // the state derived from what the store then holds is still Finished. The store's own half (a
+        // regression accrues nothing) is probe_stats'; this is the half that decides what a shelf shows.
+        {
+            ConsumptionStats::addPagesRead(alpha->path, n, alpha->title);   // read to the end
+            ConsumptionStats::addPagesRead(alpha->path, 2, alpha->title);   // ...then paged back
+            const ConsumptionStats::Totals t = ConsumptionStats::get(alpha->path);
+            CHECK(int(t.pagesRead) == n);                                   // the store kept the high-water
+            BookLibrary::ReadState live;
+            live.furthestPage = int(t.pagesRead);
+            live.lastRead     = t.lastActivity;
+            const BookLibrary::Progress p = BookLibrary::progressFor(*alpha, live);
+            CHECK(p.completion == Completion::Finished);                    // paging back did not un-finish it
+            CHECK(p.fraction == 1.0);
+        }
+
+        // ---- Continue reading: membership, ordering, and what it refuses ------------------------------
+        // Driven through the CATALOG and not through the raw list, because the door's count and the shelf's
+        // contents have to be one answer: a row saying "2 books" over a level holding three is the failure
+        // this level of the test exists to catch.
+        {
+            QHash<QString, BookLibrary::ReadState> states;
+            states.insert(alpha->key,   st(6, 300));            // in progress, read EARLIER
+            states.insert(bravo->key,   st(4, 500));            // in progress, read most recently
+            states.insert(charlie->key, st(1, 900));            // page one only: not on it
+            states.insert(delta->key,   st(n, 900));            // finished: not on it
+            auto progress = [&states](const Book& b) {
+                return BookLibrary::progressFor(b, states.value(b.key));
+            };
+
+            const MediaCatalog cont = browse::bookContinueCatalog(r, progress);
+            CHECK(cont.items.size() == 2);
+            if (cont.items.size() == 2)
+            {
+                CHECK(cont.items.first().id == bravo->key);     // MOST RECENTLY READ FIRST
+                CHECK(cont.items.at(1).id == alpha->key);
+            }
+            for (const MediaItem& it : cont.items)
+            {
+                // Real leaves, exactly as a bucket's rows are — no second leaf kind for this shelf.
+                CHECK(!it.expandable);
+                CHECK(it.mime == QString::fromLatin1(browse::kLocalBookMime));
+                CHECK(QFileInfo::exists(it.url));
+                CHECK(it.progress > 0.0);                       // a partial book carries its own bar
+                CHECK(it.progress < 1.0);
+                // The excluded two are excluded BY NAME, not merely by the count above.
+                CHECK(it.id != charlie->key);
+                CHECK(it.id != delta->key);
+            }
+
+            // THE DOOR: offered on the root, leading here, and saying the number this level holds.
+            browse::BookEmptyNote noNote;
+            const MediaCatalog root = browse::bookRootCatalog(r, noNote, {}, progress);
+            CHECK(!root.items.isEmpty());
+            CHECK(root.items.first().type == QString::fromLatin1(browse::kBookContinueType));
+            CHECK(root.items.first().mime == QString::fromLatin1(browse::kBookContinuePrefix));
+            CHECK(root.items.first().id == root.items.first().mime);
+            CHECK(root.items.first().expandable);
+            CHECK(root.items.first().subtitle.contains(QString::number(cont.items.size())));
+
+            // A BADGE AND THE SHELF CANNOT DISAGREE, because they are one derivation: the finished book
+            // reads "Finished" on its row, the half-read one shows its per-cent, and the page-one one says
+            // nothing about progress at all.
+            const MediaCatalog shelf = browse::bookAuthorCatalog(r, r.authors.first().key, {}, progress);
+            CHECK(shelf.items.size() == 4);
+            for (const MediaItem& it : shelf.items)
+            {
+                if (it.id == delta->key)   { CHECK(it.subtitle.startsWith(QStringLiteral("Finished")));
+                                             CHECK(it.progress == 1.0); }
+                if (it.id == alpha->key)   { CHECK(it.subtitle.startsWith(QStringLiteral("50%")));
+                                             CHECK(it.progress == 0.5); }
+                if (it.id == charlie->key) { CHECK(it.progress < 0.0);
+                                             CHECK(!it.subtitle.contains(QStringLiteral("%"))); }
+            }
+        }
+
+        // NOTHING PART-WAY THROUGH => NO DOOR AND NO SHELF, the same compatibility rule the Series door
+        // follows. No supplier AT ALL is the same thing: a caller that never mentions progress sees exactly
+        // the browse increment 1 shipped, row for row.
+        {
+            browse::BookEmptyNote noNote;
+            auto nothing = [](const Book& b) { return BookLibrary::progressFor(b, BookLibrary::ReadState{}); };
+            const MediaCatalog root = browse::bookRootCatalog(r, noNote, {}, nothing);
+            CHECK(!root.items.isEmpty());
+            CHECK(root.items.first().type != QString::fromLatin1(browse::kBookContinueType));
+            CHECK(browse::bookContinueCatalog(r, nothing).items.isEmpty());
+            CHECK(!browse::bookContinueCatalog(r, nothing).title.isEmpty());
+
+            const MediaCatalog bare = browse::bookRootCatalog(r, noNote);
+            CHECK(!bare.items.isEmpty());
+            CHECK(bare.items.first().type != QString::fromLatin1(browse::kBookContinueType));
+            CHECK(browse::bookContinueCatalog(r, {}).items.isEmpty());
+            const MediaCatalog shelf = browse::bookAuthorCatalog(r, r.authors.first().key);
+            for (const MediaItem& it : shelf.items)
+            {
+                CHECK(it.progress < 0.0);
+                CHECK(!it.subtitle.contains(QStringLiteral("%")));
+            }
+        }
+    }
+
+    // ---- §16 ONLINE BLANK-FILLING: THE GATE AND THE MERGE (issue #134 increment 2) ---------------------
+    // Both halves are pure, which is the point. "Zero requests" is the target list being EMPTY over a whole
+    // real library, and "local metadata always wins" is a value the merge DROPPED — neither is a comment
+    // above a network call that no probe can see.
+    {
+        // Whether a cover.*/folder.* sits beside a file is a filesystem question, so the answer is injected
+        // for the reason the cover resolver is. `own` is what the app asks (the container's own cover);
+        // `all` is the library where nothing is missing a picture.
+        auto own = [](const Book& b) { return b.hasCover; };
+        auto all = [](const Book&)   { return true; };
+
+        // WITH THE SETTING OFF, NOTHING IS ASKED ABOUT. Over the entire scanned library, both ways round —
+        // the answer is not "few", it is none, and there is no list for a caller to iterate.
+        CHECK(BookLibrary::enrichmentTargets(idx, own, false).isEmpty());
+        CHECK(BookLibrary::enrichmentTargets(idx, all, false).isEmpty());
+
+        // WITH IT ON, EXACTLY THE BLANKS — asserted per book in both directions, so a mutant that widened
+        // the rule (every book a target) and one that narrowed it (only author-less books) both die here.
+        const QVector<Book> targets = BookLibrary::enrichmentTargets(idx, own, true);
+        CHECK(!targets.isEmpty());
+        for (const BookLibrary::Author& a : idx.authors)
+            for (const Book& b : a.books)
+            {
+                bool isTarget = false;
+                for (const Book& t : targets) if (t.key == b.key) { isTarget = true; break; }
+                CHECK(isTarget == (b.author.trimmed().isEmpty() || !b.hasCover));
+            }
+
+        // A BOOK THAT ALREADY HAS BOTH IS NEVER ASKED ABOUT, which is what makes this cost nothing in the
+        // steady state: with every cover accounted for, only the author-less books are left, and they are a
+        // SUBSET of the list above rather than a different question.
+        const QVector<Book> withCovers = BookLibrary::enrichmentTargets(idx, all, true);
+        for (const Book& b : withCovers)
+        {
+            CHECK(b.author.trimmed().isEmpty());
+            bool inTargets = false;
+            for (const Book& t : targets) if (t.key == b.key) { inTargets = true; break; }
+            CHECK(inTargets);
+        }
+        // ...and a library with nothing missing produces an empty list even with the setting on.
+        Index nothingMissing;
+        {
+            BookLibrary::Author a;
+            a.key = QStringLiteral("asimov"); a.name = QStringLiteral("Isaac Asimov");
+            Book b;
+            b.key = QStringLiteral("k"); b.path = QStringLiteral("/x.epub");
+            b.title = QStringLiteral("Foundation"); b.author = QStringLiteral("Isaac Asimov");
+            b.hasCover = true;
+            a.books.push_back(b);
+            nothingMissing.authors.push_back(a);
+        }
+        CHECK(BookLibrary::enrichmentTargets(nothingMissing, own, true).isEmpty());
+
+        // ---- THE MATCH GATE: is the answer even about this book? ---------------------------------------
+        // A book catalogue never says "I do not have that" — it answers every search with its best guess.
+        // This was found LIVE against Open Library: the fixture "Alpha Chronicle" came back with a real
+        // author of a real and entirely unrelated book, and without this gate that name would have been
+        // written under somebody's untagged scan.
+        CHECK(BookLibrary::titleCorroborates(QStringLiteral("Dune"), QStringLiteral("Dune")));
+        CHECK(BookLibrary::titleCorroborates(QStringLiteral("dune"), QStringLiteral("DUNE")));
+        CHECK(BookLibrary::titleCorroborates(QStringLiteral("Dune"),
+                                             QStringLiteral("Dune (Dune Chronicles, #1)")));
+        CHECK(BookLibrary::titleCorroborates(QStringLiteral("The Left Hand of Darkness"),
+                                             QStringLiteral("The Left Hand of Darkness!")));
+        // ...and the refusals, which are the half that matters.
+        CHECK(!BookLibrary::titleCorroborates(QStringLiteral("Dune"), QStringLiteral("Duneland Folk")));
+        CHECK(!BookLibrary::titleCorroborates(QStringLiteral("Alpha Chronicle"),
+                                              QStringLiteral("The Long Afternoon of Earth")));
+        CHECK(!BookLibrary::titleCorroborates(QStringLiteral("Dune"), QString()));
+        CHECK(!BookLibrary::titleCorroborates(QString(), QStringLiteral("Dune")));
+        // A NON-CORROBORATING ANSWER IS DROPPED WHOLE, not field by field: a cover from one book under the
+        // title of another is the most confusing form a half-accepted answer can take.
+        {
+            Book untagged;
+            untagged.key = QStringLiteral("u"); untagged.title = QStringLiteral("Alpha Chronicle");
+            BookLibrary::Fill wrong;
+            wrong.title       = QStringLiteral("The Long Afternoon of Earth");
+            wrong.author      = QStringLiteral("Brian Aldiss");
+            wrong.coverUrl    = QStringLiteral("https://example.invalid/wrong.jpg");
+            wrong.description = QStringLiteral("Not this book.");
+            const BookLibrary::Fill got = BookLibrary::acceptedFill(untagged, false, wrong);
+            CHECK(got.isEmpty());
+            CHECK(got.author.isEmpty());
+            CHECK(got.coverUrl.isEmpty());
+            CHECK(got.description.isEmpty());
+        }
+
+        // ---- THE MERGE: only a blank is ever filled ----------------------------------------------------
+        BookLibrary::Fill answer;
+        answer.title       = QStringLiteral("Foundation");
+        answer.author      = QStringLiteral("Somebody Else");
+        answer.coverUrl    = QStringLiteral("https://example.invalid/cover.jpg");
+        answer.description = QStringLiteral("A blurb.");
+
+        Book told;                                   // the file said everything
+        told.key = QStringLiteral("t"); told.title = QStringLiteral("Foundation");
+        told.author  = QStringLiteral("Isaac Asimov");
+        told.summary = QStringLiteral("The Empire is falling.");
+        const BookLibrary::Fill keptNothing = BookLibrary::acceptedFill(told, /*hasCover*/ true, answer);
+        CHECK(keptNothing.isEmpty());                // NOT ONE FIELD of the answer may be used
+        CHECK(keptNothing.author.isEmpty());
+        CHECK(keptNothing.coverUrl.isEmpty());
+        CHECK(keptNothing.description.isEmpty());
+
+        Book blank;                                  // the file said nothing but its own name
+        blank.key = QStringLiteral("b"); blank.title = QStringLiteral("Foundation");
+        const BookLibrary::Fill keptAll = BookLibrary::acceptedFill(blank, /*hasCover*/ false, answer);
+        CHECK(keptAll.author == answer.author);
+        CHECK(keptAll.coverUrl == answer.coverUrl);
+        CHECK(keptAll.description == answer.description);
+
+        // PER FIELD, not all-or-nothing: a book that names its author but carries no picture takes the
+        // picture and keeps its author. That is the case the whole feature exists for — a bare PDF.
+        Book halfway = told;
+        halfway.summary.clear();
+        const BookLibrary::Fill mixed = BookLibrary::acceptedFill(halfway, /*hasCover*/ false, answer);
+        CHECK(mixed.author.isEmpty());               // its own author stands
+        CHECK(mixed.coverUrl == answer.coverUrl);
+        CHECK(mixed.description == answer.description);
+
+        // A FAILED LOOKUP LEAVES THE BLANK. An empty answer is what a timeout, a refusal and a provider with
+        // nothing to say all look like from here, and all three produce nothing to store.
+        CHECK(BookLibrary::acceptedFill(blank, false, BookLibrary::Fill{}).isEmpty());
+        BookLibrary::Fill whitespace;
+        whitespace.author = QStringLiteral("   ");
+        CHECK(BookLibrary::acceptedFill(blank, false, whitespace).isEmpty());
     }
 
     QDir(base).removeRecursively();

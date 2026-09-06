@@ -36,6 +36,13 @@ namespace browse
     // over the book's key and folder, and a probe injects nothing and pins the rows without touching a disk.
     using BookCoverFn = std::function<QString(const BookLibrary::Book&)>;
 
+    // HOW FAR THROUGH A BOOK SOMEBODY IS (#134 increment 2), injected for exactly the reason the cover is:
+    // the answer needs ConsumptionStats and ItemMarks, this translation unit reads no store, and a probe
+    // hands it a lambda and pins the rows without touching either. The derivation itself is
+    // BookLibrary::progressFor and is not re-implemented here — a badge and the Continue-reading shelf are
+    // two readings of ONE answer, which is the only way they can be guaranteed not to disagree.
+    using BookProgressFn = std::function<BookLibrary::Progress(const BookLibrary::Book&)>;
+
     // What the Books category says when there is nothing in it. Its own type rather than a shared one, for
     // the reason AudiobookEmptyNote gives: importing another feature's header to share three fields would
     // drag that feature's library into every consumer of this one.
@@ -50,10 +57,12 @@ namespace browse
     inline const char* kBookAuthorType     = "_bkauthor";
     inline const char* kBookSeriesListType = "_bkserieslist";   // the door: root -> the series list
     inline const char* kBookSeriesType     = "_bkseries";
+    inline const char* kBookContinueType   = "_bkcontinue";     // the door: root -> Continue reading
 
     inline const char* kBookAuthorPrefix     = "bookauthor:";
     inline const char* kBookSeriesListPrefix = "bookserieslist:";
     inline const char* kBookSeriesPrefix     = "bookseries:";
+    inline const char* kBookContinuePrefix   = "bookcontinue:";
 
     // The LEAF types. No leading '_', which is what gives them a media tile rather than a synthetic row and
     // — on the themed layouts — sends their Enter through the per-leaf action chooser (themedEnterFor splits
@@ -84,20 +93,34 @@ namespace browse
     // chosen" from "still scanning" from "that folder has no books in it" — those need different sentences,
     // and each of them reads Settings or scan state, which is what this file has none of.
     MediaCatalog bookRootCatalog(const BookLibrary::Index& idx, const BookEmptyNote& note,
-                                 const BookCoverFn& cover = {});
+                                 const BookCoverFn& cover = {}, const BookProgressFn& progress = {});
 
     // ---- Level 2: one bucket's books ---------------------------------------------------------------------
     // Two entrances, one shape, because an author's books and a series' books are the same rows read from
     // two sides. An unknown key yields an empty, titled catalog: a stale route must not be able to crash a
     // navigation, and the surface re-reads the index on Back.
     MediaCatalog bookAuthorCatalog(const BookLibrary::Index& idx, const QString& authorKey,
-                                   const BookCoverFn& cover = {});
+                                   const BookCoverFn& cover = {}, const BookProgressFn& progress = {});
     MediaCatalog bookSeriesCatalog(const BookLibrary::Index& idx, const QString& seriesKey,
-                                   const BookCoverFn& cover = {});
+                                   const BookCoverFn& cover = {}, const BookProgressFn& progress = {});
 
     // ---- The dimension list ------------------------------------------------------------------------------
     // Series, one row each, subtitled with how many books. An index with none yields an empty, titled
     // catalog; the door that leads here is not offered in that case, so it is reachable only by a stale
     // route, and a stale route must be empty rather than a crash.
     MediaCatalog bookSeriesListCatalog(const BookLibrary::Index& idx, const BookCoverFn& cover = {});
+
+    // ---- Continue reading (#134 increment 2) -------------------------------------------------------------
+    // The books somebody is PART-WAY THROUGH, most recently read first — the same rows a bucket shows, in a
+    // different order, and with no new leaf kind or storage of its own.
+    //
+    // IT IS NOT A SECOND RecentStore, and the difference is the whole rule: Recents is "what you opened",
+    // this is "what you are part-way through", and a book opened once and abandoned on page one belongs to
+    // the first and not to the second. Membership is BookLibrary::continueReading over the SAME derivation
+    // the badges use, so a tile saying 40% and this shelf can never disagree about whether it is here.
+    //
+    // A shelf with nothing in it yields an empty, titled catalog and the door above is not offered — the
+    // compatibility rule the Series door already follows, and what `_bkempty` does one level up.
+    MediaCatalog bookContinueCatalog(const BookLibrary::Index& idx, const BookProgressFn& progress,
+                                     const BookCoverFn& cover = {});
 }

@@ -621,6 +621,15 @@ private:
     void populateBookSeriesList();
     void openBookSeriesLevel(const QString& seriesKey);
     void populateBookSeries(const QString& seriesKey);
+    // Continue reading (#134 increment 2): the books somebody is part-way through, most recent first. Not a
+    // second Recents — that is "what you opened"; this is "what you have not finished".
+    void openBookContinueLevel();
+    void populateBookContinue();
+    // A reader closed: re-derive a READING level's badges in place (and nothing else). Public because
+    // MainWindow's returnFromReader is what knows a reader just closed.
+public:
+    void refreshReadingProgress();
+private:
 
     void selectMusic();                                // enter the Music category (synthetic, no addon)
     void populateMusicArtists();                       // (re)build the artist list from the installed index

@@ -107,16 +107,58 @@
 //   the book. That was true of the reader as it stood; it stopped being true when the container walk moved
 //   into ebook/MobiHeader, which answers title/author/cover out of the headers and the EXTH block and
 //   inflates nothing. The refusal went with the cost that justified it — issue #144.)
-//   * Reading PROGRESS on a tile. ConsumptionStats has the data; putting it on a row is a browse decision
-//     with its own marks/completion vocabulary, and it is the follow-up this increment names.
-//   * Online enrichment (the AIO catalog / #73 pattern) for bare PDFs. Local metadata always wins, so this
-//     is blank-filling and strictly additive — a second increment, not a rule buried in this one.
+//   (Reading PROGRESS on a tile and online blank-filling both USED to be here, named as the follow-up. They
+//   are #134 increment 2 and they are below — progressFor and the enrichment pair — as pure functions over
+//   an already-built index, still reading no store and still opening no file.)
+//
+// ---- WHERE A PERSON IS IN A BOOK (increment 2) -------------------------------------------------------------
+//
+// progressFor is a PURE FUNCTION of one Book plus a ReadState the caller gathered, and the whole of the
+// progress vocabulary is decided there so a tile's badge and the Continue-reading shelf cannot disagree —
+// they are two readings of one answer. AudiobookLibrary::progressFor is the same shape for the same reason
+// (#139), down to `known == false` meaning SAY NOTHING rather than "zero".
+//
+// THREE RULES SETTLE IT, and each of them is a refusal:
+//
+//   * A MARK THE PERSON SET BY HAND IS NEVER OVERWRITTEN. The marks menu exists so somebody can say the
+//     automatic answer is wrong about their book, and an automatic mark that could clobber it would make
+//     that menu a lie. So NOTHING here ever writes ItemMarks: the automatic state is DERIVED at the moment
+//     it is displayed, and the only thing in that store is what a person put there. "Which way was this
+//     set" is then structural rather than remembered — anything in ItemMarks is by hand, by construction —
+//     and `fromUser` reports it. (A person who clears their mark back to None gets the automatic answer
+//     again, which is what "clear" means.)
+//   * HIGH-WATER, so paging back a chapter does not un-finish a book. The furthest page ever reached is what
+//     ConsumptionStats::addPagesRead already stores, per title, for exactly this reason.
+//   * pageCount == 0 SHOWS NO PERCENTAGE RATHER THAN A WRONG ONE. A container that did not say how long it
+//     is can still be known to be in progress — that is the page count of the READING, not of the book — but
+//     it cannot be placed on a bar without inventing the denominator, and 0/0 rendered as "100%" is the
+//     specific wrongness this refuses.
+//
+// ---- ONLINE BLANK-FILLING (increment 2), AND WHY IT IS TWO PURE FUNCTIONS ----------------------------------
+//
+// A book with NO author or NO cover may — only with the setting on, default OFF — be asked about online, the
+// #73 way (resolve -> getMeta -> MetaCache). The two decisions that make that safe are pure and live here:
+// `enrichmentTargets` says WHICH books may be asked at all, and `acceptedFill` says WHAT of an answer may be
+// used. Everything else (which addon, the queue, the timeout) is app wiring above this file.
+//
+// SPLITTING IT THIS WAY IS THE POINT. "Nothing is requested with the setting off" and "nothing is requested
+// for a book that already has the field" become one assertion over a whole fixture library — the target list
+// is EMPTY — rather than a comment above a network call that no probe can see. And "local metadata always
+// wins" becomes an assertion that acceptedFill DROPPED the fields the book already had, rather than a
+// promise about merge order somewhere downstream.
+//
+// AND THE ANSWER NEVER RE-GROUPS THE LIBRARY. A filled author is display, not identity: the Authors buckets
+// come from the scan and from nothing else, so an enrichment cannot move a book, cannot feed itself on the
+// next sweep, and cannot survive as a fact about a file that the file never said. AudiobookMeta.h reaches
+// the same rule from the other direction (#198), and the persisted index holds container fields only.
 #pragma once
+#include "ItemMarks.h"            // Completion — the states a reading state is already spelled in
 #include "../comic/ComicInfo.h"   // #152: the Rating / Direction vocabularies an entry carries
 #include <QHash>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 namespace BookLibrary
 {
@@ -284,6 +326,105 @@ namespace BookLibrary
     // shelf on the first launch of this build, and why "unrated is never mistaken for Everyone" is the part
     // that actually matters.
     Index filterForProfile(const Index& idx, bool restricted);
+
+    // ------------------------------------------------------------------------------------------------
+    // WHERE A PERSON IS IN A BOOK (issue #134 increment 2). Pure; see the header for the three rules.
+    // ------------------------------------------------------------------------------------------------
+
+    // WHAT THE APP KNOWS about one book's reading, gathered by the caller. This file reads no store, for the
+    // reason every other pure function here does not: a probe hands it a struct and asserts on the answer.
+    struct ReadState
+    {
+        // THE FURTHEST PAGE EVER REACHED, 1-based; 0 == never opened. It is ConsumptionStats::Totals::
+        // pagesRead, which IS a high-water page index (its header says so at length) — not a count of
+        // sessions and not a position that can go backwards.
+        int    furthestPage = 0;
+        // When that page was last moved, epoch seconds; 0 == never. ORDERING ONLY — it decides where a book
+        // sits on the Continue-reading shelf and nothing about which state it is in.
+        qint64 lastRead = 0;
+        // WHAT THE PERSON SAID, and only that: ItemMarks holds nothing this feature wrote. None == they
+        // never said, so the automatic answer stands.
+        ItemMarks::Completion userMark = ItemMarks::Completion::None;
+    };
+
+    struct Progress
+    {
+        ItemMarks::Completion completion = ItemMarks::Completion::None;
+        bool   fromUser = false;   // the state above is the one somebody set by hand
+        bool   started  = false;   // read past the first page (or said to be in progress)
+        bool   finished = false;
+        // FALSE MEANS SHOW NO PERCENTAGE — not "0%". A container that did not say how long it is has no
+        // denominator, and AudiobookLibrary::Progress::known refuses the same way for the same reason.
+        bool   known    = false;
+        double fraction = 0.0;     // 0..1, meaningful only when `known`; exactly 1.0 when finished
+        int    page     = 0;       // the furthest page reached, echoed back so a caller need not re-clamp
+        qint64 lastRead = 0;
+    };
+
+    Progress progressFor(const Book& b, const ReadState& st);
+
+    // IS THIS BOOK ON "CONTINUE READING"? Exactly the books whose state is InProgress — which is what makes
+    // the shelf and the badge one answer rather than two. It excludes, for free and without a second rule:
+    // a finished book, a book never opened, a book abandoned at page one (no state at all), and the two
+    // states somebody chose ON PURPOSE that are not "I am part-way through this" — Abandoned and Planned.
+    bool continueReading(const Progress& p);
+
+    // The Continue-reading shelf, in the order it shows: most recently read FIRST, then by natural title so
+    // a hand-marked book nobody has opened has a stable place instead of an arbitrary one. Over `authors`
+    // only — the series vector holds COPIES of books already filed there, and sweeping both would list a
+    // book twice.
+    //
+    // It takes the PROGRESS supplier rather than the state one, so the shelf is built out of the very
+    // answers the tiles are showing. A second lookup here could be correct on Tuesday and disagree with a
+    // badge on Wednesday; there is nothing to keep in step because there is only one answer.
+    QVector<Book> continueReadingBooks(const Index& idx, const std::function<Progress(const Book&)>& progressOf);
+
+    // ------------------------------------------------------------------------------------------------
+    // ONLINE BLANK-FILLING (issue #134 increment 2). Pure; see the header.
+    // ------------------------------------------------------------------------------------------------
+
+    // "Does this book have a picture already", asked of the caller because the answer is a filesystem
+    // question (a cover inside the container, or a cover.* beside it) and this file touches no disk.
+    using HasCoverFn = std::function<bool(const Book&)>;
+
+    // WHAT AN ANSWER MAY CARRY. Every field but `title` is optional; an empty one is "the provider said
+    // nothing".
+    //
+    // `title` IS WHAT THE PROVIDER THINKS IT ANSWERED ABOUT, and it is not a field to be filled — it is the
+    // EVIDENCE. A book catalogue's search never says "I do not have that": ask Open Library about "Alpha
+    // Chronicle" and it returns its best guess with the same confidence it returns Dune, so an answer taken
+    // on trust puts a stranger's name under somebody's untagged scan. This repository has been bitten by
+    // exactly that (a romhack search answering "Advance Wars" with "Guild Wars"), and the lesson written
+    // down there is that the safety is a MATCH GATE. acceptedFill is where it is applied.
+    struct Fill
+    {
+        QString title;
+        QString author;
+        QString coverUrl;
+        QString description;
+        bool isEmpty() const { return author.isEmpty() && coverUrl.isEmpty() && description.isEmpty(); }
+    };
+
+    // "Is this answer about THIS book": the two titles, normalised (case, punctuation and spacing dropped),
+    // equal or one a whole-word prefix of the other — which is what lets "Dune" match "Dune (Dune
+    // Chronicles, #1)" while refusing "Dune" for "Duneland Folk". An answer that names NO title is refused
+    // outright: a reply that will not say what it is about is not evidence about anything.
+    bool titleCorroborates(const QString& bookTitle, const QString& answerTitle);
+
+    // WHICH BOOKS MAY BE ASKED ABOUT AT ALL. Empty when `enabled` is false — that is the "zero requests with
+    // the setting off" guarantee, as a value a probe can assert over a whole library rather than as a
+    // comment above a network call. A book is a target only when it is missing an author or missing a
+    // cover; one that has both is never asked, however many times the sweep runs.
+    QVector<Book> enrichmentTargets(const Index& idx, const HasCoverFn& hasCover, bool enabled);
+
+    // WHAT OF `f` MAY ACTUALLY BE USED for `b`. Two gates, in this order:
+    //   1. THE MATCH GATE — an answer whose title does not corroborate the book's is dropped ENTIRELY, not
+    //      field by field. Half of a wrong answer is still a wrong answer.
+    //   2. Every field the book already has is DROPPED. This is "local metadata always wins" as a function
+    //      rather than as a merge order somewhere downstream.
+    // An all-empty result means the answer added nothing and nothing should be stored; a failed lookup is
+    // simply an empty `f`, which returns an empty Fill and leaves the blank exactly as it was.
+    Fill acceptedFill(const Book& b, bool hasCover, const Fill& f);
 
     // The grouping keys, exposed because the probe asserts on them and because a surface needs to be able to
     // ask "which bucket does this file belong to" without re-deriving the rule.

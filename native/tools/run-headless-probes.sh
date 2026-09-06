@@ -2378,6 +2378,7 @@ else
     'audiobooks.addserver|abSrvAdd = new QPushButton(tr("Add an audiobook server'
     'books.change|bkBrowse = new QPushButton(tr("Change…"))'
     'books.rescan|bkRescan = new QPushButton(tr("Rescan"))'
+    'books.enrich|new QCheckBox(tr("Fill in missing book covers and authors online"))'
     'pb.autonext|new QCheckBox(tr("Auto-play the next episode"))'
     'pb.gapless|new QCheckBox(tr("Gapless playback"))'
     'pb.replaygain|replayGain = new QComboBox()'

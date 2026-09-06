@@ -937,6 +937,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         mi.expandable = true;
         followFetches_.insert(addons_->requestDetail(src, mi, 1), done);
     });
+    // ONLINE BLANK-FILLING FOR BOOKS (#134 increment 2). One persistent listener beside the follow one, for
+    // the same reason: metaReady is a broadcast and each interested party recognises its OWN request ids.
+    // An id this window did not issue falls straight out of onBookMetaReady, so the game and audiobook
+    // aggregators are untouched by its existence.
+    connect(addons_.get(), &AddonManager::metaReady, this,
+            [this](int id, const MediaDetail& d) { onBookMetaReady(id, d); });
     connect(addons_.get(), &AddonManager::catalogReady, this, [this](int req, const MediaCatalog& cat) {
         const auto it = followFetches_.find(req);
         if (it == followFetches_.end()) return;             // somebody else's request
@@ -2135,6 +2141,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (comicHost_)  comicHost_->onLeaving();
 #endif
         book_->persist(); pdf_->persist(); comic_->persist();
+        // ...and the stats accrued while reading are now what a badge is made of (#134 increment 2). AFTER
+        // the persists above, so the level is re-derived from what was just written; and it touches ONLY a
+        // Books level, which is what leaves the "no refresh, keep your place" rule below exactly as it was
+        // for every other list.
+        if (home_) home_->refreshReadingProgress();
         // Return to the surface the reader was opened FROM, not a hardcoded home (B2 Task 6, item 1). The reader
         // is a separate stack page, so the themed home/browse it was launched off still holds its exact view
         // (detail if opened from detail, browse otherwise) and cursor — just switch back to it. A classic-mode
@@ -3231,6 +3242,9 @@ void MainWindow::rescanBookLibrary()
         {
             BookLibrary::installIndex(w->result());
             if (home_) home_->onBookLibraryChanged();          // a level on screen picks it up at once
+            // ...and only then look anything up (#134 increment 2). AFTER the index is installed, because
+            // the sweep reads it; and it is a no-op — not one request — unless the user asked for it.
+            sweepBookMetadata();
         }
         w->deleteLater();
     });
@@ -22016,6 +22030,11 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("books.path"), Settings::readingFolder(), QString());
         action(QStringLiteral("books.change"), tr("Change Books folder…"));
         action(QStringLiteral("books.rescan"), tr("Rescan Books"));
+        // Online blank-filling (#134 increment 2), DEFAULT OFF. Classic twin below (GS_TWINS). It is worded
+        // as what it does rather than as what it is — "missing" is the whole scope, and a book whose file
+        // already carries a cover and an author is never asked about however long this stays on.
+        toggle(QStringLiteral("books.enrich"), tr("Fill in missing book covers and authors online"),
+               Settings::booksEnrichOnline());
         info(QStringLiteral("books.hint"),
              tr("Point this at a folder of your own books and comics and they browse by author and series. "
                 "EPUB books bring their own title, author and cover; comics are grouped by what their files "
@@ -22762,6 +22781,13 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.keepdownloads")) Settings::setKeepDownloadsInRoms(on);
                 else if (id == QStringLiteral("ps3.autoupdate")) Settings::setPs3AutoUpdate(on);
                 else if (id == QStringLiteral("content.autoinstall")) Settings::setInstallGameContent(on);
+                else if (id == QStringLiteral("books.enrich")) {
+                    Settings::setBooksEnrichOnline(on);
+                    // Switching it ON is the moment to look, because the library is already scanned and the
+                    // sweep after a scan has long since run. Switching it OFF cancels nothing in flight and
+                    // needs to: the sweep's own gate is re-read per book, so what is queued stops asking.
+                    if (on) sweepBookMetadata();
+                }
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
                 else if (id == QStringLiteral("pb.gapless")) Settings::setGaplessAudio(on);
                 // ReplayGain (issue #141). Both rows re-apply live so a mode/preamp change is audible on the
@@ -24130,6 +24156,16 @@ void MainWindow::openGeneralSettings()
             rescanBookLibrary();
             statusBar()->showMessage(tr("Scanning your books…"), 4000);
         });
+        // Online blank-filling (#134 increment 2) - same Settings key/setter and the same sweep call as the
+        // themed twin above (GS_TWINS), one write path, no drift.
+        auto* bkEnrich = new QCheckBox(tr("Fill in missing book covers and authors online"));
+        bkEnrich->setStyleSheet(QStringLiteral("font-size:15px;"));
+        bkEnrich->setChecked(Settings::booksEnrichOnline());
+        connect(bkEnrich, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setBooksEnrichOnline(c);
+            if (c) sweepBookMetadata();
+        });
+        v->addWidget(bkEnrich);
         v->addSpacing(10);
 
         auto* pbHeading = new QLabel(tr("Playback"));

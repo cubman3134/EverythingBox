@@ -603,6 +603,152 @@ bool saveIndexFile(const QString& filePath, const QVector<FileEntry>& entries)
     return f.write(QJsonDocument(root).toJson(QJsonDocument::Compact)) >= 0;
 }
 
+// ---- WHERE A PERSON IS IN A BOOK (#134 increment 2) ---------------------------------------------------
+//
+// Pure, and deliberately short: the argument for every line of it is in the header, and the value of having
+// it in ONE function is that a tile's badge, the Continue-reading shelf and anything added later are the
+// same answer read three ways rather than three re-derivations that agree until one of them is edited.
+
+Progress progressFor(const Book& b, const ReadState& st)
+{
+    Progress p;
+    p.page     = qMax(0, st.furthestPage);
+    p.lastRead = st.lastRead;
+
+    // THE AUTOMATIC ANSWER. Reaching the last page finishes a book; getting PAST the first page starts one.
+    // Page one alone is not a start — it is what opening a file looks like, and calling it progress is how a
+    // "continue reading" shelf fills up with books nobody is reading (RecentStore is where an open belongs).
+    ItemMarks::Completion autoC = ItemMarks::Completion::None;
+    if (b.pageCount > 0 && p.page >= b.pageCount) autoC = ItemMarks::Completion::Finished;
+    else if (p.page >= 2)                         autoC = ItemMarks::Completion::InProgress;
+
+    // ...AND THE PERSON BEATS IT, in both directions and without exception. See the header: nothing in this
+    // feature ever writes ItemMarks, so a non-None mark here can only be one somebody set.
+    const bool said = st.userMark != ItemMarks::Completion::None;
+    p.completion = said ? st.userMark : autoC;
+    p.fromUser   = said;
+
+    p.finished = p.completion == ItemMarks::Completion::Finished;
+    p.started  = p.finished || p.completion == ItemMarks::Completion::InProgress || p.page >= 2;
+
+    // THE FRACTION, and the one case that must not produce one. A finished book is at 1.0 whichever way it
+    // got there — a bar that stops at 94% under the word "Finished" is a disagreement between two things
+    // that are supposed to be one answer.
+    if (p.finished)
+    {
+        p.known = true;
+        p.fraction = 1.0;
+    }
+    else if (b.pageCount > 0 && p.page > 0)
+    {
+        p.known = true;
+        p.fraction = qBound(0.0, double(p.page) / double(b.pageCount), 1.0);
+    }
+    else
+    {
+        p.known = false;      // no denominator, or nothing read: a state may still be shown, a number may not
+        p.fraction = 0.0;
+    }
+    return p;
+}
+
+bool continueReading(const Progress& p)
+{
+    return p.completion == ItemMarks::Completion::InProgress;
+}
+
+QVector<Book> continueReadingBooks(const Index& idx, const std::function<Progress(const Book&)>& progressOf)
+{
+    QVector<Book> out;
+    if (!progressOf) return out;
+    QVector<QPair<qint64, Book>> keyed;
+    for (const Author& a : idx.authors)          // authors only: series holds copies of these same books
+        for (const Book& b : a.books)
+        {
+            if (b.key.isEmpty()) continue;
+            const Progress p = progressOf(b);
+            if (!continueReading(p)) continue;
+            keyed.push_back({ p.lastRead, b });
+        }
+    // Most recently read first. A book somebody marked "In progress" by hand and never opened carries no
+    // time at all, so it lands at the end in natural title order rather than at an arbitrary place.
+    std::stable_sort(keyed.begin(), keyed.end(),
+                     [](const QPair<qint64, Book>& x, const QPair<qint64, Book>& y) {
+                         if (x.first != y.first) return x.first > y.first;
+                         return naturalCollator().compare(x.second.title, y.second.title) < 0;
+                     });
+    out.reserve(keyed.size());
+    for (const QPair<qint64, Book>& k : keyed) out.push_back(k.second);
+    return out;
+}
+
+// ---- ONLINE BLANK-FILLING (#134 increment 2) ----------------------------------------------------------
+
+QVector<Book> enrichmentTargets(const Index& idx, const HasCoverFn& hasCover, bool enabled)
+{
+    QVector<Book> out;
+    // THE WHOLE OPT-IN, in one line and before anything is walked. With the setting off there is no list, so
+    // there is nothing for a caller to ask about — which is the shape that makes "zero requests" assertable.
+    if (!enabled) return out;
+    for (const Author& a : idx.authors)          // authors only, for the reason above: no book asked twice
+        for (const Book& b : a.books)
+        {
+            if (b.key.isEmpty()) continue;
+            const bool haveCover  = hasCover ? hasCover(b) : b.hasCover;
+            const bool haveAuthor = !b.author.trimmed().isEmpty();
+            if (haveCover && haveAuthor) continue;   // it already says everything this could fill
+            out.push_back(b);
+        }
+    return out;
+}
+
+namespace
+{
+    // Case, punctuation and spacing dropped; everything else kept. Deliberately NOT a fuzzy distance: a
+    // threshold that admits "close enough" is a threshold somebody has to defend, and the wrong answers a
+    // book search returns are not near-misses — they are different books.
+    QString matchFold(const QString& s)
+    {
+        QString out;
+        out.reserve(s.size());
+        for (const QChar& c : s)
+        {
+            if (c.isLetterOrNumber()) out.append(c.toCaseFolded());
+            else if (!out.isEmpty() && !out.endsWith(QLatin1Char(' '))) out.append(QLatin1Char(' '));
+        }
+        return out.trimmed();
+    }
+
+    // One is the other, or one starts the other AT A WORD BOUNDARY. The boundary is the whole point: it
+    // matches "Dune" to "Dune Chronicles 1" and refuses it for "Duneland Folk".
+    bool prefixAtWordBoundary(const QString& shortOne, const QString& longOne)
+    {
+        if (!longOne.startsWith(shortOne)) return false;
+        return longOne.size() == shortOne.size() || longOne.at(shortOne.size()) == QLatin1Char(' ');
+    }
+}
+
+bool titleCorroborates(const QString& bookTitle, const QString& answerTitle)
+{
+    const QString a = matchFold(bookTitle), b = matchFold(answerTitle);
+    if (a.isEmpty() || b.isEmpty()) return false;   // an answer that names nothing is evidence of nothing
+    if (a == b) return true;
+    return a.size() < b.size() ? prefixAtWordBoundary(a, b) : prefixAtWordBoundary(b, a);
+}
+
+Fill acceptedFill(const Book& b, bool hasCover, const Fill& f)
+{
+    Fill out;
+    // GATE 1: is this answer even about this book? All or nothing — half of a wrong answer is a wrong
+    // answer, and a cover from one book over the title of another is the most confusing form it can take.
+    if (!titleCorroborates(b.title, f.title)) return out;
+    // GATE 2: only a blank is ever filled.
+    if (b.author.trimmed().isEmpty())  out.author      = f.author.trimmed();
+    if (!hasCover)                     out.coverUrl    = f.coverUrl.trimmed();
+    if (b.summary.trimmed().isEmpty()) out.description = f.description.trimmed();
+    return out;
+}
+
 // Cached process-wide index (main-thread only): the async scan installs it, browse reads it.
 namespace { Index g_index; bool g_indexReady = false; }
 
