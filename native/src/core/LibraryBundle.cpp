@@ -647,6 +647,11 @@ LandResult landItem(const QString& root, const Payload& p, QString& error, const
         return LandResult::WriteFailed;
     }
     QDir(retired).removeRecursively();
+    // Tidy the two bookkeeping folders while they are empty, so a finished transfer leaves a cache directory
+    // holding items and nothing else. Both refuse to remove a non-empty directory, so a landing that runs
+    // beside another one in flight cannot take its staging away.
+    QDir().rmdir(retiredRoot(root));
+    QDir().rmdir(incomingRoot(root));
     return LandResult::Landed;
 }
 
@@ -663,7 +668,6 @@ int sweepPartials(const QString& root)
             recoverItem(root, id);
             ++touched;
         }
-        retired.rmdir(QStringLiteral("."));
     }
     QDir incoming(incomingRoot(root));
     if (incoming.exists())
@@ -674,8 +678,12 @@ int sweepPartials(const QString& root)
             QDir(incoming.filePath(id)).removeRecursively();
             ++touched;
         }
-        incoming.rmdir(QStringLiteral("."));
     }
+    // Drop the two bookkeeping folders themselves once they are empty. rmdir refuses a non-empty directory,
+    // so this can only ever remove one that holds nothing — and leaving them behind would put two folders a
+    // user did not create in a cache directory for the rest of the install's life.
+    QDir().rmdir(retiredRoot(root));
+    QDir().rmdir(incomingRoot(root));
     return touched;
 }
 
@@ -720,21 +728,43 @@ bool parseReceipt(const QByteArray& json, Receipt& out)
 
 // ------------------------------------------------------------------ 8. progress ----------------------------
 
+QString describeSize(qint64 bytes)
+{
+    // Below a megabyte, say kilobytes. A run that moved a few hundred kilobytes of PNG reporting "0.0 MB"
+    // reads as a run that moved nothing, which is the one thing this feature's other message means.
+    if (bytes < 1024LL * 1024LL)
+        return QString::number(double(bytes) / 1024.0, 'f', 1) + QStringLiteral(" KB");
+    return QString::number(double(bytes) / (1024.0 * 1024.0), 'f', 1) + QStringLiteral(" MB");
+}
+
 QString describeProgress(const Progress& p, const QString& deviceName)
 {
     const QString who = deviceName.isEmpty() ? QStringLiteral("that device") : deviceName;
     if (p.itemsTotal == 0)
     {
-        // The second run, and the sentence that says the feature worked: nothing left this machine.
+        // The second run, and the sentence that says the feature worked: nothing left this machine. But an
+        // item the TARGET has a newer copy of was a deliberate decision, not an absence of one, so it is
+        // named — "up to date" on its own would quietly claim the two ends agree when they do not.
+        if (p.keptNewer > 0)
+            return who + QStringLiteral(" is already up to date — nothing to send. %1 %2 newer there and %3 "
+                                        "left alone.")
+                             .arg(p.keptNewer)
+                             .arg(p.keptNewer == 1 ? QStringLiteral("is") : QStringLiteral("are"))
+                             .arg(p.keptNewer == 1 ? QStringLiteral("was") : QStringLiteral("were"));
         return who + QStringLiteral(" is already up to date — nothing to send.");
     }
-    const double mb = double(p.bytesSent) / (1024.0 * 1024.0);
-    QString s = QStringLiteral("Sent %1 of %2 items (%3 MB) to %4.")
+    QString s = QStringLiteral("Sent %1 of %2 items (%3) to %4.")
                     .arg(p.itemsSent).arg(p.itemsTotal)
-                    .arg(QString::number(mb, 'f', 1)).arg(who);
-    if (p.unchanged > 0) s += QStringLiteral(" %1 were already there.").arg(p.unchanged);
-    if (p.keptNewer > 0) s += QStringLiteral(" %1 were newer there and were left alone.").arg(p.keptNewer);
-    if (p.failed > 0)    s += QStringLiteral(" %1 could not be sent.").arg(p.failed);
+                    .arg(describeSize(p.bytesSent)).arg(who);
+    if (p.unchanged > 0)
+        s += (p.unchanged == 1 ? QStringLiteral(" 1 was already there.")
+                               : QStringLiteral(" %1 were already there.").arg(p.unchanged));
+    if (p.keptNewer > 0)
+        s += (p.keptNewer == 1 ? QStringLiteral(" 1 is newer there and was left alone.")
+                               : QStringLiteral(" %1 are newer there and were left alone.").arg(p.keptNewer));
+    if (p.failed > 0)
+        s += (p.failed == 1 ? QStringLiteral(" 1 could not be sent.")
+                            : QStringLiteral(" %1 could not be sent.").arg(p.failed));
     return s;
 }
 

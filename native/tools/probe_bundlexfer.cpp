@@ -408,6 +408,41 @@ int main(int, char**)
         CHECK(LibraryBundle::describeProgress(prog, QStringLiteral("Living Room"))
                   .contains(QStringLiteral("Living Room")));
 
+        // A run that sent NOTHING because the target's copies were newer is not the same event as a run that
+        // sent nothing because the two ends agree, and it must not read as one. (A live two-instance drive is
+        // what found this: "already up to date" alone quietly claimed agreement where a decision had been
+        // made.)
+        LibraryBundle::Progress keptOnly;
+        keptOnly.keptNewer = 1;
+        const QString keptLine = LibraryBundle::describeProgress(keptOnly, QStringLiteral("Living Room"));
+        CHECK(keptLine.contains(QStringLiteral("newer there")));
+        CHECK(keptLine.contains(QStringLiteral("left alone")));
+
+        // And a few hundred kilobytes of PNG does not get reported as "0.0 MB", which reads as nothing moved.
+        CHECK(LibraryBundle::describeSize(300 * 1024).endsWith(QStringLiteral("KB")));
+        CHECK(LibraryBundle::describeSize(5 * 1024 * 1024).endsWith(QStringLiteral("MB")));
+        LibraryBundle::Progress small;
+        small.itemsTotal = 1; small.itemsSent = 1; small.bytesSent = 4096;
+        CHECK(!LibraryBundle::describeProgress(small, QStringLiteral("Living Room"))
+                   .contains(QStringLiteral("0.0 MB")));
+
+        // Counts of one read as counts of one. "1 were newer there" is what the live drive printed before
+        // this, and a progress line that cannot count to one is not a progress line anyone trusts.
+        small.keptNewer = 1; small.unchanged = 1; small.failed = 1;
+        const QString ones = LibraryBundle::describeProgress(small, QStringLiteral("Living Room"));
+        CHECK(!ones.contains(QStringLiteral("1 were")));
+        CHECK(ones.contains(QStringLiteral("1 was already there")));
+        CHECK(ones.contains(QStringLiteral("1 is newer there and was left alone")));
+        LibraryBundle::Progress many;
+        many.itemsTotal = 9; many.itemsSent = 9; many.keptNewer = 2; many.unchanged = 3;
+        CHECK(LibraryBundle::describeProgress(many, QStringLiteral("Living Room"))
+                  .contains(QStringLiteral("2 are newer there")));
+
+        // A finished transfer leaves the cache holding items and nothing else: no staging folder, no
+        // set-aside folder, no trace of the machinery.
+        CHECK(!QFileInfo::exists(dstRoot + QStringLiteral("/.eb-incoming")));
+        CHECK(!QFileInfo::exists(dstRoot + QStringLiteral("/.eb-retired")));
+
         // ---- change ONE item on the source: exactly one item moves. ----
         fx::writeFile(srcRoot + QLatin1Char('/') + idB + QStringLiteral("/thumb.png"),
                       QByteArray("PNGDATA-BB-REDRAWN"));

@@ -212,6 +212,12 @@ namespace LibraryBundle
         qint64 bytesSent    = 0;
     };
 
-    // Both ends are honest about what happened: item counts AND bytes, including the run that moved nothing.
+    // Bytes as a sentence. Kilobytes below a megabyte: a run that moved 300 KB of PNG reporting "0.0 MB"
+    // reads as a run that moved nothing, and "nothing" is exactly what the other message here means.
+    QString describeSize(qint64 bytes);
+
+    // Both ends are honest about what happened: item counts AND bytes, including the run that moved nothing —
+    // and INCLUDING the items the target kept because its own were newer, which is a decision the source made
+    // and must not report as an absence of one.
     QString describeProgress(const Progress& p, const QString& deviceName);
 }
