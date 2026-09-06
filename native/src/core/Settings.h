@@ -449,6 +449,15 @@ namespace Settings
     QString readingFolder();       // resolved path (never empty)
     void setReadingFolder(const QString& path);
 
+    // FILL IN A BOOK'S BLANKS FROM ONLINE METADATA (issue #134 increment 2). Key "reading/enrichOnline",
+    // DEFAULT OFF — a reading library is somebody's own files and this is the one part of the feature that
+    // leaves the machine, so it is asked for rather than assumed. On, a book with no author or no cover may
+    // be looked up; a book that has both is never asked about, and with this off nothing is asked at all.
+    // What it can do with an answer is bounded in code, not by intent: BookLibrary::acceptedFill drops every
+    // field the file already carries, so local metadata always wins and a lookup can only fill a blank.
+    bool booksEnrichOnline();      // key "reading/enrichOnline", default false
+    void setBooksEnrichOnline(bool on);
+
     // PER-SERIES COMIC READING DIRECTION (issue #152). A comic archive's ComicInfo.xml states its direction
     // in <Manga> and that is the DEFAULT; this is the user's answer for a series, and it beats the document
     // outright — the same "user edits are above all" rule the whole reading library follows.

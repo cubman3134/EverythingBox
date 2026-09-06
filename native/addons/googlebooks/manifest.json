@@ -7,6 +7,6 @@
   "author": "EverythingBox",
   "description": "Audiobook metadata provider (Google Books). Backfills the description, cover and publication year Open Library did not supply. Official, public and keyless. Your own tags always win.",
   "permissions": ["network"],
-  "metaFor": ["audiobook"],
+  "metaFor": ["audiobook", "book"],
   "catalogs": []
 }

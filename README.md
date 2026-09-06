@@ -84,6 +84,35 @@ All of them share one reader: the same pagination, font sizing, contents panel, 
 per-book resume and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
 
+### Your own books and comics
+
+Point **Settings ▸ Books** at a folder and everything readable under it browses by **author** and, where the
+files say so, by **series**. A book with no metadata at all still appears, under its own file name — a
+library that quietly drops its untagged half is how a collection goes missing.
+
+**Where you are shows on the tile.** A book you have read past the first page of is marked *in progress* and
+carries a bar; one you have read to the end reads **Finished**. Paging backwards never un-finishes a book —
+what counts is the furthest page you have reached. A file whose container never says how long it is (a plain
+`.txt`, some PDFs) says *In progress* and shows **no percentage**: there is no honest denominator, and a
+made-up one is worse than none.
+
+**What you set by hand always wins.** The status you pick yourself — *In progress*, *Finished*, *Abandoned*,
+*Planned* — is never overwritten by reading, in either direction: mark a book Finished half way through and
+it stays Finished; mark one In progress after reading the last page and it stays In progress. Clearing your
+status hands the book back to the automatic answer.
+
+**Continue reading** leads the Books shelf whenever anything is part-way through: the books you have started
+and not finished, most recently read first. It is not a second Recents — a book you opened once and left on
+page one belongs there, not here — and it disappears entirely when there is nothing to continue.
+
+**Filling in blanks online** is off by default and is the one part of this that leaves the machine. Turned on
+(**Settings ▸ Books ▸ Fill in missing book covers and authors online**), a book with **no** cover or **no**
+author is looked up by **title** through the book-metadata add-ons — the app ships Open Library and Google
+Books, both public and keyless. Nothing is sent for a book whose file already carries both, and nothing at
+all is sent while the setting is off. What comes back can only fill a blank: your own file's metadata is
+never overwritten, an answer whose title does not match the book is thrown away whole rather than half-used,
+and a failed lookup leaves the blank exactly as it was.
+
 ### Selecting text, and highlights
 
 Selection in the reader is a **mode you enter on purpose**, because the reader is used on a television with a

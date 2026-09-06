@@ -840,6 +840,18 @@ void Settings::setReadingFolder(const QString& path)
     store().setValue(QStringLiteral("reading/folder"), path); store().sync();
 }
 
+// Online blank-filling for books (#134 increment 2). Default FALSE, and the default is the feature: a
+// reading library is a folder of somebody's own files, and asking the internet about them is a thing they
+// opt into rather than something that starts happening on an upgrade.
+bool Settings::booksEnrichOnline()
+{
+    return store().value(QStringLiteral("reading/enrichOnline"), false).toBool();
+}
+void Settings::setBooksEnrichOnline(bool on)
+{
+    store().setValue(QStringLiteral("reading/enrichOnline"), on); store().sync();
+}
+
 // Per-series comic reading direction (issue #152). ONE settings value holding a JSON object, rather than one
 // key per series: a series key is arbitrary user text — it can hold a '/', which QSettings reads as a group
 // separator, and a ']' or a '=', which the INI backend escapes — so keys minted from it would be a family of
