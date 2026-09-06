@@ -1081,6 +1081,20 @@ void Settings::setRetroParkDrivenBackend(const QString& id)
     store().sync();
 }
 
+// MS-DOS MIDI device (issue #191) — a device id from the msdos recipe's `midi` block, or "" for the core's
+// own default. Stored lowercased and trimmed so the launcher's lookup (which lowercases too) can never miss a
+// match on case alone; every other spelling is carried through untouched and simply finds no device.
+QString Settings::dosMidiDevice()
+{
+    return store().value(QStringLiteral("dos/midi_device")).toString().trimmed().toLower();
+}
+
+void Settings::setDosMidiDevice(const QString& id)
+{
+    store().setValue(QStringLiteral("dos/midi_device"), id.trimmed().toLower());
+    store().sync();
+}
+
 // Keyed "opt/<core>/<key>". The option key is the core's own (e.g. "mgba_gb_model"); it can't collide
 // across cores because <core> namespaces it.
 QString Settings::optionValue(const QString& core, const QString& key)

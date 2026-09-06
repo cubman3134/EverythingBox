@@ -1384,6 +1384,29 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         for (auto it = delta.constBegin(); it != delta.constEnd(); ++it)
             core_.setOptionValue(it.key().toStdString(), it.value().toStdString());
     }
+    // The dosbox.conf translation (issue #191), taken from the file the user put BESIDE THIS GAME and handed
+    // in by the launcher (which also builds the applied/ignored report the user reads). It sits between the
+    // per-game delta above and the recipe seed below, and that ordering is the layering this feature claims:
+    //
+    //     user's per-core setting  >  user's per-game delta  >  this game's conf  >  the system recipe
+    //
+    // A conf is per GAME and a recipe is per SYSTEM, so the conf is the more specific of the two and wins over
+    // it; but it is still a FILE the user dropped next to a game, not a choice they made in the app, so any
+    // setting they picked by hand outranks it. Consumed here (cleared after use) so a conf can never survive
+    // into the next launch on the same view.
+    if (!confOptions_.isEmpty())
+    {
+        const QMap<QString, QString> gameDelta = (coreName.isEmpty() || overrideToken_.isEmpty())
+            ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName);
+        for (auto it = confOptions_.constBegin(); it != confOptions_.constEnd(); ++it)
+        {
+            if (!coreName.isEmpty() && !Settings::optionValue(coreName, it.key()).isEmpty()) continue; // user chose
+            if (gameDelta.contains(it.key())) continue;                                                // game overrides
+            core_.setOptionValue(it.key().toStdString(), it.value().toStdString());
+        }
+    }
+    confOptions_.clear();
+
     // The system's LAUNCH RECIPE (issue #190): the core options a retro computer needs before it will boot —
     // machine model, memory, video standard, and the workarounds for cores whose own auto-detection is wrong.
     // This used to be a hardcoded C++ table with exactly one row in it (hatari's tosimage auto-detection

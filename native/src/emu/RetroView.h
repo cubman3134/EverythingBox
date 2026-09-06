@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <QHash>
+#include <QMap>
 #include "LibretroCore.h"   // everythingbox_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
@@ -61,6 +62,13 @@ public:
                   const QString& coreName = QString(), QString* error = nullptr,
                   const QString& title = QString(), const QString& systemId = QString(),
                   const QString& gameKey = QString());
+    // The core options translated from a dosbox.conf sitting beside the game (issue #191), pushed in by the
+    // launcher just before openGame. The LAUNCHER computes them because it owns the user-facing report — the
+    // applied/ignored sentence — and it must be able to say what happened even when the launch is refused for
+    // some other reason. Set on EVERY libretro launch (usually to an empty map), so a conf can never leak from
+    // one game into the next: the value is consumed and cleared by openGame.
+    void setConfOptions(const QMap<QString, QString>& options) { confOptions_ = options; }
+
     void stop();
     bool running() const { return running_; }
     bool paused()  const { return paused_; }   // freeze state (Esc menu + OS-lifecycle pause query)
@@ -298,6 +306,7 @@ private:
     QString coreName_;        // the bare core id of the running game (for the netplay handshake)
     QString overrideToken_;   // Settings::gameToken of the running game's identity; keys its per-game overrides (#95)
     QString systemId_;        // the running game's system ("nes", "snes", …); namespaces NEW save files
+    QMap<QString, QString> confOptions_;  // #191: dosbox.conf -> core options for the NEXT openGame; consumed there
     QString gameTitle_;       // the running game's display name, recorded in the saves-meta sidecar
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)

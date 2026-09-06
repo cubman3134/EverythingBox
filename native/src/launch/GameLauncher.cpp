@@ -23,6 +23,7 @@
 #include "../core/BiosCatalog.h"
 #include "../core/LaunchRecipe.h"      // per-system launch recipes: options, firmware, content (issue #190)
 #include "../core/AmsdosCatalog.h"     // Amstrad CPC disk catalogue -> the RUN" command (issue #190)
+#include "../core/DosConf.h"        // dosbox.conf -> core options, and the MIDI assets (issue #191)
 #include "../core/PerfTrace.h"
 #include <QTimer>
 #include <QFileInfo>
@@ -711,6 +712,20 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
                     emit notifyUser(tr("“%1” has no program the disk names, so it will boot to a "
                                        "catalogue listing. Type RUN\" followed by a name from the list.")
                                         .arg(recentTitle), kFeedbackLong);
+                // #191: the DOS power-user tier. Neither of these can refuse a launch — a conf that cannot be
+                // read applies nothing and says so, a missing MT-32 ROM leaves the game on its default audio —
+                // so both run here, past every blocker, and hand their options to the view before openGame.
+                // The MIDI seed is applied SECOND and so wins on a key both name: the user picked it in
+                // Settings, and a conf is a file that happened to be in the folder.
+                QMap<QString, QString> seed;
+                const QString confMsg = dosConfReport(ready, recentTitle, &seed);
+                QMap<QString, QString> midiSeed;
+                const QString midiMsg = dosMidiSeed(ready, recentTitle, &midiSeed);
+                for (auto it = midiSeed.constBegin(); it != midiSeed.constEnd(); ++it)
+                    seed.insert(it.key(), it.value());
+                if (retro_) retro_->setConfOptions(seed);
+                if (!confMsg.isEmpty()) emit notifyUser(confMsg, kFeedbackLong);
+                if (!midiMsg.isEmpty()) emit notifyUser(midiMsg, kFeedbackLong);
                 finishLibretroLaunch(ready, launchRom, recentTitle, thumb, key);
             });
     });
@@ -781,6 +796,87 @@ QString GameLauncher::amsdosBootCommand(const CorePlan& plan, bool* readable) co
                    AmsdosCatalog::names(cat).join(QStringLiteral(", ")),
                    cmd.isEmpty() ? QStringLiteral("(nothing runnable — the core will show its catalogue)") : cmd));
     return cmd;
+}
+
+// #191. THE dosbox.conf TRANSLATION, and the report that is the point of it.
+//
+// The conf beside the game is read, mapped onto THIS plan's core through the recipe's `conf` block, and the
+// result comes back as two lists: what was applied and what was not. Every ignored key carries a reason. The
+// sentence returned here names both — because the alternative, applying six of a user's twenty settings and
+// saying "conf applied", would leave them debugging a game that is not configured the way they think it is.
+//
+// Returns "" for every launch with no conf beside it, which is every launch on every system but MS-DOS and
+// most MS-DOS launches too, so nothing about them changes.
+QString GameLauncher::dosConfReport(const CorePlan& plan, const QString& title,
+                                    QMap<QString, QString>* options) const
+{
+    if (options) options->clear();
+    if (plan.systemId.isEmpty() || plan.core.isEmpty() || plan.launchRom.isEmpty()) return QString();
+    const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
+    if (recipe.isNull()) return QString();
+    const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
+    if (!rc || rc->conf.isNull()) return QString();   // this core has no conf mapping — nothing to do
+
+    // The game folder: launchRom is the folder itself, or the program inside it (#190 hands a folder game the
+    // executable path). The whole top level is listed rather than a "*.conf" filter, which is case-SENSITIVE
+    // on Linux and would miss the upper-case DOSBOX.CONF a DOS game folder actually ships.
+    const QFileInfo fi(plan.launchRom);
+    const QDir dir = fi.isDir() ? QDir(plan.launchRom) : QDir(fi.absolutePath());
+    if (!dir.exists()) return QString();
+    const QString confName = DosConf::chooseConf(dir.entryList(QDir::Files));
+    if (confName.isEmpty()) return QString();
+
+    QFile f(dir.absoluteFilePath(confName));
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    // Bounded: a dosbox.conf is a few kilobytes. Reading a capped prefix keeps a mislabelled huge file off the
+    // GUI thread — the same guard amsdosBootCommand applies to a .dsk.
+    const QByteArray bytes = f.read(1 * 1024 * 1024);
+    f.close();
+
+    DosConf::File conf;
+    DosConf::parse(bytes, &conf);                       // a false return leaves conf.ok false, which is the report
+    const DosConf::Plan p = DosConf::translate(conf, rc->conf);
+    if (options && p.ok) *options = p.options;
+
+    for (const QString& line : DosConf::logLines(p))
+        glLog(QStringLiteral("game: %1 %2").arg(confName, line));
+    return DosConf::report(title, confName, p);
+}
+
+// #191. The MIDI assets. Whatever device the user chose for MS-DOS, the files it needs are THEIRS to supply —
+// MT-32 ROMs are copyrighted and a soundfont is somebody else's licensed content, so nothing here is ever
+// fetched or bundled. Present => seed the core option that selects it. Absent => return the message naming the
+// exact file(s) and the exact folder, and let the game boot anyway on its default audio. A missing soundfont
+// is not a reason to refuse a launch.
+QString GameLauncher::dosMidiSeed(const CorePlan& plan, const QString& title,
+                                  QMap<QString, QString>* options) const
+{
+    if (options) options->clear();
+    const QString choice = Settings::dosMidiDevice();
+    if (choice.isEmpty()) return QString();             // "Default" — the core decides, as it always has
+    if (plan.systemId.isEmpty() || plan.core.isEmpty()) return QString();
+    const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
+    if (recipe.isNull()) return QString();
+    const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
+    if (!rc || rc->midi.isNull()) return QString();     // this core has no MIDI-asset option
+    const DosConf::MidiDevice* dev = DosConf::midiDevice(rc->midi, choice);
+    if (!dev) return QString();                         // a stored value this core does not offer
+
+    const QString sysDir = CoreManager::systemDir();
+    const auto exists = [&sysDir](const QString& n) {
+        return QFileInfo::exists(sysDir + QStringLiteral("/") + n);
+    };
+    const QStringList missing = DosConf::missingMidiFiles(*dev, exists);
+    if (missing.isEmpty())
+    {
+        if (options) *options = DosConf::midiOptions(rc->midi, choice, exists);
+        glLog(QStringLiteral("game: MIDI device \"%1\" -> %2=%3")
+                  .arg(dev->label, rc->midi.option, dev->value));
+        return QString();
+    }
+    glLog(QStringLiteral("game: MIDI device \"%1\" unavailable — missing %2 in %3")
+              .arg(dev->label, missing.join(QStringLiteral(", ")), QDir::toNativeSeparators(sysDir)));
+    return DosConf::midiMessage(*dev, missing, QDir::toNativeSeparators(sysDir), title);
 }
 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,

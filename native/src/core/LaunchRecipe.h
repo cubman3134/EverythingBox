@@ -54,6 +54,7 @@
 #include <functional>
 
 #include "AppPaths.h"
+#include "DosConf.h"   // issue #191: the dosbox.conf -> core-option mapping and the MIDI assets, both DATA
 
 // ---- the schema ---------------------------------------------------------------------------------------
 
@@ -100,6 +101,13 @@ struct RecipeCore
     QList<RecipeFirmware>  firmware;
     QList<RecipeContentRule> content;
     QString                bootCommand; // optional command the core is asked to run after boot ("" = none)
+
+    // Issue #191, and both are DATA for the same reason the options above are: dosbox-pure renames and
+    // re-values its core options between releases, so a `conf` mapping or a MIDI option key compiled into
+    // C++ would turn every upstream rename into "the conf silently stopped working". Empty on every core
+    // that has no such concept, which is every core but the two DOS ones.
+    DosConf::Spec     conf;   // dosbox.conf key -> this core's option, with the accepted values
+    DosConf::MidiSpec midi;   // the MT-32 / General MIDI assets and the option they set
 };
 
 // The executable-autodetect rules for a folder game (MS-DOS is the case that needs them).
@@ -248,6 +256,10 @@ namespace LaunchRecipes
                 rule.present = presentationFromString(no.value(QStringLiteral("present")).toString());
                 rc.content.push_back(rule);
             }
+            // Issue #191. Absent keys yield null specs, which every consumer reads as "this core has no conf
+            // translation / no MIDI assets" — the pre-#191 behaviour, so silence still never changes a launch.
+            rc.conf = DosConf::specFromJson(co.value(QStringLiteral("conf")));
+            rc.midi = DosConf::midiFromJson(co.value(QStringLiteral("midi")));
             r.cores.push_back(rc);
         }
         if (out) *out = r;
