@@ -45,7 +45,12 @@ namespace RemoteApi
     // /open takes an item REFERENCE plus a position (never bytes) and /pair is how a source obtains the token
     // /open then requires. The BODY of an /open is left in Request::body and decoded by PlayOn::parseHandoff,
     // so this unit stays free of the hand-off vocabulary and the routing table can be tested apart from it.
-    enum class CommandKind { State, Player, Input, Open, PairBegin, PairRedeem, NotFound, BadRequest };
+    // Inventory/Bundle are #127's library-transfer surface, on the SAME listener and the same credential:
+    // GET /inventory answers with what this device's art cache holds (item id + content stamp), POST /bundle
+    // carries ONE item's art. Their bodies, like /open's, are left in Request::body and decoded by
+    // LibraryBundle, so this unit never learns the bundle vocabulary either.
+    enum class CommandKind { State, Player, Input, Open, PairBegin, PairRedeem,
+                             Inventory, Bundle, NotFound, BadRequest };
 
     // The /player verbs. PlayPause is the toggle a single remote button wants; Play/Pause force a state.
     enum class PlayerAction
@@ -109,4 +114,13 @@ namespace RemoteApi
     // The reason phrase for a status code ("OK", "Bad Request", ...). Exposed so the probe can pin the status
     // line without re-deriving the table.
     const char* reasonPhrase(int status);
+
+    // How many bytes of ONE request this surface will buffer. #76's routes are tiny and keep a tiny cap — a
+    // control API that buffers megabytes is a way to make the app eat memory. #127's POST /bundle is the one
+    // route that legitimately carries a payload, so it (and only it) gets a payload-sized cap, decided HERE
+    // from the request line rather than in the socket code, so the exception is one testable function rather
+    // than a condition buried in a read loop. `rawPrefix` may be a partial request — whatever has arrived.
+    constexpr int kDefaultRequestCap = 64 * 1024;
+    constexpr int kBundleRequestCap  = 20 * 1024 * 1024;
+    int requestCapBytes(const QByteArray& rawPrefix);
 }

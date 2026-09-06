@@ -7,17 +7,22 @@
 //   * THE TOKEN IS A CREDENTIAL. It travels in one header on one request and is never logged, never put in a
 //     signal argument that reaches a log line, never included in an error string. Every failure here reports
 //     QNetworkReply::errorString() or the peer's own reason text — never the request.
-//   * NO BYTES EVER MOVE THROUGH HERE. A hand-off is a reference plus a position (PlayOn::Handoff). This
-//     class has no notion of a stream URL and cannot acquire one; the target resolves its own.
+//   * A HAND-OFF STILL MOVES NO BYTES. It is a reference plus a position (PlayOn::Handoff); this class has
+//     no notion of a stream URL and cannot acquire one, and the target resolves its own. What issue #127
+//     added below is a DIFFERENT thing on the same transport and is named as such: sendBundleItem carries
+//     one item's ART, which is exactly the payload the hand-off rule was written to keep off the wire, so
+//     the two must not be confused. No media file, no ROM and no stream ever rides either of them.
 //
 // Every call is fire-and-forget with a hard timeout: a peer that has gone off the LAN must fail in seconds
 // and say so, not leave a spinner up. Replies are matched by the peer id the caller passed in, so a caller
 // that has moved on to another device simply ignores the late signal.
 #pragma once
+#include <QList>
 #include <QMetaType>
 #include <QObject>
 #include <QString>
 #include <functional>
+#include "LibraryBundle.h"
 #include "PlayOnDevice.h"
 
 class QNetworkAccessManager;
@@ -45,8 +50,20 @@ public:
     // ---- "Continue on this device" ----
     void pullState(const PlayOn::Peer& peer);
 
+    // ---- the library transfer (issue #127) ----
+    // The SAME transport, the same peer and the same paired credential: this is not a second connection to a
+    // second service, it is two more requests on the one #76 listener #143 already authenticates against.
+    // fetchInventory asks what the target's art cache holds; sendBundleItem posts ONE item's art. One item
+    // per request, so a transfer is resumable by construction — an interrupted run simply re-diffs.
+    void fetchInventory(const PlayOn::Peer& peer, const QString& token);
+    void sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
+                        const QByteArray& payload);
+
     // How long a peer has to answer before we call it gone.
     static constexpr int kTimeoutMs = 4000;
+    // A bundle is megabytes over a LAN, not a control message: it gets its own budget. Still bounded, so a
+    // peer that goes off the network mid-transfer fails in seconds rather than leaving a spinner up.
+    static constexpr int kBundleTimeoutMs = 60000;
 
 signals:
     void pairingOffered(const QString& peerId);                       // the code is now on the peer's screen
@@ -59,11 +76,21 @@ signals:
     void stateArrived(const QString& peerId, const PlayOn::RemoteView& view);
     void pullArrived(const QString& peerId, const PlayOn::Pull& pull);
 
+    // #127. `ok` false means the peer did not answer or refused; `message` is then what to show.
+    void inventoryArrived(const QString& peerId, const QList<LibraryBundle::Entry>& items,
+                          bool ok, const QString& message);
+    // One item's answer: `result` is the receipt's word ("landed" / "kept" / "current" / "refused"),
+    // `message` the peer's reason when it is not a plain success.
+    void bundleItemDone(const QString& peerId, const QString& itemId, bool ok,
+                        const QString& result, const QString& message);
+
 private:
     QString base(const PlayOn::Peer& peer) const;
     // One place that issues a request, arms the timeout and hands the caller (status, body, ok).
     void post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body, const QString& token,
               std::function<void(int, const QByteArray&, bool)> done);
+    void post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body, const QString& token,
+              int timeoutMs, std::function<void(int, const QByteArray&, bool)> done);
     void get(const PlayOn::Peer& peer, const QString& path, const QString& token,
              std::function<void(int, const QByteArray&, bool)> done);
 
@@ -75,3 +102,4 @@ private:
 // remote that stops updating for reasons nothing reports.
 Q_DECLARE_METATYPE(PlayOn::RemoteView)
 Q_DECLARE_METATYPE(PlayOn::Pull)
+Q_DECLARE_METATYPE(QList<LibraryBundle::Entry>)

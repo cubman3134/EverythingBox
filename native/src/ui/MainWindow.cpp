@@ -5160,6 +5160,11 @@ void MainWindow::updateRemoteServer()
     h.pairBegin  = [this] { return playOnPairBegin(); };
     h.pairRedeem = [this](const QString& code) { return playOnPairRedeem(code); };
     h.tokens     = [this] { return playOnIssuedTokens(); };
+    // #127 — the library-transfer surface, two more one-line adapters onto MainWindowSendLibrary.cpp. Both
+    // are called ONLY after the same paired-token check as `open`, and neither can reach past the metadata
+    // cache: LibraryBundle refuses an id that is not a MetaCache hash and a file that is not art.
+    h.inventory  = [this] { return libraryInventoryJson(); };
+    h.bundle     = [this](const QByteArray& body) { return libraryReceiveBundle(body); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))
@@ -21815,6 +21820,14 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("playon.name"), tr("This device is called"), Settings::deviceName());
         action(QStringLiteral("playon.rename"), tr("Rename this device…"));
         action(QStringLiteral("playon.pick"), tr("Play on another device…"));
+        // #127: the same peers, the same pairing, a different payload. Twin below in the QWidget builder.
+        action(QStringLiteral("playon.sendlib"), tr("Send library to device…"));
+        info(QStringLiteral("playon.sendhint"),
+             tr("Warms another box's artwork cache from this one so it doesn't re-scrape thousands of images. "
+                "Only what's missing or newer is sent, so running it twice sends nothing the second time. It "
+                "moves artwork and metadata — never your marks, favourites or resume points, and never the "
+                "games or videos themselves."),
+             QString());
         info(QStringLiteral("playon.hint"),
              tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA in the cast picker. "
                 "A hand-off sends what to play and where you are in it — never the video itself — so the other "
@@ -22548,6 +22561,9 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("playon.pick")) {
                     showPlayOnMenu();
+                }
+                else if (id == QStringLiteral("playon.sendlib")) {
+                    showSendLibraryMenu();
                 }
                 else if (id == QStringLiteral("livetv.add")) {
                     if (!home_ || !home_->promptForLiveTvSource()) return;
@@ -23479,6 +23495,18 @@ void MainWindow::openGeneralSettings()
         auto* poPick = panelRow(tr("Play on Another Device…"));
         connect(poPick, &QPushButton::clicked, this, [this] { showPlayOnMenu(); });
         v->addWidget(poPick);
+        // #127: the classic twin of the themed builder's playon.sendlib row — same menu, one code path
+        // (GS_TWINS).
+        auto* poSendNote = new QLabel(tr("Warms another box's artwork cache from this one so it doesn't "
+            "re-scrape thousands of images. Only what's missing or newer is sent, so running it twice sends "
+            "nothing the second time. It moves artwork and metadata — never your marks, favourites or resume "
+            "points, and never the games or videos themselves."));
+        poSendNote->setWordWrap(true);
+        poSendNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(poSendNote);
+        auto* poSend = panelRow(tr("Send Library To Device…"));
+        connect(poSend, &QPushButton::clicked, this, [this] { showSendLibraryMenu(); });
+        v->addWidget(poSend);
         v->addSpacing(10);
 
         // --- Live TV: the classic twin of the themed builder's Live TV section. ---

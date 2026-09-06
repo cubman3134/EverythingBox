@@ -29,6 +29,7 @@ PlayOnClient::PlayOnClient(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
     qRegisterMetaType<PlayOn::RemoteView>("PlayOn::RemoteView");
     qRegisterMetaType<PlayOn::Pull>("PlayOn::Pull");
+    qRegisterMetaType<QList<LibraryBundle::Entry>>("QList<LibraryBundle::Entry>");
 }
 
 QString PlayOnClient::base(const PlayOn::Peer& peer) const
@@ -39,13 +40,20 @@ QString PlayOnClient::base(const PlayOn::Peer& peer) const
 void PlayOnClient::post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body,
                         const QString& token, std::function<void(int, const QByteArray&, bool)> done)
 {
+    post(peer, path, body, token, kTimeoutMs, done);
+}
+
+void PlayOnClient::post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body,
+                        const QString& token, int timeoutMs,
+                        std::function<void(int, const QByteArray&, bool)> done)
+{
     QNetworkRequest req{ QUrl(base(peer) + path) };
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     // The credential. One header, one request, and it appears nowhere else in this process's output.
     if (!token.isEmpty()) req.setRawHeader("X-EB-Token", token.toLatin1());
 
     QNetworkReply* r = nam_->post(req, body);
-    QTimer::singleShot(kTimeoutMs, r, [r] { if (r->isRunning()) r->abort(); });
+    QTimer::singleShot(timeoutMs, r, [r] { if (r->isRunning()) r->abort(); });
     connect(r, &QNetworkReply::finished, this, [r, done] {
         r->deleteLater();
         const int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -133,6 +141,60 @@ void PlayOnClient::pollState(const PlayOn::Peer& peer)
 void PlayOnClient::sendPlayerCommand(const PlayOn::Peer& peer, const QByteArray& body)
 {
     post(peer, QStringLiteral("/player"), body, QString(), [](int, const QByteArray&, bool) {});
+}
+
+// ---------------------------------------------------------------------------- library transfer -----------
+void PlayOnClient::fetchInventory(const PlayOn::Peer& peer, const QString& token)
+{
+    const QString id = peer.id;
+    const QString name = peer.name;
+    get(peer, QStringLiteral("/inventory"), token,
+        [this, id, name](int status, const QByteArray& body, bool ok) {
+            if (ok && status == 200)
+            {
+                QList<LibraryBundle::Entry> items;
+                QString err;
+                if (LibraryBundle::parseInventory(body, items, err))
+                {
+                    emit inventoryArrived(id, items, true, QString());
+                    return;
+                }
+                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false, err);
+                return;
+            }
+            if (status == 401)
+            {
+                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
+                                      tr("%1 needs pairing again.").arg(name));
+                return;
+            }
+            emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
+                                  reasonOf(body, tr("%1 did not answer.").arg(name)));
+        });
+}
+
+void PlayOnClient::sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
+                                  const QByteArray& payload)
+{
+    const QString id = peer.id;
+    const QString name = peer.name;
+    post(peer, QStringLiteral("/bundle"), payload, token, kBundleTimeoutMs,
+         [this, id, itemId, name](int status, const QByteArray& body, bool ok) {
+             LibraryBundle::Receipt r;
+             if (ok && status == 200 && LibraryBundle::parseReceipt(body, r))
+             {
+                 emit bundleItemDone(id, itemId, true, r.result, r.reason);
+                 return;
+             }
+             if (status == 401)
+             {
+                 emit bundleItemDone(id, itemId, false, QStringLiteral("refused"),
+                                     tr("%1 needs pairing again.").arg(name));
+                 return;
+             }
+             emit bundleItemDone(id, itemId, false, QStringLiteral("failed"),
+                                 reasonOf(body, tr("%1 did not answer.").arg(name)));
+         });
 }
 
 // ---------------------------------------------------------------------------- continue here --------------

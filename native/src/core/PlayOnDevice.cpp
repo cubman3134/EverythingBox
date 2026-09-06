@@ -498,7 +498,13 @@ QString Pairing::redeem(const QString& entered, const QByteArray& tokenEntropy)
 
 bool routeNeedsToken(const QString& path)
 {
-    return path == QLatin1String("/open");
+    // /open starts playback on someone else's screen. /inventory and /bundle (issue #127) read what a device
+    // holds and WRITE INTO ITS CACHE, which is if anything a stronger reason: an inventory is a list of what
+    // someone owns, and a bundle puts files on their disk. All three take the same paired credential; /pair
+    // cannot (it is how a token is obtained) and #76's /state / /player / /input keep that issue's posture.
+    return path == QLatin1String("/open")
+        || path == QLatin1String("/inventory")
+        || path == QLatin1String("/bundle");
 }
 
 bool authorized(const QString& presented, const QSet<QString>& issuedTokens)

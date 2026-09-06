@@ -281,6 +281,40 @@ namespace RemoteApi
             return c;
         }
 
+        // ---- #127: the library-transfer surface ----
+        // GET /inventory is a READ of what this device's art cache holds; POST /bundle carries one item's
+        // art. Both are credentialled (PlayOn::routeNeedsToken), and as with /open the AUTH decision is not
+        // made here: routing is about shape.
+        if (req.path == QStringLiteral("/inventory"))
+        {
+            if (req.method != Method::Get)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/inventory is GET only");
+                return c;
+            }
+            c.kind = CommandKind::Inventory;
+            return c;
+        }
+
+        if (req.path == QStringLiteral("/bundle"))
+        {
+            if (req.method != Method::Post)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/bundle is POST only");
+                return c;
+            }
+            if (req.body.trimmed().isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/bundle needs an item");
+                return c;
+            }
+            c.kind = CommandKind::Bundle;
+            return c;
+        }
+
         if (req.path == QStringLiteral("/input"))
         {
             if (req.method != Method::Post)
@@ -374,5 +408,15 @@ namespace RemoteApi
         r += "\r\n";
         r += body;
         return r;
+    }
+
+    int requestCapBytes(const QByteArray& rawPrefix)
+    {
+        // Matched on the request LINE, before any header is trusted, and only for the exact spelling the
+        // bundle client sends. A request that merely mentions /bundle later (in a header, in a body) does not
+        // get the larger cap: the target of a POST is the first thing on the wire or it is not this route.
+        if (rawPrefix.startsWith("POST /bundle ") || rawPrefix.startsWith("POST /bundle?"))
+            return kBundleRequestCap;
+        return kDefaultRequestCap;
     }
 }

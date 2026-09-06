@@ -232,9 +232,10 @@ namespace PlayOn
 
     // ---- 6. auth ------------------------------------------------------------------------------------------
 
-    // Which routes need a paired token. /open does — it starts playback on someone else's screen. /pair
-    // cannot (it is how a token is obtained), and /state / /player / /input keep #76's posture so the phone
-    // remote that shipped with that issue still works untouched.
+    // Which routes need a paired token. /open does — it starts playback on someone else's screen; so do
+    // #127's /inventory and /bundle, which list what a device holds and write into its cache. /pair cannot
+    // (it is how a token is obtained), and /state / /player / /input keep #76's posture so the phone remote
+    // that shipped with that issue still works untouched.
     bool routeNeedsToken(const QString& path);
 
     bool authorized(const QString& presented, const QSet<QString>& issuedTokens);

@@ -64,8 +64,10 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
     QByteArray& buf = buffers_[sock];
     buf += sock->readAll();
 
-    // Cap the buffered request. A control API's requests are tiny; anything over the cap is broken or hostile.
-    if (buf.size() > kMaxRequestBytes)
+    // Cap the buffered request. #76's routes are tiny, so anything over that cap is broken or hostile; #127's
+    // POST /bundle is the one route that legitimately carries a payload and is capped at a bundle's size.
+    // The decision is RemoteApi's, read off the request line, so the exception is one testable function.
+    if (buf.size() > RemoteApi::requestCapBytes(buf))
     {
         finish(sock, RemoteApi::httpResponse(413, "request too large", "text/plain"));
         return;
@@ -182,6 +184,34 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
             o.insert(QStringLiteral("token"), token);
             status = 200;
             body = QJsonDocument(o).toJson(QJsonDocument::Compact);
+            break;
+        }
+        case RemoteApi::CommandKind::Inventory:
+        {
+            if (!hooks_.inventory)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            body = hooks_.inventory();
+            status = 200;
+            break;
+        }
+        case RemoteApi::CommandKind::Bundle:
+        {
+            if (!hooks_.bundle)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            // The body is handed over whole. Decoding it -- and refusing an unsafe id, an unsafe file name or
+            // a future format -- is LibraryBundle's job, on the far side of this hook, so the socket code
+            // never learns the bundle vocabulary and cannot get the safety rules subtly different.
+            const LibraryBundle::Receipt r = hooks_.bundle(req.body);
+            status = r.httpStatus;
+            body = LibraryBundle::receiptJson(r);
             break;
         }
         case RemoteApi::CommandKind::NotFound:
