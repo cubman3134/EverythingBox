@@ -499,7 +499,14 @@ int NavConfirm::ask(const QString& title, const QString& message, const QStringL
 
 void NavConfirm::setMessage(const QString& message)
 {
-    if (message_) message_->setText(message);
+    if (!message_) return;
+    message_->setText(message);
+    // RE-FIT THE PANEL AROUND IT. The card was sized when it was built, and a message that GROWS after that —
+    // #137's lookup card opens on "Looking up…" and is relabelled seconds later with several lines of a
+    // dictionary entry — kept the old size and had everything past the first line cut off. NavCountdown never
+    // exposed this because it only ever swaps one digit into a message that was already its final size.
+    // probe_nav section 10 pins it; a live drive of #137 against a real Wiktionary entry is what found it.
+    relayoutPanel();
 }
 
 NavCountdown::NavCountdown(const QString& title, const QString& messageTmpl, const QStringList& buttons,

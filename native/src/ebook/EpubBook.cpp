@@ -122,6 +122,7 @@ bool EpubBook::parseOpf(const QString& opfRelPath, QString* error)
     const EpubMeta::Metadata meta = EpubMeta::parseOpfMetadata(opfBytes);
     title_  = meta.title;
     author_ = meta.author;
+    language_ = meta.language;   // issue #137: seeds the lookup's dictionary edition and read-aloud's voice
 
     QHash<QString, QString> idToHref;
     QStringList spineIds;

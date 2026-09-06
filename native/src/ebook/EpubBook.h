@@ -18,6 +18,9 @@ public:
     const QString& title() const override { return title_; }
     const QString& author() const override { return author_; }
     const QString& sourcePath() const override { return sourcePath_; } // original .epub path (per-book settings key)
+    // dc:language out of the OPF, verbatim and never guessed (issue #137). EpubMeta already read it on the
+    // way to the spine; this is the field finally having somewhere to go.
+    QString language() const override { return language_; }
 
     const QStringList& chapterFiles() const override { return chapterFiles_; } // absolute paths, spine order
     const QVector<EpubTocEntry>& toc() const override { return toc_; }
@@ -37,6 +40,7 @@ private:
     QString htmlRoot_;    // directory containing the OPF (chapter hrefs are relative to this)
     QString sourcePath_;
     QString title_, author_;
+    QString language_;    // dc:language as the package declared it; "" when it declared none (#137)
 
     QStringList chapterFiles_;  // absolute paths, spine order
     QStringList chapterHrefs_;  // parallel file names (for TOC matching)

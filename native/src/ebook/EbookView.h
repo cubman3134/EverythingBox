@@ -4,6 +4,7 @@
 // mouse movement reveals an auto-hiding menu; arrow keys page through. Mirrors the Unity ereader UX.
 #pragma once
 #include <QColor>
+#include <QPointer>
 #include <QRectF>
 #include <QVector>
 #include <QWidget>
@@ -22,6 +23,8 @@ class QPushButton;
 class QTimer;
 class QTextDocument;
 class QTouchEvent;
+class LookupClient;   // issue #137: the in-book lookup's one socket owner
+class NavConfirm;     // issue #137: the NavOverlay card a lookup renders in
 
 // Renders one page of a chapter and turns clicks into page/menu requests. The owner (EbookView) drives
 // chapter flow; this widget only knows how to paginate and paint the chapter it was given.
@@ -279,6 +282,10 @@ public:
     bool beginCursorModeAt(const QPointF& pos) override;
     void endCursorMode() override;
     void gotoHighlight(int spine, int offset) override;
+    // The book's declared language, or the system locale when it declared none (issue #137). Public because
+    // the lookup card's language override and the vocabulary row both need the same answer this reader gives
+    // its narrator — one seam, not two opinions about what language the book is in.
+    QString bookLanguage() const;
     // Drive one key through cursor mode. True when the mode consumed it — both chromes ask this BEFORE their
     // own arbitration, so while the caret is live the arrows move it instead of turning pages.
     bool handleCursorKey(int key);
@@ -341,6 +348,14 @@ private:
     // ---- Selection + highlights (issue #136) ---------------------------------------------------------------
     void refreshHighlightBands();   // re-read this chapter's stored highlights into the page's paint bands
     void syncCursorVisuals();       // push the caret + live selection to the page, and keep the caret on screen
+    // ---- In-book lookup (issue #137) -----------------------------------------------------------------------
+    // A committed selection opens the ANNOTATION ACTION MENU — Highlight, Define, Wikipedia, Translate — and
+    // the colour picker is what "Highlight" leads to. The lookup verbs are riders on #136's selection: there
+    // is no second selection path, no second menu and no second way into the reader.
+    void offerSelectionActions(const ReaderAnchor& range);  // the action menu a committed selection opens
+    void runLookup(int verb, const QString& term, const ReaderAnchor& range, const QString& lang);
+    void offerLookupLanguage(int verb, const QString& term, const ReaderAnchor& range);
+    void cancelLookup();            // page turn / chapter change / leaving the reader: drop what is in flight
     void offerHighlightColour(const ReaderAnchor& range);  // the four-colour NavMenu for a fresh selection
     void offerHighlightEdit(const QString& id);            // an EXISTING highlight: recolour / remove
     void annotationsChanged();      // stores moved: repaint the bands and tell the hosted chrome
@@ -372,6 +387,11 @@ private:
     ReaderSelection::Model cursor_;
     QPushButton* selectBtn_ = nullptr;   // classic bar: "Select" (enter cursor mode)
     QPushButton* marksBtn_  = nullptr;   // classic bar: "Marks" (the annotation list)
+    // In-book lookup (issue #137). The client is created LAZILY on the first verb press, so a reader who never
+    // looks a word up never constructs a network access manager — and the card is a QPointer because the
+    // reader can be torn down (or the page turned) while an answer is still on the wire.
+    LookupClient* lookup_ = nullptr;
+    QPointer<NavConfirm> lookupCard_;
     // The wake lock (issue #147). A unique_ptr member and NOT a bool, so the release is structural: the
     // reader being destroyed by a teardown nobody wrote a handler for still lets the screen sleep again.
     std::unique_ptr<KeepAwake::Guard> awake_;

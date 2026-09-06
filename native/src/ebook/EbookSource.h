@@ -25,6 +25,14 @@ public:
     virtual const QString& author() const = 0;
     virtual const QString& sourcePath() const = 0; // original file path (per-book settings key)
 
+    // The book's DECLARED language, verbatim ("en", "en-GB", "fr", …), or "" when the format did not say
+    // (issue #137). It is what seeds the dictionary edition a lookup asks and the voice read-aloud picks, so
+    // the honest default is EMPTY and never a guess: a caller that gets "" falls back to the system locale,
+    // which is a stated fallback rather than a fabricated fact about the book. NOT pure-virtual — EPUB is the
+    // only format in this tree whose container states it (dc:language, EpubMeta::Metadata::language), and
+    // making every other reader implement a method to return nothing would be ceremony, not coverage.
+    virtual QString language() const { return QString(); }
+
     virtual const QStringList& chapterFiles() const = 0;  // absolute paths, reading order
     virtual const QVector<EpubTocEntry>& toc() const = 0;
     virtual int chapterIndexForHref(const QString& hrefFileName) const = 0; // chapter for a TOC href, or -1
