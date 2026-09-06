@@ -49,6 +49,11 @@ class ReaderBridge : public QObject
     Q_PROPERTY(int fontIndex READ fontIndex NOTIFY changed)
     Q_PROPERTY(QStringList toc READ toc NOTIFY tocChanged)
     Q_PROPERTY(bool twoUp READ twoUp NOTIFY changed)   // comic: is the two-up spread on
+    // Reading modes (issue #154). The comic's per-series controls, as a LIST the row appends after the four
+    // it has always drawn: one label each, a parallel "is it on", and an activation by index that the host
+    // forwards to the reader. Empty for a book, a pdf and a photo folder, so their rows are unchanged.
+    Q_PROPERTY(QStringList comicControls READ comicControls NOTIFY changed)
+    Q_PROPERTY(QVariantList comicControlsOn READ comicControlsOn NOTIFY changed)
     // Annotations (issue #136): this book's bookmarks AND its highlights, interleaved in document order - the
     // "review before book club" list the issue asks for. `bookmarks` keeps its name because the zone, the QML
     // panel and the nav graph are all spelled readerBookmarks; what it CARRIES is now the whole list, which is
@@ -91,6 +96,8 @@ public:
     int  fontIndex() const;             // index into fontOptions() nearest the current size (for currentOption)
     QStringList toc() const;
     bool twoUp() const;                 // comic: the double-page spread preference
+    QStringList comicControls() const;    // #154: the comic's extra per-series controls, in row order
+    QVariantList comicControlsOn() const; // #154: parallel to it — which of them are currently on
     int  tocCount() const;              // toc().size() (0 for pdf/comic) — host feeds the readerToc zone count
 
     // Bookmarks (issue #136): the current book's bookmarks in reading order (a label per bookmark), and their

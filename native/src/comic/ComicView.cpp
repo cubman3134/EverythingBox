@@ -120,8 +120,12 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
-    v->addWidget(scroll_, 1);
+    // #154: the scroll area and the (hidden) webtoon thumbnail rail go in as ONE row, so turning the rail on
+    // narrows the page instead of covering it. Both surfaces and the five per-series buttons are built in
+    // ComicViewModes.cpp.
+    installModeSurfaces(v);
     v->addWidget(bar_);
+    installModeControls();
 
     setFocusPolicy(Qt::StrongFocus);
 }
@@ -325,15 +329,31 @@ bool ComicView::openComic(const QString& path, QString* error)
         const ComicInfo::Info parsed = ComicInfo::parse(comicInfoXml, &wellFormed);
         if (wellFormed) meta = parsed;   // a malformed document is ignored whole (ComicInfo.h)
     }
-    // The override is keyed by SERIES, so a comic whose document names no series has none to look up — the
-    // document's own answer stands. (#147 owns the toggle that writes these; this reads whatever is there.)
-    const int stored = meta.series.isEmpty()
-                           ? 0
-                           : Settings::comicDirectionOverride(ComicName::seriesKey(meta.series));
-    const ComicInfo::Direction over = stored == 1 ? ComicInfo::Direction::LeftToRight
-                                    : stored == 2 ? ComicInfo::Direction::RightToLeft
-                                                  : ComicInfo::Direction::Unspecified;
-    rtl_ = ComicInfo::resolveDirection(meta.direction, over) == ComicInfo::Direction::RightToLeft;
+    // The settings are keyed by SERIES. #152 could only look one up for a comic whose document named a
+    // series; #154's key (ComicRead::seriesKeyFor) falls back to the FILENAME, so chapter 2 of a webtoon
+    // opens in the mode chapter 1 was set to. Both overrides are read under that one key — nothing had ever
+    // written a direction override under a filename-derived key, because until now nothing wrote one at all.
+    seriesKey_ = ComicRead::seriesKeyFor(meta.series, path);
+    readDisplayOptions();
+    mode_ = ComicRead::resolveMode(meta.direction,
+                                   Settings::comicDirectionOverride(seriesKey_),
+                                   Settings::comicDisplayOption(seriesKey_,
+                                                                QString::fromLatin1(ComicRead::Opt::kMode)));
+    rtl_ = ComicRead::isRtl(mode_);
+
+    // Every page's own size, out of its HEADER (no decode): the webtoon strip is laid out from these and the
+    // split decision is taken on them, so both are answerable for any page of a 300-page comic at any moment.
+    pageSizes_.clear();
+    pageSizes_.reserve(pages_.size());
+    for (const QByteArray& bytes : pages_)
+    {
+        QBuffer buf;
+        buf.setData(bytes);
+        if (!buf.open(QIODevice::ReadOnly)) { pageSizes_.append(QSize()); continue; }
+        pageSizes_.append(QImageReader(&buf).size());
+    }
+    stripCache_.clear();
+    railCache_.clear();
     // Leaving photo mode. openFolder() clears pages_ on the way in, and this is the same door in the other
     // direction: MainWindow reuses ONE ComicView for both, so a comic opened after a photo folder was viewed
     // kept photoMode_ set and was read as that folder — pageTotal()/decodeAt() answer from photoFiles_, and
@@ -343,9 +363,17 @@ bool ComicView::openComic(const QString& path, QString* error)
 
     int page = store().value(comicKey(path) + QStringLiteral("page"), 0).toInt();
     page = qBound(0, page, pages_.size() - 1);
+    // #154: a webtoon's place is a page AND how far into it, because a page there is a screenful of a strip
+    // rather than a thing you turn. A comic saved before this existed has no fraction and resumes at 0.0,
+    // which is where it always resumed.
+    resumeFraction_ = qBound(0.0, store().value(comicKey(path) + QStringLiteral("frac"), 0.0).toDouble(), 1.0);
     fit_ = true;
     zoom_ = 1.0;
-    showPage(page);
+    current_ = page;
+    const double storedFraction = resumeFraction_;
+    applyMode();
+    showPage(page);   // the page's own bookkeeping (stats, presence, the end-of-chapter hint) is in here...
+    if (mode_ == ComicRead::Mode::Webtoon) scrollToPosition(page, storedFraction);   // ... and this is the spot
     setFocus();
     return true;
 }
@@ -370,6 +398,20 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     path_ = folder;
     fit_ = true;
     zoom_ = 1.0;
+    // ... and no reading MODE either (#154). A photo folder is not a series, carries no per-file resume and
+    // accrues no reading stats, so it goes back to the plain paged view with every per-series option off —
+    // the same door openComic() closes in the other direction.
+    mode_ = ComicRead::Mode::PagedLtr;
+    split_ = ComicRead::Split::Auto;
+    filter_ = ComicRead::Filter::None;
+    crop_ = false;
+    railOn_ = false;
+    seriesKey_.clear();
+    half_ = -1;
+    pageSizes_.clear();
+    stripCache_.clear();
+    railCache_.clear();
+    applyMode();
 
     int start = 0;
     if (!startFile.isEmpty())
@@ -408,19 +450,38 @@ void ComicView::persist()
 {
     if (photoMode_ || path_.isEmpty() || pages_.isEmpty()) return; // photos carry no per-file resume (issue #102)
     const QString k = comicKey(path_);
-    store().setValue(k + QStringLiteral("page"), current_);
+    // #154: in webtoon mode the place is (page, fraction into that page) — currentPosition() answers exactly
+    // that, and answers (current_, 0.0) in every paged mode, so this is one write for both.
+    int page = current_;
+    double fraction = 0.0;
+    currentPosition(&page, &fraction);
+    store().setValue(k + QStringLiteral("page"), page);
+    store().setValue(k + QStringLiteral("frac"), fraction);
     store().setValue(k + QStringLiteral("title"), QFileInfo(path_).fileName());
     store().sync();
 }
 
-void ComicView::showPage(int index)
+void ComicView::showPage(int index, int dir)
 {
     if (index < 0 || index >= pageTotal()) return;
     current_ = index;
-    image_ = decodeAt(index);
-    rescale();
+    if (mode_ == ComicRead::Mode::Webtoon && !photoMode_)
+    {
+        // In a strip a page is a PLACE, not a picture to swap in: the whole chapter is already laid out, so
+        // "show page N" means scroll to where page N starts.
+        half_ = -1;
+        scrollToPosition(index, 0.0);
+    }
+    else
+    {
+        // #154: a page that splits arrives as one of its halves — the second one when the reader is walking
+        // backwards, so a spread read in reverse shows the half it showed last.
+        half_ = ComicRead::entryHalf(pageSplits(index), dir);
+        image_ = preparedPage(index, half_);
+        rescale();
+        scroll_->verticalScrollBar()->setValue(0); // start each page at the top
+    }
     updateLabel();
-    scroll_->verticalScrollBar()->setValue(0); // start each page at the top
     // Consumption stats: high-water page read (revisits/backward turns don't accrue). Path-derived key + title,
     // 1-based page to match the reader's own labels; the store owns the accrual math. Comics only — a photo
     // folder isn't a "book being read", so it does not accrue reading stats (issue #102).
@@ -441,22 +502,30 @@ void ComicView::showPage(int index)
 // itself a landscape spread).
 bool ComicView::spreadActive() const
 {
+    // #154: neither a split page nor a strip is ever ALSO an open book — the first is already two pages of
+    // one image and the second has no page boundaries at all.
+    if (half_ >= 0 || mode_ == ComicRead::Mode::Webtoon) return false;
     return fit_ && twoUp_ && current_ + 1 < pageTotal();
 }
 
 void ComicView::rescale()
 {
+    if (mode_ == ComicRead::Mode::Webtoon && !photoMode_) return;   // #154: the strip paints itself
     if (image_.isNull()) { imageLabel_->clear(); return; }
     const int vw = qMax(64, scroll_->viewport()->width() - 4); // fill the viewport width (scale up or down)
     const int vh = qMax(64, scroll_->viewport()->height());
 
-    // Photo mode never pairs pages book-style — two-up is a comic notion (issue #102).
-    twoUp_ = !photoMode_ && twoUpEnabled_ && fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
+    // Photo mode never pairs pages book-style — two-up is a comic notion (issue #102). A SPLIT page is never
+    // paired either (#154): it is a double spread already, and pairing half of one with half of the next is
+    // the one arrangement that is wrong in every reading direction.
+    twoUp_ = !photoMode_ && half_ < 0 && twoUpEnabled_ && fit_
+             && image_.height() > image_.width() && vw > vh && vw >= 800;
 
     if (twoUp_ && current_ + 1 < pages_.size())
     {
-        QImage right;
-        right.loadFromData(pages_[current_ + 1]);
+        // The facing page goes through the SAME display pipeline as the page beside it — a spread with one
+        // page cropped and tinted and the other not would be a worse artefact than either setting.
+        const QImage right = preparedPage(current_ + 1, -1);
         if (!right.isNull())
         {
             // Normalise both pages to a common height, lay them side by side, then fit the whole spread to the
@@ -525,9 +594,18 @@ void ComicView::updateLabel()
                             + tr("Photo %1 / %2").arg(current_ + 1).arg(pageTotal()));
         return;
     }
-    const QString where = spreadActive()
-        ? tr("Pages %1–%2 / %3").arg(current_ + 1).arg(current_ + 2).arg(pages_.size())
-        : tr("Page %1 / %2").arg(current_ + 1).arg(pages_.size());
+    // #154: a strip has no page boundaries, so the page number in it is where you ARE rather than what is on
+    // screen — the label says "approx" outright instead of implying a precision the mode does not have. A
+    // split page says which half you are on, because "page 7" twice in a row is the one thing that looks
+    // like a stuck reader.
+    const QString where =
+        mode_ == ComicRead::Mode::Webtoon
+            ? tr("Page %1 / %2 (approx)").arg(current_ + 1).arg(pages_.size())
+        : half_ >= 0
+            ? tr("Page %1 / %2 · half %3 of 2").arg(current_ + 1).arg(pages_.size()).arg(half_ + 1)
+        : spreadActive()
+            ? tr("Pages %1–%2 / %3").arg(current_ + 1).arg(current_ + 2).arg(pages_.size())
+            : tr("Page %1 / %2").arg(current_ + 1).arg(pages_.size());
     pageLabel_->setText(QFileInfo(path_).fileName() + QStringLiteral("  —  ") + where);
 }
 
@@ -537,6 +615,17 @@ void ComicView::nextPage()
     // opened here, and nothing is judged here either — MainWindow owns the crossing, knows whether a next
     // chapter exists, and is the only place that can say "That's the last chapter." when one does not. So the
     // report is unconditional; a comic with no run there is answered with the same silence as before.
+    // #154: a page that SPLIT is two screens, and the first press over it moves between them. It changes no
+    // page, reports no boundary and writes no resume — the reader has not left this page yet.
+    if (ComicRead::stepStaysInPage(half_, +1))
+    {
+        half_ = 1;
+        image_ = preparedPage(current_, half_);
+        rescale();
+        updateLabel();
+        emit pageInfoChanged();
+        return;
+    }
     if (comicPastEnd(current_, pageTotal()))
     {
         emit chapterAdvanceRequested(+1);
@@ -546,12 +635,21 @@ void ComicView::nextPage()
 }
 void ComicView::prevPage()
 {
+    if (ComicRead::stepStaysInPage(half_, -1))
+    {
+        half_ = 0;
+        image_ = preparedPage(current_, half_);
+        rescale();
+        updateLabel();
+        emit pageInfoChanged();
+        return;
+    }
     if (comicBeforeStart(current_))
     {
         emit chapterAdvanceRequested(-1);   // likewise unconditional — see nextPage()
         return;
     }
-    showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
+    showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0), -1);
 }
 
 void ComicView::zoomIn()  { fit_ = false; zoom_ = qMin(5.0, zoom_ * 1.2); rescale(); emit pageInfoChanged(); }
@@ -560,6 +658,44 @@ void ComicView::fitWidth() { fit_ = true; rescale(); updateLabel(); emit pageInf
 
 void ComicView::keyPressEvent(QKeyEvent* e)
 {
+    // #154, THE RAIL FIRST. While the thumbnail rail holds the cursor every arrow belongs to it — that is
+    // what makes it a nav zone on a D-pad without being a themed NavGraph zone (which would have put it on
+    // one layout only; see ComicView.h). LEFT/RIGHT hand the arrows back to the strip.
+    //
+    // ESCAPE AND BACK ARE DELIBERATELY NOT LISTED. Under the themed chrome those two never reach this widget
+    // at all — the host takes them as "leave the reader" before the reader sees a thing — so consuming them
+    // here would make one press mean "leave the rail" on the classic layout and "leave the comic" on the
+    // themed one. A rail you get out of with a different key depending on the chrome is worse than a rail
+    // you always get out of the same way.
+    if (railFocus_ && railWidget_)
+    {
+        switch (e->key())
+        {
+        case Qt::Key_Up:   railStep(-1); return;
+        case Qt::Key_Down: railStep(+1); return;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+            scrollToPosition(railIndex_, 0.0);
+            updateLabel();
+            emit pageInfoChanged();
+            return;
+        case Qt::Key_Left: case Qt::Key_Right:
+            setRailFocus(false);
+            return;
+        default: break;
+        }
+    }
+    // #154, THE STRIP. Up/Down scroll it by a viewport fraction; Left/Right (below) still jump a whole page,
+    // because in a chapter you are part-way through "the next page" is the only landmark there is.
+    if (mode_ == ComicRead::Mode::Webtoon && !photoMode_)
+    {
+        switch (e->key())
+        {
+        case Qt::Key_Down: scrollByViewport(+1); return;
+        case Qt::Key_Up:   scrollByViewport(-1); return;
+        default: break;
+        }
+    }
+
     switch (e->key())
     {
     // THE ARROWS FOLLOW THE READING DIRECTION (issue #152); PageDown/PageUp and Space do NOT. Left and
@@ -580,6 +716,16 @@ void ComicView::keyPressEvent(QKeyEvent* e)
 void ComicView::resizeEvent(QResizeEvent* e)
 {
     QWidget::resizeEvent(e);
+    // #154: a strip is laid out for ONE viewport width, so a resize relays it out — and lands back on the
+    // same (page, fraction), which is the whole reason the reading position is kept in those terms.
+    if (mode_ == ComicRead::Mode::Webtoon && !photoMode_) { relayoutStrip(); updateLabel(); return; }
+    // ... and a rotation can change whether the page in front of you is a double spread at all.
+    const int wantHalf = ComicRead::entryHalf(pageSplits(current_), +1);
+    if ((wantHalf < 0) != (half_ < 0))
+    {
+        half_ = wantHalf;
+        image_ = preparedPage(current_, half_);
+    }
     if (fit_ && !image_.isNull()) { rescale(); updateLabel(); } // refit to the new width (may toggle the spread)
 }
 
@@ -590,6 +736,13 @@ void ComicView::showEvent(QShowEvent* e)
     // after it is shown (the host lays the widget out on show), so the rescale done at openComic() time saw a
     // stale/small width. Refit on the next event-loop turn once the geometry has settled, so the opening page
     // fits width and the two-up spread is evaluated against the real viewport. Idempotent (classic mode too).
+    // #154: the strip has the same problem and the same answer — it is laid out for a width that is only
+    // right once the host has finished, so it is laid out again on the next turn.
+    if (mode_ == ComicRead::Mode::Webtoon && !photoMode_)
+    {
+        QTimer::singleShot(0, this, [this] { relayoutStrip(); updateLabel(); });
+        return;
+    }
     if (!image_.isNull())
         QTimer::singleShot(0, this, [this] { rescale(); updateLabel(); });
 }

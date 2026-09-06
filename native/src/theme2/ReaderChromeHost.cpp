@@ -57,10 +57,32 @@ QString ReaderBridge::pageLabel() const
     const int p = reader_->currentPage(), pc = reader_->pageCount();
     if (reader_->spreadActive() && p + 1 <= pc)
         return QStringLiteral("%1–%2 / %3").arg(p).arg(p + 1).arg(pc); // N–N+1 / M (en dash, as the classic bar)
-    return QStringLiteral("%1 / %2").arg(p).arg(pc);
+    // #154: the reader adds what a NUMBER cannot say on its own - "(approx)" in a continuous strip, where
+    // the page is where you are rather than what is on screen, and which half of a split spread you are
+    // looking at. It comes from the reader because the bridge has no business knowing either, and it is
+    // here rather than only in the classic bar because a label that reads differently on the two layouts
+    // is the same feature twice.
+    const QString note = reader_->pageLabelNote();
+    return note.isEmpty() ? QStringLiteral("%1 / %2").arg(p).arg(pc)
+                          : QStringLiteral("%1 / %2 %3").arg(p).arg(pc).arg(note);
 }
 int  ReaderBridge::fontSize() const  { return reader_ ? reader_->fontPt() : 14; }
 bool ReaderBridge::twoUp() const     { return reader_ && reader_->twoUp(); }
+
+// Reading modes (issue #154). The bridge asks the reader what its extra controls are called and which are on;
+// it knows what none of them mean, which is what lets increment 2 add one without touching this file.
+QStringList ReaderBridge::comicControls() const
+{
+    return (reader_ && kind_ == ReaderKind::Comic) ? reader_->comicControlLabels() : QStringList();
+}
+QVariantList ReaderBridge::comicControlsOn() const
+{
+    QVariantList out;
+    if (!reader_ || kind_ != ReaderKind::Comic) return out;
+    const QVector<bool> on = reader_->comicControlActive();
+    for (bool b : on) out.append(b);
+    return out;
+}
 
 QVariantList ReaderBridge::fontOptions() const
 {
@@ -271,7 +293,10 @@ int ReaderBridge::settingsRowCount() const
 {
     if (kind_ == ReaderKind::Book)
         return ReadAloud::bookSettingsRowCount(readAloudAvailable()) + (selectionSupported() ? 1 : 0);
-    return (kind_ == ReaderKind::Comic) ? 5 : 4;
+    // #154: the comic's five fixed controls (Exit, −, +, Fit, Two-Up) plus one per per-series control the
+    // reader offers. Stated ONCE here, as read-aloud's count is, so the zone the cursor can walk and the row
+    // the QML draws cannot disagree — and so a photo folder, which offers none, keeps the row it had.
+    return (kind_ == ReaderKind::Comic) ? 5 + comicControls().size() : 4;
 }
 
 void ReaderBridge::beginSelection()
@@ -375,6 +400,15 @@ void ReaderBridge::activateSetting(int index)
         }
         emit changed();   // narration's labels (Stop/Resume/speed/voice) are read straight off this bridge
         return;   // these already emit changed(); a reader page command did not happen
+    }
+
+    // #154: everything past the fixed four is one of the comic's per-series controls, fired by the offset the
+    // row drew it at. Guarded against a stale index (a count that arrived before the reader did) the same way
+    // the read-aloud cases are, so the row can never fire a control it is not drawing.
+    if (kind_ == ReaderKind::Comic && index >= 5)
+    {
+        if (index - 5 < comicControls().size()) reader_->comicActivateControl(index - 5);
+        return;
     }
 
     switch (index)

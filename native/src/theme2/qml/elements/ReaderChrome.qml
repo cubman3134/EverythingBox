@@ -153,8 +153,17 @@ Rectangle {
                                 return brows
                             }
                             var rows = [{ i: 1, t: "−" }, { i: 2, t: "+" }, { i: 3, t: "Fit" }]
-                            if (chrome.readerType === "comic")
+                            if (chrome.readerType === "comic") {
                                 rows.push({ i: 4, t: "Two-Up", on: chrome.br.twoUp })
+                                // Reading modes (issue #154). The comic's per-series controls come from the
+                                // reader as labels, so this row draws whatever it is given and the index it
+                                // draws with is the index the host fires (5 + the position in that list).
+                                // A photo folder returns none and the row is the four it always was.
+                                var cc = chrome.br.comicControls
+                                var on = chrome.br.comicControlsOn
+                                for (var k = 0; k < cc.length; ++k)
+                                    rows.push({ i: 5 + k, t: cc[k], on: (k < on.length && on[k] === true) })
+                            }
                             return rows
                         }
                         delegate: Loader {
