@@ -89,6 +89,14 @@ namespace Settings
     ReaderTypography::Theme readerTheme();   // key "reader/theme"; default Light (stored as int 0..3)
     void    setReaderTheme(ReaderTypography::Theme t);
 
+    // In-book lookup (issue #137). Define and Wikipedia are zero-config (Wiktionary's and Wikipedia's REST
+    // endpoints need no key), so the only setting the feature has is WHERE to translate: a LibreTranslate-class
+    // instance URL, supplied by the user because no such endpoint is free and keyless. EMPTY IS MEANINGFUL —
+    // the Translate verb is then ABSENT from the reader's action menu rather than present and failing, which is
+    // the difference between a feature you have not set up and one that is broken.
+    QString readerTranslateEndpoint();      // key "reader/translateEndpoint"; default "" (no Translate verb)
+    void    setReaderTranslateEndpoint(const QString& url);
+
     // Audio output (issue #69): the output device, passthrough (bitstream to receiver) and exclusive mode,
     // mapped to mpv's audio-device / audio-spdif / audio-exclusive via AudioOutput::toMpvOptions. Unlike the
     // subtitle look above, these are DEVICE-LOCAL: an audio-device id is meaningless on another machine, so the

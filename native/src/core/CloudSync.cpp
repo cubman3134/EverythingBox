@@ -457,6 +457,13 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // local.) The prefix is "highlights/" with the slash; probe_cloudmerge asserts it is per-item-synced
         // and NOT device-local so a later edit to either table cannot reclassify it silently.
         || key.startsWith(QStringLiteral("highlights/"))
+        // The looked-up vocabulary list (issue #137). A word you had to look up is a fact about the READER,
+        // not about the machine they were holding at the time, so it syncs on exactly the highlight terms
+        // above: per-item, per-profile, NOT device-local, riding the CloudMerge document with the union-by-id
+        // + newest-ts + delete-tombstone rule. The id is the WORD (VocabularyStore::idFor), so two devices
+        // that met the same word converge on ONE row instead of listing it twice. probe_lookup asserts it is
+        // per-item-synced and NOT device-local so a later edit to either table cannot reclassify it silently.
+        || key.startsWith(QStringLiteral("vocabulary/"))
         // Per-item audio bookmarks (issue #140). A bookmarked POSITION in an audiobook/podcast is a property of
         // the CONTENT the issue wants to "survive switching devices", exactly like #136's reading bookmarks and
         // resume — so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge document with

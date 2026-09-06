@@ -15,6 +15,9 @@
 #include "../core/HighlightStore.h"    // per-book highlights: the range anchor + the fixed palette (issue #136)
 #include "ReaderAnnotations.h"         // the ONE document-order merge of bookmarks + highlights (issue #136)
 #include "../ui/nav/NavOverlay.h"      // NavMenu: the colour picker and the annotation list (nav kit only)
+#include "../core/LookupClient.h"   // issue #137: the in-book lookup's one socket owner
+#include "../core/LookupRequest.h"  // issue #137: the pure URL/response/failure-sentence half
+#include "../core/VocabularyStore.h" // issue #137: the per-profile looked-up word list
 #include "ReadAloud.h"                 // the pure divider/stripper/position map (issue #145)
 #include "ReaderGestureConfig.h"        // issue #147: the reader's ONE touch vocabulary, from stored prefs
 #include "ReaderSpread.h"               // issue #147: dual-page landscape geometry
@@ -1143,6 +1146,7 @@ void EbookView::hideEvent(QHideEvent* e)
 {
     QWidget::hideEvent(e);
     updateKeepAwake();   // the reader was left: the screen may sleep again, at once and not on a timer
+    cancelLookup();      // issue #137: the book was closed; the answer to the old question is not wanted
 }
 
 void EbookView::setStreamIssueVisible(bool on)
@@ -1187,6 +1191,7 @@ void EbookView::loadChapter(int index, bool toLast)
 {
     const QStringList& files = book_->chapterFiles();
     if (files.isEmpty()) return;
+    cancelLookup();   // issue #137: a chapter change is a page turn writ large
     chapter_ = qBound(0, index, files.size() - 1);
 
     QFile f(files[chapter_]);
@@ -1212,6 +1217,7 @@ void EbookView::loadChapter(int index, bool toLast)
 void EbookView::nextPage()
 {
     if (!book_->isOpen()) return;
+    cancelLookup();   // issue #137: the reader moved on, so the answer must not arrive over the new page
     // While narrating, the page follows the narrator, so a page key is a PARAGRAPH move - the reader's twin of
     // #140's jump controls (issue #145). Paging by hand here would be undone by the very next utterance.
     if (readAloudActive()) { readAloudSkip(+1); return; }
@@ -1239,6 +1245,7 @@ void EbookView::accrueReadingProgress()
 void EbookView::prevPage()
 {
     if (!book_->isOpen()) return;
+    cancelLookup();   // issue #137: the reader moved on, so the answer must not arrive over the new page
     if (readAloudActive()) { readAloudSkip(-1); return; }   // paragraph back while narrating (issue #145)
     if (page_->pageBackward())   { /* moved within the chapter */ }
     else if (chapter_ > 0)         loadChapter(chapter_ - 1, /*toLast*/ true);
@@ -1645,11 +1652,19 @@ void EbookView::raClearSpoken()
 
 QString EbookView::raBookKey() const { return itemKey(); }
 
-// The book's own dc:language is not reachable through EbookSource, and adding it would mean editing the format
-// parsers - which issue #144 owns this cycle. The system locale stands in: it is right for the overwhelming
-// majority of a library, and every installed voice is still one press of the Voice control away, so a book in
-// another language is never stuck with the wrong narrator.
-QString EbookView::raPreferredLanguage() const { return QLocale::system().name(); }
+// THE BOOK'S OWN LANGUAGE, which #145 left as a seam and #137 finally fills in. EbookSource::language() is
+// dc:language out of the EPUB package, verbatim and never guessed; the system locale is the STATED fallback
+// for a book (or a format) that declared none, which is right for the overwhelming majority of a library.
+// It is one answer, not two: the narrator's voice and the dictionary edition a lookup asks are the same
+// question about the same book, and letting them disagree is how a French novel gets an English dictionary
+// and a French voice in the same session.
+QString EbookView::bookLanguage() const
+{
+    const QString declared = book_ ? book_->language().trimmed() : QString();
+    return declared.isEmpty() ? QLocale::system().name() : declared;
+}
+
+QString EbookView::raPreferredLanguage() const { return bookLanguage(); }
 
 void EbookView::raNarrationChanged()
 {
@@ -1747,7 +1762,7 @@ bool EbookView::handleCursorKey(int key)
     {
         const ReaderAnchor range = cursor_.toAnchor(chapter_, text);
         if (!range.isRange()) { cursor_.anchor = -1; syncCursorVisuals(); return true; }  // nothing but space
-        offerHighlightColour(range);
+        offerSelectionActions(range);
         return true;
     }
     default:
@@ -1799,6 +1814,150 @@ void EbookView::annotationsChanged()
 {
     refreshHighlightBands();
     emit pageInfoChanged();   // the hosted chrome re-reads the annotation list off the same stores
+}
+
+// ---- In-book lookup (issue #137) ---------------------------------------------------------------------------
+// THE VERBS ARE RIDERS ON #136's SELECTION. A committed selection used to open the colour menu directly;
+// it now opens the ANNOTATION ACTION MENU, and Highlight is one of its rows. That is the whole integration:
+// no second selection path, no second key map, no second way in. Both layouts get it for the same reason
+// #136's mode did — the menu lives in the READER, not in either chrome.
+//
+// DEFINE AND WIKIPEDIA ARE ALWAYS OFFERED (they need no configuration); TRANSLATE IS OFFERED ONLY WHEN AN
+// INSTANCE IS SET, because a verb that cannot work should not be on the menu. All three are absent for a
+// selection that is not a word or a short phrase — a mis-committed paragraph is not a dictionary lookup, and
+// silently posting one to a translator is exactly the surprise the privacy line promises does not happen.
+void EbookView::offerSelectionActions(const ReaderAnchor& range)
+{
+    const QString text = page_ ? page_->plainText() : QString();
+    const QString term = ReaderSelection::textOf(text, range);
+    const bool lookupable = LookupRequest::isLookupable(term);
+    const bool translatable = lookupable
+                           && LookupRequest::translateConfigured(Settings::readerTranslateEndpoint());
+
+    QStringList rows;
+    QVector<int> verbs;   // -1 = the highlight colour picker; otherwise a LookupRequest::Verb
+    rows  << tr("Highlight…");
+    verbs << -1;
+    if (lookupable)
+    {
+        rows  << tr("Define") << tr("Wikipedia");
+        verbs << int(LookupRequest::Verb::Define) << int(LookupRequest::Verb::Wikipedia);
+    }
+    if (translatable)
+    {
+        rows  << tr("Translate");
+        verbs << int(LookupRequest::Verb::Translate);
+    }
+
+    new NavMenu(term.isEmpty() ? tr("Selection") : term, rows, [this, range, term, verbs](int row) {
+        if (row < 0 || row >= verbs.size()) { syncCursorVisuals(); return; }
+        if (verbs.at(row) < 0) { offerHighlightColour(range); return; }
+        runLookup(verbs.at(row), term, range, bookLanguage());
+    }, window());
+}
+
+// One lookup, one card. The card opens IMMEDIATELY saying it is looking — so a slow network is a card that
+// says so rather than a menu that appears to have swallowed the press — and the same card is relabelled with
+// whatever comes back. Because LookupRequest never returns a failure without a sentence, there is no path
+// that leaves it on "Looking up…".
+void EbookView::runLookup(int verb, const QString& term, const ReaderAnchor& range, const QString& lang)
+{
+    if (!LookupRequest::isLookupable(term)) return;
+    const LookupRequest::Verb v = static_cast<LookupRequest::Verb>(verb);
+
+    cancelLookup();
+    if (!lookup_) lookup_ = new LookupClient(this);   // lazily: a reader who never looks a word up owns no NAM
+
+    const QString code = LookupRequest::normalizeLang(lang);
+    QString title;
+    switch (v)
+    {
+    case LookupRequest::Verb::Wikipedia: title = tr("Wikipedia — %1").arg(term); break;
+    case LookupRequest::Verb::Translate: title = tr("Translate — %1").arg(term); break;
+    case LookupRequest::Verb::Define:    title = tr("Define — %1 (%2)").arg(term, code); break;
+    }
+
+    auto* card = new NavConfirm(title, tr("Looking up…"),
+                                QStringList() << tr("Language…") << tr("Close"), 1, window());
+    lookupCard_ = card;
+    connect(card, &NavOverlay::closed, this, [this, verb, term, range](int r) {
+        lookupCard_.clear();
+        if (lookup_) lookup_->cancel();   // the card was closed while the answer was still on the wire
+        // Deferred one turn of the loop: this runs INSIDE the card's dismiss(), and opening the next overlay
+        // from under an emission is the #28/#211 shape. A zero timer puts it after the frame, not in it.
+        if (r == 0) QTimer::singleShot(0, this, [this, verb, term, range] {
+            offerLookupLanguage(verb, term, range);
+        });
+    });
+
+    // The TRANSLATION TARGET is the reader's own locale: you translate a foreign book INTO the language you
+    // read the interface in. The SOURCE is the book's, which is the whole point of the language seam.
+    const QString target = LookupRequest::normalizeLang(QLocale::system().name());
+    const QString bookText = page_ ? page_->plainText() : QString();
+    const QString context = LookupRequest::contextAround(bookText, range.offset, range.endOffset);
+    const QString bookTitle = book_ ? book_->title() : QString();
+    const QString key = itemKey();
+
+    lookup_->start(v, term, code, target, Settings::readerTranslateEndpoint(),
+                   [this, v, term, code, context, bookTitle, key, range](LookupRequest::Outcome out) {
+        if (NavConfirm* c = lookupCard_.data()) c->setMessage(out.text);
+        if (!out.ok) return;
+        // A word only joins the vocabulary list when the lookup actually SAID something. Recording the
+        // failures too would fill a reader's list with words the app could not answer, which is a list of the
+        // app's problems rather than of theirs.
+        VocabularyStore::Word w;
+        w.word       = term;
+        w.lang       = code;
+        w.source     = LookupRequest::verbName(v);
+        w.definition = out.text;
+        w.bookKey    = key;
+        w.bookTitle  = bookTitle;
+        w.context    = context;
+        w.spine      = range.spine;
+        w.offset     = range.offset;
+        VocabularyStore::add(w);
+    });
+}
+
+// The language OVERRIDE the issue asks the panel to offer. The book's declaration is a seed, not a verdict:
+// an English novel quoting French, or a book whose package simply lies, is one press away from the right
+// dictionary. The list is short on purpose — it is read on a television with a pad.
+namespace {
+struct LookupLang { const char* code; const char* name; };
+const LookupLang kLookupLangs[] = {
+    { "en", "English" },  { "fr", "French" },     { "de", "German" },   { "es", "Spanish" },
+    { "it", "Italian" },  { "pt", "Portuguese" }, { "nl", "Dutch" },    { "sv", "Swedish" },
+    { "pl", "Polish" },   { "ru", "Russian" },    { "ja", "Japanese" }, { "zh", "Chinese" },
+    { "ko", "Korean" },   { "la", "Latin" },
+};
+const int kLookupLangCount = int(sizeof(kLookupLangs) / sizeof(kLookupLangs[0]));
+}
+
+void EbookView::offerLookupLanguage(int verb, const QString& term, const ReaderAnchor& range)
+{
+    const QString current = LookupRequest::normalizeLang(bookLanguage());
+
+    QStringList rows;
+    int initial = 0;
+    for (int i = 0; i < kLookupLangCount; ++i)
+    {
+        rows << QStringLiteral("%1 (%2)").arg(QString::fromLatin1(kLookupLangs[i].name),
+                                              QString::fromLatin1(kLookupLangs[i].code));
+        if (QLatin1String(kLookupLangs[i].code) == current) initial = i;
+    }
+    new NavMenu(tr("Look up in…"), rows, [this, verb, term, range](int row) {
+        if (row < 0 || row >= kLookupLangCount) return;
+        runLookup(verb, term, range, QString::fromLatin1(kLookupLangs[row].code));
+    }, window(), initial);
+}
+
+// A lookup is abandoned when the reader moves on: a page turn, a chapter change, the book being closed, or
+// the card being dismissed. Cancelling drops the CALLBACK as well as the socket, so a cancelled lookup can
+// neither relabel a card that is now about something else nor record a word the reader walked away from.
+void EbookView::cancelLookup()
+{
+    if (lookup_) lookup_->cancel();
+    if (NavConfirm* c = lookupCard_.data()) { lookupCard_.clear(); c->dismiss(-1); }
 }
 
 // The colour menu for a FRESH selection. NavMenu, not a popup: the nav kit is the only menu this app has, and

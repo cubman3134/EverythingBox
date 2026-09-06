@@ -45,6 +45,7 @@
 #include "Tombstones.h"
 #include "CloudMerge.h"
 #include "HighlightStore.h"   // issue #136: the real store the highlights section drives
+#include "VocabularyStore.h"  // issue #137: the real store the vocabulary section drives
 #include "ReaderAnchor.h"      // issue #136: the range anchor a highlight is
 #include "Tracker.h"         // issue #156: the credentials/links carve-out split, asserted below
 #include "TrackerLinks.h"
@@ -349,7 +350,7 @@ int main(int argc, char** argv)
     auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
     auto wipeStores = [&]() {
         QSettings raw(iniPath, QSettings::IniFormat);
-        for (const char* g : {"marks", "favorites", "bookmarks", "highlights", "audiobookmarks", "playlists", "filterpresets",
+        for (const char* g : {"marks", "favorites", "bookmarks", "highlights", "vocabulary", "audiobookmarks", "playlists", "filterpresets",
                               "deleted", "resume", "recent", "metaoverrides", "launchopts", "speed", "lyricoffset", "missed", "follow", "followsnap", "trackerlink", "channels"})
             raw.remove(QLatin1String(g));
         raw.sync();
@@ -2448,6 +2449,83 @@ int main(int argc, char** argv)
         CHECK(wide != narrow);
         mergeDoc(hNarrow);
         CHECK(hlIds() == (QStringList{wide}));
+
+        wipeStores();
+        useProfile(QString());
+    }
+
+    // ---- 24d-3. The looked-up VOCABULARY list (issue #137): the highlights section above, for WORDS ----------
+    //
+    // The same {items, tombs} shape under its own root key, written through the REAL VocabularyStore for the
+    // reason 24d-2 gives: what is pinned is that the store and the merge agree on the spelling of the key and
+    // of the id. The one thing that is different here, and the reason this section exists at all, is what the
+    // ID IS: the case-folded WORD plus its language, carrying neither the book nor the verb. That is what
+    // makes meeting a word twice — in another book, on another device — ONE row that updates, rather than a
+    // log with the same word in it four times.
+    {
+        useProfile(QStringLiteral("voc137"));
+        const QString vk = QStringLiteral("vocabulary/voc137/items");
+        auto word = [](const QString& w, const QString& lang, const QString& def) {
+            VocabularyStore::Word v; v.word = w; v.lang = lang; v.definition = def;
+            v.bookKey = QStringLiteral("/lib/V.epub"); v.bookTitle = QStringLiteral("A Book");
+            return v;
+        };
+        auto vocIds = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(vk).toString().toUtf8()).array())
+                out << v.toObject().value(QStringLiteral("id")).toString();
+            out.sort(); return out;
+        };
+        auto vocDef = [&](const QString& id) {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(vk).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject();
+              if (o.value(QStringLiteral("id")).toString() == id) return o.value(QStringLiteral("definition")).toString(); }
+            return QString();
+        };
+
+        // 24d3-a. It rides the document under its own root key, per profile.
+        wipeStores();
+        const QString wid = VocabularyStore::add(word(QStringLiteral("ineffable"), QStringLiteral("en"),
+                                                      QStringLiteral("Too great to be expressed."))).id;
+        CHECK(!wid.isEmpty());
+        const QJsonObject v1 = serializeNow();
+        CHECK(v1.contains(QStringLiteral("vocabulary")));
+        CHECK(v1.value(QStringLiteral("vocabulary")).toObject().contains(QStringLiteral("voc137")));
+
+        // 24d3-b. The SAME WORD on two devices is ONE row, and the newer statement about it wins. The id is
+        // the word and the language only, so a peer that met it through a different verb in a different book
+        // does not add a second row.
+        wipeStores();
+        VocabularyStore::add(word(QStringLiteral("Ineffable,"), QStringLiteral("en_GB"),
+                                  QStringLiteral("The peer's older note.")));
+        const QJsonObject vPeer = serializeNow();            // the peer's copy, written first
+        VocabularyStore::add(word(QStringLiteral("ineffable"), QStringLiteral("en"),
+                                  QStringLiteral("This device's newer note.")));
+        mergeDoc(vPeer);
+        CHECK(vocIds() == (QStringList{wid}));               // one row, not two
+        CHECK(vocDef(wid) == QLatin1String("This device's newer note."));
+
+        // 24d3-c. A word only ONE device knows about is imported, not dropped.
+        wipeStores();
+        const QString other = VocabularyStore::add(word(QStringLiteral("frabjous"), QStringLiteral("en"),
+                                                        QStringLiteral("Only the peer met this one."))).id;
+        const QJsonObject vOnly = serializeNow();
+        wipeStores();
+        VocabularyStore::add(word(QStringLiteral("ineffable"), QStringLiteral("en"), QStringLiteral("Mine.")));
+        mergeDoc(vOnly);
+        CHECK(vocIds().size() == 2);
+        CHECK(vocIds().contains(other));
+        CHECK(vocIds().contains(wid));
+
+        // 24d3-d. THE RAIL. A word removed here is not resurrected by a peer that still holds it — the same
+        // tombstone-at-or-after-ts rule every other per-item store follows.
+        wipeStores();
+        VocabularyStore::add(word(QStringLiteral("ineffable"), QStringLiteral("en"), QStringLiteral("Gone.")));
+        const QJsonObject vStale = serializeNow();           // the peer still has it, no tombstone
+        VocabularyStore::remove(wid);
+        mergeDoc(vStale);
+        CHECK(vocIds().isEmpty());
 
         wipeStores();
         useProfile(QString());

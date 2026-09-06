@@ -221,6 +221,12 @@ void Settings::setReaderMargin(int pct)
 }
 
 bool Settings::readerJustify() { return store().value(QStringLiteral("reader/justify"), false).toBool(); }
+
+// The in-book lookup's translation instance (issue #137). Trimmed on the way in, because a URL pasted from a
+// browser carries a trailing space often enough to matter and an endpoint that differs from the one the user
+// believes they typed is unexplainable from the outside.
+QString Settings::readerTranslateEndpoint() { return store().value(QStringLiteral("reader/translateEndpoint")).toString().trimmed(); }
+void Settings::setReaderTranslateEndpoint(const QString& url) { store().setValue(QStringLiteral("reader/translateEndpoint"), url.trimmed()); store().sync(); }
 void Settings::setReaderJustify(bool on)
 {
     store().setValue(QStringLiteral("reader/justify"), on); store().sync();

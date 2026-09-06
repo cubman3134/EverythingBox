@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.191 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.192 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -770,6 +770,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
         src/core/HighlightStore.cpp src/core/HighlightStore.h  # per-book highlights: the same anchor with its range end (issue #136)
+        src/core/VocabularyStore.cpp src/core/VocabularyStore.h  # the looked-up word list, per-item-synced (issue #137)
+        src/core/LookupClient.cpp src/core/LookupClient.h      # the in-book lookup's one socket owner (issue #137)
+        src/core/LookupRequest.h                               # ...and its pure URL/response/failure half (header-only)
         src/core/AudioBookmarkStore.cpp src/core/AudioBookmarkStore.h  # per-item audio bookmarks, per-item-synced (issue #140)
         src/ebook/ReaderAnchor.h                             # the one repagination-stable reader anchor model (issue #136, header-only)
         src/ebook/ReaderSelection.h                          # the pure D-pad selection state machine (issue #136, header-only)
@@ -867,6 +870,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
@@ -1207,6 +1211,38 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_highlights PRIVATE src src/core src/ebook src/theme2)
     target_link_libraries(probe_highlights PRIVATE Qt6::Core Qt6::Gui)
+
+    # In-book lookup (issue #137): the three verbs' request shapes, every failure sentence, the language seam,
+    # the VocabularyStore round trip + its sync classification, and the cancel a page turn fires. It runs a
+    # FIXTURE HTTP SERVER on loopback (QTcpServer), so it needs Qt6::Network for both the stub and the real
+    # LookupClient. The classification asserts go through the REAL CloudSync carve-out, which is why this
+    # target pulls the same lean CloudSync subset probe_audioout does (SettingsTxn, BrandMigration, TraktSync,
+    # PendingPush and miniz are CloudSync.cpp's TU, unused by the asserts). The CloudMerge ROUND TRIP lives in
+    # probe_cloudmerge instead, exactly where #136 put the highlights one: CloudMerge.cpp reaches into forty
+    # other stores, and linking all of them here to merge one word list would be a probe that fails for
+    # everyone else's reasons.
+    # Qt6::Gui is CloudSync's QDesktopServices (OAuth browser open).
+    add_executable(probe_lookup tools/probe_lookup.cpp
+        src/core/LookupRequest.h                                    # header-only: the URLs, the readers, the sentences
+        src/core/LookupClient.cpp     src/core/LookupClient.h
+        src/core/VocabularyStore.cpp  src/core/VocabularyStore.h
+        src/core/Tombstones.cpp       src/core/Tombstones.h
+        src/core/ProfileStore.cpp     src/core/ProfileStore.h
+        src/core/CloudSync.cpp        src/core/CloudSync.h
+        src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h
+        src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
+        src/core/SyncBackend.h
+        src/core/Settings.cpp         src/core/Settings.h
+        src/core/SettingsTxn.cpp      src/core/SettingsTxn.h
+        src/core/BrandMigration.cpp   src/core/BrandMigration.h
+        src/core/TraktSync.cpp        src/core/TraktSync.h
+        src/core/TraktRead.cpp        src/core/TraktRead.h
+        src/core/PendingPush.cpp      src/core/PendingPush.h
+        src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
+        third_party/miniz.c)
+    target_include_directories(probe_lookup PRIVATE src src/core src/ebook src/media src/theme2 third_party)
+    target_compile_definitions(probe_lookup PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_lookup PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Per-item audio bookmarks (issue #140): the AudioBookmarkStore round-trip (add/remove/list-sorted-by-position
     # + the delete tombstone) and the jump-interval Settings default. QtCore-only (a QSettings wrapper over the
@@ -1994,6 +2030,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # hand-built fixture would paper over. QtCore-only, and every dependency it has (Tombstones,
         # ProfileStore) is already linked here for favourites.
         src/core/HighlightStore.cpp  src/core/HighlightStore.h
+        # issue #137: the looked-up VOCABULARY store. Section 24d-3 drives the REAL store for 24d-2's reason -
+        # what is pinned is that the store and the merge agree on the key AND on the id, which for this one is
+        # the WORD rather than a position. QtCore-only; Tombstones/ProfileStore are already linked here.
+        src/core/VocabularyStore.cpp src/core/VocabularyStore.h
+        src/core/LookupRequest.h                                # header-only: VocabularyStore::idFor's seed
         # issue #184: saved filter presets, now a synced per-profile store. CloudMerge calls
         # FilterPresetStore::syncIdForName (legacy-id back-fill) and §33 asserts through the store accessor;
         # FilterPresetStore parses/serializes a gamefilter::Filter, so GameFilter comes with it. QtCore-only.

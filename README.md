@@ -96,9 +96,9 @@ keyboard) and a caret appears at the top of the page:
 | **Enter** | first press starts the selection here; second press finishes it |
 | **Back / Escape** | drops the selection, and again leaves the mode |
 
-Finishing a selection offers four colours. On a phone or a tablet, **hold a finger on a word** to open the
-caret there instead — the same hold the video player already uses, so the gesture means the same thing in
-both.
+Finishing a selection opens the **action menu**: Highlight, and — for a word or a short phrase — Define,
+Wikipedia and Translate. On a phone or a tablet, **hold a finger on a word** to open the caret there instead
+— the same hold the video player already uses, so the gesture means the same thing in both.
 
 A highlight is anchored to the *characters* it covers, not to a page, so changing the font size, the
 typeface or the window keeps it on the same words. Move the caret into an existing highlight and press
@@ -113,6 +113,40 @@ device you made it on, so it follows you the way a bookmark does, with deletes t
 Comics and PDFs keep their bookmarks and simply have no highlights — there is no text layer to anchor one in.
 
 Not here yet: **notes** on a highlight, an **export** of a book's annotations, and PDF region highlights.
+
+### Looking a word up without leaving the book
+
+The three verbs on the selection menu answer in a **card over the page**, not in a browser: staying in the
+book is the entire point.
+
+| | |
+|---|---|
+| **Define** | the dictionary entry, from **Wiktionary**'s open REST API |
+| **Wikipedia** | the article's opening summary, from **Wikipedia**'s summary endpoint |
+| **Translate** | a translation, from a **LibreTranslate**-class instance you name in Settings ▸ Reading |
+
+Define and Wikipedia need **no setting and no account**. Translate has no free keyless service to point at,
+so it is off until you give it an address; leave that empty and the Translate verb simply is not offered,
+rather than sitting on the menu and failing.
+
+**The language comes from the book.** An EPUB that declares `dc:language` is looked up in that language's
+Wiktionary and Wikipedia — a French novel gets `fr.wiktionary.org`, not the English one — and a translation
+is *from* the book's language into yours. A book that declares nothing falls back to your system language.
+Either way **Language…** on the card overrides it for that lookup, for the English novel that quotes French.
+
+Every failure is a sentence you can act on: no entry for this word, no article, the service is unreachable,
+the service refused. A lookup never sits on "Looking up…" for ever, and it is **cancelled when you turn the
+page** — the answer to the old question does not arrive over the new page.
+
+Words you look up are kept: **Settings ▸ Reading ▸ Words I looked up** lists them newest first, with what was
+said, the book, and the sentence you met it in. The list is per profile and **syncs** like a bookmark does.
+Looking the same word up twice updates its row rather than adding a second one — it is a vocabulary, not a
+log. There are no flashcards and no scheduling.
+
+**On privacy, plainly:** each of those three verbs is a **network request that sends the words you selected**
+— to Wiktionary, to Wikipedia, or to the translation service you named. Nothing is ever looked up merely
+because you selected it; it takes pressing one of the three. Offline dictionaries (StarDict) are not here
+yet, and they are the answer for anyone who would rather not make the request at all.
 
 ### Reading on a touch screen
 

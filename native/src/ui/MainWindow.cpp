@@ -22141,6 +22141,26 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("reader.hint"),
              tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the page but keep your place."),
              QString());
+        // --- In-book lookup (issue #137). Define and Wikipedia need no configuration at all, so the only
+        // control here is WHERE to translate; leaving it empty removes the Translate verb from the reader
+        // rather than leaving it there to fail. The word list is an action row for #161's reason — it is a
+        // LIST, and a list wants its own surface, not a panel of rows. The hint is a PRIVACY statement, and it
+        // is deliberately blunt: a lookup is a network call carrying the words you selected. Classic twins are
+        // in the QWidget builder below (GS_TWINS). ---
+        textf(QStringLiteral("reader.translate"), tr("Translation service (LibreTranslate address)"),
+              Settings::readerTranslateEndpoint());
+        action(QStringLiteral("reader.vocab"),
+               vocabularyWordCount() > 0
+                   ? tr("Words I looked up (%n)", "", vocabularyWordCount())
+                   : tr("Words I looked up"));
+        info(QStringLiteral("reader.lookuphint"),
+             tr("Select a word while reading and the menu offers Define, Wikipedia and Translate. Each one is "
+                "a NETWORK REQUEST that sends the words you selected — to Wiktionary, to Wikipedia, or to the "
+                "translation service you name above. Nothing is ever looked up just because you selected it: "
+                "it takes pressing one of those three. Words you look up are kept in the list above, on this "
+                "profile, and sync with your other devices. Leave the translation address empty and the "
+                "Translate verb is not offered at all."),
+             QString());
         // --- Touch reading (issue #147). The tap-zone preset, swipe paging and keep-awake are inert unless
         // this device reports a touch form factor (ReaderGestureConfig applies the same FormFactor gate the
         // video player's gestures do), which is also what keeps a phone's preset out of the TV profile; the
@@ -22869,6 +22889,11 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("reader.dualpage")) {
                     Settings::setReaderDualPage(on); applyReaderTypographyLive();
                 }
+                // In-book lookup (issue #137). Same setter as the classic twin, and no live re-apply is owed:
+                // the reader reads the endpoint at the moment a verb is pressed, so a row changed here is in
+                // force by the next lookup without anything having to be told about it.
+                else if (id == QStringLiteral("reader.translate")) Settings::setReaderTranslateEndpoint(val);
+                else if (id == QStringLiteral("reader.vocab")) { openVocabularyList(); return; }
                 else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
                 else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
                 else if (id == QStringLiteral("os.pass")) Settings::setOpenSubPassword(val);
@@ -24754,6 +24779,39 @@ void MainWindow::openGeneralSettings()
         readerTouchNote->setWordWrap(true);
         readerTouchNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(readerTouchNote);
+
+        // In-book lookup (issue #137): the classic twins of the themed reader.translate TextField and
+        // reader.vocab Action rows. Same Settings key, same setter, same list surface — one write path, no
+        // drift (GS_TWINS). The privacy paragraph is the twin of the themed reader.lookuphint Info row, and
+        // it says the same thing in the same words: a lookup is a network call, and only a verb press makes
+        // one happen.
+        auto* rlNote = new QLabel(tr("Select a word while reading and the menu offers Define, Wikipedia and "
+            "Translate. Each one is a NETWORK REQUEST that sends the words you selected — to Wiktionary, to "
+            "Wikipedia, or to the translation service you name below. Nothing is ever looked up just because "
+            "you selected it: it takes pressing one of those three. Words you look up are kept in the list "
+            "below, on this profile, and sync with your other devices. Leave the translation address empty "
+            "and the Translate verb is not offered at all."));
+        rlNote->setWordWrap(true);
+        rlNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(rlNote);
+        auto* rlRow = new QHBoxLayout();
+        auto* rlLbl = new QLabel(tr("Translation service (LibreTranslate address)"));
+        rlLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        rlRow->addWidget(rlLbl);
+        auto* rlTranslate = new QLineEdit(Settings::readerTranslateEndpoint());
+        rlTranslate->setMinimumHeight(34);
+        rlRow->addWidget(rlTranslate, 1);
+        v->addLayout(rlRow);
+        // editingFinished, not textChanged: a half-typed URL is not an endpoint, and there is nothing to
+        // re-apply per keystroke — the reader reads this key at the moment a verb is pressed.
+        connect(rlTranslate, &QLineEdit::editingFinished, this, [rlTranslate] {
+            if (rlTranslate->text().trimmed() == Settings::readerTranslateEndpoint()) return;  // focus out, no edit
+            Settings::setReaderTranslateEndpoint(rlTranslate->text());
+        });
+        auto* rlVocab = new QPushButton(tr("Words I looked up…"));
+        connect(rlVocab, &QPushButton::clicked, this, [this] { openVocabularyList(); });
+        v->addWidget(rlVocab);
+        v->addSpacing(10);
 
         auto* readerNote = new QLabel(tr("Font, size, spacing, margins and theme for ebooks. Changes reflow the "
                                          "page but keep your place."));

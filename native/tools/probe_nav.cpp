@@ -329,6 +329,26 @@ int main(int argc, char** argv)
         confirm->dismiss(-1);
         pump();
 
+        // A confirm card whose message GROWS after it opened — the shape #137's lookup card has, and the one
+        // the whole "relabel it live" facility exists for. The card opens saying "Looking up…", the answer
+        // arrives seconds later and is several lines long, and setMessage() used to set the label text without
+        // re-fitting the panel around it: the panel kept the size it was built at, so everything past the
+        // first line was cut off. NavCountdown never noticed because it only ever swaps one digit. A live
+        // drive of #137 found it against a real Wiktionary entry; this is that, headless.
+        auto* growing = new NavConfirm(QStringLiteral("Define — ineffable (en)"),
+                                       QStringLiteral("Looking up…"),
+                                       { QStringLiteral("Language…"), QStringLiteral("Close") }, 1, &win);
+        fits(growing, "confirm(before the answer arrives)");
+        growing->setMessage(QStringLiteral(
+            "Symbol 1. ISO 639-2 and ISO 639-3 language code for a language spoken in Nevada.\n"
+            "Verb 1. First-person singular simple past indicative of be.\n"
+            "Verb 2. Third-person singular simple past indicative of be.\n"
+            "Verb 3. Second-person singular simple past indicative of be, chiefly in dialects that keep "
+            "the older form, and in a good deal of poetry besides."));
+        fits(growing, "confirm(message grown after it opened)");
+        growing->dismiss(-1);
+        pump();
+
         // A menu with a long title and long rows (a long game name in the Recent menu).
         auto* menu = new NavMenu(
             QStringLiteral("Super Ultra Mega Fighting Legends II: The Definitive Championship Edition (USA, Rev 2)"),

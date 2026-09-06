@@ -559,6 +559,11 @@ private:
     // A plain helper, NOT a slot: nothing connects to it, and declaring it in `private slots:` only made moc
     // emit dispatch machinery for a direct call.
     void remintAndOpen(const RecentItem& row, const QString& resumeKey);
+    // In-book lookup (issue #137). Both defined in MainWindowLookup.cpp, off this file's busiest TU: the
+    // count that labels the Settings ▸ Reading row, and the browsable list that row opens (both settings
+    // builders reach the same one — GS_TWINS). The lookup itself lives in the READER, not here.
+    int  vocabularyWordCount() const;
+    void openVocabularyList();
     // #224: arm "Issue with Streaming" for a stream a re-mint has just OPENED. Two halves that have to move
     // together — HomeView's alternate-source context (what a swap would re-resolve) and this window's
     // capability flag (whether the button is drawn at all) — because either alone is a lie: a flag with no
