@@ -5,15 +5,27 @@
 #pragma once
 #include <QWidget>
 #include <QVector>
+#include <QHash>
+#include <QPixmap>
 #include <QByteArray>
 #include <QImage>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
+#include "ReadingModes.h"          // #154: the mode, the split/crop/filter rules, the webtoon strip
 #include "../theme2/HostedReader.h"
 
 class QScrollArea;
 class QLabel;
+class QPushButton;
+class QVBoxLayout;
+// #154: the two surfaces webtoon mode adds — the continuous strip and its thumbnail rail. Both are plain
+// QWidgets defined in ComicView.cpp: they carry no signals of their own, are never named outside it and so
+// need no header and no moc. They live INSIDE the reader rather than in the themed chrome on purpose —
+// ComicView is the same widget under both layouts, so one implementation is on both, where a themed NavGraph
+// zone would have been on the themed layout only.
+class ComicStripWidget;
+class ComicRailWidget;
 
 // Fit-to-PAGE scale for a two-page (open-book) spread: the SMALLER of fit-to-width and fit-to-height, so the
 // whole spread stays visible in BOTH dimensions. Pure arithmetic — no widgets, no Qt objects — so it is unit-
@@ -61,6 +73,31 @@ public:
     // pages are numbered in reading order by the people who scanned it, and reversing them here would undo
     // that (and put the cover last).
     bool rightToLeft() const { return rtl_; }
+
+    // ---- READING MODES (issue #154) -------------------------------------------------------------------------
+    // The mode this comic is being read in, and the five per-series controls the reader offers over it. Each
+    // cycle writes the new value to the series' store and applies it to the page on screen immediately — there
+    // is no apply step and no dialog, because every one of them is a thing you judge by looking at the page.
+    //
+    // WHY THESE ARE ON ComicView AND NOT IN GENERAL SETTINGS. They are PER SERIES, and a per-series control
+    // belongs where the series is: in front of you, while you read it. The one global reading surface (#147's)
+    // holds the settings that are the same for every book you own; these are not. Both layouts reach the same
+    // five methods — the classic bar's buttons below and the themed chrome's control row through
+    // comicControlLabels()/comicActivateControl() — so the feature exists once and is on both.
+    ComicRead::Mode readingMode() const { return mode_; }
+    void cycleReadingMode();     // paged L2R -> paged R2L -> webtoon -> paged L2R
+    void cycleSplitOverride();   // auto -> always -> never -> auto
+    void toggleBorderCrop();
+    void cycleColorFilter();     // none -> greyscale -> sepia -> night -> high contrast -> none
+    void toggleThumbnailRail();  // webtoon only; turning it on also gives it the reader's key cursor
+
+    // The themed chrome's extra comic controls, as labels + "is it on" + one activation by index. ONE generic
+    // trio rather than ten typed virtuals: the QML row appends one entry per label and fires back the index it
+    // drew, so increment 2's scan-quality controls are a label and a case, not a signature change in three files.
+    QStringList   comicControlLabels() const override;
+    QVector<bool> comicControlActive() const override;
+    void          comicActivateControl(int index) override;
+    QString       pageLabelNote() const override;   // "(approx)" in the strip, "half 1 of 2" over a split page
 
     // ---- Hosted mode (themed reader chrome, Plan B1 Task 4) ----------------------------------------------
     // Mirrors EbookView/PdfView: setHostedChrome(true) hides the reader's own bottom control bar so the themed
@@ -124,9 +161,38 @@ private:
                       QByteArray* comicInfoXml = nullptr); // .cb7 via SevenZip → temp dir
     bool loadCbtPages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cbt via the in-tree Tar reader
     bool loadCbrPages(const QString& path, QVector<QByteArray>& pages, QString* error); // .cbr via unarr (RarComic.h)
-    void showPage(int index);
+    // `dir` is which way the reader ARRIVED, and it decides one thing only: which half of a page that splits
+    // is on screen (#154 — arriving backwards shows the second half first). +1 for every caller that is not
+    // prevPage(), which is what it always was.
+    void showPage(int index, int dir = +1);
     void rescale();
     void updateLabel();
+
+    // ---- #154 internals -------------------------------------------------------------------------------------
+    void installModeControls();         // the classic bar's five per-series buttons
+    void installModeSurfaces(QVBoxLayout* column);   // the strip + the rail, as one row beside the scroll area
+    void readDisplayOptions();          // load this comic's per-series options out of the store
+    void writeOption(const char* option, int value);
+    void applyMode();                   // swap the scroll area between the paged label and the webtoon strip
+    void rebuildStrip();                // (re)compute the strip layout for the current viewport width
+    void relayoutStrip();               // rebuild AND land back on the same reading position
+    void scrollToPosition(int page, double fraction);
+    void scrollByViewport(int dir);     // webtoon: Up/Down, a viewport fraction at a time
+    void railStep(int delta);
+    void setRailFocus(bool on);   // (the rail is an incomplete type in ComicView.cpp)
+    void onStripScrolled();             // the scroll bar moved: which page is that, and what to prefetch
+    void prefetchAround(int page);
+    void currentPosition(int* page, double* fraction) const;   // where the reader is, in resume terms
+    bool pageSplits(int index) const;   // does page `index` split, under the override and this viewport
+    QSize rawPageSize(int index) const; // the page's own pixel size, from its header — no decode
+    QImage preparedPage(int index, int half) const;            // decode + crop + split + filter
+    QPixmap stripPixmap(int index);     // webtoon: the prepared page scaled to the strip's width (cached)
+    QPixmap railThumb(int index);       // webtoon: a small thumbnail for the rail (cached)
+    void updateBarButtons();            // relabel the classic bar's five per-series buttons
+    ComicRead::PageOptions optionsFor(int half) const;
+
+    friend class ComicStripWidget;
+    friend class ComicRailWidget;
     int  pageTotal() const;         // pages_.size() in comic mode, photoFiles_.size() in photo mode
     QImage decodeAt(int index) const; // decode page/photo bytes (EXIF auto-transform when in photo mode)
 
@@ -145,8 +211,35 @@ private:
     QStringList photoFiles_;      // photo mode: the folder's image files, natural order (comic mode: empty)
     QString path_;
 
+    // ---- #154 state -----------------------------------------------------------------------------------------
+    // All five are per SERIES, read at open and written the moment one is changed. seriesKey_ empty means this
+    // comic has nothing to remember settings under (a photo folder), and every write is then a no-op.
+    ComicRead::Mode   mode_   = ComicRead::Mode::PagedLtr;
+    ComicRead::Split  split_  = ComicRead::Split::Auto;
+    ComicRead::Filter filter_ = ComicRead::Filter::None;
+    bool crop_ = false;
+    bool railOn_ = false;
+    QString seriesKey_;
+    int  half_ = -1;              // paged split: -1 whole page, 0 first half on screen, 1 second half
+    QVector<QSize> pageSizes_;    // every page's own size, read from its HEADER at open (no decode)
+    ComicRead::Strip strip_;      // webtoon: where each page starts in the strip, for the current width
+    QHash<int, QPixmap> stripCache_;  // webtoon: prepared pages at strip width, held to the prefetch window
+    QHash<int, QPixmap> railCache_;   // webtoon: rail thumbnails (small; kept for the whole comic)
+    int  stripCacheWidth_ = 0;    // the width stripCache_ was built at — a resize invalidates it whole
+    bool railFocus_ = false;      // the rail holds the key cursor (Up/Down step it, Enter jumps)
+    int  railIndex_ = 0;
+    double resumeFraction_ = 0.0; // webtoon: the stored fraction into the resume page, until it is applied
+    bool inScrollUpdate_ = false; // guards the scrollbar -> current_ -> scrollbar loop
+
     QWidget* bar_ = nullptr;   // the bottom control bar (hidden in hosted/themed mode)
     QScrollArea* scroll_ = nullptr;
     QLabel* imageLabel_ = nullptr;
     QLabel* pageLabel_ = nullptr;
+    ComicStripWidget* stripWidget_ = nullptr;   // #154: the continuous webtoon strip (scroll_'s widget there)
+    ComicRailWidget*  railWidget_  = nullptr;   // #154: the thumbnail rail beside it
+    QPushButton* modeBtn_ = nullptr;            // the classic bar's five per-series controls
+    QPushButton* splitBtn_ = nullptr;
+    QPushButton* cropBtn_ = nullptr;
+    QPushButton* filterBtn_ = nullptr;
+    QPushButton* railBtn_ = nullptr;
 };

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.192 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.193 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -540,6 +540,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         # its pages. One parser, four containers (the seam dispatches on the extension); pure XML + the
         # rating/direction tables, so the whole of it is probe-testable without an archive at all.
         src/comic/ComicInfo.cpp   src/comic/ComicInfo.h
+        # #154: how a comic is READ -- the mode (paged L2R / paged R2L / webtoon), the split/crop/filter
+        # decisions and the webtoon scroll mapping, as free functions over plain values. Its own TU for the
+        # same reason ComicName is: ComicView cannot be driven headlessly, and these rules can.
+        src/comic/ReadingModes.cpp src/comic/ReadingModes.h
+        # ... and the reader half of it: the webtoon strip, the thumbnail rail and the five per-series
+        # controls, off ComicView.cpp for the reason MainWindow's features are off MainWindow.cpp (#186).
+        src/comic/ComicViewModes.cpp
         src/core/NaturalOrder.h                             # #205 the one numeric-aware collator (header-only)
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
@@ -1177,6 +1184,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/comic/RarComic.cpp    src/comic/RarComic.h    # ComicView's .cbr branch (#144, vendored unarr)
         src/comic/ComicInfo.cpp   src/comic/ComicInfo.h   # ComicView's reading direction (#152)
         src/comic/ComicName.cpp   src/comic/ComicName.h   # seriesKey(): the direction override's key (#152)
+        src/comic/ReadingModes.cpp src/comic/ReadingModes.h # ComicView's reading modes (#154)
+        src/comic/ComicViewModes.cpp                        # ... and their half of ComicView (#154)
         src/core/SevenZip.cpp     src/core/SevenZip.h     # ComicView's .cb7 branch
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h # ComicView's photo mode (issue #102)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
@@ -3005,6 +3014,30 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_comicinfo PRIVATE src src/core src/comic src/theme2 third_party tools)
     target_compile_definitions(probe_comicinfo PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_comicinfo PRIVATE Qt6::Core Qt6::Gui lzma7z unarr)
+
+    # Manga reading modes (issue #154): the per-series reading mode (paged L2R / paged R2L / webtoon), the
+    # page-split decision, the border-crop heuristic, the webtoon scroll<->page mapping, the neighbour
+    # prefetch window and the display-time colour filters - all of them free functions over plain values, so
+    # this probe is the specification and ComicView is a caller. Qt6::Gui is here for QImage (the crop scans
+    # one and the filters rewrite one); no QGuiApplication is created and none is needed for raster images.
+    #
+    # It links the SAME set probe_comicinfo does, for the same reason: ComicInfo.cpp carries the
+    # four-container seam, so the archive readers come along whether or not this probe opens an archive
+    # (it does not - it needs resolveDirection and the Direction enum). Settings.cpp (+ its FormFactor
+    # pairing) is the per-series store, and ComicName.cpp is the folded series key the store is keyed by.
+    add_executable(probe_readingmodes tools/probe_readingmodes.cpp
+        src/comic/ReadingModes.cpp src/comic/ReadingModes.h
+        src/comic/ComicInfo.cpp   src/comic/ComicInfo.h
+        src/comic/ComicName.cpp   src/comic/ComicName.h
+        src/comic/ComicPageOrder.h src/comic/Tar.h      # header-only (the image-member rule, the .cbt reader)
+        src/comic/RarComic.cpp    src/comic/RarComic.h
+        src/core/SevenZip.cpp     src/core/SevenZip.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        third_party/miniz.c)
+    target_include_directories(probe_readingmodes PRIVATE src src/core src/comic src/theme2 third_party tools)
+    target_compile_definitions(probe_readingmodes PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_readingmodes PRIVATE Qt6::Core Qt6::Gui lzma7z unarr)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one

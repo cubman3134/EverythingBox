@@ -178,6 +178,54 @@ to books; a comic's two-up spread is its own, and already knows about right-to-l
 Not here yet, and each deliberately its own pass: **auto-scroll** (paged and smooth), the **brightness
 swipe**, and **volume-key paging**.
 
+### Reading modes (comics and manga)
+
+A comic reader has to present three different things that are all "a bag of images in reading order", so the
+comic reader has a **reading mode**, and it is remembered **per series**:
+
+| Mode | What it does |
+|---|---|
+| **Paged L→R** | One page at a time, the next page to the right. What every comic did before any of this. |
+| **Paged R→L** | One page at a time, the next page to the **left**, and the earlier page on the right of a two-page spread — a manga. `ComicInfo.xml`'s `Manga` = `YesAndRightToLeft` selects it by itself. |
+| **Webtoon** | One **continuous vertical strip**, pages stitched edge to edge with no page boundaries — how Korean and Chinese webtoons are drawn, and the only way they read correctly. |
+
+**A webtoon is never guessed at.** Nothing in a comic's metadata says "long strip", publisher and format tags
+only hint at it, and being wrong replaces a readable comic with a scroll that never ends — so the mode is only
+ever reached by picking it. Pick it once per series and every chapter of that series opens in it, including
+chapters whose files carry no metadata at all (the series is then taken from the filename).
+
+In the strip, **Up/Down** scroll by most of a screen and **left/right** jump a whole page; your place is kept
+as a page *and how far into it*, so closing mid-chapter and coming back lands on the same drawing even if the
+window is a different size. The page counter says "page 12 of 40 (approx)", because in a strip it is where you
+are rather than what is on screen. The **thumbnail rail** (a toggle) is the answer to that: a side strip of
+page thumbnails, and pressing one jumps there. Turning the rail on hands it the arrow keys, so Up/Down walk it
+and Enter jumps; left or right gives the arrows back to the strip. (Back and Escape mean what they always mean
+in the reader — leave the comic — on both layouts.)
+
+Four more per-series controls sit beside the mode, in the reader — both layouts, and each applies to the page
+in front of you the moment you press it:
+
+- **Page split** — a double-page spread scanned as one wide image becomes two portrait pages on a narrow
+  screen, in reading order (the right half first in a manga). Detection is by shape and it is right most of the
+  time and wrong loudly the rest, so the override is three-way: *auto*, *always*, *never*.
+- **Border crop** — trims the uniform white or black margin a scanner leaves, by an edge scan from the page's
+  own corner colour. Art that reaches a corner disables it for that page rather than guessing, and a page that
+  is blank is left alone rather than cropped to a postage stamp.
+- **Colour filters** — greyscale, sepia, night (dimmed and warmed, for blazing-white scan backgrounds) and high
+  contrast.
+- **Rail** — the thumbnail rail above.
+
+Everything here is **display time only**. Nothing is ever written back into the archive, and turning any of it
+off restores the page exactly.
+
+Crop and split apply to the **paged** modes and not to the strip — a long strip is drawn digitally with no scan
+margins and no double spreads, and changing a page's shape there would move every page after it, and your saved
+place with it. Colour filters apply to both, because a tint changes no geometry.
+
+Not here yet, and increment 2 of the same issue: the **scan-quality** filters (de-moiré for halftone screens,
+mild noise reduction, sharpen) and the **zoom-start position** for pages taller than the screen. Joining two
+single pages into one landscape spread, panel-by-panel navigation and OCR translation are not planned.
+
 ### Book servers (OPDS)
 
 Point the reader at a self-hosted book server that speaks OPDS 1.2 — Calibre-web, Komga, Kavita,

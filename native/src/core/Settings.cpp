@@ -876,6 +876,45 @@ void Settings::setComicDirectionOverride(const QString& seriesKey, int direction
     store().sync();
 }
 
+// Per-series comic DISPLAY options (issue #154): the reading mode, the page-split override, border crop, the
+// colour filter and the thumbnail rail. ONE settings value holding a JSON object of objects — the same shape
+// and the same reason as the direction overrides above (a series key is arbitrary user text and would be a
+// family of silent corruptions as an INI key), with one more level so a series' options travel together and
+// increment 2's scan-quality filters add a member rather than a fifth top-level key.
+namespace
+{
+    const char* kComicDisplayKey = "reading/comicDisplay";
+
+    QJsonObject comicDisplay()
+    {
+        const QString raw = store().value(QLatin1String(kComicDisplayKey)).toString();
+        if (raw.isEmpty()) return QJsonObject();
+        return QJsonDocument::fromJson(raw.toUtf8()).object();   // unparseable == no options, never a throw
+    }
+}
+
+int Settings::comicDisplayOption(const QString& seriesKey, const QString& option)
+{
+    if (seriesKey.isEmpty() || option.isEmpty()) return 0;
+    return comicDisplay().value(seriesKey).toObject().value(option).toInt(0);
+}
+
+void Settings::setComicDisplayOption(const QString& seriesKey, const QString& option, int value)
+{
+    if (seriesKey.isEmpty() || option.isEmpty()) return;
+    QJsonObject root = comicDisplay();
+    QJsonObject one = root.value(seriesKey).toObject();
+    // 0 is "the default" for every option, so it FORGETS rather than recording a value — see Settings.h.
+    if (value != 0) one.insert(option, value);
+    else            one.remove(option);
+    if (one.isEmpty()) root.remove(seriesKey);
+    else               root.insert(seriesKey, one);
+    if (root.isEmpty()) store().remove(QLatin1String(kComicDisplayKey));
+    else store().setValue(QLatin1String(kComicDisplayKey),
+                          QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
+    store().sync();
+}
+
 // The one place the ad-hoc separator DEFAULT is decided (issue #196). AudioTags holds the splitting rule and
 // no policy — see Settings.h for why this list is a single semicolon and what it costs to get it wrong.
 // contains() rather than a default argument: an empty stored value is "split nothing", which a defaulted

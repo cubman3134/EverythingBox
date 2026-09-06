@@ -464,6 +464,19 @@ namespace Settings
     int  comicDirectionOverride(const QString& seriesKey);
     void setComicDirectionOverride(const QString& seriesKey, int direction);
 
+    // PER-SERIES COMIC DISPLAY OPTIONS (issue #154) — the reading mode (paged L2R / paged R2L / webtoon), the
+    // page-split override, border crop, the colour filter and the webtoon thumbnail rail. One generic pair
+    // rather than five typed ones, for the same reason the value above is an int: Settings.h is included by
+    // most of the app and must not drag the comic layer's headers in behind it. The option NAMES are declared
+    // once in comic/ReadingModes.h (ComicRead::Opt), which also reserves increment 2's — a name spelled
+    // twice is a setting that is silently forgotten.
+    //
+    // 0 ALWAYS MEANS "the default" and setting it FORGETS the option, so "never had an opinion" and "changed
+    // my mind back" are the same stored state and an untouched library stores nothing at all. `seriesKey` is
+    // ComicRead::seriesKeyFor() — the document's series when it has one, the filename's otherwise.
+    int  comicDisplayOption(const QString& seriesKey, const QString& option);
+    void setComicDisplayOption(const QString& seriesKey, const QString& option, int value);
+
     // AD-HOC MULTI-VALUE SEPARATORS for artist and genre tags (issue #196), as a whitespace-separated list of
     // the separators themselves — the stored default is ";" and "; / feat." would be three of them. They are
     // used ONLY when the container gave one string; a repeated Vorbis field or a NUL-separated ID3v2.4 frame

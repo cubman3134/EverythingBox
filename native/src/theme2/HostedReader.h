@@ -11,6 +11,7 @@
 // own bar buttons already call, so there is ZERO render/scroll-logic change behind this interface.
 #include <QPointF>
 #include <QStringList>
+#include <QVector>
 
 class QWidget;
 
@@ -40,6 +41,17 @@ public:
     virtual void fitWidth() {}                  // pdf/comic: fit-to-width
     virtual void setTwoUp(bool) {}              // comic: enable/disable the two-page spread
     virtual bool twoUp() const { return false; } // comic: is the two-up spread preference on
+    // COMIC READING MODES (issue #154). The comic's per-series controls — reading mode, page split, border
+    // crop, colour filter, thumbnail rail — as a LIST rather than as one virtual each. The chrome draws one
+    // control per label, highlights the ones the parallel `active` list marks, and fires back the index it
+    // drew; nothing but the comic knows what any of them mean. A kind that has none returns none and its row
+    // is the row it always was, which is what keeps the book and the pdf untouched by this.
+    virtual QStringList comicControlLabels() const { return {}; }
+    virtual QVector<bool> comicControlActive() const { return {}; }
+    virtual void comicActivateControl(int /*index*/) {}
+    // What the page NUMBER cannot say on its own: "(approx)" in a continuous strip, or which half of a split
+    // spread is on screen. Empty for every reader that has nothing to add, which is all of them but a comic.
+    virtual QString pageLabelNote() const { return {}; }
     virtual bool spreadActive() const { return false; } // comic: a two-page spread is on screen RIGHT NOW (fit
                                                         // + two-up + a next page exists) — the themed page label
                                                         // then reads a RANGE ("3–4 / 20"), matching the classic bar
