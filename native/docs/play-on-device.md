@@ -93,8 +93,49 @@ position.
 If the other box is playing something it cannot name — a file dropped straight onto it, say — the
 take-over is refused rather than guessed at from the title.
 
+## Send library to device
+
+A box that has never seen your library rebuilds its own artwork cache from scratch — thousands of
+throttled scraper calls for posters the desktop already has on disk. **Settings ▸ General ▸ Play on
+device ▸ Send library to device…** copies that artwork across the network instead.
+
+It uses everything above: the same peers, the same six-digit code on the target, the same token. A
+device you have already paired with for playback is already paired for this.
+
+**How it decides what to send.** The target is asked what it holds first — one line per item, an id
+and a content stamp — and only what is **missing or newer here** is sent. That is the whole point of
+the feature, and it is worth seeing once: run it, then run it again straight away, and the second run
+sends **nothing at all**. Add ten games and the next run sends ten items.
+
+**What it moves:**
+
+- each item's `meta.json` — title, synopsis, facts, the metadata panel;
+- its artwork roles — poster, box, logo, fanart, screenshots, composited miximages.
+
+**What it does NOT move, and will not:**
+
+- **your marks, favourites, playlists or resume positions.** Those are drive sync's business. An
+  artwork transfer that also moved them would give one datum two owners, which is how sync bugs
+  start. Nothing here reads or writes them.
+- **ROMs, videos, music or any other media file.** Art only. Trailers, theme songs and game manuals
+  are skipped for the same reason — they are the megabyte roles, not the cache that makes a shelf
+  render.
+- **anything at all outside the artwork cache.** A bundle names items by their cache hash and files
+  by name, and anything else is refused rather than written.
+
+**It warms, it never fights.** If the target's copy of an item is *newer* than this one's, the target
+keeps its own — it says so and moves on. Each item lands complete or not at all, so a transfer that
+is interrupted (the box sleeps, the network drops) leaves nothing half-written; run it again and it
+picks up from the difference rather than starting over.
+
+Both ends stay honest about it: the source reports how many items went, how many megabytes, how many
+were already there and how many were kept because they were newer at the other end.
+
 ## Not in this version
 
 - No synchronised playback across several devices at once. This is transfer, not party mode.
 - No cloud relay: both devices must be on the same network.
 - Video hand-off carries position and track selection only.
+- **Sending ROMs or media files is not implemented.** Only artwork and metadata move today; a media
+  transfer needs a chunked upload and a disk-space story of its own.
+- No scheduled or background library sync. Curate, then send — it is a button, not a daemon.

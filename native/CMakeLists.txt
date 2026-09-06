@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.196 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.197 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -755,6 +755,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
         src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
         src/core/PlayOnHost.cpp   src/core/PlayOnHost.h    # device-local pairing tokens, both directions (#143)
+        src/core/LibraryBundle.cpp src/core/LibraryBundle.h # pure "Send library to device": stamp, diff, atomic landing (#127)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
@@ -881,6 +882,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
         src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
@@ -3191,6 +3193,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RemoteApi.cpp    src/core/RemoteApi.h)
     target_include_directories(probe_playon PRIVATE src src/core)
     target_link_libraries(probe_playon PRIVATE Qt6::Core)
+
+    # Headless test for "Send library to device" (#127): the content stamp (stable, and what changes it), the
+    # inventory diff, the payload's safety rules (a 40-character MetaCache id and an art-only extension
+    # allowlist), the atomic per-item landing with an interruption injected mid-item, and THE property the
+    # feature is for -- a second run with nothing changed puts zero bytes of payload on the wire. Links the
+    # #143/#76 pure cores too, because #127 adds /inventory and /bundle to that same routing table. Every
+    # unit here is QtCore-only, so this runs against two temporary directories with no socket and no window.
+    add_executable(probe_bundlexfer tools/probe_bundlexfer.cpp
+        src/core/LibraryBundle.cpp src/core/LibraryBundle.h
+        src/core/PlayOnDevice.cpp  src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp     src/core/RemoteApi.h)
+    target_include_directories(probe_bundlexfer PRIVATE src src/core)
+    target_link_libraries(probe_bundlexfer PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.

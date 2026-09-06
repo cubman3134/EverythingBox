@@ -20,6 +20,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
+#include "../core/LibraryBundle.h"    // LibraryBundle::Receipt / Progress are by-value members (issue #127)
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 #include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
@@ -780,6 +781,29 @@ private:
     void playOnContinueHere(const PlayOn::Peer& peer);
     void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
     void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
+
+    // ---- "Send library to device" (issue #127). EVERY MEMBER BELOW IS DEFINED IN
+    // src/ui/MainWindowSendLibrary.cpp, for the same reason the #143 block above is.
+    //
+    // This rides #143's transport: the same mDNS peers, the same pairing code on the target, the same
+    // device-local token, two more routes on the one #76 listener. It moves ART — MetaCache per-item folders
+    // — and it moves NO STATE: marks, favourites and resume belong to drive sync, and two systems owning one
+    // datum is how sync bugs are born.
+    QByteArray             libraryInventoryJson() const;                  // the GET /inventory hook
+    LibraryBundle::Receipt libraryReceiveBundle(const QByteArray& body);  // the POST /bundle hook
+    static QString         libraryCacheRoot();                            // <dataDir>/metadata, one spelling
+
+    void sendLibraryTo(const PlayOn::Peer& peer);                         // pair if needed, then diff + send
+    void sendLibraryWithToken(const PlayOn::Peer& peer, const QString& token);
+    void sendLibraryNextItem(const PlayOn::Peer& peer, const QString& token);
+    void showSendLibraryMenu();                                // reachable from Settings on BOTH layouts
+
+    // The state of ONE run. A transfer is one item per request, so this is all the resumability it needs:
+    // an interrupted run leaves the target consistent and the next run re-diffs from what actually landed.
+    QStringList            sendLibQueue_;
+    int                    sendLibCursor_ = 0;
+    LibraryBundle::Progress sendLibProgress_;
+    QString                sendLibPeerId_;
 
     // ---- Store backends (issue #118). DEFINED IN src/ui/MainWindowStoreBackend.cpp, for the same reason
     // the block above is: MainWindow.cpp is the busiest merge surface here, and these three reach the class

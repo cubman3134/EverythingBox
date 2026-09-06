@@ -13,6 +13,11 @@
 //   * A per-connection read cap (kMaxRequestBytes) so a malicious or broken client cannot make the app buffer
 //     an unbounded request.
 //
+// #127 adds two more on the same terms: GET /inventory (what this device's art cache holds) and POST /bundle
+// (one item's art, landed atomically). They are credentialled exactly as /open is, they write nowhere but the
+// metadata cache, and /bundle is the ONE route allowed a payload-sized read cap -- decided by
+// RemoteApi::requestCapBytes rather than by a condition in the read loop below.
+//
 // #143 adds two routes to this same listener and nothing else: POST /open (a hand-off — an item REFERENCE
 // plus a position, never bytes) and POST /pair (show a code / redeem it for a token). The safety posture
 // above is unchanged and one line stronger: /open is the only route that requires a paired credential, and a
@@ -21,6 +26,7 @@
 #pragma once
 #include <QHash>
 #include <QObject>
+#include "LibraryBundle.h"
 #include "PlayOnDevice.h"
 #include "RemoteApi.h"
 #include <functional>
@@ -48,6 +54,13 @@ public:
         std::function<bool()>                                     pairBegin;
         std::function<QString(const QString&)>                    pairRedeem;
         std::function<QSet<QString>()>                            tokens;
+        // #127. `inventory` answers with this device's art-cache inventory JSON; `bundle` lands ONE item's
+        // payload and returns the receipt. Both are called only after the same token check as /open, and
+        // both are optional -- an unset hook degrades to a 503, never a crash and never an unauthenticated
+        // write. Neither can reach outside the metadata cache: LibraryBundle refuses an item id that is not
+        // a MetaCache hash and a file name that is not art.
+        std::function<QByteArray()>                                    inventory;
+        std::function<LibraryBundle::Receipt(const QByteArray& body)>   bundle;
     };
 
     explicit RemoteServer(QObject* parent = nullptr);
@@ -75,5 +88,6 @@ private:
     quint16     port_ = 0;
     QHash<QTcpSocket*, QByteArray> buffers_;   // per-connection accumulation until a full request has arrived
 
-    static constexpr int kMaxRequestBytes = 64 * 1024;  // cap a single request; over this -> 413 + close
+    // The per-request read cap is RemoteApi::requestCapBytes (#76's tiny one for every route, a payload-sized
+    // one for POST /bundle alone). Kept there rather than here so the exception is a testable function.
 };
