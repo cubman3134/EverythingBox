@@ -163,6 +163,44 @@ parse as a remote one however a user names their band. `probe_musicsources` driv
 `api_key` and for Subsonic carries `t`/`s` — is minted at the moment the player is handed it and
 written nowhere, because the index is copied into queues and a queue is persisted.
 
+## PC games: importers and store backends
+
+**One folder, one entry per game.** Steam, Epic, GOG and Battle.net are read by four IMPORTERS that
+parse a store CLIENT's own local state — its manifests, its registry keys — and hand launches back to
+that client. `PcGameId`/`PcGameRemap` fold every copy into a single entry, so one game the user owns in
+three places is one tile with three sources and one set of stars, marks and hours.
+
+**A store BACKEND is the other half, and Linux is why it exists** (issue #118). The importer model has
+a floor: there is no Epic Games Launcher on Linux, so the Epic importer imports nothing there and there
+is nothing to hand a launch to. A backend is a small standalone executable — **legendary** for Epic
+today, gogdl (GOG) and nile (Amazon) later — that authenticates with the user's own account and talks
+to the store directly. `StoreBackend` is the seam; the rest of the app asks it and never learns which
+CLI answered.
+
+**We shell out; we never reimplement a storefront protocol.** Every call is a bounded `QProcess` run on
+a worker thread, and a backend that is absent, hangs, exits non-zero or prints something unreadable
+degrades to *no games from this source* with one readable sentence saying which of those it was —
+never a crash, never a stall on the GUI thread.
+
+**Detection, not installation.** legendary is looked for in `<app>/tools/` and then on `PATH`. When it
+is missing, the Settings row says so and links the project's own releases page: EverythingBox does not
+download or install a third-party binary for you.
+
+**The credential is legendary's, not ours.** Sign-in is the tool's own browser round trip; the
+authorization code the user pastes goes to the child process's argv (legendary's only non-interactive
+interface) and is dropped — it is never written to the ini, never logged, and never put in a message.
+What we persist is the owned listing and a signed-in boolean, under a `storebackend/` prefix that is
+carved out of cloud sync. `probe_storebackend` byte-scans the whole settings file for the code after a
+full sign-in run.
+
+**Backend-listed games join the existing merge.** An entitlement is an ordinary source on the merged
+entry, so a game owned on Epic and installed on Steam is ONE tile with two sources, and an Epic game
+that is both installed and owned is one Epic row. An entitlement is never *ready*: a single Play press
+cannot start a download.
+
+**Not yet** (later increments of #118): install, update, verify/repair, the download queue, launching a
+backend-installed game, store cloud saves, GOG achievements, and the gogdl and nile backends.
+
 ## Layout
 ```
 native/

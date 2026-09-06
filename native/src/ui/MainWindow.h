@@ -780,6 +780,20 @@ private:
     void playOnContinueHere(const PlayOn::Peer& peer);
     void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
     void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
+
+    // ---- Store backends (issue #118). DEFINED IN src/ui/MainWindowStoreBackend.cpp, for the same reason
+    // the block above is: MainWindow.cpp is the busiest merge surface here, and these three reach the class
+    // only through members that already exist. Both settings builders call all three.
+    //
+    // The status line a settings row shows for legendary. CHEAP AND PROCESS-FREE — a file lookup plus the
+    // cached signed-in flag — because it is computed while the panel is being built, on the GUI thread. It
+    // must never grow a call that spawns legendary: that is a network round trip inside a panel open.
+    QString legendaryStatusLine() const;
+    // Open the browser at Epic's login page, take the pasted authorization code, and hand it to legendary
+    // OFF the GUI thread. `setStatus` is the caller's own way of updating its status row (each builder has a
+    // different one), invoked with the fresh line when the sign-in settles.
+    void promptLegendaryAuth(const std::function<void(const QString&)>& setStatus);
+    void openLegendaryReleases();                              // the honest "it isn't installed" link
     // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
     // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
     // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.

@@ -22356,6 +22356,13 @@ void MainWindow::openGeneralSettings()
               Settings::steamWebApiKey(), /*masked=*/true);
         textf(QStringLiteral("steam.steamid"), tr("SteamID (64-bit) — shows owned, not-installed games"),
               Settings::steamId());
+        // --- Epic without the Epic launcher (issue #118) --- twin lives in the QWidget builder below.
+        // legendary is a third-party CLI we SHELL OUT to; it is detected, never installed by us, so the
+        // status row's job is to be honest about which of the three states this machine is in.
+        sep(tr("Epic Games (legendary)"));
+        info(QStringLiteral("epic.legendary.status"), tr("legendary"), legendaryStatusLine());
+        action(QStringLiteral("epic.legendary.auth"), tr("Sign in to Epic (legendary)"));
+        action(QStringLiteral("epic.legendary.get"), tr("Get legendary"));
         // --- Streaming (Debrid) ---
         sep(tr("Streaming (Debrid)"));
         textf(QStringLiteral("debrid.torbox"), tr("TorBox API key"),
@@ -22463,6 +22470,16 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("community.patreon")) {
                     QDesktopServices::openUrl(QUrl(QString::fromLatin1(kPatreonUrl)));
+                }
+                // Store backends (#118). Both rows are defined in src/ui/MainWindowStoreBackend.cpp; the
+                // sign-in hands its own status updater in, so the row a person is looking at is the row that
+                // changes when the sign-in settles.
+                else if (id == QStringLiteral("epic.legendary.auth")) {
+                    promptLegendaryAuth([this, setInfo](const QString& line) {
+                        setInfo(QStringLiteral("epic.legendary.status"), tr("legendary"), line); });
+                }
+                else if (id == QStringLiteral("epic.legendary.get")) {
+                    openLegendaryReleases();
                 }
                 else if (id == QStringLiteral("lib.showhidden")) {
                     store().setValue(QStringLiteral("library/showHidden"), on);
@@ -25386,6 +25403,33 @@ void MainWindow::openGeneralSettings()
             statusBar()->showMessage(tr("Saved Steam Web API key + SteamID."), 4000);
         });
         v->addWidget(sSave);
+
+        // --- Epic Games (legendary), issue #118: the classic twin of the themed builder's
+        // epic.legendary.auth / epic.legendary.get rows. A setting that exists in one builder is unreachable
+        // in the other mode, and this one matters most exactly where the classic layout is common — a Linux
+        // desktop, which has no Epic Games Launcher for the importer to read. ---
+        v->addSpacing(10);
+        auto* lgHeading = new QLabel(tr("Epic Games (legendary)"));
+        lgHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(lgHeading);
+        auto* lgNote = new QLabel(tr("legendary is a small command-line program that talks to Epic directly, so "
+            "your owned Epic games can be listed with no Epic Games Launcher installed. EverythingBox looks for "
+            "it on your PATH and in the app's tools folder; it never downloads or installs it for you. Signing "
+            "in happens in legendary's own account — EverythingBox keeps no Epic password or token."));
+        lgNote->setWordWrap(true); lgNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(lgNote);
+        auto* lgStatus = new QLabel(legendaryStatusLine());
+        lgStatus->setWordWrap(true); lgStatus->setStyleSheet(QStringLiteral("color:#bbb;font-size:12px;"));
+        v->addWidget(lgStatus);
+        auto* lgAuth = panelRow(tr("Sign in to Epic (legendary)"));
+        connect(lgAuth, &QPushButton::clicked, this, [this, lgStatus] {
+            QPointer<QLabel> keep(lgStatus);   // the panel can be replaced while the sign-in is in flight
+            promptLegendaryAuth([keep](const QString& line) { if (keep) keep->setText(line); });
+        });
+        v->addWidget(lgAuth);
+        auto* lgGet = panelRow(tr("Get legendary"));
+        connect(lgGet, &QPushButton::clicked, this, [this] { openLegendaryReleases(); });
+        v->addWidget(lgGet);
 
         // --- Streaming (Debrid): a TorBox API key turns Stremio torrent results into playable streams. ---
         v->addSpacing(10);

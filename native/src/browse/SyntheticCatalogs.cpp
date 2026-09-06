@@ -649,7 +649,8 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
                             const QVector<pcgame::PcGameSource>& downloaded,
                             const QString& query, const QString& launcherFilter,
                             const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster,
-                            const QList<SteamGame>& steamOwned)
+                            const QList<SteamGame>& steamOwned,
+                            const QList<EpicGame>& epicOwned)
 {
     const QString q = query.trimmed();
     MediaCatalog cat;
@@ -741,8 +742,10 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.ready     = false;
         add(g.name, pcTitleRank(s), s);
     }
+    QSet<QString> installedEpicApps;
     for (const EpicGame& g : epic)
     {
+        installedEpicApps.insert(g.appName);
         pcgame::PcGameSource s;
         s.kind     = pcgame::PcGameSource::LauncherInstalled;
         s.launcher = QStringLiteral("epic");
@@ -753,6 +756,24 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.label = QObject::tr("Epic Games");
         s.available = g.available;   // #62: unavailable when shown from cache (source unreadable this scan)
         s.ready = g.available;
+        add(g.name, pcTitleRank(s), s);
+    }
+    // Owned on Epic per the STORE BACKEND (legendary, issue #118) — the account's entitlements, read without
+    // the Epic Games Launcher, which is the only Epic library a Linux machine can have. An AppName the
+    // installed scan already returned is skipped: that copy is installed, its source is strictly better, and
+    // two "Epic Games" rows for one game is the duplicate this folder abolishes.
+    //
+    // NOT READY and with NO launchUrl: installing through the backend is a later increment, so activating the
+    // row says "no way to launch from here" rather than pretending. pickAutoSource can never hand Play one.
+    for (const EpicGame& g : epicOwned)
+    {
+        if (installedEpicApps.contains(g.appName)) continue;
+        pcgame::PcGameSource s;
+        s.kind     = pcgame::PcGameSource::LauncherOwned;
+        s.launcher = QStringLiteral("epic");
+        s.launchId = g.appName;
+        s.label    = QObject::tr("Epic Games · owned, not installed");
+        s.ready    = false;
         add(g.name, pcTitleRank(s), s);
     }
     for (const GogGame& g : gog)
@@ -953,25 +974,37 @@ QString pcLauncherLabel(const QString& launcher)
 
 QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
-                               const QList<SteamGame>& steamOwned)
+                               const QList<SteamGame>& steamOwned, const QList<EpicGame>& epicOwned)
 {
     // The SAME fixed order the display-title precedence uses (pcTitleRank), for the same reason: a menu
     // whose rows reshuffle when a launcher scan comes back in a different order is a menu whose muscle
     // memory is a lie.
     QStringList out;
     if (!steam.isEmpty() || !steamOwned.isEmpty()) out << QStringLiteral("steam");
-    if (!epic.isEmpty())                           out << QStringLiteral("epic");
+    // Backend-listed entitlements qualify the Epic row on their own (issue #118): on Linux there is no Epic
+    // Games Launcher to scan, so `epic` is always empty there and a row gated on it alone could never appear
+    // however many games the account owns.
+    if (!epic.isEmpty() || !epicOwned.isEmpty())   out << QStringLiteral("epic");
     if (!gog.isEmpty())                            out << QStringLiteral("gog");
     if (!bnet.isEmpty())                           out << QStringLiteral("battlenet");
-    // The "Owned, not installed" group (issue #62), offered ONLY when at least one owned Steam game is not
-    // installed — otherwise the filter would select an empty folder. An appid that is both owned AND
-    // installed is not owned-not-installed, so it does not qualify the row. Placed after the launchers so
-    // the launcher order above stays fixed.
+    // The "Owned, not installed" group (issue #62), offered ONLY when at least one owned game is not
+    // installed — otherwise the filter would select an empty folder. An id that is both owned AND installed
+    // is not owned-not-installed, so it does not qualify the row. Placed after the launchers so the launcher
+    // order above stays fixed.
     {
+        bool any = false;
         QSet<QString> installedIds;
         for (const SteamGame& g : steam) installedIds.insert(g.appid);
         for (const SteamGame& g : steamOwned)
-            if (!installedIds.contains(g.appid)) { out << QLatin1String(kPcFilterOwnedNotInstalled); break; }
+            if (!installedIds.contains(g.appid)) { any = true; break; }
+        if (!any)
+        {
+            QSet<QString> installedApps;
+            for (const EpicGame& g : epic) installedApps.insert(g.appName);
+            for (const EpicGame& g : epicOwned)
+                if (!installedApps.contains(g.appName)) { any = true; break; }
+        }
+        if (any) out << QLatin1String(kPcFilterOwnedNotInstalled);
     }
     return out;
 }

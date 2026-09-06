@@ -798,6 +798,12 @@ int main(int argc, char** argv)
             // pcscan/* (issue #62): the persisted last-good installed-scan per launcher. A snapshot of what
             // THIS machine has installed, so it is device-local and must never ride the bundle.
             raw.setValue(QStringLiteral("pcscan/steam"), QStringLiteral("[{\"id\":\"440\",\"name\":\"TF2\"}]"));
+            // storebackend/* (issue #118): a store backend's cached owned-library listing. It describes an
+            // account linked in a third-party CLI's own config ON THIS MACHINE, so another device would be
+            // shown a library it cannot act on — and it churns on a 30-minute cadence, which is the
+            // fingerprint-flipping cost the Trakt caches were carved out for.
+            raw.setValue(QStringLiteral("storebackend/legendary/games"),
+                         QStringLiteral("[{\"app\":\"Sugar\",\"title\":\"Rocket League\"}]"));
             // Per-game launch HOOKS (issue #64): a command line that EXECUTES, so it is device-local and must
             // NOT ride the bundle — the deliberate contrast with launchopts/* (#51), which DOES sync.
             raw.setValue(QStringLiteral("launchhooks/items/deadbeef"),
@@ -832,7 +838,8 @@ int main(int argc, char** argv)
                                "audio/device", "audio/passthrough", "audio/exclusive",  // #69: audio out is per-device
                                "launchhooks/items/deadbeef",           // #64: hooks are device-local, never in the bundle
                                "device/id", "downloads/foo", "pcgames/bar",
-                               "pcscan/steam"})                        // #62: persisted installed-scan is device-local
+                               "pcscan/steam",                        // #62: persisted installed-scan is device-local
+                               "storebackend/legendary/games"})       // #118: a backend's owned listing is this machine's
             CHECK(!b.contains(QLatin1String(ex)));                    // device-local carved out of the bundle
         CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs
         CHECK(b.contains(QStringLiteral("sync/global/audio")));      // sync/global/* still syncs
@@ -943,6 +950,12 @@ int main(int argc, char** argv)
         // this machine has installed, and it churns every refresh) — never in the per-item set, never synced.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("pcscan/steam")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("pcscan/steam")) == false);
+        // storebackend/* (issue #118): the store backends' cached owned listing and signed-in flag. Both
+        // halves, because the flag alone riding the bundle would tell another machine it is signed in to a
+        // store it has no tool for.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("storebackend/legendary/games")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("storebackend/legendary/signedIn")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("storebackend/legendary/games")) == false);
         // emugfx* (issue #103): per-game standalone-emulator graphics are DEVICE-LOCAL (hardware-dependent) —
         // both key spellings the store uses must be carved out, and never in the per-item set.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("emugfx/items/deadbeef")) == true);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.195 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.196 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -862,6 +862,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
         src/core/PcGameRemap.cpp  src/core/PcGameRemap.h   # marks/stats/favourites follow the merged id (pc-games T3)
         src/core/PcScanCache.cpp  src/core/PcScanCache.h   # persist the last good installed-scan per launcher (#62)
+        # #118: store BACKENDS (legendary/Epic today; gogdl/nile later) - own a game on a storefront
+        # with no store CLIENT installed, which is the only way an Epic library exists on Linux.
+        src/core/StoreBackend.cpp src/core/StoreBackend.h
+        src/core/LegendaryBackend.cpp src/core/LegendaryBackend.h
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -889,6 +893,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # #248 (b): the self-compiled tier's card. A MainWindow member in its OWN TU (the #186
         # direction) - MainWindow.cpp is one giant object that a dozen branches edit at once.
         src/ui/MainWindowRecomps.cpp
+        # #118: the settings surface for a store backend (detection / sign-in / the releases link).
+        # Its own TU for the same reason as the two above.
+        src/ui/MainWindowStoreBackend.cpp
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h
@@ -3245,6 +3252,38 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)  # SyntheticCatalogs -> photosCatalog's groupByFolder (#102)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the STORE-BACKEND seam (#118, increment 1): legendary's two JSON parses, the four
+    # failure mappings (absent / timeout / non-zero / malformed) as a pure function, the REAL bounded
+    # QProcess (the probe re-execs ITSELF as the child, so a hang and a non-zero exit are exercised on both
+    # platforms with no legendary installed), the device-local listing cache, and the merge that matters:
+    # a backend-listed Epic game and an imported copy become ONE entry rather than two shelf rows.
+    #
+    # It links SyntheticCatalogs and its dependency fan exactly as probe_importers does, because the merge
+    # assertion is the whole reason the seam is shaped the way it is and pinning it anywhere else would pin
+    # it against a re-implementation.
+    add_executable(probe_storebackend tools/probe_storebackend.cpp
+        src/core/StoreBackend.cpp src/core/StoreBackend.h
+        src/core/LegendaryBackend.cpp src/core/LegendaryBackend.h
+        src/core/SteamLibrary.cpp src/core/SteamLibrary.h
+        src/core/EpicLibrary.cpp src/core/EpicLibrary.h
+        src/core/GogLibrary.cpp src/core/GogLibrary.h
+        src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h
+        src/core/PcGameId.cpp src/core/PcGameId.h
+        src/core/TraktRead.cpp src/core/TraktRead.h
+        src/core/TraktSync.cpp src/core/TraktSync.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
+        src/core/Tombstones.cpp src/core/Tombstones.h
+        src/core/ProfileStore.cpp src/addons/AddonModels.cpp
+        src/core/StreamHeaders.cpp
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)
+    target_include_directories(probe_storebackend PRIVATE src src/core src/addons src/browse src/theme2)
+    target_link_libraries(probe_storebackend PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the PerfTrace span harness (gating, format, overhead budget) plus the
     # component-budget asserts (browse builders, m3u parse, search dedup) — sources mirror
