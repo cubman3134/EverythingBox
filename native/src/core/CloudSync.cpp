@@ -320,6 +320,14 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // on every refresh — so it is device-local for the same reasons downloads/* and pcgames/* are, and
         // must never ride the synced settings bundle. probe_cloudmerge pins the carve-out.
         || key.startsWith(QStringLiteral("pcscan/"))
+        // storebackend/* (issue #118): the store BACKENDS' cached owned-library listing and their signed-in
+        // flag. Device-local for both of pcscan/*'s reasons and one of its own: the listing is a snapshot of
+        // an account linked ON THIS MACHINE, in a third-party tool's own config, so it describes a sign-in
+        // the receiving device does not have. Carried in a synced bundle it would present another machine's
+        // Epic library as this one's, offering games nothing here can install. It also churns on the same
+        // 30-minute cadence the Trakt caches do, which is the fingerprint-flipping cost that carve-out was
+        // added for. probe_cloudmerge pins it.
+        || key.startsWith(QStringLiteral("storebackend/"))
         // mediadur/* (issue #179): the measured length of each item this device has opened — the index a
         // channel's lineup is gated on. Device-local: it is re-derived by playing the file, it says nothing
         // about what anyone did, and left in the heavy settings bundle it would add a row per file ever opened

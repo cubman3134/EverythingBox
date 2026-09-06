@@ -45,6 +45,7 @@
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
 #include "../core/PcScanCache.h"   // #62: persist the last good installed-scan per launcher
+#include "../core/StoreBackend.h"  // #118: owned libraries from a store BACKEND (legendary), no client needed
 #include "../core/Settings.h"
 #include "../core/ItemMarks.h"
 #include "../core/GameFilter.h"        // pure filter model/evaluator for saved-filter shelves (#63)
@@ -4099,7 +4100,25 @@ struct PcLibScan
     // Owned-but-not-installed on Steam. ownedGamesCached is network-free (populatePcGames arms the
     // background refresh separately), so gathering it here never blocks the GUI thread.
     QList<SteamGame>       steamOwned;
+    // Owned on Epic per the store BACKEND (legendary, issue #118). Read from the TTL cache and NEVER by
+    // spawning legendary here: this runs on the GUI thread on every folder refresh, and a subprocess that
+    // talks to Epic's API would freeze the folder for as long as the network takes. populatePcGames arms
+    // the off-thread refresh that fills the cache, exactly as it does for steamOwned.
+    QList<EpicGame>        epicOwned;
 };
+
+// A backend entitlement in the shape the merge layer already speaks. EpicGame is the launcher-manifest type
+// and carries an install location; a backend listing has none, which is the point — it is owned, not
+// installed. Converting here rather than teaching pcGamesCatalog about StoreGame keeps SyntheticCatalogs.cpp
+// free of StoreBackend, which matters: three probe targets compile that file WITHOUT this unit linked, and a
+// call into it there is a CI-only link break (the standing rule at the top of the PC-games section).
+static QList<EpicGame> epicOwnedFromBackend()
+{
+    QList<EpicGame> out;
+    for (const StoreGame& g : storeback::cachedOwned(storeback::legendary()->id(), storeback::kOwnedTtlSecs))
+        out << EpicGame{ g.appName, g.title, QString(), /*available=*/true };
+    return out;
+}
 
 // Route one launcher's fresh scan through the persisted-scan cache (issue #62). On a readable scan the fresh
 // list is authoritative and becomes the new last-good cache; on an UNREADABLE one the games do not vanish —
@@ -4155,6 +4174,7 @@ static PcLibScan scanPcLibrary()
     }
     s.downloads  = DownloadsStore::list();
     s.steamOwned = SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId());
+    s.epicOwned  = epicOwnedFromBackend();
     return s;
 }
 
@@ -4196,7 +4216,7 @@ MediaCatalog HomeView::pcLibraryCatalog(const QString& query, const QString& lau
     // The owned-but-not-installed Steam list rides the scan (creds-gated, TTL-cached, network-free);
     // populatePcGames arms the background refresh that fills it.
     return browse::pcGamesCatalog(pre->steam, pre->epic, pre->gog, pre->bnet,
-                                  downloaded, query, launcherFilter, {}, pre->steamOwned);
+                                  downloaded, query, launcherFilter, {}, pre->steamOwned, pre->epicOwned);
 }
 
 // Drill into the synthetic "PC Games" console (a child of the Games catalog). Pushed as a detail level so
@@ -4261,6 +4281,13 @@ void HomeView::populatePcGames(bool runRemap)
         // contributes the same pair twice, which a QHash collapses; the destination is the same either way.
         for (const SteamGame& g : scan.steamOwned)
             lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+        // OWNED on Epic per the store backend (#118). It keys exactly like an installed Epic entry
+        // ("epic:<AppName>" — legendary and the launcher manifests use the same AppName), so a pre-merge
+        // favourite or play time banked on an Epic game the user owns but has not installed migrates onto
+        // the merged tile instead of sitting under a stale per-launcher id. An AppName that is both owned
+        // and installed contributes the same pair twice, which the QHash collapses onto one destination.
+        for (const EpicGame& g : scan.epicOwned)
+            lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
         for (const DownloadedItem& d : scan.downloads)
         {
             if (d.kind != QStringLiteral("pcgame")) continue;
@@ -4289,7 +4316,7 @@ void HomeView::populatePcGames(bool runRemap)
     // Which launchers to OFFER is decided from the same scan the folder is built from, so the menu can
     // never list a launcher this machine has nothing in.
     pcLaunchersAvailable_ = browse::pcLaunchersPresent(scan.steam, scan.epic, scan.gog, scan.bnet,
-                                                       scan.steamOwned);
+                                                       scan.steamOwned, scan.epicOwned);
     MediaCatalog cat = pcLibraryCatalog(query, pcLauncherFilter_, &scan);
     // Pinned at the TOP, and shown unconditionally — including when the filter has emptied the folder,
     // which is exactly when it must still be reachable to clear. It is inserted HERE and not inside
@@ -4306,12 +4333,15 @@ void HomeView::populatePcGames(bool runRemap)
     // populate (rapid Back/re-enter or filter typing fires several) is dropped — only the latest fetch
     // re-presents, so stale replies can't stack rebuilds or fight over the cursor.
     const int gen = ++ownedFetchGen_;
-    SteamLibrary::ownedGamesFetch(Settings::steamWebApiKey(), Settings::steamId(), this,
-                                  [this, gen](const QVector<SteamGame>&) {
+    // ONE re-present, shared by both owned-library fetches (Steam's Web API and the store backend's
+    // subprocess). It was written twice for a day and that is exactly how the cursor rules drift apart;
+    // both late replies do the same thing to the same folder, so they call the same code.
+    //
+    // Cursor preserve: an owned game can MERGE INTO an existing tile (it is a source, not a row of its own),
+    // so unlike the old per-store consoles the re-present is not a pure append and row indices can move.
+    // Keep the selection on the same GAME by id, falling back to the row when the id has gone.
+    auto repopulateKeepingCursor = [this, gen] {
         if (gen != ownedFetchGen_ || !atPcGamesConsole()) return; // superseded / navigated away
-        // Cursor preserve: an owned game can MERGE INTO an existing tile (it is a source, not a row of its
-        // own), so unlike the old Steam console the re-present is not a pure append and row indices can move.
-        // Keep the selection on the same GAME by id, falling back to the row when the id has gone.
         const int keepRow = grid_ ? grid_->currentRow() : -1;
         const QString keepId = (keepRow >= 0 && keepRow < items_.size()) ? items_[keepRow].id : QString();
         populatePcGames();
@@ -4324,6 +4354,20 @@ void HomeView::populatePcGames(bool runRemap)
             grid_->setCurrentRow(row);
             grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
         }
+    };
+    SteamLibrary::ownedGamesFetch(Settings::steamWebApiKey(), Settings::steamId(), this,
+                                  [repopulateKeepingCursor](const QVector<SteamGame>&) {
+        repopulateKeepingCursor();
+    });
+    // The same shape for the Epic store backend (#118): with legendary installed and the cached listing
+    // stale, list the account's entitlements OFF THE GUI THREAD (bounded subprocess), then re-present so the
+    // owned games appear — merged into their existing tiles where the user already has the game elsewhere.
+    // No legendary, or a still-fresh cache -> ownedGamesFetch no-ops and never calls back, which is also
+    // what stops the re-present loop. Failures are silent here and reported in Settings, not in the folder:
+    // a grid is not the place to learn that a CLI is signed out.
+    storeback::ownedGamesFetch(storeback::legendary(), this,
+                               [repopulateKeepingCursor](const StoreListing&) {
+        repopulateKeepingCursor();
     });
 }
 

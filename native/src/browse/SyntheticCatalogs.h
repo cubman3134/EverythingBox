@@ -249,12 +249,26 @@ namespace browse
     // `poster`, for the same reason steamGamesCatalog's `owned` did: every existing call site keeps compiling.
     // A game whose sources are ALL not-installed (owned/addon-available) is badged "Not installed" in its
     // subtitle, which is where the old console put that badge.
+    //
+    // `epicOwned` is the STORE-BACKEND owned library for Epic (issue #118): what `legendary` says the account
+    // owns, with no Epic Games Launcher involved — which on Linux is the only way an Epic game can appear at
+    // all. It is the exact analogue of `steamOwned` one parameter above and rides last for the same reason
+    // (every existing call site keeps compiling), with two differences that matter:
+    //   * DEDUPED AGAINST THE INSTALLED EPIC SCAN BY AppName, so a game the launcher has installed and the
+    //     backend also lists is ONE Epic row and not two. The merge layer would group them anyway — same
+    //     title, same id — but they would sit in the group as two Epic sources, and a picker offering "Epic
+    //     Games" twice for one copy is the duplicate this whole folder exists to abolish.
+    //   * NO launchUrl. Installing through the backend is a later increment of #118, so the source is honest
+    //     about being an entitlement: not ready, nothing to activate. It still MERGES — a game owned on Epic
+    //     and installed on Steam is one entry with a Steam source and an Epic one, which is the property the
+    //     backend work has to preserve.
     MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                 const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
                                 const QVector<pcgame::PcGameSource>& downloaded,
                                 const QString& query, const QString& launcherFilter,
                                 const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
-                                const QList<SteamGame>& steamOwned = {});
+                                const QList<SteamGame>& steamOwned = {},
+                                const QList<EpicGame>& epicOwned = {});
 
     // The launcherFilter SENTINEL for the "Owned, not installed" group (issue #62). It is deliberately NOT a
     // launcher name (those are steam/epic/gog/battlenet), so pcGamesCatalog tells it apart from an ordinary
@@ -279,9 +293,12 @@ namespace browse
     // ever empty the folder, and offering ALL FOUR always would do exactly that on the common machine with
     // one store installed. Owned-but-not-installed Steam entries count: they are Steam library entries, and
     // "what I own on Steam" is the phrase this feature exists to answer.
+    // Backend-listed Epic entitlements count too, for the same reason owned Steam entries do: "what I own on
+    // Epic" is the question, and on a machine with no Epic Games Launcher the backend list is the whole answer.
     QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                    const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
-                                   const QList<SteamGame>& steamOwned = {});
+                                   const QList<SteamGame>& steamOwned = {},
+                                   const QList<EpicGame>& epicOwned = {});
 
     // The filter menu: .first is the launcherFilter value to pass to pcGamesCatalog (EMPTY = every
     // launcher), .second is the row a person reads, with the current choice ticked.
