@@ -270,11 +270,34 @@ int main(int argc, char** argv)
     }
 
     // ================= 6b. auto-install stays a built-in privilege ========================================
-    // EVERY built-in must have an install source (else the app couldn't offer to download it); this is the
+    // A built-in must have an install source (else the app couldn't offer to download it); this is the
     // property hasInstallSource keys off to distinguish a user entry. If a future built-in ships with no
     // update URL this trips — a deliberate tripwire, not just a passing assertion.
+    //
+    // WITH ONE DECLARED EXCEPTION CLASS (issue #191): a FIND-ONLY built-in, which the app ships the knowledge
+    // of but deliberately does not download. The two DOSBoxes are it. The tripwire is kept — a NEW built-in
+    // that quietly ships with no source still fails here — by naming the exception rather than weakening the
+    // rule, and the exceptions carry their own obligations: without a homepage and a find-rule, "find-only"
+    // would mean "unreachable", because there would be nothing to tell the user and nowhere to look.
+    const QStringList kFindOnlyBuiltins = { QStringLiteral("dosbox-staging"), QStringLiteral("dosbox-x") };
     for (const ExternalEmulator& e : builtin)
+    {
+        if (kFindOnlyBuiltins.contains(e.id))
+        {
+            CHECK(!hasInstallSource(e));      // if one of these GAINS a source, this line says so
+            CHECK(!e.homepage.isEmpty());     // …where the user gets it
+            CHECK(!e.winBinaries.isEmpty());  // …and where we look for it once they have
+            CHECK(!e.linuxBinaries.isEmpty());
+            CHECK(!e.macBinaries.isEmpty());
+            // isBuiltinId is what EmulatorManager uses to pick the "we don't download this" message over the
+            // "check your JSON" one; a find-only built-in that did not answer to it would get the wrong text.
+            CHECK(EmulatorRegistry::isBuiltinId(e.id));
+            continue;
+        }
         CHECK(hasInstallSource(e));
+    }
+    // An id nobody ships is not a built-in, which is the other half of that discriminator.
+    CHECK(!EmulatorRegistry::isBuiltinId(QStringLiteral("no-such-emulator")));
 
     // ================= 7. the SHIPPED example file is a valid, mergeable data file ========================
 #ifdef EB_USEREMU_EXAMPLE_DIR

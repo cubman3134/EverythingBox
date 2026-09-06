@@ -125,6 +125,23 @@ namespace LaunchOpts
     // (opening an emulator's own UI with no game) collapse away instead of becoming an empty argv element.
     QStringList buildArgs(const QString& resolved, const QString& romNative);
 
+    // The CONFIG-FILE hand-off (issue #191): substitute `{conf}` in an args template with the emulator's own
+    // conf argument form (ExternalEmulator::confArgs, e.g. `-conf "{confPath}"`) carrying `confPath`.
+    //
+    // BEFORE THE CUT, UNLIKE {rom}, and that asymmetry is the whole design. `-conf <path>` is TWO arguments,
+    // so its expansion has to be able to produce two tokens — which a post-cut substitution (which can only
+    // ever fill in part of one already-cut token) cannot do. Expanding before the cut means the path is
+    // exposed to the tokeniser, which is exactly what #237's shell-style quoting is for: the template writes
+    // `-conf "{confPath}"`, so a path with a space in it stays one argument. That quoting is the emulator
+    // entry's data, not this function's, so an emulator whose flag is spelled `--conf=<path>` is expressible
+    // without touching code.
+    //
+    // Yields an EMPTY `{conf}` — which buildArgs then drops, leaving the command line byte-for-byte what it
+    // was — when there is no conf, when the emulator declares no confArgs, or when the path contains a double
+    // quote (which would break out of the quoting; no real conf path does, and guessing an escape convention
+    // per platform to support one would be worse than declining).
+    QString applyConfArg(const QString& resolved, const QString& confArgs, const QString& confPath);
+
     // ---- store (global; husk-on-clear; QtCore-only, same posture as MetaOverrides) ---------------------------
     QString  hashKey(const QString& key);   // md5-hex of the UTF-8 key (ItemMarks/MetaOverrides scheme)
     Override get(const QString& key);       // absent/empty key -> a default (all-clear) Override

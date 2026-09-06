@@ -197,6 +197,22 @@ struct ExternalEmulator
     QStringList systems;    // SystemCatalog system ids this emulator can run — LOAD-BEARING: EmulationTarget.h's
                             // boundEmulatorsFor offers/accepts this emulator on each (see the header note)
 
+    // ---- the CONFIG-FILE hand-off (issue #191) ----------------------------------------------------------
+    // How this emulator takes a configuration file that sits beside the game, with {confPath} where the path
+    // goes: DOSBox spells it `-conf "{confPath}"`. Empty on every emulator that has no such concept, which is
+    // every built-in entry but the two DOSBoxes.
+    //
+    // WHY THIS IS DATA AND NOT A HARDCODED "-conf". A dosbox.conf is how DOS configuration is passed between
+    // humans; handing the file straight to a real DOSBox is LOSSLESS, where translating it onto a libretro
+    // core's options can only ever be partial (see DosConf.h). So the standalone entries are the complete
+    // answer, and the flag they take belongs beside the rest of their command line rather than in C++.
+    //
+    // The quotes are load-bearing and are exactly what #237 bought: the substitution happens BEFORE the
+    // shell-style cut, so a conf path with a space in it ("C:/My Games/…/dosbox.conf") stays one argument
+    // only because the template quotes it. {rom} is different — it is substituted AFTER the cut and so needs
+    // no quoting — and the two must not be confused. LaunchOpts::applyConfArg is the substitution.
+    QString confArgs;
+
     // The native-port game binding (issue #233) — see NativePortBinding above. Empty for every entry in the
     // built-in emulator table; filled only by the port catalog (NativePorts.h), which is a SEPARATE registry.
     NativePortBinding port;
@@ -222,7 +238,8 @@ inline bool operator==(const ExternalEmulator& a, const ExternalEmulator& b)
         && a.updateJsonUrl == b.updateJsonUrl && a.winArtifact == b.winArtifact && a.macArtifact == b.macArtifact
         && a.linuxArtifact == b.linuxArtifact && a.flatpakAppId == b.flatpakAppId
         && a.winUpdateUrl == b.winUpdateUrl && a.macUpdateUrl == b.macUpdateUrl && a.linuxUpdateUrl == b.linuxUpdateUrl
-        && a.extensions == b.extensions && a.systems == b.systems && a.port == b.port
+        && a.extensions == b.extensions && a.systems == b.systems && a.confArgs == b.confArgs   // #191
+        && a.port == b.port
         && a.contentInstall == b.contentInstall;   // issue #189
 }
 inline bool operator!=(const ExternalEmulator& a, const ExternalEmulator& b) { return !(a == b); }
@@ -630,6 +647,73 @@ namespace EmulatorRegistry
                 // list is the whole reason the picker offers "ares (standalone)" for N64 at all.
                 { QStringLiteral("n64") },
             },
+            {
+                // MS-DOS, the "nicer defaults" fork (issue #191). DOSBox Staging is the actively developed
+                // DOSBox: modern scaling, cleaner audio mixing, sane defaults. It is NOT the MS-DOS default —
+                // dosbox-pure stays that, because the in-process core is what makes a DOS game launch with no
+                // setup at all (#190) and it keeps save states, rewind and achievements. This is the tier
+                // above: chosen per system or per game, and worth choosing for exactly one reason —
+                //
+                //   IT TAKES A dosbox.conf LOSSLESSLY. Everything the DOS scene knows is written as a conf;
+                //   translating one onto libretro core options can only ever be partial (DosConf.h reports
+                //   what it could not carry). `-conf` carries all of it, because it IS DOSBox reading its own
+                //   file. That is the whole argument for registering a standalone entry.
+                //
+                // CLI: `dosbox -conf <file> <game>` — the game path is positional, `-fullscreen` for full
+                // screen, and `-exit` quits DOSBox when the program ends (without it the user is left at a
+                // DOS prompt inside a window EverythingBox is waiting on). No auto-install: Staging publishes
+                // per-OS archives with no stable machine-readable index we can match an artifact in, so this
+                // entry is find-only — the user points it at an install they have, and until then the launch
+                // says which binary is missing and where the download is.
+                QStringLiteral("dosbox-staging"), QStringLiteral("DOSBox Staging"),
+                QStringLiteral("{fs} {conf} -exit {rom}"),
+                QStringLiteral("-fullscreen"),   // fullscreenArgs
+                QString(),                       // windowedArgs (default is windowed)
+                QStringLiteral("https://www.dosbox-staging.org/releases/windows/"),
+                { QStringLiteral("dosbox.exe"), QStringLiteral("dosbox-staging.exe"),
+                  QStringLiteral("dosbox-staging/dosbox.exe") },
+                { QStringLiteral("dosbox-staging.app/Contents/MacOS/dosbox"), QStringLiteral("dosbox-staging.app") },
+                { QStringLiteral("dosbox-staging"), QStringLiteral("dosbox"),
+                  QStringLiteral("dosbox-staging.AppImage") },
+                QString(),                       // updateJsonUrl — find-only, see above
+                QString(), QString(), QString(), // win/mac/linux artifact — none
+                QStringLiteral("io.github.dosbox-staging"), // Linux is published as a Flatpak
+                QString(), QString(), QString(), // win/mac/linux update URL overrides — none
+                { QStringLiteral("exe"), QStringLiteral("com"), QStringLiteral("bat"), QStringLiteral("conf") },
+                // systems: the LOAD-BEARING binding (see the header note). MS-DOS keeps dosbox_pure as its
+                // default; this list is the whole reason the picker offers "DOSBox Staging (standalone)".
+                { QStringLiteral("msdos") },
+                // The conf hand-off. Quoted because the substitution happens before the shell-style cut, so a
+                // spaced path ("C:/My Games/Doom/dosbox.conf") is one argument only because of these quotes.
+                QStringLiteral("-conf \"{confPath}\""),
+            },
+            {
+                // MS-DOS, the ACCURACY fork (issue #191). DOSBox-X aims at the hardware dosbox-pure and
+                // Staging do not: Tandy and PCjr, specific 386/486 machine variants, obscure sound hardware,
+                // and non-game DOS software (Windows 3.x, development tools) that the core does not target.
+                // Same conf hand-off, same reason.
+                //
+                // CLI is DOSBox's: `-conf <file>`, a positional program to run, `-fullscreen`, `-exit`.
+                // DOSBox-X ALSO reads a dosbox-x.conf from beside its own exe, which is why the conf we hand
+                // it is passed explicitly rather than copied anywhere — an explicit -conf is the only way to
+                // be sure which file won. Find-only, like Staging.
+                QStringLiteral("dosbox-x"), QStringLiteral("DOSBox-X"),
+                QStringLiteral("{fs} {conf} -exit {rom}"),
+                QStringLiteral("-fullscreen"),   // fullscreenArgs
+                QString(),                       // windowedArgs (default is windowed)
+                QStringLiteral("https://dosbox-x.com/"),
+                { QStringLiteral("dosbox-x.exe"), QStringLiteral("dosbox-x.reference.full.exe"),
+                  QStringLiteral("dosbox-x/dosbox-x.exe") },
+                { QStringLiteral("dosbox-x.app/Contents/MacOS/dosbox-x"), QStringLiteral("dosbox-x.app") },
+                { QStringLiteral("dosbox-x"), QStringLiteral("dosbox-x.AppImage") },
+                QString(),                       // updateJsonUrl — find-only
+                QString(), QString(), QString(), // win/mac/linux artifact — none
+                QStringLiteral("com.dosbox_x.DOSBox-X"),    // Linux is published as a Flatpak
+                QString(), QString(), QString(), // win/mac/linux update URL overrides — none
+                { QStringLiteral("exe"), QStringLiteral("com"), QStringLiteral("bat"), QStringLiteral("conf") },
+                { QStringLiteral("msdos") },
+                QStringLiteral("-conf \"{confPath}\""),
+            },
         };
         // Issue #189: attach each emulator's content-install recipe by id. Done here rather than inside the
         // initialisers above so adding a recipe never touches the positional table (and never has to restate
@@ -685,6 +769,7 @@ namespace EmulatorRegistry
         putArr("linuxBinaries", e.linuxBinaries);
         putArr("extensions", e.extensions);
         putArr("systems", e.systems);
+        putStr("confArgs", e.confArgs);   // issue #191 — the -conf hand-off, see ExternalEmulator::confArgs
         putStr("updateJsonUrl", e.updateJsonUrl);
         putStr("winArtifact", e.winArtifact);
         putStr("macArtifact", e.macArtifact);
@@ -745,6 +830,7 @@ namespace EmulatorRegistry
         }
         if (o.contains(QStringLiteral("extensions")))     e.extensions = jsonStrList(o.value(QStringLiteral("extensions")), true);
         if (o.contains(QStringLiteral("systems")))        e.systems = jsonStrList(o.value(QStringLiteral("systems")), true);
+        if (o.contains(QStringLiteral("confArgs")))       e.confArgs = o.value(QStringLiteral("confArgs")).toString();
         if (o.contains(QStringLiteral("updateJsonUrl")))  e.updateJsonUrl = o.value(QStringLiteral("updateJsonUrl")).toString().trimmed();
         if (o.contains(QStringLiteral("winArtifact")))    e.winArtifact = o.value(QStringLiteral("winArtifact")).toString();
         if (o.contains(QStringLiteral("macArtifact")))    e.macArtifact = o.value(QStringLiteral("macArtifact")).toString();
@@ -774,6 +860,17 @@ namespace EmulatorRegistry
     {
         return !e.updateJsonUrl.isEmpty() || !e.winUpdateUrl.isEmpty()
             || !e.macUpdateUrl.isEmpty() || !e.linuxUpdateUrl.isEmpty();
+    }
+
+    // Is this id one the app SHIPS (as opposed to one a <data>/emulators file added)? Used to tell the two
+    // reasons an emulator has no install source apart (issue #191): a USER entry points at a binary they
+    // already have, while a FIND-ONLY BUILT-IN — the two DOSBoxes — is one we ship the knowledge of but
+    // deliberately do not download, so the message has to name the folder and the homepage rather than tell
+    // the user to check a JSON file they never wrote.
+    inline bool isBuiltinId(const QString& id)
+    {
+        for (const ExternalEmulator& e : builtinEmulators()) if (e.id == id) return true;
+        return false;
     }
 
     // ---- pure: the "releases/latest 404" fallback (issue #233) -----------------------------------------

@@ -719,6 +719,16 @@ namespace Settings
     QString retroParkDrivenBackend();
     void setRetroParkDrivenBackend(const QString& id);
 
+    // MS-DOS MIDI device (issue #191). The stored value is a device ID declared by the msdos launch recipe's
+    // `midi` block — "gm" (a General MIDI soundfont) or "mt32" (Roland MT-32 ROMs) — and "" means "let the
+    // core decide", which is the default and is byte-for-byte the pre-#191 launch. Deliberately NOT validated
+    // against a fixed list here: which devices exist is DATA (a recipe file), and the launcher simply finds no
+    // device for an id the recipe does not declare and seeds nothing. The ASSETS the chosen device needs are
+    // the user's to supply and are never downloaded; a missing one leaves the game on its default audio with a
+    // message naming the file and the folder. Key "dos/midi_device".
+    QString dosMidiDevice();
+    void setDosMidiDevice(const QString& id);
+
     // Per-core option overrides (resolution, BIOS, region, ...). "" means "use the core's default".
     QString optionValue(const QString& core, const QString& key);
     void setOptionValue(const QString& core, const QString& key, const QString& value);

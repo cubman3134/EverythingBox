@@ -41,6 +41,7 @@
 #include "../core/RecompFeed.h" // issue #248 (b): the RetComM feed, for a feed-only row's entry
 #include "../core/RecompRows.h" // issue #248: the tier a catalogue entry belongs to
 #include "../core/Settings.h"
+#include "../core/LaunchRecipe.h"   // issue #191: the MS-DOS MIDI device list is recipe DATA, not a C++ table
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
 #include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
@@ -7755,7 +7756,13 @@ void MainWindow::openEmulatorManager()
                                       : tr("Re-download / Update %1").arg(em.displayName); rows << r; }
             else
             { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.userprovided:") + em.id;
-              r.label = tr("Install"); r.value = tr("User-provided (points at your own binary)");
+              r.label = tr("Install");
+              // TWO reasons there is nothing to download, and they read differently (issue #191): a USER
+              // entry points at their own binary, while a FIND-ONLY BUILT-IN is one we ship and deliberately
+              // do not fetch — so name the folder we look in rather than call it "yours".
+              r.value = EmulatorRegistry::isBuiltinId(em.id)
+                            ? tr("You supply it — put it in emulators/%1/").arg(em.id)
+                            : tr("User-provided (points at your own binary)");
               r.enabled = false; rows << r; }
             { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.launch:") + em.id;
               r.label = tr("Launch %1").arg(em.displayName); rows << r; }
@@ -7879,7 +7886,10 @@ void MainWindow::openEmulatorManager()
                                                         : tr("Re-download / Update %1").arg(em.displayName)));
             if (!canInstall) {
                 dl->setEnabled(false);
-                dl->setToolTip(tr("This emulator points at a binary you already have, so there is nothing to download."));
+                dl->setToolTip(EmulatorRegistry::isBuiltinId(emCopy.id)
+                    ? tr("EverythingBox doesn't download this one. Put it in emulators/%1/ beside the app, or "
+                         "point a <data>/emulators entry at a copy you already have.").arg(emCopy.id)
+                    : tr("This emulator points at a binary you already have, so there is nothing to download."));
             } else {
                 connect(dl, &QPushButton::clicked, this, [this, emCopy] {
                     if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
@@ -21564,6 +21574,29 @@ void MainWindow::openGeneralSettings()
             if (p.second == Settings::retroParkDrivenBackend()) { curRpDrivenDisp = p.first; break; }
 #endif
 
+        // MS-DOS MIDI device (issue #191). The choices come from the msdos LAUNCH RECIPE's `midi` block, not
+        // from a list in C++: which devices exist, what each is called and which files each needs are DATA
+        // (native/systems/recipes/msdos.json, overridable from <data>/systems/recipes), so adding a device is
+        // a file rather than a rebuild. "Default" is always first and stores the EMPTY value — the pre-#191
+        // launch, in which the core decides. The same pairs back the classic builder's QComboBox below.
+        //
+        // NOTHING HERE IS EVER DOWNLOADED. Picking a device does not fetch its ROMs or a soundfont; the launch
+        // checks the system folder and, when a file is missing, says which file and which folder.
+        QList<QPair<QString, QString>> dosMidiPairs = { { tr("Default (the core decides)"), QString() } };
+        {
+            const LaunchRecipe& dosRecipe = LaunchRecipes::forSystem(QStringLiteral("msdos"));
+            const RecipeCore* dosCore = dosRecipe.isNull()
+                ? nullptr : LaunchRecipes::coreFor(dosRecipe, QStringLiteral("dosbox_pure"));
+            if (dosCore)
+                for (const DosConf::MidiDevice& d : dosCore->midi.devices)
+                    dosMidiPairs.push_back({ d.label.isEmpty() ? d.id : d.label, d.id });
+        }
+        QStringList dosMidiOpts;
+        for (const auto& p : dosMidiPairs) dosMidiOpts << p.first;
+        QString curDosMidiDisp = dosMidiOpts.first();
+        for (const auto& p : dosMidiPairs)
+            if (p.second == Settings::dosMidiDevice()) { curDosMidiDisp = p.first; break; }
+
 
         // --- Subtitle appearance (issue #71). Display<->value tables for the Choice rows; the same value sets
         // back the classic builder's QComboBoxes. The handler maps each picked display back to its stored value
@@ -21863,6 +21896,15 @@ void MainWindow::openGeneralSettings()
                 "the proven default; OpenGL is an experimental opt-in. GameCube (Dolphin) is unaffected — it "
                 "always uses Vulkan. Takes effect the next time you launch a game."), QString());
 #endif
+
+        // MS-DOS MIDI device (issue #191). Classic twin in the QWidget builder below (GS_TWINS).
+        choice(QStringLiteral("emu.dosmidi"), tr("MS-DOS MIDI device"), dosMidiOpts, curDosMidiDisp);
+        info(QStringLiteral("emu.dosmidihint"),
+             tr("Many DOS games sound far better through a Roland MT-32 or General MIDI than through Adlib. "
+                "The ROMs and the soundfont are yours to supply - EverythingBox never downloads them. Put "
+                "MT32_CONTROL.ROM and MT32_PCM.ROM, or a soundfont named DOSBOX.SF2, in the system folder; "
+                "if a file is missing the game still plays, on its default audio, and says which file it "
+                "wanted."), QString());
         // --- Local Library (movies + TV) ---
         sep(tr("Local Library"));
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
@@ -22362,6 +22404,7 @@ void MainWindow::openGeneralSettings()
              xfPairs,                  // Crossfade (#141): same, for the seconds row
              musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
              shaderPresetPairs,
+             dosMidiPairs,             // MS-DOS MIDI device (#191): the handler maps the picked display back
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
 #endif
@@ -22391,6 +22434,9 @@ void MainWindow::openGeneralSettings()
                     for (const auto& p : rpDrivenBackendPairs) if (p.first == val) { Settings::setRetroParkDrivenBackend(p.second); break; }
                 }
 #endif
+                else if (id == QStringLiteral("emu.dosmidi")) {
+                    for (const auto& p : dosMidiPairs) if (p.first == val) { Settings::setDosMidiDevice(p.second); break; }
+                }
                 else if (id == QStringLiteral("emu.hardcore")) {
                     // Hardcore (#94): enabling needs consent (it disables the emulator's comforts and resets the
                     // achievement session). The row already flipped visually; only persist + apply on confirm,
@@ -23638,6 +23684,34 @@ void MainWindow::openGeneralSettings()
         rpDrivenRow->addWidget(rpDrivenLbl); rpDrivenRow->addWidget(rpDriven); rpDrivenRow->addStretch(1);
         v->addLayout(rpDrivenRow);
 #endif
+
+        // MS-DOS MIDI device (issue #191): classic twin of the themed emu.dosmidi row. The options are read
+        // from the msdos launch recipe's `midi` block, exactly as the themed builder reads them, so the two
+        // surfaces can never offer different devices; the stored id ("" | "gm" | "mt32") rides in the item
+        // data. Nothing is ever downloaded — the assets are the user's to supply, and a launch with one
+        // missing plays on the core's default audio and names the file it wanted.
+        auto* dosMidiRow = new QHBoxLayout();
+        auto* dosMidiLbl = new QLabel(tr("MS-DOS MIDI device"));
+        auto* dosMidi = new QComboBox();
+        dosMidi->addItem(tr("Default (the core decides)"), QString());
+        {
+            const LaunchRecipe& dosRecipeC = LaunchRecipes::forSystem(QStringLiteral("msdos"));
+            const RecipeCore* dosCoreC = dosRecipeC.isNull()
+                ? nullptr : LaunchRecipes::coreFor(dosRecipeC, QStringLiteral("dosbox_pure"));
+            if (dosCoreC)
+                for (const DosConf::MidiDevice& d : dosCoreC->midi.devices)
+                    dosMidi->addItem(d.label.isEmpty() ? d.id : d.label, d.id);
+        }
+        dosMidi->setCurrentIndex(qMax(0, dosMidi->findData(Settings::dosMidiDevice())));
+        dosMidi->setToolTip(tr("Many DOS games sound far better through a Roland MT-32 or General MIDI than "
+                               "through Adlib. The ROMs and the soundfont are yours to supply - EverythingBox "
+                               "never downloads them. Put MT32_CONTROL.ROM and MT32_PCM.ROM, or a soundfont "
+                               "named DOSBOX.SF2, in the system folder; if a file is missing the game still "
+                               "plays, on its default audio, and says which file it wanted."));
+        connect(dosMidi, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [dosMidi](int) { Settings::setDosMidiDevice(dosMidi->currentData().toString()); });
+        dosMidiRow->addWidget(dosMidiLbl); dosMidiRow->addWidget(dosMidi); dosMidiRow->addStretch(1);
+        v->addLayout(dosMidiRow);
 
         v->addSpacing(10);
 

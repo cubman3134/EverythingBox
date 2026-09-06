@@ -172,6 +172,22 @@ QString LaunchOpts::appendExtraArgs(const QString& resolvedArgs, const QString& 
     return out + e;                                 // exactly one space between the template and the extra
 }
 
+QString LaunchOpts::applyConfArg(const QString& resolved, const QString& confArgs, const QString& confPath)
+{
+    const QString placeholder = QStringLiteral("{conf}");
+    if (!resolved.contains(placeholder)) return resolved;
+    const QString path = confPath.trimmed();
+    QString expansion;
+    if (!confArgs.trimmed().isEmpty() && !path.isEmpty() && !path.contains(QLatin1Char('"')))
+    {
+        expansion = confArgs;
+        expansion.replace(QStringLiteral("{confPath}"), path);
+    }
+    QString out = resolved;
+    out.replace(placeholder, expansion);
+    return out;
+}
+
 QStringList LaunchOpts::buildArgs(const QString& resolved, const QString& romNative)
 {
     QStringList args;

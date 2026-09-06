@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.193 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.195 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1848,6 +1848,24 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_recipes PRIVATE Qt6::Core)
     target_compile_definitions(probe_recipes PRIVATE
         EB_RECIPES_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/systems/recipes")
+
+    # The DOS power-user tier (issue #191): a dosbox.conf beside the game translated onto the core's options
+    # with an honest applied/ignored report, the two standalone DOSBox entries and their `-conf` hand-off, and
+    # the MT-32 / soundfont assets. Drives DosConf.h (pure: parser, mapping, report, MIDI messages) against
+    # literals, and the SHIPPED msdos recipe + the SHIPPED emulator table so the assertions are about what
+    # actually ships. recipes.qrc is compiled IN through qt_add_resources for the reason probe_recipes spells
+    # out: a .qrc reaching a target any other way is silently not embedded. LaunchOptionsStore.cpp links for
+    # the argv half (applyConfArg + buildArgs); Settings.cpp/FormFactor.cpp follow it exactly as they do for
+    # probe_launchopts.
+    qt_add_resources(EB_RECIPES_RCC_DOSCONF resources/recipes.qrc)
+    add_executable(probe_dosconf tools/probe_dosconf.cpp
+        src/core/DosConf.h src/core/LaunchRecipe.h src/core/EmulatorRegistry.h
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        ${EB_RECIPES_RCC_DOSCONF})
+    target_include_directories(probe_dosconf PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_dosconf PRIVATE Qt6::Core)
 
     # PS3 game auto-update pure-logic units (src/core/ps3): the PARAM.SFO Title-ID parser and the rest of the
     # check→install pipeline, each seam-isolated so this one headless probe exercises them without display,

@@ -46,6 +46,7 @@
 #include "core/ps3/Ps3Pkg.h"               // the pkg's own entry table — the airtight "what must this install produce" list
 #include "core/ps3/Ps3VerifyBackoff.h"     // bounds a PERSISTENT verification-only failure to one chain per title per day
 #include "LaunchCancel.h"                  // pure decision behind cancelPendingLaunch (demote vs cancel-now)
+#include "DosConf.h"                       // issue #191: which conf beside the game is THE conf (pure)
 
 #ifdef EVERYTHINGBOX_HAVE_SDL
 #define SDL_MAIN_HANDLED          // never let SDL take over main()
@@ -216,8 +217,18 @@ void EmulatorManager::play(const ExternalEmulator& em, const QString& rom, const
     if (bin.isEmpty() && !EmulatorRegistry::hasInstallSource(em))
     {
         busy_ = false;
-        emit failed(tr("Couldn't find %1's program. Check the \"binary\" path in its emulators/*.json entry.")
-                        .arg(em.displayName));
+        // TWO different reasons an emulator has no install source, and they need different sentences
+        // (issue #191). A USER entry points at a binary they already have, so the fix is their JSON. A
+        // FIND-ONLY BUILT-IN — the two DOSBoxes — is one WE ship and deliberately do not download, so
+        // telling the user to check a file they never wrote would send them looking for a bug; name the
+        // folder we look in and where to get it instead.
+        if (EmulatorRegistry::isBuiltinId(em.id))
+            emit failed(tr("EverythingBox doesn't download %1 for you. Put it in emulators/%2/ beside the app, "
+                           "or point a <data>/emulators entry at a copy you already have. %3")
+                            .arg(em.displayName, em.id, em.homepage));
+        else
+            emit failed(tr("Couldn't find %1's program. Check the \"binary\" path in its emulators/*.json entry.")
+                            .arg(em.displayName));
         return;
     }
     // This launch now owns the manager: retire the previous launch's context, cancelling any async work it
@@ -1534,6 +1545,23 @@ void EmulatorManager::restoreSaves(const QString& binDir)
     }
 }
 
+// The conf file that sits BESIDE the game (issue #191), or "" when there is none. The game path may be the
+// folder itself or a program inside it (#190 hands a DOS folder game the executable path), so the search
+// directory is the folder either way. The whole top level is listed rather than a `*.conf` name filter,
+// because that filter is case-SENSITIVE on Linux and a DOS game folder is full of upper-case names —
+// DOSBOX.CONF would be invisible there. DosConf's rule does the matching, case-insensitively, and it is pure
+// so the choice is pinned by probe_dosconf rather than by a directory that happens to exist on this machine.
+static QString confBesideGame(const QString& gamePath)
+{
+    if (gamePath.trimmed().isEmpty()) return QString();
+    const QFileInfo fi(gamePath);
+    const QDir dir = fi.isDir() ? QDir(gamePath) : QDir(fi.absolutePath());
+    if (!dir.exists()) return QString();
+    const QStringList names = dir.entryList(QDir::Files);
+    const QString chosen = DosConf::chooseConf(names);
+    return chosen.isEmpty() ? QString() : dir.absoluteFilePath(chosen);
+}
+
 void EmulatorManager::launch(const QString& binary)
 {
     // Both routes into launch() — play()'s "already installed" shortcut and finishInstall's launch-after-install
@@ -1550,6 +1578,27 @@ void EmulatorManager::launch(const QString& binary)
     // Per-game extra args (issue #51) appended AFTER the resolved template — its own whole tokens, past the
     // positional {rom}. A blank extra (the overwhelmingly common case) leaves tmpl byte-for-byte unchanged.
     tmpl = LaunchOpts::appendExtraArgs(tmpl, extraArgs_);
+
+    // THE CONFIG-FILE HAND-OFF (issue #191). An emulator that declares `confArgs` — the two DOSBoxes — takes
+    // a dosbox.conf sitting beside the game LOSSLESSLY, by being handed the file. Nothing is translated on
+    // this path, which is the reason a standalone entry is worth having at all: translating a conf onto
+    // libretro core options can only ever be partial (DosConf.h reports what it could not carry), while
+    // DOSBox reading its own file carries all of it.
+    //
+    // Gated on `confArgs` being non-empty, so this is inert for all sixteen emulators that predate #191:
+    // their templates hold no {conf} and applyConfArg returns the string unchanged. Which path a launch took
+    // is logged, because "did my conf get used?" is the whole question a user has here.
+    QString confPath;
+    if (!em_.confArgs.trimmed().isEmpty())
+    {
+        confPath = confBesideGame(rom_);
+        qInfo("EmulatorManager: %s conf hand-off: %s", qUtf8Printable(em_.id),
+              confPath.isEmpty()
+                  ? "no conf beside the game — launching with the emulator's own configuration"
+                  : qUtf8Printable(QStringLiteral("passing %1 through with %2 (nothing translated)")
+                                       .arg(QFileInfo(confPath).fileName(), em_.confArgs)));
+    }
+    tmpl = LaunchOpts::applyConfArg(tmpl, em_.confArgs, QDir::toNativeSeparators(confPath));
 
     // Use the platform's native separators for the ROM path: PCSX2 rejects a forward-slash path on Windows
     // ("filename does not exist") even though most emulators accept it. No-op on Linux/macOS where / is native.

@@ -24,7 +24,102 @@
         { "when": "folder",  "present": "executable" },
         { "when": "file",    "present": "asIs" }
       ],
-      "bootCommand": ""
+      "bootCommand": "",
+      "conf": {
+        "unmappedNote": "DOSBox-Pure has no matching core option",
+        "map": [
+          {
+            "from": "dosbox.machine",
+            "to": "dosbox_pure_machine",
+            "values": {
+              "svga_s3": "svga", "svga_et3000": "svga", "svga_et4000": "svga",
+              "svga_paradise": "svga", "vesa_nolfb": "svga", "vesa_oldvbe": "svga",
+              "vgaonly": "vga", "ega": "ega", "cga": "cga", "cga_mono": "cga",
+              "tandy": "tandy", "hercules": "hercules", "pcjr": "pcjr"
+            },
+            "note": "DOSBox-Pure's machine list has no entry for this value"
+          },
+          {
+            "from": "dosbox.memsize",
+            "to": "dosbox_pure_memory_size",
+            "values": {
+              "4": "4", "8": "8", "16": "16", "24": "24", "32": "32", "48": "48",
+              "64": "64", "96": "96", "128": "128", "224": "224", "256": "256",
+              "512": "512", "1024": "1024"
+            },
+            "note": "DOSBox-Pure offers a fixed list of memory sizes and this is not one of them"
+          },
+          {
+            "from": "cpu.cycles",
+            "to": "dosbox_pure_cycles",
+            "transform": "cycles",
+            "note": "only auto, max and a fixed cycle count can be expressed as a core option"
+          },
+          {
+            "from": "cpu.cputype",
+            "to": "dosbox_pure_cpu_type",
+            "values": {
+              "auto": "auto", "386": "386", "386_slow": "386", "386_prefetch": "386_prefetch",
+              "486_slow": "486_slow", "486_prefetch": "486_slow",
+              "pentium": "pentium_slow", "pentium_slow": "pentium_slow"
+            },
+            "note": "DOSBox-Pure emulates a smaller set of CPU types than dosbox.conf can name"
+          },
+          {
+            "from": "cpu.core",
+            "to": "dosbox_pure_cpu_core",
+            "values": {
+              "auto": "auto", "dynamic": "dynamic", "dynamic_x86": "dynamic",
+              "dynamic_rec": "dynamic", "dynamic_nodhfpu": "dynamic",
+              "normal": "normal", "full": "normal", "simple": "simple"
+            },
+            "note": "DOSBox-Pure has no core of this kind"
+          },
+          {
+            "from": "sblaster.sbtype",
+            "to": "dosbox_pure_sblaster_type",
+            "values": {
+              "sb1": "sb1", "sb2": "sb2", "sbpro1": "sbpro1", "sbpro2": "sbpro2",
+              "sb16": "sb16", "gb": "gb", "none": "none"
+            },
+            "note": "DOSBox-Pure has no Sound Blaster of this type"
+          },
+          {
+            "from": "sblaster.oplmode",
+            "to": "dosbox_pure_sblaster_adlib_mode",
+            "values": {
+              "auto": "auto", "cms": "cms", "opl2": "opl2", "dualopl2": "dualopl2",
+              "opl3": "opl3", "opl3gold": "opl3gold", "none": "none"
+            },
+            "note": "DOSBox-Pure has no OPL mode of this kind"
+          },
+          {
+            "from": "midi.mididevice",
+            "to": "dosbox_pure_midi",
+            "transform": "none",
+            "note": "the MIDI device is chosen in Settings ▸ MS-DOS MIDI device, because it depends on which MT-32 ROMs or soundfont you have supplied"
+          }
+        ]
+      },
+      "midi": {
+        "option": "dosbox_pure_midi",
+        "devices": [
+          {
+            "id": "gm",
+            "label": "General MIDI (SoundFont)",
+            "value": "DOSBOX.SF2",
+            "files": ["DOSBOX.SF2"],
+            "note": "EverythingBox doesn't bundle a soundfont; supply one of your own and give it that name"
+          },
+          {
+            "id": "mt32",
+            "label": "Roland MT-32",
+            "value": "MT32_CONTROL.ROM",
+            "files": ["MT32_CONTROL.ROM", "MT32_PCM.ROM"],
+            "note": "these ROMs are copyrighted"
+          }
+        ]
+      }
     },
     {
       "core": "dosbox_core",
@@ -39,7 +134,45 @@
         { "when": "folder",  "present": "executable" },
         { "when": "file",    "present": "asIs" }
       ],
-      "bootCommand": ""
+      "bootCommand": "",
+      "conf": {
+        "unmappedNote": "the dosbox_core option set has no equivalent",
+        "map": [
+          {
+            "from": "dosbox.machine",
+            "to": "dosbox_core_machine",
+            "values": {
+              "svga_s3": "svga_s3", "svga_et3000": "svga_et3000", "svga_et4000": "svga_et4000",
+              "svga_paradise": "svga_paradise", "vgaonly": "vgaonly", "ega": "ega",
+              "cga": "cga", "tandy": "tandy", "hercules": "hercules", "pcjr": "pcjr"
+            },
+            "note": "dosbox_core's machine list has no entry for this value"
+          },
+          {
+            "from": "dosbox.memsize",
+            "to": "dosbox_core_memory_size",
+            "values": {
+              "4": "4", "8": "8", "16": "16", "24": "24", "32": "32", "48": "48", "64": "64"
+            },
+            "note": "dosbox_core offers a fixed list of memory sizes and this is not one of them"
+          },
+          {
+            "from": "sblaster.sbtype",
+            "to": "dosbox_core_sblaster_type",
+            "values": {
+              "sb1": "sb1", "sb2": "sb2", "sbpro1": "sbpro1", "sbpro2": "sbpro2",
+              "sb16": "sb16", "gb": "gb", "none": "none"
+            },
+            "note": "dosbox_core has no Sound Blaster of this type"
+          },
+          {
+            "from": "cpu.cycles",
+            "to": "dosbox_core_cpu_cycles",
+            "transform": "none",
+            "note": "dosbox_core splits cycles across two options (a mode and a count), which one conf line cannot set on its own — install DOSBox Staging or DOSBox-X and hand it the conf instead"
+          }
+        ]
+      }
     }
   ]
 }

@@ -77,6 +77,94 @@ In order, stopping at the first step that decides:
 
 A game folder that ships its own `DOSBOX.CONF` is honoured automatically.
 
+### A `dosbox.conf` beside the game
+
+Every GOG release, game pack and "how do I make this run" answer in the DOS world is written as a
+`dosbox.conf`. It is how DOS configuration is passed between people, so EverythingBox reads one if you put it
+next to the game — `dosbox.conf`, or the `dosbox_<game>.conf` a GOG install ships (the `_single` twin, which
+also runs the game and exits, is skipped in favour of the settings one), or the single `.conf` in the folder
+if there is exactly one. Two unrelated `.conf` files is an ambiguity the app will not resolve for you: it
+uses neither and says nothing.
+
+There are **two** ways that file gets used, and which one you get depends on the engine:
+
+* **DOSBox-Pure (the default) translates it.** A libretro core is configured through core options, not
+  through a conf, and the two are not the same set — so the translation is *partial by nature*. What the app
+  does about that is tell you: every launch with a conf beside it reports **how many of its settings were
+  applied, which ones, and which were ignored**. Nothing is dropped quietly.
+* **DOSBox Staging / DOSBox-X take it as it is.** Handed `-conf <your file>`, a real DOSBox reads its own
+  format, so nothing is translated and nothing is lost. See [Standalone DOSBox](#standalone-dosbox) below.
+
+A conf with a **syntax error** applies nothing at all and says which line: a half-read conf would leave you
+debugging a game configured out of the first few lines of your file.
+
+What the shipped mapping carries onto DOSBox-Pure:
+
+| `dosbox.conf` | Core option | Notes |
+|---|---|---|
+| `[dosbox] machine` | `dosbox_pure_machine` | every `svga_*` and `vesa_*` value maps to `svga`; `vgaonly` → `vga`; `ega`, `cga`, `tandy`, `hercules`, `pcjr` map across |
+| `[dosbox] memsize` | `dosbox_pure_memory_size` | the core offers a fixed list of sizes; one that is not on it is reported as ignored rather than rounded |
+| `[cpu] cycles` | `dosbox_pure_cycles` | `auto` → auto, `max` / `max 80%` / `max limit N` → max, `fixed N` and a bare `N` → that count |
+| `[cpu] cputype` | `dosbox_pure_cpu_type` | `386`, `386_prefetch`, `486_slow`, `pentium` and `auto`; the core emulates fewer types than a conf can name |
+| `[cpu] core` | `dosbox_pure_cpu_core` | `dynamic*` → dynamic, `full` → normal, plus `auto`, `normal`, `simple` |
+| `[sblaster] sbtype` | `dosbox_pure_sblaster_type` | `sb1` … `sb16`, `gb`, `none` |
+| `[sblaster] oplmode` | `dosbox_pure_sblaster_adlib_mode` | `auto`, `cms`, `opl2`, `dualopl2`, `opl3`, `opl3gold`, `none` |
+| `[midi] mididevice` | — | deliberately **not** translated: the MIDI device is a setting, because it depends on which ROMs or soundfont you supplied (below) |
+| `[autoexec]` | — | mounting and start-up commands are the emulator's own job |
+| everything else | — | reported as ignored, by name |
+
+DOSBox-Pure *also* reads a conf inside the game folder or ZIP itself, which is why `dosbox_pure_conf` is
+seeded to `inside`. The translation above is the layer on top: it makes the settings visible to the app, so
+they can be reported, and it works for `dosbox_core` too (which has its own, smaller mapping onto its own
+option names — a conf mapping is a property of the *core*, never of the system).
+
+The conf sits between your own settings and the system recipe:
+
+    your per-core setting  >  your per-game override  >  this game's dosbox.conf  >  the system recipe
+
+— a conf is more specific than the recipe, because it is about one game; but it is a file that happened to be
+in the folder, so anything you chose by hand still wins.
+
+## Standalone DOSBox
+
+Two real DOSBoxes are registered beside the in-process core. Neither is the default — **DOSBox-Pure stays
+what MS-DOS launches on** — and both are offered per system or per game through the same picker that offers
+ares for N64.
+
+| Entry | What it is for |
+|---|---|
+| **DOSBox Staging** | The actively developed DOSBox: better defaults, modern scaling, cleaner audio. The "nicer than the core" option. |
+| **DOSBox-X** | The accuracy fork: Tandy, PCjr, specific 386/486 variants, obscure hardware, and non-game DOS software (Windows 3.x, development tools) the core does not aim at. |
+
+Both are launched as `-conf <your conf> -exit <the game>`, so the conf hand-off is exact: **nothing is
+translated on this path**, because DOSBox is reading its own file. The log says which path a launch took and
+which conf, if any, was passed.
+
+Neither is auto-installed. Put the emulator where EverythingBox looks (`emulators/dosbox-staging/` or
+`emulators/dosbox-x/` beside the app), or point a `<data>/emulators/*.json` entry at a copy you already have
+with `"binary": "C:/path/to/dosbox.exe"`. Until then the launch says which binary is missing and where to get
+it.
+
+## MS-DOS MIDI: MT-32 and General MIDI
+
+Many DOS games sound dramatically better through a Roland MT-32 or a General MIDI device than through Adlib
+or the PC speaker, and DOSBox-Pure supports both — given the assets. **EverythingBox never downloads or
+bundles them**: MT-32 ROMs are copyrighted, and a soundfont is somebody else's licensed content. It does the
+same thing it does for firmware — names the exact file and the exact folder.
+
+Settings ▸ General ▸ **MS-DOS MIDI device** (on both layouts):
+
+| Choice | Files, in the **system folder** |
+|---|---|
+| **Default (the core decides)** | none — this is what happens if you never open the setting |
+| **General MIDI (SoundFont)** | `DOSBOX.SF2` — any General MIDI soundfont you like, under that name |
+| **Roland MT-32** | `MT32_CONTROL.ROM` **and** `MT32_PCM.ROM` — both, or it is not an MT-32 |
+
+If a file is missing the launch is **not** refused: the game plays through its default audio, and the message
+names the file(s) that were wanted and the folder they go in. The device choices themselves come from the
+recipe, so a new one is a data file rather than a rebuild.
+
+
 ## Amstrad CPC in detail
 
 A CPC boots to BASIC and waits for you to type `RUN"` and a file name, which is why every CPC user learns
@@ -119,6 +207,16 @@ Inside a `cores[]` entry:
 * `content` — `{ when: file | folder | archive, present: asIs | executable | extract }`. Saying **nothing**
   about a shape means "behave as EverythingBox always has", which for an archive is *extract* — so handing a
   core an unextracted archive is something a recipe has to ask for in as many words.
+* `conf` — the `dosbox.conf` translation for this core (issue #191): `unmappedNote` (the phrase used for a
+  conf key with no mapping) and `map`, a list of `{ from, to, values?, transform?, note? }`. `from` is
+  `section.key` in the conf; `to` is the core option. `values` is BOTH a translation table and a whitelist —
+  a conf value it does not list is reported as ignored rather than passed at a core that has no setting for
+  it. `transform` is `"cycles"` (the `cycles=` grammar) or `"none"`, which means "we know about this key and
+  deliberately do not translate it" and reports the `note` instead.
+* `midi` — the MT-32 / General MIDI assets (issue #191): `option` (the core option that selects a device)
+  and `devices`, a list of `{ id, label, value, files, note }`. `files` is ALL-OF, unlike `firmware`'s
+  any-of: an MT-32 needs both of its ROMs. `note` says why EverythingBox cannot provide the file, which is
+  never the same reason twice. Nothing here is ever downloaded.
 * `bootCommand` — how this core gets its typed boot command. `"amsdos"` means "read it out of the Amstrad
   disk's own catalogue"; empty means the core needs none. It names a *mechanism*, not a literal command,
   because the command is a property of the disk and a recipe is a property of the system.

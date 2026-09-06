@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <QElapsedTimer>
+#include <QMap>
 #include <functional>
 #include "../ui/FeedbackPolicy.h"   // kFeedbackLong — error-class notice duration
 #include "../core/EmuBackend.h"     // CorePlan::backend — which engine a resolved game launches on (Slice 2a)
@@ -98,6 +99,21 @@ public:
     // disk's catalogue holds nothing runnable, which is the one case where the core gives up and drops the
     // user at a `CAT` listing with no explanation. Public so the split-pane branch reports it too.
     QString amsdosBootCommand(const CorePlan& plan, bool* readable = nullptr) const;
+
+    // #191: the dosbox.conf translation for a libretro plan. Reads the conf sitting beside the game, maps it
+    // onto this core's options through the recipe's `conf` block, fills *options with what to seed, and
+    // returns THE REPORT — the sentence naming which of the conf's settings were applied and which were
+    // ignored. "" when there is no conf beside the game (which is every launch on every other system), so
+    // nothing about a launch without one changes. A conf that cannot be PARSED returns its own message and
+    // leaves *options empty: half-applying a conf is worse than ignoring it. Public so the split-pane branch
+    // can run the same translation.
+    QString dosConfReport(const CorePlan& plan, const QString& title, QMap<QString, QString>* options) const;
+
+    // #191: the MIDI assets. For the user's chosen MS-DOS MIDI device, fills *options with the core option
+    // that selects it — but only when every file that device needs is in the system folder — and returns the
+    // message naming the missing file(s) and the folder when it is not. Never refuses a launch: a game with
+    // no soundfont plays through its default audio, and the message says so.
+    QString dosMidiSeed(const CorePlan& plan, const QString& title, QMap<QString, QString>* options) const;
 
     // Fill plan.corePath — immediately when installed, else via an async buildbot download (progress on the
     // Notifier toast) — then run onReady with the completed plan. On failure onReady never runs; the error
