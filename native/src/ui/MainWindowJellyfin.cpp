@@ -55,6 +55,7 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QStringList>
+#include <QUuid>
 
 namespace {
 
@@ -107,6 +108,14 @@ void MainWindow::openJellyfinItem(const QString& qualifiedId, const QString& tit
 {
     if (!Jellyfin::isQualified(qualifiedId)) return;   // not ours; the caller's other routes own it
 
+    // #110: A DOWNLOADED COPY WINS, AND IS ASKED ABOUT BEFORE ANY SOCKET IS OPENED. That order is the whole
+    // offline story: prepareOpen's two round trips would otherwise have to time out before a file already
+    // on this disk could play, so an aeroplane would cost thirty seconds and a sentence about the server
+    // being unreachable for something that needs no server at all. The same prefer-local rule the catalogue
+    // rows already follow, applied at the one door every Jellyfin open comes through.
+    if (const QString local = jellyfinLocalCopy(qualifiedId); !local.isEmpty())
+    { playJellyfinLocalCopy(qualifiedId, local, title); return; }
+
     // "Finding" rather than "Loading": two round trips are about to happen against somebody's server, and
     // on a slow link the difference between a window that says nothing and one that says this is the
     // difference between a bug report and a wait.
@@ -146,6 +155,7 @@ void MainWindow::openJellyfinItem(const QString& qualifiedId, const QString& tit
             jellyfinPlaySessionId_  = plan.playSessionId;
             jellyfinMediaSourceId_  = plan.mediaSourceId;
             jellyfinLastReportedS_  = -1.0;     // the first tick always goes out
+            jellyfinPlayingOffline_ = false;    // #110: this one IS streaming from the server
 
             // Step 2. THE POSITION IS THE SERVER'S. Both lines are after playStream on purpose:
             // beginResume (inside it) clears the flag and reads this device's stored position, and this is
@@ -158,9 +168,11 @@ void MainWindow::openJellyfinItem(const QString& qualifiedId, const QString& tit
 
             // ...and tell the server the playback has started, so its own session list shows it now rather
             // than in ten seconds' time.
-            JellyfinClient::instance().reportProgress(qualifiedId, Jellyfin::ProgressEvent::Start,
-                                                      plan.resumeSeconds, plan.playSessionId,
-                                                      plan.mediaSourceId);
+            // #110: through the ONE report site, which sends straight at the server for a streamed item and
+            // queues for a downloaded one. Every report in this feature goes through it, so there is one
+            // place that knows whether there is anybody listening.
+            reportJellyfinProgress(qualifiedId, Jellyfin::ProgressEvent::Start, plan.resumeSeconds,
+                                   plan.playSessionId, plan.mediaSourceId);
 
             // Step 3. The server's intro/credits detection, as one more provider tier. AFTER playStream,
             // because playStream's resetSegmentState clears exactly this field.
@@ -203,8 +215,8 @@ void MainWindow::onJellyfinProgress(const QString& key, double seconds)
     // and it reports immediately on a backward seek — see the rule there.
     if (!Jellyfin::shouldReportProgress(jellyfinLastReportedS_, seconds)) return;
     jellyfinLastReportedS_ = seconds;
-    JellyfinClient::instance().reportProgress(jellyfinPlayingId_, Jellyfin::ProgressEvent::Progress,
-                                              seconds, jellyfinPlaySessionId_, jellyfinMediaSourceId_);
+    reportJellyfinProgress(jellyfinPlayingId_, Jellyfin::ProgressEvent::Progress, seconds,
+                           jellyfinPlaySessionId_, jellyfinMediaSourceId_);
 }
 
 void MainWindow::stopJellyfinPlayback()
@@ -223,6 +235,49 @@ void MainWindow::stopJellyfinPlayback()
     jellyfinPlaySessionId_.clear();
     jellyfinMediaSourceId_.clear();
     jellyfinLastReportedS_ = -1.0;
-    JellyfinClient::instance().reportProgress(id, Jellyfin::ProgressEvent::Stop, pos > 0.0 ? pos : 0.0,
-                                              ps, ms);
+    reportJellyfinProgress(id, Jellyfin::ProgressEvent::Stop, pos > 0.0 ? pos : 0.0, ps, ms);
+    // #110: cleared AFTER the report, unlike the four fields above — reportJellyfinProgress reads it to
+    // decide whether there is a server to talk to, and clearing it first would send an offline session's
+    // final position straight at a server that is not there, losing the one report that matters most.
+    // The re-entrancy the fields above guard against is already handled by jellyfinPlayingId_ being empty.
+    jellyfinPlayingOffline_ = false;
+}
+
+// ---- The offline route (issue #110) --------------------------------------------------------------------
+// A DOWNLOADED ITEM IS A LOCAL ITEM, and this is what that sentence costs: no prepareOpen, no PlaybackInfo,
+// no user-state read, no segments fetch. Four network round trips that a file on this disk does not need,
+// and that on a plane are four timeouts between the press and the picture.
+//
+// Everything else is deliberately IDENTICAL to the streaming route, because the item is the same item:
+//
+//   * the resume key is still the qualified id, so Recents records the ID (Jellyfin::recordedPath), the
+//     Downloads shelf's row re-opens through this same door, and the position is filed where the streaming
+//     route would look for it;
+//   * jellyfinPlayingId_ is still set, so the throttled progress hook still fires and the Stop still runs;
+//   * ...but setResumeOwnedByServer is NOT called. The server cannot be asked where this user got to, so
+//     THIS DEVICE's store is the authority for the length of the flight — which is exactly what
+//     PlaybackSession::beginResume has already done inside playStream. Marking it server-owned would seed
+//     a position nobody supplied.
+//
+// The play session id is minted here. The server never issued one for this viewing — there was no session —
+// and every report the queue collects has to quote the same one, or the server sees a different playback per
+// report. It is a uuid: an identifier, not a credential.
+void MainWindow::playJellyfinLocalCopy(const QString& qualifiedId, const QString& local,
+                                       const QString& title)
+{
+    statusBar()->showMessage(tr("Playing “%1” from your downloads…").arg(title), kFeedbackShort);
+    playStream(local, qualifiedId, title);
+    jellyfinPlayingId_      = qualifiedId;
+    jellyfinPlaySessionId_  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    jellyfinMediaSourceId_.clear();
+    jellyfinLastReportedS_  = -1.0;
+    jellyfinPlayingOffline_ = true;
+    // THE IDENTITY IS STILL A MACHINE KEY EVEN THOUGH THE POSITION IS OURS. Without this the resume row
+    // this playback writes gets "jf:<server>:<item>" as its title, and that is what the Continue Watching
+    // shelf shows. See PlaybackSession::setResumeIdentityNotAName for why the two halves of #83's flag come
+    // apart exactly here. AFTER playStream, because beginResume (inside it) clears the flag.
+    if (session_) session_->setResumeIdentityNotAName(true);
+    reportJellyfinProgress(qualifiedId, Jellyfin::ProgressEvent::Start,
+                           session_ ? session_->position() : 0.0,
+                           jellyfinPlaySessionId_, jellyfinMediaSourceId_);
 }

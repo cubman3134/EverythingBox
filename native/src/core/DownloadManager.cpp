@@ -72,7 +72,10 @@ bool DownloadManager::hasActiveOrQueued() const
 
 void DownloadManager::enqueue(const DownloadJob& in)
 {
-    if (in.url.isEmpty() || in.dest.isEmpty()) return;
+    // A job needs SOMETHING to fetch: a url, or a sourceRef the minter can turn into one (#110). A
+    // ref-backed job deliberately arrives with an empty url — that is the whole point of it, so testing
+    // only `url` here would silently drop every Jellyfin download.
+    if ((in.url.isEmpty() && in.sourceRef.isEmpty()) || in.dest.isEmpty()) return;
     // Already downloaded? Report it complete without re-fetching.
     if (QFileInfo::exists(in.dest) && QFileInfo(in.dest).size() > 0)
     {
@@ -89,6 +92,7 @@ void DownloadManager::enqueue(const DownloadJob& in)
             // the item again is exactly how a user recovers a job that outlived its own credentials, so the
             // fresh answer has to win — otherwise the retry re-sends the dead one and fails identically.
             j.url = in.url;
+            j.sourceRef = in.sourceRef;   // #110: the durable half; the url above is empty for these
             j.requestHeaders = in.requestHeaders;
             j.headerGated = !in.requestHeaders.isEmpty();
             if (j.state == DownloadJob::Failed || j.state == DownloadJob::Paused) { j.state = DownloadJob::Queued; j.error.clear(); }
@@ -127,6 +131,27 @@ void DownloadManager::start(int idx)
         pump(); // this job is out of the running; don't strand the rest of the queue behind it
         return;
     }
+    // A REF-BACKED JOB HAS NO URL AND MINTS ONE HERE, once, for this request (#110). This is the site the
+    // whole credential design turns on: the link exists between here and the QNetworkRequest below and
+    // nowhere else — it is never assigned to `j`, so it cannot reach save(), a log line or a crash dump.
+    // See DownloadJob::sourceRef and JellyfinDownload.h.
+    QString fetchUrl = j.url;
+    if (!j.sourceRef.isEmpty())
+    {
+        fetchUrl = minter_ ? minter_(j.sourceRef) : QString();
+        if (fetchUrl.isEmpty())
+        {
+            // The honest sentence, built from NOTHING about the request. A server that has been removed or
+            // signed out is the ordinary case here, and it is a state the user can fix.
+            j.state = DownloadJob::Failed;
+            j.error = tr("the server this was downloaded from isn't set up on this device any more — "
+                         "sign in again and start the download from the item");
+            save(); emit changed();
+            pump(); // this job is out of the running; don't strand the rest of the queue behind it
+            return;
+        }
+    }
+
     const QString part = j.dest + QStringLiteral(".part");
     QDir().mkpath(QFileInfo(j.dest).absolutePath());
 
@@ -155,7 +180,7 @@ void DownloadManager::start(int idx)
     j.state = DownloadJob::Active;
     activeId_ = j.id;
 
-    QNetworkRequest rq{ QUrl(j.url) };
+    QNetworkRequest rq{ QUrl(fetchUrl) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     // OUR Range, set before the source's headers and safe from them: parseProxyHeaders refuses a Range from a
     // stream precisely because this request (and the player's seeks) own it.
@@ -180,7 +205,7 @@ void DownloadManager::start(int idx)
     bodyExpected_ = -1;
     bodyReceived_ = 0;
     rangeAsked_ = have > 0;
-    reply_ = NetHeaderApply::get(nam_, rq, j.requestHeaders, j.url, [this](bool allowed, const QUrl& to) {
+    reply_ = NetHeaderApply::get(nam_, rq, j.requestHeaders, fetchUrl, [this](bool allowed, const QUrl& to) {
         if (allowed)
         {
             dlLog(QStringLiteral("download: same-origin redirect -> %1, headers still apply")
@@ -470,7 +495,12 @@ void DownloadManager::save() const
     {
         if (j.state == DownloadJob::Done) continue; // completed jobs live in DownloadsStore; don't persist here
         arr.append(QJsonObject{
-            { QStringLiteral("id"), j.id }, { QStringLiteral("title"), j.title }, { QStringLiteral("url"), j.url },
+            { QStringLiteral("id"), j.id }, { QStringLiteral("title"), j.title },
+            // #110: THE REF, AND FOR A REF-BACKED JOB NO URL AT ALL. `j.url` is already empty for those —
+            // this is not a scrub but a belt beside the braces, so that a future site which did assign one
+            // still cannot write it here. A ref is two ids and carries no credential.
+            { QStringLiteral("url"), j.sourceRef.isEmpty() ? j.url : QString() },
+            { QStringLiteral("ref"), j.sourceRef },
             { QStringLiteral("dest"), j.dest }, { QStringLiteral("kind"), j.kind }, { QStringLiteral("sysId"), j.sysId }, { QStringLiteral("form"), j.form },
             { QStringLiteral("thumb"), j.thumb }, { QStringLiteral("key"), j.key },
             // The FLAG, never the headers. Deliberately not a loop over requestHeaders: this file is not a
@@ -496,6 +526,7 @@ void DownloadManager::load()
         j.id = o.value(QStringLiteral("id")).toString();
         j.title = o.value(QStringLiteral("title")).toString();
         j.url = o.value(QStringLiteral("url")).toString();
+        j.sourceRef = o.value(QStringLiteral("ref")).toString();   // #110; absent for every older job
         j.dest = o.value(QStringLiteral("dest")).toString();
         j.kind = o.value(QStringLiteral("kind")).toString();
         j.sysId = o.value(QStringLiteral("sysId")).toString();
@@ -510,6 +541,6 @@ void DownloadManager::load()
         j.received = o.value(QStringLiteral("received")).toVariant().toLongLong();
         j.total = o.value(QStringLiteral("total")).toVariant().toLongLong();
         j.state = static_cast<DownloadJob::State>(o.value(QStringLiteral("state")).toInt());
-        if (!j.id.isEmpty() && !j.dest.isEmpty()) jobs_.push_back(j);
+        if (!j.id.isEmpty() && !j.dest.isEmpty()) jobs_.push_back(j);   // url may be empty: see `ref`
     }
 }

@@ -8829,6 +8829,16 @@ void HomeView::requestNextSource()
 void HomeView::startDownload()
 {
     if (stack_.isEmpty() || !stack_.last().detail) return;
+    // #110: A JELLYFIN ROW IS NOT CRAWLED, it is handed over. There is no addon under it and no url on it,
+    // so the crawl below would walk a null addon and end at "Nothing here could be downloaded" — which is
+    // exactly what a press on a perfectly downloadable film would have said. The themed twin of this arm is
+    // at the top of downloadThemedLeaf; both ask browse::jellyfinDownloadTargetFor, which is the one table.
+    if (const browse::JellyfinDownloadTarget t = browse::jellyfinDownloadTargetFor(stack_.last().item); t.ok())
+    {
+        emit jellyfinDownloadRequested(int(t.kind), t.ref, t.seasonRef, stack_.last().item.title,
+                                       stack_.last().item.thumbnailUrl);
+        return;
+    }
     if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
     const Level& top = stack_.last();
     DlNode root;
@@ -11104,6 +11114,9 @@ void HomeView::downloadThemedLeaf(int idx)
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
     const MediaItem it = items_[browseRowMap_[idx]];
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("“%1” is already saved.").arg(it.title), 4000); return; }
+    // #110: the themed twin of startDownload's arm — same table, same reason. See there.
+    if (const browse::JellyfinDownloadTarget t = browse::jellyfinDownloadTargetFor(it); t.ok())
+    { emit jellyfinDownloadRequested(int(t.kind), t.ref, t.seasonRef, it.title, it.thumbnailUrl); return; }
     if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
 
     DlNode node;
@@ -11182,7 +11195,10 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     const bool dlContainer = item.expandable
         && (item.type == QStringLiteral("series") || item.type == QStringLiteral("tv")
             || item.type == QStringLiteral("season") || item.type == QStringLiteral("comic"));
-    g.download = dlLeaf || dlContainer;
+    // #110: a Jellyfin row is downloadable on its own terms — it has no addon to crawl through and no url,
+    // so neither dlLeaf nor dlContainer can ever be true for one. Asked of the same table BOTH layouts'
+    // Download verbs consult (browse::jellyfinDownloadTargetFor), so the two cannot answer differently.
+    g.download = dlLeaf || dlContainer || browse::jellyfinDownloadTargetFor(item).ok();
     return g;
 }
 
@@ -11324,6 +11340,23 @@ bool HomeView::browseNativePort(int themedIndex, MediaItem* itemOut, QString* po
     if (id.isEmpty()) return false;
     if (itemOut) *itemOut = items_[row];
     if (portIdOut) *portIdOut = id;
+    return true;
+}
+
+bool HomeView::browseJellyfinDownload(int themedIndex, int* kindOut, QString* refOut,
+                                     QString* seasonRefOut, QString* titleOut, QString* thumbOut) const
+{
+    int row = -1;
+    if (themedIndex < 0) { if (!grid_) return false; row = grid_->currentRow(); }
+    else                 { if (themedIndex >= browseRowMap_.size()) return false; row = browseRowMap_[themedIndex]; }
+    if (row < 0 || row >= items_.size()) return false;
+    const browse::JellyfinDownloadTarget t = browse::jellyfinDownloadTargetFor(items_[row]);
+    if (!t.ok()) return false;
+    if (kindOut)      *kindOut = int(t.kind);
+    if (refOut)       *refOut = t.ref;
+    if (seasonRefOut) *seasonRefOut = t.seasonRef;
+    if (titleOut)     *titleOut = items_[row].title;
+    if (thumbOut)     *thumbOut = items_[row].thumbnailUrl;
     return true;
 }
 

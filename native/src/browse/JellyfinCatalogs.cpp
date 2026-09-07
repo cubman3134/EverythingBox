@@ -138,6 +138,35 @@ MediaCatalog jellyfinLibraryCatalog(const QString& title,
     return c;
 }
 
+browse::JellyfinDownloadTarget jellyfinDownloadTargetFor(const MediaItem& it)
+{
+    JellyfinDownloadTarget t;
+    // A LEAF. Read off the keyed mime rather than off `type`, because `type` here is the app's own
+    // vocabulary ("movie" / "episode") which a dozen other sources also use; the mime is what says this
+    // particular film belongs to a Jellyfin server, and it carries the qualified id we need anyway.
+    if (const QString leaf = jellyfinKeyOf(it.mime, kJellyfinItemPrefix); Jellyfin::isQualified(leaf))
+    { t.kind = JellyfinDownloadTarget::Kind::Item; t.ref = leaf; return t; }
+
+    if (const QString series = jellyfinKeyOf(it.mime, kJellyfinSeriesPrefix); Jellyfin::isQualified(series))
+    { t.kind = JellyfinDownloadTarget::Kind::Series; t.ref = series; return t; }
+
+    // A SEASON ROW CARRIES BOTH IDS, newline-joined, for the reason jellyfinSeasonsCatalog states: the
+    // episodes endpoint is addressed by the SERIES and filtered by the season. Split here rather than at
+    // the two call sites, so a change to that encoding is one edit.
+    if (const QString both = jellyfinKeyOf(it.mime, kJellyfinSeasonPrefix); !both.isEmpty())
+    {
+        const QStringList parts = both.split(QLatin1Char('\n'));
+        if (parts.size() == 2 && Jellyfin::isQualified(parts.at(0)) && Jellyfin::isQualified(parts.at(1)))
+        {
+            t.kind      = JellyfinDownloadTarget::Kind::Season;
+            t.ref       = parts.at(0);
+            t.seasonRef = parts.at(1);
+            return t;
+        }
+    }
+    return t;
+}
+
 MediaCatalog jellyfinSeasonsCatalog(const QString& seriesTitle, const QString& seriesRef,
                                             const QVector<Jellyfin::UnionItem>& seasons)
 {

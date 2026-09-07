@@ -54,7 +54,9 @@
 #include "LaunchOptionsStore.h" // issue #51 / RetroPark Slice 2a: the per-game override the merge carries opaquely
 #include "MissedDismiss.h"  // issue #25: the per-show "you missed" dismissal watermarks
 #include "TraktMissed.h"    // issue #25: kMissedDismissTtlDays — the shelf life prune() enforces
-#include "CloudSync.h"     // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "CloudSync.h"
+#include "JellyfinDownload.h"   // issue #110: the download-cap keys, asked through their own builders
+#include "OfflineProgress.h"     // issue #110: the store-and-forward queue key, same reason     // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "Scrobble.h"      // #192: the carve-out is asserted through the writer's own prefixes
 #include "PlayOnDevice.h"  // #143: ...and through PlayOn::tokenKey, the "Play on device" token writer
 #include "ScrobbleQueue.h" // ...and through the real key builders, not hand-typed literals
@@ -910,6 +912,30 @@ int main(int argc, char** argv)
         // issue itself. Both ways, and the per-server enable flag rides the same blob so it is covered too.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/profileA/servers")) == false);
+        // #110: EVERY KEY THE OFFLINE-DOWNLOAD FEATURE ADDS, asked through the feature's OWN key builders
+        // rather than through a spelling copied here — so a rename that quietly moved one out of a carved
+        // prefix fails HERE, which is the only place that can tell.
+        //
+        //   * downloads/<profile>/capGb and .../removeAfterWatched: device-local for the reason
+        //     CloudSync.cpp already gives about "downloads*" — they are settings about the files on THIS
+        //     machine's disk, and a 25 GB limit set for a laptop means nothing on a television with a
+        //     four-terabyte drive.
+        //   * jellyfin/<profile>/offlineprogress/<serverId>: the store-and-forward buffer of reports this
+        //     device owes a server. Two reasons, either sufficient: it is a claim about a viewing THIS
+        //     install performed, and synced, two installs would flush the same rows — the second one
+        //     against a server that had already moved past them, which is exactly the stale report the
+        //     queue's own rule exists to refuse.
+        //
+        // Neither family is a per-item store: the CloudMerge progress document does not own them, and
+        // listing them there is the OTHER way a per-item key reaches a peer.
+        CHECK(CloudSync::isDeviceLocalKey(JellyfinDownload::capKey()) == true);
+        CHECK(CloudSync::isDeviceLocalKey(JellyfinDownload::removeWatchedKey()) == true);
+        CHECK(CloudSync::isPerItemStoreKey(JellyfinDownload::capKey()) == false);
+        CHECK(CloudSync::isPerItemStoreKey(JellyfinDownload::removeWatchedKey()) == false);
+        CHECK(CloudSync::isDeviceLocalKey(
+                  OfflineProgress::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == true);
+        CHECK(CloudSync::isPerItemStoreKey(
+                  OfflineProgress::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == false);
         // playon/* (issue #143): the "Play on device" pairing tokens. A token is minted by ANOTHER device for
         // THIS one and authorises starting playback on that peer -- synced, it would both put a credential in
         // a zip on somebody's Drive and hand every install on the account the right to take over a device it

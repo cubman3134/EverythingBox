@@ -18,6 +18,7 @@
 #include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
 #include "../core/FollowPlan.h"      // follow::Child is a value in the in-flight fetch map (#155)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
+#include "../core/Jellyfin.h"        // #110: Jellyfin::UnionItem / ProgressEvent in the download decls
 #include "../core/LifecyclePolicy.h"
 #include "../core/MediaSegments.h"
 #include "../core/LibraryBundle.h"    // LibraryBundle::Receipt / Progress are by-value members (issue #127)
@@ -1817,6 +1818,47 @@ private:
     // TIER, read by gatherSegments beside the .edl, the chapters and what the user taught us. Cleared by
     // resetSegmentState with the rest of the per-file segment state.
     QVector<MediaSegments::Segment> jellyfinSegments_;
+    // Set when the item now playing is being read from a DOWNLOADED LOCAL FILE rather than from the server
+    // (issue #110). Everything above still runs — the same id, the same progress hook, the same Stop — but
+    // every report goes through the store-and-forward queue instead of straight at a server that may be on
+    // the other side of an aeroplane window. See MainWindowJellyfinDownload.cpp.
+    bool jellyfinPlayingOffline_ = false;
+
+    // ---- JELLYFIN: OFFLINE DOWNLOADS (issue #110, increment 1) ------------------------------------
+    // ALL DEFINED IN MainWindowJellyfinDownload.cpp, the feature-TU rule (#186) again.
+    //
+    // Installs DownloadManager's url minter, restores the "already have it" index and flushes anything the
+    // last session queued. Called once, from the constructor's Jellyfin wiring.
+    void initJellyfinDownloads();
+    // Queue ONE item for offline keeping. Asks the owning server for the item's container so the file is
+    // named honestly, then enqueues a ref-backed DownloadJob (no url — see DownloadJob::sourceRef).
+    void downloadJellyfinItem(const QString& qualifiedId, const QString& title, const QString& thumb);
+    // The batch verbs, from a series or a season row: the whole season, or the next N unwatched. One verb,
+    // not a per-episode grind. `qualifiedId` is a series or a season ref.
+    // `seriesRef` addresses /Shows/<series>/Episodes; a non-empty `seasonRef` narrows the batch to one
+    // season. Both come off the row through browse::jellyfinDownloadTargetFor.
+    void downloadJellyfinBatch(const QString& seriesRef, const QString& seasonRef, const QString& title);
+    // The one enqueue site both verbs end at: a ref-backed job, named from the item's own fields.
+    void enqueueJellyfinDownload(const Jellyfin::UnionItem& item, const QString& thumb);
+    // ...and its tail, once the item's container is known (or known to be unavailable).
+    void queueJellyfinJob(const Jellyfin::UnionItem& item, const QString& thumb, const QString& container);
+    // Play a downloaded Jellyfin item from its local file — the offline route. `local` is a path that has
+    // already been checked to exist.
+    void playJellyfinLocalCopy(const QString& qualifiedId, const QString& local, const QString& title);
+    // The local copy of a downloaded Jellyfin item, or "" — the offline play route's precondition.
+    QString jellyfinLocalCopy(const QString& qualifiedId) const;
+    // Every qualified id this device already has a completed download of (finished jobs included), which is
+    // what the batch verbs subtract before queueing anything.
+    QSet<QString> jellyfinDownloadedIds() const;
+    // The one report site for a Jellyfin position: straight at the server when the item is streaming from
+    // it, into the store-and-forward queue when it is being played from a downloaded file.
+    void reportJellyfinProgress(const QString& qualifiedId, Jellyfin::ProgressEvent ev, double seconds,
+                                const QString& playSessionId, const QString& mediaSourceId);
+    // Flush every server's queue, oldest report first, each one gated on what the server already knows
+    // (OfflineProgress::shouldApply). Safe to call at any time; a no-op when nothing is queued.
+    void flushJellyfinProgressQueues();
+    // The storage-cap check: shows the LRU suggestion, deletes nothing. Run after a download completes.
+    void checkJellyfinDownloadCap();
     // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
     // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
     // the same seam in later increments, and nothing below names AniList except the construction.

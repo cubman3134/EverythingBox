@@ -190,6 +190,22 @@ public:
     void setResumeOwnedByServer(bool on) { resumeServerOwned_ = on; }
     bool resumeOwnedByServer() const { return resumeServerOwned_; }
 
+    // ...AND THE HALF OF THAT FLAG THAT IS ABOUT THE IDENTITY RATHER THAN THE POSITION (issue #110).
+    //
+    // The flag above means two things at once, and says so: "the server owns this position" AND "this
+    // identity is a machine key, so do not derive a title from it". For a STREAMED server item those are
+    // the same fact. For a DOWNLOADED one they come apart — the position is this device's (there is nobody
+    // to ask on a plane, which is the whole point of the download), but the identity is still the same
+    // qualified id and still not a name. Setting the flag above to get the title right would throw away the
+    // only resume an offline viewing can have; leaving it clear wrote "jf:<server>:<item>" into the resume
+    // row's title, which is exactly the machine string that comment exists to prevent, and it is what the
+    // Continue Watching shelf then shows.
+    //
+    // So: a second, narrower flag for the identity half alone. It is a flag and not a spelling test for the
+    // same reason its sibling is — this file must not learn any source's id grammar — and beginResume
+    // resets it for the same reason too.
+    void setResumeIdentityNotAName(bool on) { resumeIdentityNotAName_ = on; }
+
     // Where the SERVER says to start. Applied exactly like a stored position (consumed once the duration is
     // known), and it also moves the stats accrual point, so the resume jump itself never dumps minutes into
     // this device's watch time. Called after beginResume, which is what fills in the local answer this
@@ -363,6 +379,7 @@ private:
                                    // (#204: for everything but a music server track this is still its path)
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
     bool   resumeServerOwned_ = false; // #83: this item's position is a server's, not this ini's
+    bool   resumeIdentityNotAName_ = false; // #110: the identity half of the flag above, on its own
     double audioPos_ = 0.0;        // last reported playback position
     double lastSavedPos_ = -100.0; // throttle resume writes
     double lastAccruedPos_ = 0.0;  // consumption-stats: position through which watch/listen seconds were accrued

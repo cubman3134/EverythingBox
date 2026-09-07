@@ -110,6 +110,12 @@ public:
     // `themedIndex` >= 0 is the themed column's own index (a browseRowMap_ position); -1 means "ask the
     // classic grid where it is standing", which is what the classic Start menu does.
     bool browseNativePort(int themedIndex, MediaItem* itemOut, QString* portIdOut) const;
+    // #110: the Jellyfin download target of the row the CLASSIC grid is standing on, for the Start menu —
+    // which is the classic layout's twin of the themed action chooser's Download pill. Same asymmetry as
+    // browseNativePort's: -1 is the classic cursor, >= 0 indexes the themed column. Answers through
+    // browse::jellyfinDownloadTargetFor, so no surface re-reads the mime for itself.
+    bool browseJellyfinDownload(int themedIndex, int* kindOut, QString* refOut, QString* seasonRefOut,
+                                QString* titleOut, QString* thumbOut) const;
     // The same question about an item the caller already holds (a Recents/Downloads row). "" = no port.
     QString nativePortIdFor(const MediaItem& it) const;
     // #193 increment 2 — the music row the "Add to queue" / "Play next" verbs act on.
@@ -468,6 +474,12 @@ signals:
     // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
     // confirm and the install — the same shape as chooseSourceRequested above.
     void romhacksRequested(const MediaItem& item, const QString& systemId);
+    // #110: the Download verb on a Jellyfin row. The view knows WHICH row; only MainWindow can turn a
+    // qualified id into a download, for the same reason only it can turn one into a playable link. `kind`
+    // is browse::JellyfinDownloadTarget::Kind as an int, so this header does not have to include the
+    // catalogs one; the two container kinds take the batch verbs and the leaf takes the single one.
+    void jellyfinDownloadRequested(int kind, const QString& ref, const QString& seasonRef,
+                                   const QString& title, const QString& thumb);
     // A game leaf that a NATIVE PORT is bound to, asking to run on it (issue #233). MainWindow owns the
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.

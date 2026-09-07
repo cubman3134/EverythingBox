@@ -23,6 +23,7 @@
 #include "../comic/ComicView.h"
 #include "../core/PhotoLibrary.h"
 #include "../browse/LeafRoute.h"   // themedEnterFor: what Enter on a themed browse row does
+#include "../browse/JellyfinCatalogs.h" // #110: JellyfinDownloadTarget::Kind, the Download verb's table
 #include "LibraryView.h"
 #include "HomeView.h"
 #include "SplitView.h"
@@ -92,6 +93,7 @@
 #include "../core/ChannelStore.h"    // #179: the stored channels
 #include "../core/ChannelLineup.h"   // #179: source -> candidates -> the duration-gated lineup
 #include "../core/MediaDurations.h"  // #179: the duration index the lineup is gated on
+#include "../core/JellyfinDownload.h"     // issue #110: the offline-download cap + the remove-after-watched toggle
 #include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
 #include "../core/ServerMusicClient.h"    // issue #194 inc 3: the connected servers that serve music
 #include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
@@ -874,6 +876,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
         DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId, j.form });
         notify(tr("Downloaded “%1”.").arg(j.title), 4000);
+        // #110: the storage cap is checked when the disk has just grown, which is the only moment the answer
+        // can have changed. It SUGGESTS and never deletes - see checkJellyfinDownloadCap.
+        if (Jellyfin::isQualified(j.key)) checkJellyfinDownloadCap();
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
     connect(dm_, &DownloadManager::jobProgress, this, &MainWindow::updateDownloadRow);
@@ -885,6 +890,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         else if (themedPanelIsTop(tr("Downloads"))) openDownloadManager();   // themed: replaceTop (reentry) below
 #endif
     });
+    // #110: the url minter DownloadManager mints a Jellyfin link with, and the flush of anything the last
+    // session queued while offline. Immediately after the manager's own wiring, because the minter has to be
+    // installed before any restored job can start.
+    initJellyfinDownloads();
     PerfTrace::end(QStringLiteral("startup.addons"));
 
     home_ = new HomeView(addons_.get(), this);
@@ -898,6 +907,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::tuneChannelCellRequested, this, &MainWindow::tuneChannelFromGuide);   // #179 inc 2
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
+    // #110: Download on a Jellyfin row. Deferred a turn for the reason every other verb that opens a
+    // NavMenu is - this arrives inside a clicked()/QML delivery and the batch verb spins a nested loop,
+    // which is the #28/#211 family. Every value is a plain string by the time the work runs.
+    connect(home_, &HomeView::jellyfinDownloadRequested, this,
+            [this](int kind, const QString& ref, const QString& seasonRef, const QString& title,
+                   const QString& thumb) {
+        using Kind = browse::JellyfinDownloadTarget::Kind;
+        deferPastQmlEmission([this, kind, ref, seasonRef, title, thumb] {
+            if (kind == int(Kind::Item)) downloadJellyfinItem(ref, title, thumb);
+            else                         downloadJellyfinBatch(ref, seasonRef, title);
+        });
+    });
     connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
     connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
     // The classic detail page's "Track…" button (issue #156). Deferred a turn for the reason every other
@@ -1954,7 +1975,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         }
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
     });
-    connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
+    connect(session_, &PlaybackSession::resumeSaved, this, [this] {
+        scheduleProgressSync();
+        // #110: A DOWNLOADED JELLYFIN ITEM IS A LOCAL ITEM, so its position is written to THIS DEVICE's
+        // resume store by the branch that just fired - which is the whole point, because on a plane there is
+        // nowhere else for it to go. It still owes the owning server a report, and this is the same cadence
+        // the streamed route's serverProgress hook fires at, with Jellyfin's own ten-second interval applied
+        // on top inside onJellyfinProgress. Deliberately NOT setResumeOwnedByServer: that flag means "do not
+        // write locally", which for a downloaded item would throw away the only resume it can have.
+        if (jellyfinPlayingOffline_ && !jellyfinPlayingId_.isEmpty() && session_)
+            onJellyfinProgress(jellyfinPlayingId_, session_->position());
+    });
     // #83: THE SAME HOOK, ONE SERVER ALONG. For an item whose position belongs to a Jellyfin server,
     // persistResume writes nothing locally and fires this instead — so the report goes out at exactly the
     // cadence a resume write would have happened, with Jellyfin's own ten-second interval applied on top.
@@ -5463,7 +5494,25 @@ void MainWindow::openBrowseContextMenu()
     QString portId;
     const bool hasPort = home_ && home_->browseNativePort(-1, &portItem, &portId);
 
-    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort };
+    // #110: the Jellyfin row the grid is standing on, and what Download would mean on it. THIS IS THE
+    // CLASSIC LAYOUT'S ONLY DOOR to the download verb, and the reason it is here rather than on the detail
+    // page's Download button: a Jellyfin CONTAINER never reaches a classic detail level at all (its Enter is
+    // claimed by activateItem's _jfseries/_jfseason arms, which drill), so the button that verb was first
+    // wired to is unreachable for exactly the rows the batch verbs are for. Start is the same gesture the
+    // native-port row above it is offered under, and it asks the same table the themed chooser does.
+    //
+    // SURFACE-GATED THE WAY browseQueueTarget IS, not the way browseNativePort's call site is: the classic
+    // cursor (grid_->currentRow()) SURVIVES the page being swapped away, so asking for it unconditionally
+    // would offer "Download episodes…" over the player page or a settings panel — acting on a row nobody
+    // can see. A themed index is already surface-gated by themedBrowseIndex().
+    int jfKind = 0;
+    QString jfRef, jfSeasonRef, jfTitle, jfThumb;
+    const int jfThemedIdx = themedBrowseIndex();
+    const bool jfSurfaceOk = home_ && (jfThemedIdx >= 0 || stack_->currentWidget() == home_);
+    const bool hasJfDownload = jfSurfaceOk
+        && home_->browseJellyfinDownload(jfThemedIdx, &jfKind, &jfRef, &jfSeasonRef, &jfTitle, &jfThumb);
+
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5484,6 +5533,10 @@ void MainWindow::openBrowseContextMenu()
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
     if (hasPort) offer(NativePort, tr("Native port…"));
+    if (hasJfDownload)
+        offer(JellyfinDl, jfKind == int(browse::JellyfinDownloadTarget::Kind::Item)
+                              ? tr("Download for offline")
+                              : tr("Download episodes…"));
 
     if (items.isEmpty()) { sendNavKey(Qt::Key_Escape); return; }   // nothing to configure -> today's Start=Back
 
@@ -5497,6 +5550,14 @@ void MainWindow::openBrowseContextMenu()
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
+        // Resolved BEFORE the menu opened, for the reason the native-port arm below states: the grid can
+        // move under a NavMenu, and re-reading the cursor here would download whatever it moved to.
+        case JellyfinDl:
+            if (jfKind == int(browse::JellyfinDownloadTarget::Kind::Item))
+                downloadJellyfinItem(jfRef, jfTitle, jfThumb);
+            else
+                downloadJellyfinBatch(jfRef, jfSeasonRef, jfTitle);
+            break;
         // The row and the port were resolved BEFORE the menu opened (above), so the grid moving under the
         // nested loop cannot make this fire on a different game. NavMenu::pick has already returned, so the
         // confirmation card that follows opens with nothing on top of it.
@@ -22006,6 +22067,18 @@ void MainWindow::openGeneralSettings()
         auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
             PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
 
+        // #110: the download storage cap. A short list rather than a typed number, for the reason every
+        // other Choice row here is one — this is a control somebody reaches with a d-pad. "No limit" is the
+        // default and is a real option, not an absence: a cap that cannot be switched off would eventually
+        // nag somebody who deliberately keeps a large library on a big disk.
+        const QList<QPair<QString, int>> dlCapPairs = {
+            { tr("No limit"),  0   }, { tr("10 GB"), 10  }, { tr("25 GB"),  25  },
+            { tr("50 GB"),     50  }, { tr("100 GB"), 100 }, { tr("250 GB"), 250 } };
+        QStringList dlCapOpts;
+        for (const auto& c : dlCapPairs) dlCapOpts << c.first;
+        QString dlCapCur = dlCapOpts.value(0);
+        for (const auto& c : dlCapPairs) if (c.second == JellyfinDownload::capGb()) { dlCapCur = c.first; break; }
+
         // --- Display ---
         sep(tr("Display"));
         toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
@@ -22217,6 +22290,16 @@ void MainWindow::openGeneralSettings()
         sep(tr("Jellyfin"));
         action(QStringLiteral("jellyfin.servers"), tr("Jellyfin servers…"));
         info(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine());
+        // --- Downloads (#110): the offline-viewing hygiene pair. Both DEVICE-LOCAL by nature — they are
+        // about the files on THIS disk — and both under the "downloads" prefix CloudSync::isDeviceLocalKey
+        // already carves out of the synced bundle. Twins live in the QWidget builder below.
+        sep(tr("Downloads"));
+        choice(QStringLiteral("downloads.cap"), tr("Storage limit for downloads"), dlCapOpts, dlCapCur);
+        info(QStringLiteral("downloads.caphint"),
+             tr("When downloads go over the limit you are shown the least recently watched ones and can "
+                "remove them. Nothing is ever deleted for you."), QString());
+        toggle(QStringLiteral("downloads.removewatched"), tr("Offer to remove downloads once watched"),
+               JellyfinDownload::removeAfterWatched());
         // --- Photos (#102) ---
         sep(tr("Photos"));
         info(QStringLiteral("photos.path"), Settings::photosFolder(), QString());
@@ -22719,7 +22802,7 @@ void MainWindow::openGeneralSettings()
             setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine()); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, gestEdgePairs, attractTimeoutPairs, resumeModePairs,
+            [this, dlCapPairs, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, gestEdgePairs, attractTimeoutPairs, resumeModePairs,
              previewCachePairs,        // Seek previews (#85): same, for the preview-cache size row
              followIntervalPairs,      // Following (#155): the handler maps the picked display back through them
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
@@ -22745,6 +22828,12 @@ void MainWindow::openGeneralSettings()
                     for (const auto& a : attractTimeoutPairs) if (a.first == val) { Settings::setAttractTimeoutMinutes(a.second); break; }
                     applyAttractConfig();
                 }
+                // #110: the two download-hygiene rows. Same setters the QWidget twins call — one write path.
+                else if (id == QStringLiteral("downloads.cap")) {
+                    for (const auto& c : dlCapPairs) if (c.first == val) { JellyfinDownload::setCapGb(c.second); break; }
+                    checkJellyfinDownloadCap();   // a tighter limit may make this true immediately
+                }
+                else if (id == QStringLiteral("downloads.removewatched")) JellyfinDownload::setRemoveAfterWatched(on);
                 else if (id == QStringLiteral("emu.autoinc")) Settings::setStateAutoIncrement(on);
                 else if (id == QStringLiteral("emu.resume")) {
                     for (const auto& r : resumeModePairs) if (r.first == val) { Settings::setResumeMode(r.second); break; }
@@ -24281,6 +24370,47 @@ void MainWindow::openGeneralSettings()
             home_->manageJellyfinServersInteractive();
             jfSrvStatus->setText(jellyfinServerStatusLine());
         });
+        v->addSpacing(10);
+
+        // --- Downloads (#110): the classic twins of downloads.cap and downloads.removewatched. Same store
+        // and same setters as the themed rows — one write path, no drift (GS_TWINS). ---
+        auto* dlHeading = new QLabel(tr("Downloads"));
+        dlHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dlHeading);
+        auto* dlNote = new QLabel(tr("Items you download for offline viewing are kept on this device. These "
+            "two settings are about THIS device's disk, so they are never included in anything this app "
+            "syncs."));
+        dlNote->setWordWrap(true); dlNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dlNote);
+        auto* dlCap = new QComboBox();
+        // The same six options and the same order as the themed row's dlCapPairs; the value stored is the
+        // number of gigabytes, and 0 is "No limit".
+        const QList<QPair<QString, int>> dlCapPairsClassic = {
+            { tr("No limit"),  0   }, { tr("10 GB"), 10  }, { tr("25 GB"),  25  },
+            { tr("50 GB"),     50  }, { tr("100 GB"), 100 }, { tr("250 GB"), 250 } };
+        for (const auto& c : dlCapPairsClassic) dlCap->addItem(c.first, c.second);
+        dlCap->setCurrentIndex(qMax(0, dlCap->findData(JellyfinDownload::capGb())));
+        dlCap->setToolTip(tr("When your downloads go over this limit you are shown the least recently "
+                             "watched ones and can remove them. Nothing is ever deleted for you."));
+        {
+            auto* dlCapRow = new QHBoxLayout();
+            dlCapRow->addWidget(new QLabel(tr("Storage limit for downloads")));
+            dlCapRow->addWidget(dlCap);
+            dlCapRow->addStretch();
+            v->addLayout(dlCapRow);
+        }
+        connect(dlCap, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, dlCap](int) {
+            JellyfinDownload::setCapGb(dlCap->currentData().toInt());
+            checkJellyfinDownloadCap();   // a tighter limit may make this true immediately
+        });
+        auto* dlRemoveWatched = new QCheckBox(tr("Offer to remove downloads once watched"));
+        dlRemoveWatched->setStyleSheet(QStringLiteral("font-size:15px;"));
+        dlRemoveWatched->setChecked(JellyfinDownload::removeAfterWatched());
+        dlRemoveWatched->setToolTip(tr("After you finish watching a downloaded item, offer to free the space "
+                                       "it is using. Off by default, and it always asks first."));
+        connect(dlRemoveWatched, &QCheckBox::toggled, this,
+                [](bool c) { JellyfinDownload::setRemoveAfterWatched(c); });
+        v->addWidget(dlRemoveWatched);
         v->addSpacing(10);
 
         // --- Photos (#102): the classic twin of the themed photos.path/photos.change rows. Same Settings key

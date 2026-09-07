@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.205 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.206 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -714,6 +714,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
         src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
         src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
+        # OFFLINE DOWNLOADS (#110, increment 1): JellyfinDownload is the pure half (the download url, the
+        # job identity and file naming, the batch expansions and the storage cap's LRU suggestion) plus the
+        # two device-local hygiene settings; OfflineProgress is the store-and-forward buffer of playback
+        # reports a downloaded item produces with no server to send them to. Both are QtCore-only, and both
+        # are what probe_jfdownload drives.
+        src/core/JellyfinDownload.cpp    src/core/JellyfinDownload.h
+        src/core/OfflineProgress.cpp     src/core/OfflineProgress.h
         # AUDIOBOOKSHELF CLIENT (#197 increment 1): an Audiobookshelf server as a supplier of the audiobook
         # shapes #139's local library uses, plus its podcasts. Audiobookshelf.h/.cpp is the pure half (the
         # id scheme, the URL rules, the payload readers, the chapter arithmetic, the reporting throttle) and
@@ -910,6 +917,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.
         src/ui/MainWindowJellyfin.cpp
+        # #110: taking that server's content on a plane. A SECOND Jellyfin feature TU rather than more of the
+        # one above it: nothing here is about how an item is played FROM a server, and #83's file is already
+        # a complete thought.
+        src/ui/MainWindowJellyfinDownload.cpp
         # ...and the browse levels' half of the same feature, out of HomeView.cpp for the same reason.
         src/ui/HomeViewJellyfin.cpp
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
@@ -2149,6 +2160,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameId.cpp        src/core/PcGameId.h
         src/core/PcGameRemap.cpp     src/core/PcGameRemap.h
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
+        # issue #110: the offline-download keys, asked through their own builders so the carve-out cannot
+        # drift from the writers. All three are QtCore-only (Jellyfin.h supplies the qualified-id grammar
+        # OfflineProgress routes a report by).
+        src/core/Jellyfin.cpp        src/core/Jellyfin.h
+        src/core/JellyfinDownload.cpp src/core/JellyfinDownload.h
+        src/core/OfflineProgress.cpp src/core/OfflineProgress.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: the Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -2415,6 +2432,39 @@ if(EVERYTHINGBOX_BUILD_APP)
     # write a fixture credential into their settings file.
     target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
     target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
+
+    # Headless test for OFFLINE DOWNLOADS FROM A JELLYFIN SERVER (issue #110, increment 1): the download
+    # url and its server qualification across two servers, the ref-backed job identity and the file names
+    # that keep two servers' identically-named episodes apart, the batch expansion (a whole season, next-N
+    # unwatched, an already-downloaded episode skipped), the store-and-forward progress queue (its bound,
+    # its per-item collapse, its ordering, its survival across a restart and the stale-report rule), the
+    # storage cap's LRU suggestion - and THE CREDENTIAL BYTE SCAN.
+    #
+    # A TARGET OF ITS OWN RATHER THAN A SECTION OF probe_jellyfin, and the reason is the network link: that
+    # probe is deliberately QtCore-only and deliberately does not link JellyfinClient or anything that opens
+    # a socket, and this one has to drive the REAL DownloadManager (Qt6::Network) because the assertion it
+    # exists for is about what the real manager writes into queue.json. Folding this in would have made
+    # #160's probe a network target for a feature it knows nothing about.
+    #
+    # NOTHING HERE TALKS TO A SERVER. Every url is a string built from a fixture root; the fixture host is
+    # under the reserved .test TLD and no event loop is ever run, so no request is dispatched.
+    add_executable(probe_jfdownload tools/probe_jfdownload.cpp
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinDownload.cpp    src/core/JellyfinDownload.h
+        src/core/OfflineProgress.cpp     src/core/OfflineProgress.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h
+        # The REAL downloader, over the REAL persistence. A hand-built queue.json beside it would prove only
+        # that this probe can keep a token out of a file it wrote itself; what has to be true is that the
+        # manager the app's download sites go through keeps it out. StreamHeaders comes with it (a job's
+        # per-request headers); NetHeaderApply and LogSafeText are header-only.
+        src/core/DownloadManager.cpp     src/core/DownloadManager.h
+        src/core/StreamHeaders.cpp       src/core/StreamHeaders.h)
+    target_include_directories(probe_jfdownload PRIVATE src src/core tools)
+    # The ini-redirect seam, same macro and same rule as probe_jellyfin's: the stores this probe drives hold
+    # TOKENS, so without the redirect a run would write a fixture credential into a settings file.
+    target_compile_definitions(probe_jfdownload PRIVATE EB_JELLYFIN_TEST_SEAM)
+    target_link_libraries(probe_jfdownload PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
     # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
