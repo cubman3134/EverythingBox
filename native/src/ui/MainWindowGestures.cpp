@@ -169,19 +169,22 @@ void MainWindow::handleGestureEvents(const QVector<Event>& evs)
             notify(tr("☀  %1%").arg(int(e.target)), 700);
             break;
         case Kind::SeekPreview:
-            // Time-only for now. #85's trickplay images are the intended upgrade of THIS readout and nothing
-            // else: when a preview frame exists for `e.target` it is drawn beside these two times.
+            // #85 has landed for this readout: when a preview frame exists for `e.target` it is drawn
+            // above the seek bar, and when one does not this is exactly the two times it always was.
+            trickplayShowAt(e.target);
             notify(tr("%1  →  %2  (%3%4s)")
                        .arg(gestureTimeText(lastPos_), gestureTimeText(e.target),
                             e.value < 0 ? QStringLiteral("−") : QStringLiteral("+"))
                        .arg(int(qAbs(e.value))), 1200);
             break;
         case Kind::SeekCommit:
+            trickplayHide();          // the scrub is over (issue #85)
             player_->setPosition(e.target);
             notify(gestureTimeText(e.target), 900);
             revealMediaControls();
             break;
         case Kind::SeekCancel:
+            trickplayHide();          // ...and over when it is abandoned too (issue #85)
             notify(tr("Seek cancelled"), 700);
             break;
         case Kind::LongPressBegin:

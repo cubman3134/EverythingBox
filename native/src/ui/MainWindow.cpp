@@ -2388,6 +2388,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // and QAbstractSlider only emits sliderReleased when the down flag actually changes.)
     connect(seek_, &QSlider::sliderReleased, this, [this] {
         onSeekReleased();
+        trickplayHide();   // issue #85: the drag is over, the preview goes with it
         if (adjustingBar_ == seek_) setBarAdjusting(seek_, false);
     });
     // The trailing half of the live-seek rate limit (see liveSeek): whatever position the last arrow press
@@ -2427,11 +2428,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                            + QStringLiteral(" / ") + fmtBook(total));
             return;
         }
-        time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_)); });
+        time_->setText(fmt(permille / 1000.0 * duration_) + QStringLiteral(" / ") + fmt(duration_));
+        // Issue #85: and the frame nearest where the drag points, when this file has one. Silent when
+        // it does not - a file with no sheets scrubs exactly as it did before.
+        trickplayShowAt(permille / 1000.0 * duration_); });
+    // Issue #85: the seek-preview background job. Created here, but it is inert until a local video is
+    // opened and the player then closed - it never runs while something is playing.
+    initTrickplay();
+
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
         if (stack_->currentWidget() != playerPage_)
-        { leaveBarAdjusting(); mediaControls_->hide(); videoBack_->hide(); } });
+        { leaveBarAdjusting(); mediaControls_->hide(); videoBack_->hide();
+          // Issue #85: nothing is being watched here any more, so the preview job may have the
+          // decoder and the disk back - and the file just watched is first in the queue.
+          trickplayHide(); trickplayIdle(); } });
 
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
@@ -21467,6 +21478,24 @@ void MainWindow::openGeneralSettings()
         QStringList hwdecOpts;
         for (const auto& p : hwdecPairs) hwdecOpts << p.first;
 
+        // Seek previews (issue #85). ONE control, and it is a SIZE: "Off" is 0 MB, because the honest
+        // question about a background job that writes to your disk is how much it may cost you, and a
+        // separate on/off switch beside a size would be two ways to say no that can disagree. Display <->
+        // stored megabytes; the handler maps the picked display back through this same list.
+        const QList<QPair<QString, int>> previewCachePairs = {
+            { tr("Off (never make previews)"), 0    },
+            { tr("Up to 256 MB"),              256  },
+            { tr("Up to 512 MB"),              512  },
+            { tr("Up to 1 GB"),                1024 },
+            { tr("Up to 2 GB"),                2048 },
+            { tr("Up to 5 GB"),                5120 },
+        };
+        const int curPreviewMb = Settings::previewCacheMb();
+        QString curPreviewDisp = previewCachePairs.at(2).first;   // 512 MB default if a stored value is odd
+        for (const auto& p : previewCachePairs) if (p.second == curPreviewMb) { curPreviewDisp = p.first; break; }
+        QStringList previewCacheOpts;
+        for (const auto& p : previewCachePairs) previewCacheOpts << p.first;
+
         // HDR output choice (issue #68). Display <-> stored id ("tonemap"/"passthrough"); the handler maps the
         // picked display back through this same list. Default (tonemap) always matches, so no undetected fallback.
         // The classic twin below builds the same two-option list under the same "video/hdr" key.
@@ -22171,6 +22200,13 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("pb.hwdechint"),
              tr("Auto uses safe hardware decode with a software fallback. Applies to the next video you open."),
              QString());
+        // Seek previews (issue #85). Placed here because generation is decode-bound and this is the setting
+        // above it that governs decoding. Twin below in the QWidget builder.
+        choice(QStringLiteral("pb.seekpreview"), tr("Seek preview thumbnails"), previewCacheOpts, curPreviewDisp);
+        info(QStringLiteral("pb.seekpreviewhint"),
+             tr("Shows a picture of where you are dragging to on the seek bar. Thumbnails are made in the "
+                "background, between playbacks, for videos stored on this device only — a stream is never "
+                "previewed. Older previews are deleted first when the limit is reached."), QString());
         // Refresh-rate matching, Tier 1 (issue #70). video-sync=display-resync locks video to the display clock
         // (mpv resamples audio) to smooth 24fps-on-60Hz judder; default on for desktop/TV, off on iOS's software
         // render path (RefreshSync::videoSyncFor). Applies to the next video. Twin below in the QWidget builder.
@@ -22492,6 +22528,7 @@ void MainWindow::openGeneralSettings()
 
         themedPanelHost_->present(tr("General"), rows,
             [this, langOptPairs, playerOptPairs, hwdecPairs, hdrPairs, defSpeedPairs, jumpPairs, gestEdgePairs, attractTimeoutPairs, resumeModePairs,
+             previewCachePairs,        // Seek previews (#85): same, for the preview-cache size row
              followIntervalPairs,      // Following (#155): the handler maps the picked display back through them
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              xfPairs,                  // Crossfade (#141): same, for the seconds row
@@ -22895,6 +22932,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
                 else if (id == QStringLiteral("pb.hwdec")) {
                     for (const auto& p : hwdecPairs) if (p.first == val) { Settings::setHwDecode(p.second); break; }
+                }
+                else if (id == QStringLiteral("pb.seekpreview")) {
+                    for (const auto& p : previewCachePairs) if (p.first == val) { Settings::setPreviewCacheMb(p.second); break; }
                 }
                 else if (id == QStringLiteral("player.external")) {
                     QString key = val;                              // map the picked display back to the stored key
@@ -24367,6 +24407,31 @@ void MainWindow::openGeneralSettings()
                                      "Applies to the next video."));
         hwNote->setWordWrap(true); hwNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(hwNote);
+
+        // Seek previews (issue #85): the classic twin of the themed pb.seekpreview row. Same Settings key
+        // and setter (previews/cacheMb) - one write path, no drift. Zero megabytes IS "off": nothing is
+        // generated at all, which is why there is no separate checkbox to disagree with the size.
+        auto* previewRow = new QHBoxLayout();
+        auto* previewLbl = new QLabel(tr("Seek preview thumbnails"));
+        previewLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* previewCache = new QComboBox();
+        previewCache->addItem(tr("Off (never make previews)"), 0);
+        previewCache->addItem(tr("Up to 256 MB"), 256);
+        previewCache->addItem(tr("Up to 512 MB"), 512);
+        previewCache->addItem(tr("Up to 1 GB"), 1024);
+        previewCache->addItem(tr("Up to 2 GB"), 2048);
+        previewCache->addItem(tr("Up to 5 GB"), 5120);
+        previewCache->setCurrentIndex(qMax(0, previewCache->findData(Settings::previewCacheMb())));
+        connect(previewCache, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [previewCache](int) { Settings::setPreviewCacheMb(previewCache->currentData().toInt()); });
+        previewRow->addWidget(previewLbl); previewRow->addWidget(previewCache); previewRow->addStretch(1);
+        v->addLayout(previewRow);
+        auto* previewNote = new QLabel(tr("Shows a picture of where you are dragging to on the seek bar. "
+                                          "Thumbnails are made in the background, between playbacks, for videos "
+                                          "stored on this device only — a stream is never previewed. Older "
+                                          "previews are deleted first when the limit is reached."));
+        previewNote->setWordWrap(true); previewNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(previewNote);
 
         // Default audiobook/podcast speed (issue #140): the classic twin of the themed pb.defaultspeed row. Same
         // Settings key/setter (playback/defaultSpeed) — one write path, no drift. A book with a remembered
@@ -28351,6 +28416,9 @@ void MainWindow::onDuration(double seconds)
         player_->setPosition(at);
 
     gatherSegments();
+    // Issue #85: the length is also what tells the seek-preview side which file the bar now describes.
+    // Idempotent across mpv's repeated `duration` emissions for the same file (see armTrickplay).
+    armTrickplay();
     // #141 crossfade: the length is one of the two facts the boundary decision needs. Called from here AND
     // from the fileLoaded handler because mpv reports them in no guaranteed order; the call that arrives with
     // both in hand is the one that decides, and the other returns having done nothing.

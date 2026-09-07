@@ -29,7 +29,39 @@ engine — which is what makes both all-format video and libretro first-class.
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below || Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`, `browse/JellyfinCatalogs`): **several servers at once**, merged into one library — browse, play, and report progress back | **built**; `probe_jellyfin` covers the ids, the migration, the store, the union, PlaybackInfo, progress, resume and segments, `probe_browse` the browse levels, `probe_leafroute` the leaf, `probe_segments` the server tier. Drive verified against local fixture servers — see below |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
+| Seek previews (`Trickplay`, `TrickplayGen`, `MainWindowTrickplay`): thumbnail sprite sheets for files stored on this device, shown while you scrub | **built**; `probe_trickplay` covers the tile arithmetic, the cache key, resuming, eviction, the sidecar and the stream refusal — see below |
 | One music library across every source (`MusicId`, `MusicMerge`, `MusicRemap`, + `Subsonic`/`JellyfinMusic`/`ServerMusic` suppliers) | **built**; `probe_musicid`, `probe_musicremap` and `probe_musicsources` cover identity, the remap and all four suppliers. Drive verified against fixture HTTP stubs — see below |
+
+## Seek previews
+
+**Dragging the seek bar shows the frame you are dragging to.** While you scrub — with the mouse, the
+D-pad, or a touch drag — a thumbnail appears above the bar with the time it was taken from. Nothing else
+about seeking changes, and a video that has no previews scrubs exactly the way it always has: there is no
+placeholder frame, no spinner and no message. A preview that is not there is invisible.
+
+**Only for videos stored on this device.** Streams are never previewed — not an `http(s)` url, not a
+debrid or addon-resolved link, not an IPTV channel, and not a file on a network share. Making previews
+means seeking a file a few hundred times, which on a stream would spend someone else's bandwidth (and a
+debrid quota) on a courtesy nobody asked for. The rule is a value, `Trickplay::classify`, not a check at a
+call site, and `probe_trickplay` drives it over every url shape the app produces.
+
+**They are made in the background, between playbacks.** One file at a time, on its own low-priority thread
+with its own headless `libmpv`, and never while something is playing — the decoder belongs to what you are
+watching. A run that is interrupted keeps the sheets it finished and picks up where it left off; nothing is
+written until a whole sheet is complete.
+
+**Where they live.** One directory per video under `previews/` in the app's data folder (beside
+`EverythingBox.exe` on desktop), holding tiled JPEG grids and a small `index.json` describing them. The
+directory is keyed by the file's **path, modification time and size**, so replacing a file — re-encoding
+it, restoring it from a backup, downloading a better copy — cannot leave the previous film's thumbnails
+attached to it.
+
+**How much disk it may use.** Settings → General → Playback → *Seek preview thumbnails*, on both the themed
+and the classic settings surface. The value is a size, and `Off` is the same control at zero: with previews
+off nothing is generated at all. The default is 512 MB, which is roughly a hundred feature films. When the
+limit is reached the least recently watched items are deleted first; the item you are watching is never one
+of them.
+
 
 ## Jellyfin servers
 
@@ -214,6 +246,7 @@ native/
   src/pdf/                  PdfView                   (QtPdf / PDFium)
   src/addons/               AddonModels, AddonContext, JsAddon (Duktape), AddonManager
   src/core/                 Settings, CoreManager, SystemCatalog
+                            Trickplay + TrickplayGen  (seek-preview sprite sheets: arithmetic, cache key, the job)
   src/ui/                   MainWindow, SettingsDialog, ControllerRemapDialog, LibraryView
   src/main.cpp              app entry
   systems/recipes/          per-system launch recipes (#190: core options, firmware, content) - see docs/retro-computers.md
