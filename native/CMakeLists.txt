@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.204 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.205 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -559,7 +559,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # playThemedLeaf), and the themed Enter fork. Pure, and deliberately free of the music TU's
         # link edge so the lean browse probes can keep it.
         src/browse/LeafRoute.cpp src/browse/LeafRoute.h
-        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + guide-grid builders (#75 inc 3)
+        # THE ONE EPG GRID, and its two suppliers (#75 inc 3 / #179 inc 2). GuideGrid holds the builder;
+        # LiveTvGuide feeds it from an M3U + XMLTV, ChannelGuide from a computed personal-channel day.
+        src/browse/GuideGrid.cpp    src/browse/GuideGrid.h
+        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # EPG now/next + the Live TV supplier (#75 inc 3)
+        src/browse/ChannelGuide.cpp src/browse/ChannelGuide.h      # the personal-channel supplier (#179 inc 2)
         # #83: the Jellyfin browse levels (libraries -> titles -> seasons -> episodes, and the Continue
         # Watching rows the home list merges in). Its own TU for LiveTvGuide's reason - it is pure, so the
         # lean browse probes can link it without the client, the store or a socket coming with it.
@@ -896,6 +900,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowChannelGuide.cpp                  # the channel guide + interstitial MainWindow members (#179 inc 2)
         src/ui/MainWindowMusicServerScrobble.cpp           # one scrobble provider per music server (#193 inc 6)
         src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
         src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
@@ -1592,6 +1597,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     # PlaylistStore/LocalLibrary for the two source kinds ChannelLineup enumerates.
     add_executable(probe_channels tools/probe_channels.cpp
         src/core/Channels.cpp        src/core/Channels.h
+        # #179 inc 2: the guide. The ONE grid builder plus the personal-channel supplier that feeds it, so
+        # this probe can assert GRID-AND-TUNE AGREEMENT over the real catalog rows rather than over a copy of
+        # them. AddonModels/StreamHeaders come with MediaCatalog; XmltvGuide.cpp + miniz were already here.
+        src/browse/GuideGrid.cpp     src/browse/GuideGrid.h
+        src/browse/ChannelGuide.cpp  src/browse/ChannelGuide.h
+        src/addons/AddonModels.cpp   src/addons/AddonModels.h
+        src/core/StreamHeaders.cpp   src/core/StreamHeaders.h
         src/core/ChannelStore.cpp    src/core/ChannelStore.h
         src/core/ChannelLineup.cpp   src/core/ChannelLineup.h
         src/core/MediaDurations.cpp  src/core/MediaDurations.h
@@ -1604,7 +1616,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/ResumeStore.cpp     src/core/ResumeStore.h
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
-    target_include_directories(probe_channels PRIVATE src src/core third_party)
+    target_include_directories(probe_channels PRIVATE src src/core src/addons src/browse third_party)
     target_link_libraries(probe_channels PRIVATE Qt6::Core Qt6::Gui)
     # Custom home rows (issue #161): the pure planner that orders/hides/caps the home's rows, the
     # per-profile row list behind it and the two-device merge of that list (src/core/HomeRows). QtCore-only
@@ -2742,7 +2754,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # asserted in probe_iptv, where that TU is already fully linked. miniz.c backs XmltvGuide::gunzip.
     add_executable(probe_xmltv tools/probe_xmltv.cpp
         src/core/XmltvGuide.cpp src/core/XmltvGuide.h
-        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # grid + now/next builders over the model
+        src/browse/LiveTvGuide.cpp src/browse/LiveTvGuide.h        # the Live TV supplier + now/next builder
+        src/browse/GuideGrid.cpp    src/browse/GuideGrid.h         # ...and the ONE grid builder it feeds (#179 inc 2)
         src/addons/AddonModels.cpp src/addons/AddonModels.h        # LiveTvGuide -> MediaCatalog / MediaItem
         src/media/StreamResolver.cpp src/media/StreamResolver.h    # m3uHeaderTvgUrl + M3uEntry
         src/core/StreamHeaders.cpp                                 # StreamResolver applies proxyHeaders on fetch

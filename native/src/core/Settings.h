@@ -541,6 +541,14 @@ namespace Settings
     QString photosFolder();        // resolved path (never empty)
     void setPhotosFolder(const QString& path);
 
+    // The GLOBAL folder personal-TV-channel bumpers/idents come from (issue #179, increment 2). EMPTY by
+    // default and empty means NO INTERSTITIALS — never an error, never a folder invented under the data
+    // directory: a channel with no bumpers is the ordinary case and has to stay the quiet one. A channel may
+    // name its own folder instead (channels::Channel::interstitialDir), which beats this one.
+    // Device-local: it is a path on THIS machine's disk, like the ROMs and library folders.
+    QString interstitialFolder();  // key "interstitials/folder"; unset => "" (off)
+    void setInterstitialFolder(const QString& path);
+
     // Resolve local-library movie ids online: search installed movie-catalog addons per movie and record the
     // matched catalog ids (CatalogResolver). Off => the library is indexed by NFO ids only. Default on.
     bool resolveOnline();          // key "library/resolveOnline", default true

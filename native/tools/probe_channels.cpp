@@ -23,6 +23,18 @@
 //      round trip
 //   12 the duration index outliving a cleared resume group
 //   13 the lineup seam: an unimplemented source is EMPTY, an installed resolver is used
+// Increment 2 (the guide, and the bumpers between programmes):
+//   14 the BREAK GRID: off is increment 1 byte for byte; a grid puts every start on a mark measured from the
+//      day; the grid is hashed into the timeline and the bumper folder deliberately is not
+//   15 INTERSTITIALS: every programme start byte-identical with and without them, bumpers only inside gaps,
+//      never the same one twice in a row, the run and count caps, a gap too short for the shortest bumper,
+//      an empty pool, a back-to-back channel, determinism, idempotence, and that the guide prints none
+//   16 the BUMPER FOLDER against a real directory: unset and empty are not errors, a missing folder and a
+//      file are refused with a sentence, the same duration gate applies, per-channel beats global
+//   17 THE GUIDE GRID and GRID-AND-TUNE AGREEMENT - the strongest assertion here: for every cell of every
+//      channel, what the grid printed is what whatsOn resolves, item for item and second for second,
+//      including the join offset; and exactly the cell the grid marks on air is the one tuning plays
+//   18 the projection onto xmltv::Programme at its edges: a day boundary and one very long item
 //
 // Prints CHANNELS-OK on success; any failure prints CHANNELS-FAIL <cond> (line) and exits non-zero.
 //
@@ -38,7 +50,13 @@
 #include "ResumeStore.h"
 #include "Tombstones.h"
 
+#include "ChannelGuide.h"   // #179 inc 2: the personal-channel supplier of the shared guide grid
+#include "GuideGrid.h"      // ...and the grid builder it feeds
+
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QDateTime>
 #include <QSet>
 #include <QSettings>
@@ -676,6 +694,423 @@ static void testJoinInProgress()
     CHECK(again.current.itemId == a.current.itemId && again.offsetSec == a.offsetSec);
 }
 
+
+// ---- 14. THE BREAK GRID (issue #179, increment 2) ---------------------------------------------------------
+// The grid is what MAKES a gap: without one the day is packed end to end and no bumper can ever air. The
+// claims here are (a) grid 0 is increment 1, byte for byte; (b) a grid puts every programme on a mark measured
+// from the DAY, not from the channel's start epoch; (c) the grid is an input to the timeline and so is hashed,
+// while the bumper folder is not.
+static void testBreakGrid()
+{
+    const qint64 day = 86400 * 100;
+    const QVector<LineupItem> lineup = fixtureLineup();     // 100 / 200 / 300 s
+
+    // (a) OFF is increment 1. Compared slot by slot against a channel that has never heard of a grid.
+    Channel off = fixtureChannel(Ordering::InOrder);
+    Channel zero = off; zero.breakGridSec = 0;
+    const Schedule a = buildDay(off, day, lineup);
+    const Schedule b = buildDay(zero, day, lineup);
+    CHECK(a.programmes.size() == b.programmes.size());
+    for (int i = 0; i < qMin(a.programmes.size(), b.programmes.size()); ++i)
+        CHECK(a.programmes.at(i).startUtc == b.programmes.at(i).startUtc
+              && a.programmes.at(i).itemId == b.programmes.at(i).itemId);
+    CHECK(a.programmes.at(0).startUtc == day);              // ...and it is still the contiguous layout
+    CHECK(a.programmes.at(1).startUtc == day + 100);
+    CHECK(a.programmes.at(2).startUtc == day + 300);
+
+    // (b) A 300-SECOND GRID over 100/200/300 s items, hand-computed:
+    //   Alpha  100 s at day+0    -> ends day+100  -> next mark day+300
+    //   Beta   200 s at day+300  -> ends day+500  -> next mark day+600
+    //   Gamma  300 s at day+600  -> ends day+900  -> ALREADY on a mark, so no empty cell is invented
+    //   Alpha  100 s at day+900  -> ends day+1000 -> next mark day+1200
+    Channel g = fixtureChannel(Ordering::InOrder); g.breakGridSec = 300;
+    const Schedule s = buildDay(g, day, lineup);
+    CHECK(s.programmes.at(0).startUtc == day);
+    CHECK(s.programmes.at(1).startUtc == day + 300);
+    CHECK(s.programmes.at(2).startUtc == day + 600);
+    CHECK(s.programmes.at(3).startUtc == day + 900);
+    CHECK(s.programmes.at(4).startUtc == day + 1200);
+    for (const Slot& sl : s.programmes) CHECK((sl.startUtc - day) % 300 == 0);
+
+    // (c) A channel that goes on air at 12:07:33 starts at 12:10 on a five-minute grid — the mark is measured
+    // from the DAY, so two channels made minutes apart print guides that line up.
+    Channel late = fixtureChannel(Ordering::InOrder, day + 12 * 3600 + 7 * 60 + 33);
+    late.breakGridSec = 300;
+    const Schedule ls = buildDay(late, day, lineup);
+    CHECK(!ls.isEmpty());
+    CHECK(ls.programmes.at(0).startUtc == day + 12 * 3600 + 10 * 60);
+
+    // (d) The hash. The grid moves programmes, so it is an input; the bumper folder cannot, so it is not.
+    Channel h1 = fixtureChannel(Ordering::InOrder);
+    Channel h2 = h1; h2.breakGridSec = 900;
+    Channel h3 = h1; h3.interstitialDir = QStringLiteral("/bumps");
+    CHECK(hashOfLineup(h1, day, lineup) != hashOfLineup(h2, day, lineup));
+    CHECK(hashOfLineup(h1, day, lineup) == hashOfLineup(h3, day, lineup));
+
+    // (e) An unknown grid value is OFF, never the nearest neighbour (the sourceKindFromInt rule).
+    CHECK(normalizeBreakGrid(0) == 0);
+    CHECK(normalizeBreakGrid(300) == 300);
+    CHECK(normalizeBreakGrid(301) == 0);
+    CHECK(normalizeBreakGrid(-5) == 0);
+    CHECK(!breakGridLabel(0).isEmpty() && breakGridLabel(0) != breakGridLabel(300));
+}
+
+// ---- 15. INTERSTITIALS: the rules, and the one they all serve ---------------------------------------------
+static QVector<LineupItem> bumperPool()
+{
+    QVector<LineupItem> p(3);
+    p[0].itemId = QStringLiteral("b30"); p[0].title = QStringLiteral("Ident");
+    p[0].playKey = QStringLiteral("/b/30.mp4"); p[0].durationSec = 30;
+    p[1].itemId = QStringLiteral("b60"); p[1].title = QStringLiteral("Bumper");
+    p[1].playKey = QStringLiteral("/b/60.mp4"); p[1].durationSec = 60;
+    p[2].itemId = QStringLiteral("b90"); p[2].title = QStringLiteral("Trailer");
+    p[2].playKey = QStringLiteral("/b/90.mp4"); p[2].durationSec = 90;
+    return p;
+}
+
+static void testInterstitials()
+{
+    const qint64 day = 86400 * 100;
+    const QVector<LineupItem> lineup = fixtureLineup();
+    Channel ch = fixtureChannel(Ordering::InOrder); ch.breakGridSec = 300;
+    const Schedule bare = buildDay(ch, day, lineup);
+    const Schedule filled = withInterstitials(bare, bumperPool(), BreakRules{});
+
+    // THE RULE EVERY OTHER RULE SERVES: every programme comes back BYTE-IDENTICAL, in order, unmoved.
+    QVector<Slot> progs;
+    for (const Slot& sl : filled.programmes) if (!sl.interstitial) progs.push_back(sl);
+    CHECK(progs.size() == bare.programmes.size());
+    for (int i = 0; i < qMin(progs.size(), bare.programmes.size()); ++i)
+    {
+        const Slot& x = progs.at(i); const Slot& y = bare.programmes.at(i);
+        CHECK(x.startUtc == y.startUtc && x.durationSec == y.durationSec);
+        CHECK(x.itemId == y.itemId && x.title == y.title && x.playKey == y.playKey);
+        CHECK(!x.interstitial && !y.interstitial);
+    }
+    CHECK(filled.programmes.size() > bare.programmes.size());   // ...and something DID air
+
+    // Bumpers live INSIDE gaps only: never before the first programme, never after the last, never
+    // overlapping a programme, and always in ascending order.
+    CHECK(!filled.programmes.first().interstitial);
+    CHECK(!filled.programmes.last().interstitial);
+    for (int i = 1; i < filled.programmes.size(); ++i)
+        CHECK(filled.programmes.at(i - 1).endUtc() <= filled.programmes.at(i).startUtc);
+
+    // NEVER TWICE IN A ROW - including across a break boundary, which is why the memory is carried rather
+    // than reset per gap.
+    QString prevBumper;
+    for (const Slot& sl : filled.programmes)
+    {
+        if (!sl.interstitial) continue;
+        CHECK(sl.itemId != prevBumper);
+        prevBumper = sl.itemId;
+    }
+
+    // MAX RUN, both halves. A cap under the shortest bumper airs nothing at all; a one-item cap airs at most
+    // one bumper per gap.
+    BreakRules tiny; tiny.maxRunSec = 10;
+    const Schedule none = withInterstitials(bare, bumperPool(), tiny);
+    for (const Slot& sl : none.programmes) CHECK(!sl.interstitial);
+    BreakRules one; one.maxPerBreak = 1;
+    const Schedule single = withInterstitials(bare, bumperPool(), one);
+    int run = 0, worst = 0;
+    for (const Slot& sl : single.programmes)
+    { if (sl.interstitial) { ++run; worst = qMax(worst, run); } else run = 0; }
+    CHECK(worst == 1);
+    // ...and the run cap is honoured in SECONDS as well as in count: no break exceeds it.
+    BreakRules cap; cap.maxRunSec = 60;
+    const Schedule capped = withInterstitials(bare, bumperPool(), cap);
+    int runSec = 0, worstSec = 0;
+    for (const Slot& sl : capped.programmes)
+    { if (sl.interstitial) { runSec += sl.durationSec; worstSec = qMax(worstSec, runSec); } else runSec = 0; }
+    CHECK(worstSec > 0 && worstSec <= 60);
+
+    // A GAP TOO SHORT FOR THE SHORTEST BUMPER airs nothing. A 60-second grid over 100/200/300 s items leaves
+    // gaps of 20/40/0 s; a pool whose shortest item is 90 s can use none of them.
+    Channel narrow = fixtureChannel(Ordering::InOrder); narrow.breakGridSec = 60;
+    const Schedule nb = buildDay(narrow, day, lineup);
+    QVector<LineupItem> longOnly; longOnly << bumperPool().at(2);       // 90 s only
+    const Schedule nf = withInterstitials(nb, longOnly, BreakRules{});
+    for (const Slot& sl : nf.programmes) CHECK(!sl.interstitial);
+    CHECK(nf.programmes.size() == nb.programmes.size());
+
+    // AN EMPTY POOL is the default state of the feature, not an error: the day comes back unchanged.
+    const Schedule empty = withInterstitials(bare, QVector<LineupItem>(), BreakRules{});
+    CHECK(empty.programmes.size() == bare.programmes.size());
+    for (int i = 0; i < qMin(empty.programmes.size(), bare.programmes.size()); ++i)
+        CHECK(empty.programmes.at(i).startUtc == bare.programmes.at(i).startUtc);
+
+    // A BACK-TO-BACK CHANNEL has no gaps, so it airs no bumpers however full the folder is.
+    const Schedule packed = buildDay(fixtureChannel(Ordering::InOrder), day, lineup);
+    const Schedule packedFilled = withInterstitials(packed, bumperPool(), BreakRules{});
+    CHECK(packedFilled.programmes.size() == packed.programmes.size());
+    for (const Slot& sl : packedFilled.programmes) CHECK(!sl.interstitial);
+
+    // DETERMINISM and IDEMPOTENCE: the same inputs twice give the same breaks, and re-filling an
+    // already-filled day is filling it once (which is what every re-tune does).
+    const Schedule again = withInterstitials(bare, bumperPool(), BreakRules{});
+    CHECK(again.programmes.size() == filled.programmes.size());
+    for (int i = 0; i < qMin(again.programmes.size(), filled.programmes.size()); ++i)
+        CHECK(again.programmes.at(i).itemId == filled.programmes.at(i).itemId
+              && again.programmes.at(i).startUtc == filled.programmes.at(i).startUtc);
+    const Schedule twice = withInterstitials(filled, bumperPool(), BreakRules{});
+    CHECK(twice.programmes.size() == filled.programmes.size());
+
+    // THE GUIDE NEVER PRINTS A BUMPER. Same day, same object: the programme model drops them.
+    CHECK(toProgrammes(filled).size() == bare.programmes.size());
+
+    // nextProgrammeAfter SKIPS BUMPERS - what the banner promises during a break is a programme.
+    Slot up;
+    CHECK(nextProgrammeAfter(filled, bare.programmes.at(0).startUtc, up));
+    CHECK(!up.interstitial && up.startUtc == bare.programmes.at(1).startUtc);
+    // ...and programmeStartingAt never answers with one.
+    Slot hit;
+    for (const Slot& sl : filled.programmes)
+        if (sl.interstitial) CHECK(!programmeStartingAt(filled, sl.startUtc, hit));
+
+    // PER-CHANNEL BEATS GLOBAL, and blank means "use the global one".
+    Channel own = fixtureChannel(Ordering::InOrder); own.interstitialDir = QStringLiteral("/own");
+    CHECK(interstitialDirFor(own, QStringLiteral("/global")) == QStringLiteral("/own"));
+    Channel blank = fixtureChannel(Ordering::InOrder); blank.interstitialDir = QStringLiteral("   ");
+    CHECK(interstitialDirFor(blank, QStringLiteral("/global")) == QStringLiteral("/global"));
+    CHECK(interstitialDirFor(blank, QString()).isEmpty());
+}
+
+// ---- 16. THE BUMPER FOLDER, against a real directory ------------------------------------------------------
+static void testInterstitialFolder()
+{
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString root = tmp.path();
+
+    // A path that is not there, and a path that is a FILE, are both refused with a readable sentence.
+    QString why;
+    CHECK(ChannelLineup::interstitialCandidates(root + QStringLiteral("/nope"), &why).isEmpty());
+    CHECK(!why.isEmpty());
+    QFile f(root + QStringLiteral("/notafolder.txt"));
+    CHECK(f.open(QIODevice::WriteOnly)); f.write("x"); f.close();
+    why.clear();
+    CHECK(ChannelLineup::interstitialCandidates(root + QStringLiteral("/notafolder.txt"), &why).isEmpty());
+    CHECK(!why.isEmpty());
+
+    // AN UNSET FOLDER IS NOT AN ERROR - it is the default, and it says nothing.
+    why = QStringLiteral("stale");
+    CHECK(ChannelLineup::interstitialCandidates(QString(), &why).isEmpty());
+    CHECK(why.isEmpty());
+
+    // AN EMPTY FOLDER IS NOT AN ERROR EITHER: no bumpers, no sentence.
+    const QString dir = root + QStringLiteral("/bumps");
+    CHECK(QDir().mkpath(dir));
+    why = QStringLiteral("stale");
+    CHECK(ChannelLineup::interstitialCandidates(dir, &why).isEmpty());
+    CHECK(why.isEmpty());
+
+    // Videos are enumerated (sorted, so two devices lay the same break); a text file is not a bumper.
+    const char* names[] = { "b.mp4", "a.mkv", "notes.txt" };
+    for (const char* n : names)
+    {
+        QFile g(dir + QLatin1Char('/') + QLatin1String(n));
+        CHECK(g.open(QIODevice::WriteOnly)); g.write("x"); g.close();
+    }
+    const QVector<Candidate> found = ChannelLineup::interstitialCandidates(dir, &why);
+    CHECK(why.isEmpty());
+    CHECK(found.size() == 2);
+    CHECK(found.at(0).playKey.endsWith(QStringLiteral("a.mkv")));
+    CHECK(found.at(1).playKey.endsWith(QStringLiteral("b.mp4")));
+    CHECK(found.at(0).itemId == found.at(0).playKey);    // a bumper's path IS its identity
+
+    // THE SAME DURATION GATE a programme passes: a file nobody has played has no length and is skipped.
+    Channel ch = fixtureChannel(Ordering::InOrder);
+    ch.interstitialDir = dir;
+    QStringList skipped;
+    CHECK(ChannelLineup::interstitials(ch, QString(), &skipped).isEmpty());
+    CHECK(skipped.size() == 2);
+    // ...and once the index knows how long one is, it joins the rotation.
+    MediaDurations::note(found.at(0).playKey, 15);
+    skipped.clear();
+    const QVector<LineupItem> pool = ChannelLineup::interstitials(ch, QString(), &skipped);
+    CHECK(pool.size() == 1 && pool.at(0).durationSec == 15);
+    CHECK(skipped.size() == 1);
+    // The per-channel folder beats the global one END TO END, not just in the pure chooser.
+    Channel global = fixtureChannel(Ordering::InOrder);
+    CHECK(ChannelLineup::interstitials(global, dir).size() == 1);
+    Channel both = ch;
+    CHECK(ChannelLineup::interstitials(both, root + QStringLiteral("/nope")).size() == 1);
+}
+
+// ---- 17. THE GUIDE GRID, and the claim that it never lies -------------------------------------------------
+// The strongest assertion in this file. For several channels and several times: the cell the GRID marks as on
+// air is the programme the TUNER resolves, second for second, and the offset the tuner would seek to is the
+// distance between the clock and the cell's printed start.
+static void testGuideGrid()
+{
+    const qint64 day = 86400 * 100;                 // a UTC midnight; the probe computes at tz 0
+    const QVector<LineupItem> lineup = fixtureLineup();
+
+    QVector<Channel> chans;
+    Channel packed = fixtureChannel(Ordering::InOrder);   packed.id = QStringLiteral("c-packed");
+    Channel gridded = fixtureChannel(Ordering::InOrder);  gridded.id = QStringLiteral("c-grid");
+    gridded.breakGridSec = 300;
+    Channel shuffled = fixtureChannel(Ordering::Shuffle); shuffled.id = QStringLiteral("c-shuf");
+    Channel silent = fixtureChannel(Ordering::InOrder);   silent.id = QStringLiteral("c-empty");
+    chans << packed << gridded << shuffled << silent;
+
+    QVector<Schedule> days;
+    days << buildDay(packed, day, lineup)
+         << withInterstitials(buildDay(gridded, day, lineup), bumperPool(), BreakRules{})
+         << buildDay(shuffled, day, lineup)
+         << buildDay(silent, day, QVector<LineupItem>());     // nothing with a known length
+
+    const QDateTime dayStart = QDateTime::fromSecsSinceEpoch(day, Qt::UTC);
+    const qint64 now = day + 3 * 3600 + 137;
+    const MediaCatalog cat = browse::channelGuideCatalog(
+        chans, days, QHash<QString, QString>(), QDateTime::fromSecsSinceEpoch(now, Qt::UTC),
+        dayStart, dayStart.addSecs(86400));
+
+    // Every channel gets a header, in the order given, even the one with nothing to air.
+    int headers = 0;
+    for (const MediaItem& it : cat.items)
+        if (it.type == QStringLiteral("_livetvheader")) ++headers;
+    CHECK(headers == 4);
+    CHECK(cat.items.first().type == QStringLiteral("_livetvheader"));
+    CHECK(cat.items.first().title == QStringLiteral("Fixture TV"));
+    // ...and the empty one says why, in a sentence, with nothing having been opened to find out.
+    bool sawEmptyNote = false;
+    for (int i = 0; i < cat.items.size(); ++i)
+        if (cat.items.at(i).id == QStringLiteral("_guidehdr:channel:c-empty"))
+        {
+            sawEmptyNote = !cat.items.at(i).subtitle.isEmpty();
+            CHECK(i + 1 == cat.items.size()
+                  || cat.items.at(i + 1).type == QStringLiteral("_livetvheader"));
+        }
+    CHECK(sawEmptyNote);
+
+    // A BUMPER IS NEVER A CELL. The gridded channel's day is full of them and the grid prints none.
+    int cells = 0, bumpersInDay = 0;
+    for (const Slot& sl : days.at(1).programmes) if (sl.interstitial) ++bumpersInDay;
+    CHECK(bumpersInDay > 0);
+    for (const MediaItem& it : cat.items)
+        if (it.type == QStringLiteral("_guidetune")) ++cells;
+    int progTotal = 0;
+    for (const Schedule& sc : days)
+        for (const Slot& sl : sc.programmes) if (!sl.interstitial) ++progTotal;
+    CHECK(cells == progTotal);
+
+    // ---- GRID AND TUNE AGREE ------------------------------------------------------------------------------
+    // Walk every cell of every channel. Decode the row back to (channel, start second) exactly as the
+    // activation path does, then ask the SCHEDULE what is on at that second.
+    int checked = 0;
+    for (const MediaItem& it : cat.items)
+    {
+        if (it.type != QStringLiteral("_guidetune")) continue;
+        QString cid; qint64 cellStart = 0;
+        CHECK(browse::parseChannelGuideCell(it.mime, cid, cellStart));
+        CHECK(browse::parseChannelGuideCell(it.id, cid, cellStart));   // id and mime decode alike
+        int which = -1;
+        for (int i = 0; i < chans.size(); ++i) if (chans.at(i).id == cid) which = i;
+        CHECK(which >= 0);
+        if (which < 0) continue;
+        const Schedule& sc = days.at(which);
+        Slot cell;
+        CHECK(programmeStartingAt(sc, cellStart, cell));               // the cell names a real programme
+        const Airing atStart = whatsOn(sc, cellStart);
+        CHECK(atStart.valid);
+        CHECK(atStart.current.itemId == cell.itemId);
+        CHECK(atStart.current.startUtc == cellStart);
+        CHECK(atStart.offsetSec == 0);
+        CHECK(joinOffsetSec(atStart, false) == 0);
+        // ...and a second inside it: the join point is the distance from the printed start, to the second.
+        const int probe = qMin(7, cell.durationSec - 1);
+        if (probe > 0)
+        {
+            const Airing mid = whatsOn(sc, cellStart + probe);
+            CHECK(mid.valid && mid.current.itemId == cell.itemId);
+            CHECK(mid.offsetSec == probe);
+            CHECK(joinOffsetSec(mid, false) == probe);
+            CHECK(joinOffsetSec(mid, true) == 0);          // ...unless the channel starts from the top
+        }
+        // The LAST second of the cell still belongs to it, and the next one does not (half-open windows).
+        const Airing last = whatsOn(sc, cell.endUtc() - 1);
+        CHECK(last.valid && last.current.itemId == cell.itemId);
+        const Airing after = whatsOn(sc, cell.endUtc());
+        CHECK(!after.valid || after.current.startUtc != cellStart);
+        ++checked;
+    }
+    CHECK(checked == progTotal);
+    CHECK(checked > 20);          // the corpus assertion: a guide with two cells proves nothing
+
+    // EXACTLY ONE CELL IS MARKED ON AIR per channel that has a programme on at `now`, and it is the one the
+    // tuner resolves - at the same second, with the same offset.
+    for (int i = 0; i < chans.size(); ++i)
+    {
+        const Airing air = whatsOn(days.at(i), now);
+        const QString hdr = QStringLiteral("_guidehdr:") + rowProducerKey(chans.at(i).id);
+        int seen = -1, marked = 0;
+        QString markedId;
+        for (int k = 0; k < cat.items.size(); ++k)
+        {
+            if (cat.items.at(k).id == hdr) { seen = k; continue; }
+            if (seen < 0) continue;
+            if (cat.items.at(k).type == QStringLiteral("_livetvheader")) break;
+            if (!cat.items.at(k).title.startsWith(QString::fromUtf8("●"))) continue;
+            ++marked;
+            QString cid2; qint64 st = 0;
+            CHECK(browse::parseChannelGuideCell(cat.items.at(k).mime, cid2, st));
+            markedId = cid2;
+            // THE CLAIM: what the grid shows on air is what tuning plays, including the offset.
+            CHECK(air.valid);
+            CHECK(st == air.current.startUtc);
+            CHECK(int(now - st) == air.offsetSec);
+        }
+        // A channel airing a BUMPER at `now` has no marked programme, and that is correct rather than a
+        // disagreement: the guide is a contract about programmes.
+        if (air.valid && !air.current.interstitial) { CHECK(marked == 1); CHECK(markedId == chans.at(i).id); }
+        else CHECK(marked == 0);
+    }
+
+    // A row id that is not a cell, and a LIVE TV cell (its key is a url, not "channel:<id>"), are refused.
+    QString junkId; qint64 junkStart = 0;
+    CHECK(!browse::parseChannelGuideCell(QStringLiteral("_channel:abc"), junkId, junkStart));
+    CHECK(!browse::parseChannelGuideCell(
+              QStringLiteral("_guideprog:http://host/a@b.ts@1970-01-01T00:00:00Z"), junkId, junkStart));
+    // ...while a channel key that itself contains an '@' still parses, because the split is from the RIGHT.
+    QString atId; qint64 atStart = 0;
+    CHECK(browse::parseChannelGuideCell(QStringLiteral("guidetune:channel:a@b@1970-01-02T00:00:00Z"),
+                                        atId, atStart));
+    CHECK(atId == QStringLiteral("a@b"));
+    CHECK(atStart == 86400);
+}
+
+// ---- 18. the projection onto the programme model, at its edges --------------------------------------------
+static void testProgrammeBridgeEdges()
+{
+    // A DAY BOUNDARY. The last programme of a day may run past midnight; the projection carries its real stop
+    // time rather than clipping it, or the guide would print a programme that ends when it does not.
+    const qint64 day = 86400 * 100;
+    QVector<LineupItem> one(1);
+    one[0].itemId = QStringLiteral("long"); one[0].title = QStringLiteral("The Long One");
+    one[0].playKey = QStringLiteral("/lib/long.mkv"); one[0].durationSec = 7 * 3600;   // seven hours
+    Channel ch = fixtureChannel(Ordering::InOrder);
+    const Schedule s = buildDay(ch, day, one);
+    CHECK(s.programmes.size() == 4);                       // 4 x 7h = 28h covers the day and overruns it
+    const QVector<xmltv::Programme> progs = toProgrammes(s);
+    CHECK(progs.size() == 4);
+    CHECK(progs.last().startUtc == QDateTime::fromSecsSinceEpoch(day + 21 * 3600, Qt::UTC));
+    CHECK(progs.last().stopUtc == QDateTime::fromSecsSinceEpoch(day + 28 * 3600, Qt::UTC));
+    CHECK(progs.last().stopUtc > QDateTime::fromSecsSinceEpoch(day + 86400, Qt::UTC));
+    for (const xmltv::Programme& p : progs)
+        CHECK(p.channelId == QStringLiteral("channel:chan-fixture"));
+
+    // ONE VERY LONG ITEM ON A GRID: the programme still starts on a mark, and the projection agrees.
+    Channel g = ch; g.breakGridSec = 1800;
+    const Schedule gs = buildDay(g, day, one);
+    for (const Slot& sl : gs.programmes) CHECK((sl.startUtc - day) % 1800 == 0);
+    const QVector<xmltv::Programme> gp = toProgrammes(gs);
+    CHECK(gp.size() == gs.programmes.size());
+    for (int i = 0; i < gp.size(); ++i)
+        CHECK(gp.at(i).startUtc == QDateTime::fromSecsSinceEpoch(gs.programmes.at(i).startUtc, Qt::UTC));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -694,6 +1129,11 @@ int main(int argc, char** argv)
     testStore();
     testLineupSeam();
     testJoinInProgress();
+    testBreakGrid();
+    testInterstitials();
+    testInterstitialFolder();
+    testGuideGrid();
+    testProgrammeBridgeEdges();
     if (failures == 0) std::printf("CHANNELS-OK\n");
     return failures == 0 ? 0 : 1;
 }

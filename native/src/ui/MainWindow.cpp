@@ -895,6 +895,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // #179: a channel row was activated -> tune it. The view names the channel; this window owns the clock,
     // the join and the surfing.
     connect(home_, &HomeView::tuneChannelRequested, this, &MainWindow::tuneChannel);
+    connect(home_, &HomeView::tuneChannelCellRequested, this, &MainWindow::tuneChannelFromGuide);   // #179 inc 2
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
     connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
@@ -7384,10 +7385,21 @@ void MainWindow::tuneChannel(const QString& channelId)
 
     const qint64 nowUtc = QDateTime::currentSecsSinceEpoch();
     const int    tzOff  = QDateTime::currentDateTime().offsetFromUtc();
-    const channels::Schedule sched = channelSchedules_.dayFor(ch, nowUtc, tzOff, lineup);
+    // #179 inc 2 — THE BUMPERS, laid into the gaps the channel's break grid left. This is the only place the
+    // pool meets the timeline, and withInterstitials' contract is that it cannot move a programme: every
+    // start second below is the one the guide printed, bumpers or no bumpers.
+    const channels::Schedule day   = channelSchedules_.dayFor(ch, nowUtc, tzOff, lineup);
+    const channels::Schedule sched = channels::withInterstitials(day, channelInterstitials(ch),
+                                                                 channels::BreakRules{});
     const channels::Airing   air   = channels::whatsOn(sched, nowUtc);
     if (!air.valid)
     {
+        // DEAD AIR IS NOT OFF AIR. A gap too short for the shortest bumper is a few seconds of nothing
+        // between two programmes, and being thrown out of the channel for it would be far worse than the
+        // silence. Wait for the next programme instead — but only when there IS one within the bounded wait.
+        channels::Slot up;
+        if (channels::nextProgrammeAfter(sched, nowUtc, up))
+        { awaitChannelProgramme(channelId, nowUtc, up.startUtc); return; }
         notify(lineup.isEmpty()
                    ? tr("“%1” has nothing to air yet — none of its items has a known length.").arg(ch.name)
                    : tr("“%1” is off air right now.").arg(ch.name), kFeedbackLong);
@@ -7433,8 +7445,22 @@ void MainWindow::tuneChannel(const QString& channelId)
     // Its key is the row-producer key #161 names, which is also what the star files a favourite under.
     const QString key = channels::rowProducerKey(channelId);
     RecentStore::add({ key, ch.name, QStringLiteral("video"), QString(), key });
+    // #179 inc 2 - AND A BUMPER IS NOT IN CONTINUE WATCHING AT ALL. openLibraryItem files whatever it opens
+    // as an ordinary local video, which is right for a programme and plainly wrong for a six-second ident: a
+    // live drive tuned one channel for four minutes and came back to a Continue Watching row reading
+    // "ident-gold - 87%" three times over. The row is removed the moment it is written rather than the play
+    // path being forked, because the bumper MUST open through exactly the same path a programme does (that is
+    // what puts its measured length in the duration index, which is what lets it be scheduled at all).
+    if (air.current.interstitial)
+    {
+        RecentStore::remove(air.current.playKey);
+        RecentStore::remove(air.current.itemId);
+        // A position left behind by a bumper the viewer walked out of is harmless and is deliberately left
+        // alone: the join override above is applied on EVERY tune, so it displaces any stored mark, and a
+        // bumper that plays to its end drops its own position through finishResume (#150) as any file does.
+    }
 
-    showChannelBanner(ch, air);
+    showChannelBanner(ch, air, sched);
     prefetchChannelNeighbours();
 }
 
@@ -7454,7 +7480,8 @@ void MainWindow::surfChannel(int delta)
 // interstitial's place (centred over the player, same panel colours the nav kit uses), deliberately not a
 // NavConfirm/NavCountdown — those block in a nested event loop, and a surf must not stop being interruptible
 // by the next press of Up. It is a plain child label that raises itself and fades on a timer.
-void MainWindow::showChannelBanner(const channels::Channel& ch, const channels::Airing& air)
+void MainWindow::showChannelBanner(const channels::Channel& ch, const channels::Airing& air,
+                                   const channels::Schedule& sched)
 {
     if (!playerPage_) return;
     // PARENTED ON THE WINDOW, not on the player page, and centred in the WINDOW rect — which is where the
@@ -7494,7 +7521,20 @@ void MainWindow::showChannelBanner(const channels::Channel& ch, const channels::
     const QString left = (leftSec < 60) ? tr("%n sec", "", qMax(1, leftSec))
                                         : tr("%n min", "", (leftSec + 59) / 60);
     QString text = tr("%1\n%2 — %3 left").arg(ch.name, air.current.title, left);
-    if (air.hasNext) text += QLatin1Char('\n') + tr("Next: %1").arg(air.next.title);
+    // #179 inc 2 — DURING A BUMPER the card is about the channel, not about the ident. Naming a
+    // fifteen-second sting and counting it down would be the one moment television never narrates; what the
+    // viewer wants is the programme it is holding the gap for, and when it starts.
+    channels::Slot upNext;
+    const bool haveNext = channels::nextProgrammeAfter(sched, air.current.startUtc, upNext);
+    if (air.current.interstitial)
+    {
+        text = ch.name;
+        if (haveNext)
+            text += QLatin1Char('\n') + tr("%1 at %2").arg(
+                        upNext.title,
+                        QDateTime::fromSecsSinceEpoch(upNext.startUtc).toString(QStringLiteral("HH:mm")));
+    }
+    else if (haveNext) text += QLatin1Char('\n') + tr("Next: %1").arg(upNext.title);
     channelBanner_->setText(text);
     channelBanner_->adjustSize();
     const QRect r = rect();
@@ -7529,6 +7569,10 @@ void MainWindow::exitTunedChannel()
     tunedChannelId_.clear();
     tunedChannelIds_.clear();
     if (channelBanner_) channelBanner_->hide();
+    // #179 inc 2: a pending dead-air wait dies with the channel. Left standing, it would tune a channel back
+    // in minutes after the viewer chose something else - the exact thing the tuning latch above exists to
+    // stop, one timer removed.
+    if (channelGapTimer_) channelGapTimer_->stop();
 }
 
 void MainWindow::exitChannel()
@@ -22049,6 +22093,22 @@ void MainWindow::openGeneralSettings()
              tr("An M3U playlist — a URL or a local file. Once one is saved, Live TV appears under Video, "
                 "where you can browse its channels and remove it."),
              QString());
+        // --- Channels (issue #179 increment 2): the GLOBAL bumper folder. Its classic twin is in the QWidget
+        // builder below (GS_TWINS) - same Setting, same picker, one write path. Empty means no bumpers, which
+        // is the default and is not an error; a channel may name its own folder in its editor instead. ---
+        sep(tr("Channels"));
+        info(QStringLiteral("chan.bumperpath"),
+             Settings::interstitialFolder().isEmpty() ? tr("No bumper folder set")
+                                                      : Settings::interstitialFolder(),
+             QString());
+        action(QStringLiteral("chan.bumperchange"), tr("Choose bumper folder…"));
+        action(QStringLiteral("chan.bumperclear"), tr("Clear bumper folder"));
+        info(QStringLiteral("chan.bumperhint"),
+             tr("Short idents and bumpers your channels play BETWEEN programmes. They fill the gap a "
+                "channel's break grid leaves and never delay a programme: if there is no room for one, none "
+                "airs. A channel whose programmes run back to back has no gaps and so plays none. Each file "
+                "has to have been played once before its length is known."),
+             QString());
         // --- Game ROMs ---
         sep(tr("Game ROMs"));
         info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
@@ -22856,6 +22916,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("library.rescan")) {
                     rescanLocalLibrary();
                     statusBar()->showMessage(tr("Rescanning your Local Library…"), 4000);
+                }
+                else if (id == QStringLiteral("chan.bumperchange")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your channel bumper folder"),
+                                                                          Settings::interstitialFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setInterstitialFolder(dir);
+                    setInfo(QStringLiteral("chan.bumperpath"), dir, QString());
+                    statusBar()->showMessage(tr("Channel bumpers will come from %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("chan.bumperclear")) {
+                    Settings::setInterstitialFolder(QString());
+                    setInfo(QStringLiteral("chan.bumperpath"), tr("No bumper folder set"), QString());
+                    statusBar()->showMessage(tr("Channels will play no bumpers."), 6000);
                 }
                 else if (id == QStringLiteral("photos.change")) {
                     const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your photo library folder"),
@@ -23784,6 +23857,44 @@ void MainWindow::openGeneralSettings()
             statusBar()->showMessage(tr("Live TV source saved — it's under Video on the home screen."), 6000);
         });
         v->addWidget(tvAdd);
+
+        // --- Channels (issue #179 increment 2): the classic twin of the themed builder's chan.bumper* rows -
+        // same Setting, same setter, same picker, one write path and no drift (GS_TWINS). ---
+        auto* cbHeading = new QLabel(tr("Channels"));
+        cbHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(cbHeading);
+        auto* cbNote = new QLabel(tr("Short idents and bumpers your channels play BETWEEN programmes. They "
+            "fill the gap a channel's break grid leaves and never delay a programme: if there is no room for "
+            "one, none airs. A channel whose programmes run back to back has no gaps and so plays none. Each "
+            "file has to have been played once before its length is known. Leave this empty for no bumpers; a "
+            "channel may point at its own folder instead, in its editor under Video > Channels."));
+        cbNote->setWordWrap(true); cbNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(cbNote);
+        auto* cbRow = new QHBoxLayout();
+        auto* cbPath = new QLineEdit(Settings::interstitialFolder());
+        cbPath->setMinimumHeight(34);
+        cbPath->setReadOnly(true);  // chosen via the picker, so it's always a real folder
+        cbPath->setPlaceholderText(tr("No bumper folder set"));
+        cbRow->addWidget(cbPath, 1);
+        auto* cbBrowse = new QPushButton(tr("Change…"));
+        cbRow->addWidget(cbBrowse);
+        auto* cbClear = new QPushButton(tr("Clear"));
+        cbRow->addWidget(cbClear);
+        v->addLayout(cbRow);
+        connect(cbBrowse, &QPushButton::clicked, this, [this, cbPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your channel bumper folder"),
+                                                                  Settings::interstitialFolder());
+            if (dir.isEmpty()) return;
+            Settings::setInterstitialFolder(dir);
+            cbPath->setText(dir);
+            statusBar()->showMessage(tr("Channel bumpers will come from %1").arg(dir), 6000);
+        });
+        connect(cbClear, &QPushButton::clicked, this, [this, cbPath] {
+            Settings::setInterstitialFolder(QString());
+            cbPath->clear();
+            statusBar()->showMessage(tr("Channels will play no bumpers."), 6000);
+        });
+        v->addSpacing(10);
 
         // --- Game ROMs: a local ROM library laid out RetroBat / ES-DE style (<root>/<system>/roms). ---
         auto* rHeading = new QLabel(tr("Game ROMs"));

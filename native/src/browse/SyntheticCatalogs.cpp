@@ -377,6 +377,20 @@ MediaCatalog liveTvSourcesCatalog(const QList<IptvSource>& sources)
 MediaCatalog channelsCatalog(const QList<channels::Channel>& all)
 {
     MediaCatalog cat; cat.title = QObject::tr("Channels");
+    // THE GUIDE, first (issue #179, increment 2) — the channels x time grid, on the row a viewer reaches
+    // before any single channel, because "what is on" is the question this folder is opened to answer. Only
+    // when there IS a channel: a guide over nothing is a blank page where the create row should be.
+    if (!all.isEmpty())
+    {
+        MediaItem g;
+        g.id         = QStringLiteral("_channelguide");
+        g.type       = QStringLiteral("_channelguide");
+        g.title      = QObject::tr("Guide (today)");
+        g.subtitle   = QObject::tr("What is on, and what is on next");
+        g.expandable = true;
+        g.mime       = QStringLiteral("channelguide");
+        cat.items.push_back(g);
+    }
     for (const channels::Channel& c : all)
     {
         MediaItem it;

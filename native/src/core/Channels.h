@@ -71,6 +71,28 @@ namespace channels
         TimeBlocked = 2,    // RESERVED — increment 2
     };
 
+    // WHERE PROGRAMMES ARE ALLOWED TO START (issue #179, increment 2) — the channel's slot grid, in seconds.
+    //
+    // 0 is increment 1's behaviour and stays the default: programmes are laid END TO END, a 22-minute episode
+    // is followed at once by the next, and the day has no room in it for anything else. That is a perfectly
+    // good channel and it is still what you get unless you ask for otherwise.
+    //
+    // A NON-ZERO GRID IS WHAT MAKES A BREAK EXIST. With 300, every programme starts on a five-minute mark, so
+    // a 22:13 episode is followed by a 2:47 GAP before the next one — and that gap is the only place an
+    // interstitial may ever air (rule: a bumper fills a gap, it never pushes a programme later). It is also
+    // what makes a printed guide readable: 20:00, 20:25, 20:50 rather than 20:00, 20:22:13, 20:44:26.
+    //
+    // THE GRID IS PART OF THE TIMELINE, THE BUMPERS ARE NOT. This value is hashed into Schedule::inputsHash;
+    // the interstitial folder deliberately is not, because the whole contract of increment 2 is that adding,
+    // removing or changing bumpers cannot move a programme by one second.
+    inline constexpr int kBreakGridsSec[] = { 0, 60, 300, 900, 1800 };
+    inline int normalizeBreakGrid(int sec)
+    {
+        for (int g : kBreakGridsSec) if (g == sec) return g;
+        return 0;   // an unknown number is OFF, never the nearest neighbour (the sourceKindFromInt rule)
+    }
+    QString breakGridLabel(int sec);
+
     // One channel, as stored. `startEpoch` is the UTC second the channel went on air: before it the channel
     // has no programmes at all (a schedule for an earlier day is empty, and the day it starts begins at the
     // epoch rather than at midnight), which is what makes "created at 15:00" honest instead of retroactive.
@@ -85,6 +107,8 @@ namespace channels
         Ordering   ordering   = Ordering::Shuffle;
         qint64     startEpoch = 0;            // UTC seconds; 0 == "has always been on air"
         bool       startFromBeginning = false;
+        int        breakGridSec = 0;          // #179 inc 2: programme starts land on this grid; 0 == back to back
+        QString    interstitialDir;           // #179 inc 2: this channel's own bumper folder; empty == the global one
         qint64     ts = 0;
     };
 
@@ -107,7 +131,10 @@ namespace channels
         int     durationSec = 0;   // > 0, always (withDurations is the only constructor in practice)
     };
 
-    // One programme in the computed timeline.
+    // One programme in the computed timeline — or, when `interstitial` is set, one BUMPER filling a gap
+    // between two of them (issue #179, increment 2). The flag is the whole difference: the guide prints
+    // programmes and never bumpers (`toProgrammes` drops them), while the tuner airs whatever the clock is
+    // inside of. A bumper slot is never the reason another slot moved — see `withInterstitials`.
     struct Slot
     {
         QString itemId;
@@ -115,6 +142,7 @@ namespace channels
         QString playKey;
         qint64  startUtc    = 0;
         int     durationSec = 0;
+        bool    interstitial = false;
         qint64  endUtc() const { return startUtc + durationSec; }
     };
 
@@ -268,8 +296,58 @@ namespace channels
     // from the beginning. The ONE place the override is applied, so the tuner and the banner agree.
     int joinOffsetSec(const Airing& a, bool startFromBeginning);
 
-    // The timeline in #75's source-agnostic programme model, ready for the guide grid increment 2 builds.
+    // The timeline in #75's source-agnostic programme model, the guide grid renders (increment 2).
+    // INTERSTITIAL SLOTS ARE DROPPED. The guide is a contract about programmes; a viewer reading "20:25 —
+    // Episode 4" is owed Episode 4 at 20:25, and is owed nothing at all about the ident that ran at 20:23.
     QVector<xmltv::Programme> toProgrammes(const Schedule& s);
+
+    // The programme (never a bumper) whose start is exactly `startUtc`, if the schedule has one. This is how
+    // a guide CELL is turned back into the thing the guide was promising — the grid prints a start second,
+    // and this is the only lookup that may be used to interpret it.
+    bool programmeStartingAt(const Schedule& s, qint64 startUtc, Slot& out);
+
+    // The next PROGRAMME strictly after `nowUtc`, skipping any bumpers in between. What the banner says is
+    // coming up, and what a viewer sitting in a break is waiting for.
+    bool nextProgrammeAfter(const Schedule& s, qint64 nowUtc, Slot& out);
+
+    // ---- interstitials (issue #179, increment 2) ----------------------------------------------------------
+    //
+    // A bumper is an ordinary item with a known length — the SAME `LineupItem` a programme is, produced by the
+    // same duration gate — taken from a folder the user names. There is no second mechanism and no second
+    // type: the countdown card increment 1 inherited is generalised into "the schedule has a gap; something
+    // short airs in it".
+    //
+    // THE ONE RULE EVERYTHING ELSE SERVES: an interstitial NEVER MOVES A PROGRAMME'S START TIME. The schedule
+    // is the contract the guide printed, so bumpers fill the gaps a channel's break grid already left and
+    // nothing else. `withInterstitials` is therefore total and safe on any schedule: on a back-to-back
+    // channel (breakGridSec == 0) there are no gaps and it returns the day unchanged.
+
+    // How much of a gap may be filled, and with how many pieces.
+    struct BreakRules
+    {
+        int maxRunSec   = 600;   // a single break never airs more than ten minutes of bumpers…
+        int maxPerBreak = 6;     // …nor more than six of them, however short they are
+    };
+
+    // Which folder a channel's bumpers come from: its OWN when it names one, otherwise the global folder.
+    // Trimmed, so a row of spaces is "not set" rather than a folder named " ".
+    QString interstitialDirFor(const Channel& ch, const QString& globalDir);
+
+    // The day, with bumpers laid into its gaps.
+    //
+    //   * every programme slot of `s` comes back BYTE-IDENTICAL and in the same order — same itemId, title,
+    //     playKey, startUtc and durationSec (probe_channels asserts exactly this, field by field);
+    //   * bumpers are inserted only inside a gap [previous end, next start), never before the first
+    //     programme and never after the last;
+    //   * a gap shorter than the shortest bumper in the pool airs NOTHING (dead air is honest; a programme
+    //     starting late is not);
+    //   * the same bumper never airs twice in a row, across a break boundary as well as within one;
+    //   * `rules` caps both the run length and the count per break.
+    //
+    // DETERMINISTIC, like everything else here: the choice is a seeded walk over (channelId, gapStart), so two
+    // devices tuned to the same channel at the same second are inside the same ident. Idempotent — a schedule
+    // that already carries bumpers is stripped of them first, so calling this twice is calling it once.
+    Schedule withInterstitials(const Schedule& s, const QVector<LineupItem>& pool, const BreakRules& rules);
 
     // ---- surfing ------------------------------------------------------------------------------------------
 

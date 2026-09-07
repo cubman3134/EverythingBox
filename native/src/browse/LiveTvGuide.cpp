@@ -1,4 +1,5 @@
 #include "LiveTvGuide.h"
+#include "GuideGrid.h"      // the ONE grid builder both suppliers feed (#75 inc 3 / #179 inc 2)
 
 #include <QObject>
 #include <algorithm>
@@ -34,51 +35,32 @@ MediaCatalog liveTvGuideCatalog(const QString& sourceName, const QVector<M3uEntr
                                 const xmltv::Guide& guide, const QDateTime& nowUtc,
                                 const QDateTime& dayStartUtc, const QDateTime& dayEndUtc)
 {
-    MediaCatalog cat;
-    cat.title = sourceName.isEmpty() ? QObject::tr("Guide") : QObject::tr("%1 — Guide").arg(sourceName);
-
+    // THE ADAPTER, not a second grid (#179 inc 2). All this does is answer the shared builder's question —
+    // "which channels, called what, offering what?" — from an M3U playlist matched against a parsed EPG. The
+    // rows it produces are byte-identical to the ones #75 shipped; probe_xmltv still asserts them here.
+    QVector<GuideChannel> rows;
+    rows.reserve(channels.size());
     for (const M3uEntry& e : channels)
     {
-        // The channel's section header. Prefer the EPG display-name when we matched one, else the playlist
-        // title — a channel is never dropped for lacking EPG data.
-        QString chanName = e.title;
+        GuideChannel gc;
+        gc.key = e.url;                     // unique per channel; keeps focus stable across a rebuild
+        // Prefer the EPG display-name when we matched one, else the playlist title — a channel is never
+        // dropped, nor renamed to nothing, for lacking EPG data.
+        gc.name = e.title;
         if (!e.tvgId.isEmpty())
         {
             const QString dn = guide.channelNames.value(e.tvgId);
-            if (!dn.isEmpty()) chanName = dn;
+            if (!dn.isEmpty()) gc.name = dn;
         }
-        MediaItem hdr;
-        hdr.id    = QStringLiteral("_guidehdr:") + e.url;   // url is unique per channel; keeps focus stable
-        hdr.type  = QStringLiteral("_livetvheader");
-        hdr.title = chanName;
-        cat.items.push_back(hdr);
-
-        // Today's programmes for this channel: those whose window overlaps the day, in start order.
-        QVector<xmltv::Programme> progs = xmltv::programmesForChannel(guide, e.tvgId);
-        QVector<xmltv::Programme> today;
-        for (const xmltv::Programme& p : progs)
-            if (p.startUtc.isValid() && p.stopUtc.isValid()
-                && p.startUtc < dayEndUtc && p.stopUtc > dayStartUtc)
-                today.push_back(p);
-        std::sort(today.begin(), today.end(), [](const xmltv::Programme& a, const xmltv::Programme& b) {
-            return a.startUtc < b.startUtc;
-        });
-
-        for (const xmltv::Programme& p : today)
-        {
-            const bool onAir = p.startUtc <= nowUtc && nowUtc < p.stopUtc;
-            // Local wall-clock for the row label (the stored times are UTC). "HH:mm  Title", ● when on air now.
-            const QString hhmm = p.startUtc.toLocalTime().toString(QStringLiteral("HH:mm"));
-            MediaItem it;
-            it.id       = QStringLiteral("_guideprog:") + e.url + QLatin1Char('@') + p.startUtc.toString(Qt::ISODate);
-            it.type     = QStringLiteral("_guideprog");   // non-activatable, like the header (no url)
-            it.title    = (onAir ? QStringLiteral("●  ") : QString()) + hhmm + QStringLiteral("  ") + p.title;
-            it.subtitle = p.desc;
-            cat.items.push_back(it);
-        }
+        gc.programmes = xmltv::programmesForChannel(guide, e.tvgId);
+        rows.push_back(gc);
     }
-    cat.hasMore = false;
-    return cat;
+    const QString title = sourceName.isEmpty() ? QObject::tr("Guide")
+                                               : QObject::tr("%1 — Guide").arg(sourceName);
+    // Inert cells: a Live TV programme is not something you can tune to on its own (the CHANNEL is), so it
+    // carries no mime and the type stays the non-activatable one.
+    return guideGridCatalog(title, rows, nowUtc, dayStartUtc, dayEndUtc,
+                            QStringLiteral("_guideprog"), QString());
 }
 
 }

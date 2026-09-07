@@ -1245,7 +1245,8 @@ void mergePresets(const QJsonObject& presets)
 }
 
 // ---- personal TV channels (per profile, id-stable, tombstoned deletes) --------------------------------------
-// A channel (issue #179) is eight small fields — a source, an ordering, a start epoch — and the timeline is
+// A channel (issue #179) is a handful of small fields — a source, an ordering, a start epoch, a break grid —
+// and the timeline is
 // COMPUTED from them on each device rather than stored, so this is the whole of what has to travel for two
 // devices to agree about what is on at 20:00. Byte-for-byte the preset shape above, and for the same two
 // reasons: identity is the stored `id` (a rename is a mutable-name edit that folds onto one row instead of

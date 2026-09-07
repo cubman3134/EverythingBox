@@ -421,8 +421,10 @@ namespace browse
     // and deliberately no "what is on now" subtitle, because that would put a schedule computation on every
     // navigation into the folder. The subtitle says what the channel IS (its ordering, and whether it starts
     // programmes from the beginning), which is fixed and free.
+    //   guide row:   type "_channelguide", mime "channelguide"  (activation opens the grid; #179 inc 2)
     //   channel row: type "_channel",    mime "channel:<id>"     (activation tunes)
     //   create row:  type "_newchannel", mime "newchannel"       (activation opens the editor)
+    // The guide row leads the list and is present only when there is at least one channel.
     MediaCatalog channelsCatalog(const QList<channels::Channel>& all);
 
     // The FavoriteItem for starring a CHANNEL. Mirrors liveTvChannelFavorite, and for the identical reason

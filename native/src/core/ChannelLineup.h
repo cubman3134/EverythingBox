@@ -42,6 +42,23 @@ namespace ChannelLineup
     // the items dropped for want of a length, so the caller can log them ONCE per build.
     QVector<channels::LineupItem> build(const channels::Channel& ch, QStringList* skipped = nullptr);
 
+    // ---- interstitials (issue #179, increment 2) ---------------------------------------------------------
+    // A bumper is an ordinary item with a known length, taken from a folder the user names — the SAME duration
+    // gate a programme passes, so a brand-new ident joins the rotation once it has been played through once,
+    // exactly as a brand-new episode joins its channel.
+
+    // The video files DIRECTLY inside `dir`, as candidates, sorted by path so every device lays the same
+    // break. An EMPTY path yields nothing and is NOT an error (no folder set == no interstitials, which is
+    // the default state of the feature). A path that exists but cannot be enumerated — a file, a missing
+    // folder, a directory with no read permission — yields nothing AND sets `reason` to a sentence fit to
+    // show a person. `reason` is cleared on every call, so a caller may test it without initialising it.
+    QVector<channels::Candidate> interstitialCandidates(const QString& dir, QString* reason = nullptr);
+
+    // The channel's bumper pool: its own folder when it names one, otherwise `globalDir`, run through the
+    // duration gate. `skipped` collects the files with no known length, for the one log line the caller owes.
+    QVector<channels::LineupItem> interstitials(const channels::Channel& ch, const QString& globalDir,
+                                                QStringList* skipped = nullptr, QString* reason = nullptr);
+
     // The seam described in the header: increment 2's sources (and a preset resolver, if the game library
     // ever gains a global enumeration) install themselves here. Called with the channel; returns its
     // candidates. Unset by default, which is what makes an unimplemented source EMPTY rather than wrong.

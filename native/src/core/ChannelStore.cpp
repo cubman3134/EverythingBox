@@ -54,6 +54,12 @@ QVector<Channel> ChannelStore::list()
         c.ordering   = channels::orderingFromInt(o.value(QStringLiteral("ord")).toInt());
         c.startEpoch = static_cast<qint64>(o.value(QStringLiteral("start")).toDouble());
         c.startFromBeginning = o.value(QStringLiteral("beg")).toBool();
+        // #179 inc 2. Absent in a row written by an increment-1 build: "grid" defaults to 0 (back to back,
+        // exactly what that build laid) and "bump" to empty (the global bumper folder, or none). Both are
+        // read through the same unknown-value rule the enums use — normalizeBreakGrid turns a number this
+        // build has never heard of into OFF rather than into its nearest neighbour.
+        c.breakGridSec = channels::normalizeBreakGrid(o.value(QStringLiteral("grid")).toInt());
+        c.interstitialDir = o.value(QStringLiteral("bump")).toString();
         c.ts         = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
         // A row with no id has no merge identity and no way to be edited or deleted — it can only have come
         // from a hand-edited ini. Dropped rather than given one: minting an id here would mint a DIFFERENT id
@@ -78,6 +84,8 @@ static void saveAll(const QVector<Channel>& all)
         o.insert(QStringLiteral("ord"), channels::toInt(c.ordering));
         o.insert(QStringLiteral("start"), static_cast<double>(c.startEpoch));
         o.insert(QStringLiteral("beg"), c.startFromBeginning);
+        o.insert(QStringLiteral("grid"), channels::normalizeBreakGrid(c.breakGridSec));
+        o.insert(QStringLiteral("bump"), c.interstitialDir);
         o.insert(QStringLiteral("ts"), static_cast<double>(c.ts));
         arr.append(o);
     }

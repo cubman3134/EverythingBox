@@ -1774,24 +1774,31 @@ int main(int argc, char** argv)
         b.ordering = channels::Ordering::InOrder;
 
         const MediaCatalog cat = browse::channelsCatalog({ a, b });
-        CHECK(cat.items.size() == 3, "channels: two channels + the trailing create row");
-        CHECK(cat.items[0].id == QStringLiteral("channel:aaa"), "channels: the row id IS the row-producer key");
-        CHECK(cat.items[0].mime == QStringLiteral("channel:aaa"), "channels: ...and so is the mime activation reads");
-        CHECK(cat.items[0].type == QStringLiteral("_channel"), "channels: the row type");
-        CHECK(cat.items[0].title == QStringLiteral("90s Saturday"), "channels: the row title is the channel name");
-        CHECK(!cat.items[0].expandable, "channels: a channel TUNES, it is not a folder");
+        // #179 inc 2: the guide LEADS the list — "what is on" is the question this folder is opened to ask.
+        CHECK(cat.items.size() == 4, "channels: the guide row + two channels + the trailing create row");
+        CHECK(cat.items[0].type == QStringLiteral("_channelguide")
+              && cat.items[0].mime == QStringLiteral("channelguide"),
+              "channels: the guide row leads the list");
+        CHECK(cat.items[0].expandable, "channels: the guide is a level, not a leaf");
+        CHECK(cat.items[1].id == QStringLiteral("channel:aaa"), "channels: the row id IS the row-producer key");
+        CHECK(cat.items[1].mime == QStringLiteral("channel:aaa"), "channels: ...and so is the mime activation reads");
+        CHECK(cat.items[1].type == QStringLiteral("_channel"), "channels: the row type");
+        CHECK(cat.items[1].title == QStringLiteral("90s Saturday"), "channels: the row title is the channel name");
+        CHECK(!cat.items[1].expandable, "channels: a channel TUNES, it is not a folder");
         // The subtitle says what the channel IS — never what is on it, which would mean computing a schedule
         // per channel on every navigation into this folder.
-        CHECK(cat.items[0].subtitle.contains(QStringLiteral("Shuffle"))
-              && cat.items[0].subtitle.contains(QStringLiteral("start")),
+        CHECK(cat.items[1].subtitle.contains(QStringLiteral("Shuffle"))
+              && cat.items[1].subtitle.contains(QStringLiteral("start")),
               "channels: the subtitle carries the ordering + the from-the-start flag");
-        CHECK(cat.items[1].subtitle == QStringLiteral("In order"),
+        CHECK(cat.items[2].subtitle == QStringLiteral("In order"),
               "channels: a join-in-progress channel's subtitle is just its ordering");
-        CHECK(cat.items[2].type == QStringLiteral("_newchannel")
-              && cat.items[2].mime == QStringLiteral("newchannel"), "channels: the trailing create row");
+        CHECK(cat.items[3].type == QStringLiteral("_newchannel")
+              && cat.items[3].mime == QStringLiteral("newchannel"), "channels: the trailing create row");
+        // ...and with NO channels there is no guide row: a guide over nothing is a blank page where the
+        // create row should be.
         CHECK(browse::channelsCatalog({}).items.size() == 1
               && browse::channelsCatalog({}).items[0].type == QStringLiteral("_newchannel"),
-              "channels: an empty channel list still offers the create row");
+              "channels: an empty channel list still offers the create row, and no guide");
 
         // THE FAVOURITE. #203's lesson, restated for a channel: the generic star stamps neither `path` nor
         // `kind`, and openFavorite re-opens by PATH while `kind` routes it — so both must carry the identity.

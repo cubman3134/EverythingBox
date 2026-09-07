@@ -5,6 +5,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QObject>
 #include <QHash>
 
 #include <algorithm>
@@ -119,6 +120,72 @@ int ChannelLineup::knownDurationSec(const Candidate& c)
 QVector<LineupItem> ChannelLineup::build(const Channel& ch, QStringList* skipped)
 {
     return channels::withDurations(candidatesFor(ch),
+                                   [](const Candidate& c) { return ChannelLineup::knownDurationSec(c); },
+                                   skipped);
+}
+
+// ---- interstitials (issue #179, increment 2) ---------------------------------------------------------------
+
+// The extensions a bumper may have. The same family the local video library indexes; a folder of stills or
+// text files simply yields nothing, which is the "empty folder" case and not an error.
+static QStringList interstitialNameFilters()
+{
+    return QStringList{ QStringLiteral("*.mp4"),  QStringLiteral("*.mkv"),  QStringLiteral("*.mov"),
+                        QStringLiteral("*.m4v"),  QStringLiteral("*.avi"),  QStringLiteral("*.webm"),
+                        QStringLiteral("*.mpg"),  QStringLiteral("*.mpeg"), QStringLiteral("*.ts"),
+                        QStringLiteral("*.wmv") };
+}
+
+QVector<Candidate> ChannelLineup::interstitialCandidates(const QString& dir, QString* reason)
+{
+    if (reason) reason->clear();
+    QVector<Candidate> out;
+    const QString path = dir.trimmed();
+    if (path.isEmpty()) return out;          // no folder set is the DEFAULT, never an error
+
+    const QFileInfo fi(path);
+    if (!fi.exists())
+    {
+        if (reason) *reason = QObject::tr("There is no folder at %1.").arg(QDir::toNativeSeparators(path));
+        return out;
+    }
+    if (!fi.isDir())
+    {
+        if (reason) *reason = QObject::tr("%1 is a file, not a folder of bumpers.")
+                                  .arg(QDir::toNativeSeparators(path));
+        return out;
+    }
+    QDir d(path);
+    if (!d.isReadable())
+    {
+        if (reason) *reason = QObject::tr("%1 cannot be read.").arg(QDir::toNativeSeparators(path));
+        return out;
+    }
+    // NOT RECURSIVE, and named as a decision rather than an omission: a bumper folder is a short flat list a
+    // person curates, and walking a whole tree from a mistyped path is how a channel ends up airing somebody's
+    // holiday videos between episodes.
+    QFileInfoList files = d.entryInfoList(interstitialNameFilters(), QDir::Files | QDir::Readable, QDir::Name);
+    for (const QFileInfo& f : files)
+    {
+        Candidate c;
+        c.playKey = f.absoluteFilePath();
+        c.itemId  = c.playKey;               // a bumper is not a library item: its path IS its identity
+        c.title   = f.completeBaseName();
+        out.push_back(c);
+    }
+    // The scan order QDir::Name gives is already stable, but say so explicitly: the break at 20:25 has to hold
+    // the same ident on the phone and on the TV, and that rests on both walking the folder the same way.
+    std::sort(out.begin(), out.end(), [](const Candidate& a, const Candidate& b) {
+        return a.playKey.compare(b.playKey, Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+QVector<LineupItem> ChannelLineup::interstitials(const Channel& ch, const QString& globalDir,
+                                                 QStringList* skipped, QString* reason)
+{
+    const QString dir = channels::interstitialDirFor(ch, globalDir);
+    return channels::withDurations(interstitialCandidates(dir, reason),
                                    [](const Candidate& c) { return ChannelLineup::knownDurationSec(c); },
                                    skipped);
 }

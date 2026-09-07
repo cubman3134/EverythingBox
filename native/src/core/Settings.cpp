@@ -993,6 +993,18 @@ void Settings::setPhotosFolder(const QString& path)
     store().setValue(QStringLiteral("photos/folder"), path); store().sync();
 }
 
+QString Settings::interstitialFolder()
+{
+    // NO DEFAULT PATH, deliberately (photosFolder's shape, with the opposite answer): a default would make an
+    // empty setting mean "look in <data>/interstitials", and a folder that does not exist would then be
+    // reported as unenumerable every time a channel was tuned. Empty means the feature is simply off.
+    return store().value(QStringLiteral("interstitials/folder")).toString();
+}
+void Settings::setInterstitialFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("interstitials/folder"), path); store().sync();
+}
+
 bool Settings::resolveOnline() { return store().value(QStringLiteral("library/resolveOnline"), true).toBool(); }
 void Settings::setResolveOnline(bool on)
 {
