@@ -811,6 +811,19 @@ namespace Settings
     void    clearGameOptionValue(const QString& token, const QString& core, const QString& key);
     QMap<QString, QString> gameOptionDelta(const QString& token, const QString& core);
 
+    // Runahead frames (issue #100). N core runs are speculated per displayed frame so the response to a button
+    // appears the frame it was pressed; 0 = off, 3 = the cap. The GLOBAL value is only a starting point — the
+    // right N *is* a property of the game (its own internal input lag), so the per-game override below is the
+    // one that matters, and it lives in its own keyspace ("runaheadgame/<token>") exactly like the #95 deltas:
+    // presence is the override, absence inherits the global default, and a reset REMOVES the key so it can
+    // never be mistaken for a deliberate 0.
+    int  runaheadFrames();                    // key "emu/runahead"; default 0 (off), clamped 0..3
+    void setRunaheadFrames(int frames);
+    bool gameHasRunaheadFrames(const QString& token);
+    int  gameRunaheadFrames(const QString& token);   // the game's own N (0 when it has none)
+    void setGameRunaheadFrames(const QString& token, int frames);
+    void clearGameRunaheadFrames(const QString& token);
+
     // Turbo / autofire: which RetroPad buttons auto-fire while held, per player port, plus the toggle
     // speed expressed as the half-cycle length in frames (smaller = faster).
     bool turboButton(int port, int retroId);

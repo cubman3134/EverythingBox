@@ -21630,6 +21630,20 @@ void MainWindow::openGeneralSettings()
         QString curResumeDisp = resumeModeOpts.first();
         for (const auto& r : resumeModePairs) if (r.second == Settings::resumeMode()) { curResumeDisp = r.first; break; }
 
+        // Runahead frames (#100). The GLOBAL DEFAULT only — the value that actually matters is per game, because
+        // the right N is the game's own internal input lag, and that lives in the per-game override store and is
+        // reachable from the emulator's pause menu. The same four options back the classic builder's QComboBox.
+        const QList<QPair<QString, int>> runaheadPairs = {
+            { tr("Off"),      0 },
+            { tr("1 frame"),  1 },
+            { tr("2 frames"), 2 },
+            { tr("3 frames"), 3 },
+        };
+        QStringList runaheadOpts;
+        for (const auto& r : runaheadPairs) runaheadOpts << r.first;
+        QString curRunaheadDisp = runaheadOpts.first();
+        for (const auto& r : runaheadPairs) if (r.second == Settings::runaheadFrames()) { curRunaheadDisp = r.first; break; }
+
         // Global-default shader preset (#99). A Choice over the curated ShaderPreset registry, display<->id by
         // this list; the same list backs the classic builder's QComboBox. The current value SEEDS from the legacy
         // video filter on first read (Settings::shaderPreset). A stored id not in the registry (a "custom:<path>"
@@ -21975,6 +21989,16 @@ void MainWindow::openGeneralSettings()
                 "site, and leaderboards only count in hardcore), but disables save states, rewind, fast-forward "
                 "and cheats while you play. Enabling resets your current achievement session. Softcore stays the "
                 "default and fully supported."), QString());
+        // --- Runahead (#100). The global DEFAULT number of frames to run ahead; per-game values (the ones that
+        // matter) are set from the emulator's pause menu. Twin below in the QWidget builder. ---
+        choice(QStringLiteral("emu.runahead"), tr("Runahead (default)"), runaheadOpts, curRunaheadDisp);
+        info(QStringLiteral("emu.runaheadhint"),
+             tr("Many classic games read the controller a frame or three before they draw the response. Runahead "
+                "hides that delay by emulating those frames in advance, so a button press shows up immediately. "
+                "It costs several times the emulation work per frame, so it is refused — with a reason — on a "
+                "game or a device that can't afford it, and it is off during netplay and split screen. Set it "
+                "per game from the pause menu; the right number is that game's own lag, not a device setting."),
+             QString());
         // --- Shader preset (#99). The global default slang-shader preset; per-system/per-game overrides and a
         // live preview are a later slice, and the shader chain itself does not render yet (librashader is not
         // vendored). Twin below in the QWidget builder. ---
@@ -22534,6 +22558,7 @@ void MainWindow::openGeneralSettings()
              xfPairs,                  // Crossfade (#141): same, for the seconds row
              musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
              shaderPresetPairs,
+             runaheadPairs,            // Runahead (#100): the handler maps the picked display back to N
              dosMidiPairs,             // MS-DOS MIDI device (#191): the handler maps the picked display back
 #ifdef EB_HAVE_RETROPARK
              rpDrivenBackendPairs,
@@ -22558,6 +22583,9 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("emu.shaderpreset")) {
                     for (const auto& p : shaderPresetPairs) if (p.first == val) { Settings::setShaderPreset(p.second); break; }
+                }
+                else if (id == QStringLiteral("emu.runahead")) {
+                    for (const auto& r : runaheadPairs) if (r.first == val) { Settings::setRunaheadFrames(r.second); break; }
                 }
 #ifdef EB_HAVE_RETROPARK
                 else if (id == QStringLiteral("emu.rpdriven")) {
@@ -23806,6 +23834,28 @@ void MainWindow::openGeneralSettings()
             }
         });
         v->addWidget(hardcore);
+
+        // Runahead default (#100): classic twin of the themed emu.runahead row. The same four options, N carried
+        // in the item data. This is only the DEFAULT — the per-game value (the one that matters, because the
+        // right N is that game's own internal input lag) is set from the emulator's pause menu.
+        auto* runaheadRow = new QHBoxLayout();
+        auto* runaheadLbl = new QLabel(tr("Runahead (default)"));
+        auto* runahead = new QComboBox();
+        runahead->addItem(tr("Off"),      0);
+        runahead->addItem(tr("1 frame"),  1);
+        runahead->addItem(tr("2 frames"), 2);
+        runahead->addItem(tr("3 frames"), 3);
+        runahead->setCurrentIndex(qMax(0, runahead->findData(Settings::runaheadFrames())));
+        runahead->setToolTip(tr("Many classic games read the controller a frame or three before they draw the "
+                                "response. Runahead hides that delay by emulating those frames in advance, so a "
+                                "button press shows up immediately. It costs several times the emulation work per "
+                                "frame, so it is refused — with a reason — on a game or a device that can't afford "
+                                "it, and it is off during netplay and split screen. Set it per game from the pause "
+                                "menu; the right number is that game's own lag, not a device setting."));
+        connect(runahead, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [runahead](int) { Settings::setRunaheadFrames(runahead->currentData().toInt()); });
+        runaheadRow->addWidget(runaheadLbl); runaheadRow->addWidget(runahead); runaheadRow->addStretch(1);
+        v->addLayout(runaheadRow);
 
         // Global-default shader preset (#99): classic twin of the themed emu.shaderpreset row. A QComboBox over
         // the same curated ShaderPreset registry, id carried in the item data; the current value seeds from the
