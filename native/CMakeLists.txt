@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.207 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.208 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -621,6 +621,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
+        src/core/Leaderboards.cpp src/core/Leaderboards.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
         # First-chance access-violation reporter (issue #28) — installed early in main(). Qt-free and
         # allocation-free by design; on non-Windows the installer compiles to an empty function.
@@ -1668,6 +1669,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_hardcore PRIVATE src src/core)
     target_link_libraries(probe_hardcore PRIVATE Qt6::Core)
+
+    # RetroAchievements LEADERBOARDS + RICH PRESENCE (issue #94, increment 2): the pure rules layer
+    # (src/core/Leaderboards.*: the rcheevos-event-id map, the tracker overlay state machine, the hardcore-only
+    # submission rule) driven through the real Achievements object with a FAKE event source - no account, no
+    # login, no socket. Links rcheevos for the static_asserts that pin the event ids and for rc_client_create;
+    # Qt6::Network because Achievements owns a QNetworkAccessManager (it issues nothing without a login).
+    # Settings.cpp pulls FormFactor.cpp, same as probe_hardcore.
+    add_executable(probe_ralead tools/probe_ralead.cpp
+        src/core/Leaderboards.cpp src/core/Leaderboards.h
+        src/core/Achievements.cpp src/core/Achievements.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_ralead PRIVATE src src/core src/libretro)
+    target_link_libraries(probe_ralead PRIVATE Qt6::Core Qt6::Network rcheevos)
 
     # Runahead (issue #100): the pure single-instance schedule + eligibility gate (src/emu/Runahead.h,
     # header-only, Qt-free) driven against a fake serializable core, plus the Settings store that holds N

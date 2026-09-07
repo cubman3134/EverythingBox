@@ -101,6 +101,16 @@ public:
     void setAchievements(class Achievements* a) { ach_ = a; } // RetroAchievements (full-screen emulator only)
     // Show a RetroAchievements unlock toast (badge + title + points) over the game. Queues if one is already up.
     void showAchievement(const QString& title, const QString& description, int points, const QString& badgeUrl);
+    // ---- leaderboards (#94 increment 2) ----
+    // The tracker overlay's ENTIRE input: is a leaderboard attempt being tracked, and what does its running
+    // value read. Painted on the game surface next to the unlock toast - it is not a widget, has no focus
+    // policy and receives no events, so it cannot eat a button press during a leaderboard run.
+    void setLeaderboardTracker(bool visible, const QString& display);
+    // A leaderboard notice (attempt started / failed / submitted / the server's answer). Reuses the unlock
+    // toast's queue and lifecycle, so leaderboards add no second notification system. Two arguments, not one:
+    // the card elides its subtitle, and a single combined "<board> - <status>" string lost the trailing
+    // "not submitting" clause - the one part of it that must never be cut.
+    void showLeaderboardNotice(const QString& board, const QString& status);
     // Run emulation on a dedicated worker thread instead of the GUI timer. Used for split-screen panes so the
     // game isn't throttled by the other pane's video rendering on the shared GUI thread. Call before openGame.
     void setThreaded(bool on) { threaded_ = on; }
@@ -204,6 +214,15 @@ private:
     QTimer* achTimer_ = nullptr;           // ~30fps repaint while a toast is up (game may be paused)
     QNetworkAccessManager* achNam_ = nullptr;
     bool achActive_ = false;
+
+    // ---- leaderboard tracker overlay (#94 increment 2): a corner card showing an attempt's running value ----
+    // Data only. No widget is created for it, so there is nothing that could take focus or swallow input while
+    // the player is mid-run; paintLeaderboardTracker() draws it and setLeaderboardTracker() is the only writer.
+    void paintLeaderboardTracker(QPainter& p);
+    void showLeaderboards();            // pause-menu sub-page: this game's leaderboards + rich presence
+    QString lbTracker_;                 // what the overlay reads ("" when nothing is being tracked)
+    bool lbTrackerVisible_ = false;
+    QPushButton* lbBtn_ = nullptr;      // main-page "Leaderboards" entry (hidden when the game has none)
 
     // ---- netplay (2-player LAN lockstep; full-screen only) ----
     void showNetplay();                 // pause-menu sub-page: Host / Join

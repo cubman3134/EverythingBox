@@ -125,6 +125,10 @@ void RetroView::buildMenu()
     optBtn_      = new QPushButton(tr("Core Options"), mainPage_);
     cheatsBtn_   = new QPushButton(tr("Cheats"), mainPage_);
     cheatSearchBtn_ = new QPushButton(tr("Cheat Search"), mainPage_);
+    // #94: hidden unless this game has leaderboards. Created HERE, not further down beside the other new
+    // buttons, because Qt's default tab order follows CREATION order and the pause menu's up/down navigation
+    // IS that tab order - built last, the row sat seventh visually and eleventh under the arrow keys.
+    lbBtn_       = new QPushButton(tr("Leaderboards"), mainPage_);
     QPushButton* cheats = cheatsBtn_;
     QPushButton* cheatSearch = cheatSearchBtn_;
 #ifdef EB_HAVE_LIBRASHADER
@@ -138,7 +142,7 @@ void RetroView::buildMenu()
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
+    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, lbBtn_, filterBtn_,
                             vpadBtn_, vpadOpacityBtn_, runaheadBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
@@ -153,6 +157,7 @@ void RetroView::buildMenu()
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
     connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
     connect(cheatSearch, &QPushButton::clicked, this, [this] { showCheatSearch(); });
+    connect(lbBtn_, &QPushButton::clicked, this, [this] { showLeaderboards(); });
 #ifdef EB_HAVE_LIBRASHADER
     connect(filterBtn_, &QPushButton::clicked, this, [this] { showShaderPicker(); });
 #else
@@ -196,7 +201,7 @@ void RetroView::buildMenu()
     connect(runaheadBtn_, &QPushButton::clicked, this, [this] { cycleRunahead(); });
 
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
+    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, lbBtn_, filterBtn_,
                      vpadBtn_, vpadOpacityBtn_, runaheadBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
@@ -235,6 +240,10 @@ void RetroView::showMainMenu()
     const bool showOpt  = running_ && hasOpts;
     if (diskBtn_) diskBtn_->setVisible(showDisk);
     if (optBtn_)  optBtn_->setVisible(showOpt);
+    // Leaderboards (#94): shown whenever THIS game has any, in softcore exactly as in hardcore. Softcore does
+    // not hide the list - hiding it teaches nobody why their run is not on the board; the list itself says so.
+    const bool showLb = ach_ && ach_->hasLeaderboards();
+    if (lbBtn_) lbBtn_->setVisible(showLb);
     if (runaheadBtn_) runaheadBtn_->setText(runaheadLabel()); // #100: re-read, the value may have moved
     // Hardcore (#94): grey the affordances the active session forbids so the user sees WHY, not a silent
     // failure. Disabled (not hidden) — the entries stay visible, just unclickable — and dropped from the nav
@@ -253,7 +262,7 @@ void RetroView::showMainMenu()
     menuButtons_.clear();               // navigation over the visible, ENABLED main-page buttons
     for (QPushButton* b : mainButtons_)
     {
-        if (!b || (b == diskBtn_ && !showDisk) || (b == optBtn_ && !showOpt)) continue;
+        if (!b || (b == diskBtn_ && !showDisk) || (b == optBtn_ && !showOpt) || (b == lbBtn_ && !showLb)) continue;
         if (!b->isEnabled()) continue;  // greyed (e.g. a hardcore-disabled save/load/cheats entry)
         menuButtons_ << b;
     }
@@ -2999,6 +3008,7 @@ void RetroView::paintEvent(QPaintEvent*)
 
     if (viewportMode) p.drawImage(QRect(m.bx, m.by, m.bw, m.bh), bezel_); // shell art over the game
 
+    paintLeaderboardTracker(p); // #94: leaderboard attempt's running value, top-right
     paintAchievementToast(p); // RetroAchievements unlock popup, over both render paths
 }
 
@@ -3082,7 +3092,12 @@ void RetroView::paintAchievementToast(QPainter& p)
     QFont subFont = p.font();   subFont.setPixelSize(qMax(11, height() / 45));
     const QFontMetrics tfm(titleFont), sfm(subFont);
     const int textW = qMax(tfm.horizontalAdvance(achCur_.title), sfm.horizontalAdvance(achCur_.sub));
-    const int cardW = qMin(width() - 2 * pad, badge + 3 * pad + qMin(textW, width() * 2 / 3));
+    // kTextGap is the extra space between the badge and the text block, added again below when tx is computed.
+    // It has to be in the WIDTH too: without it the card is 4px narrower than the text it was sized for and the
+    // last character is always elided. Harmless-looking on an unlock ("… 10 pt…"), not harmless on a
+    // leaderboard notice, where the clipped tail is the "— not submitting" clause (#94 increment 2).
+    const int kTextGap = 4;
+    const int cardW = qMin(width() - 2 * pad, badge + 3 * pad + kTextGap + qMin(textW, width() * 2 / 3));
     const int cardH = badge + 2 * pad;
     const int rise = int((1.0 - op) * 24);
     const QRect card((width() - cardW) / 2, height() - cardH - pad * 2 + rise, cardW, cardH);
@@ -3109,7 +3124,7 @@ void RetroView::paintAchievementToast(QPainter& p)
     }
 
     // Text block: title (bold) over the "Achievement unlocked · N pts — desc" subtitle, both elided to fit.
-    const int tx = bRect.right() + pad + 4;
+    const int tx = bRect.right() + pad + kTextGap;
     const int tw = card.right() - pad - tx;
     p.setPen(QColor(245, 246, 250));
     p.setFont(titleFont);
@@ -3120,6 +3135,141 @@ void RetroView::paintAchievementToast(QPainter& p)
     p.drawText(QRect(tx, card.bottom() - pad - sfm.height(), tw, sfm.height()),
                Qt::AlignLeft | Qt::AlignVCenter, sfm.elidedText(achCur_.sub, Qt::ElideRight, tw));
     p.restore();
+}
+
+// ---- Leaderboards (#94 increment 2) -----------------------------------------------------------------------
+// The tracker overlay. Deliberately NOT a widget: it is two members and a paint call, so there is nothing with
+// a focus policy, nothing in the tab order and nothing that receives a key or pad event. An overlay that ate a
+// button press during a leaderboard run would be worse than no overlay, and this one structurally cannot.
+// Corner-positioned (top-right, clear of the bottom-centre unlock toast) and drawn in the toast's visual
+// system: the same rounded card, the same palette, a leaderboard accent instead of the unlock gold.
+
+void RetroView::setLeaderboardTracker(bool visible, const QString& display)
+{
+    if (lbTrackerVisible_ == visible && lbTracker_ == display) return; // no repaint for an unchanged value
+    lbTrackerVisible_ = visible;
+    lbTracker_ = visible ? display : QString();
+    update();
+}
+
+void RetroView::showLeaderboardNotice(const QString& board, const QString& status)
+{
+    // Reuse the unlock toast's queue and lifecycle rather than inventing a second notification system. The
+    // badge URL is left empty, so the card draws its glyph chip. The board's NAME goes on the title line and
+    // the status on the subtitle: both are elided independently, so a long board name can no longer eat the
+    // "not submitting" clause off the end of the status.
+    if (status.isEmpty()) return;
+    AchToast t;
+    t.title = board.isEmpty() ? tr("Leaderboard") : board;
+    t.sub = status;
+    achQueue_.push_back(t);
+    if (!achActive_) startNextToast();
+}
+
+void RetroView::paintLeaderboardTracker(QPainter& p)
+{
+    if (!lbTrackerVisible_ || lbTracker_.isEmpty()) return;
+
+    const QStringList lines = lbTracker_.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (lines.isEmpty()) return;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const int pad = qMax(6, height() / 120);
+    QFont f = p.font();
+    f.setPixelSize(qMax(12, height() / 38));
+    f.setBold(true);
+    p.setFont(f);
+    const QFontMetrics fm(f);
+    int textW = 0;
+    for (const QString& l : lines) textW = qMax(textW, fm.horizontalAdvance(l));
+    const int cardW = qMin(width() / 2, textW + pad * 3);
+    const int cardH = lines.size() * fm.height() + pad * 2;
+    const QRect card(width() - cardW - pad * 2, pad * 2, cardW, cardH);
+
+    p.setPen(QPen(QColor(120, 190, 255, 210), 2));
+    p.setBrush(QColor(18, 22, 30, 210));
+    p.drawRoundedRect(card, 10, 10);
+    p.setPen(QColor(232, 240, 250));
+    for (int i = 0; i < lines.size(); ++i)
+        p.drawText(QRect(card.left() + pad, card.top() + pad + i * fm.height(), cardW - pad * 2, fm.height()),
+                   Qt::AlignRight | Qt::AlignVCenter, fm.elidedText(lines[i], Qt::ElideLeft, cardW - pad * 2));
+    p.restore();
+}
+
+// The per-game leaderboard list, beside the achievement affordances already in the pause menu. Read-only: the
+// rows are labels, not buttons, so controller focus never lands on a leaderboard and the only navigable thing
+// on the page is Back. Everything shown comes from the game data rc_client already fetched - no network call.
+void RetroView::showLeaderboards()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Leaderboards"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    const QVector<ra::Leaderboard> boards = ach_ ? ach_->leaderboards() : QVector<ra::Leaderboard>();
+
+    // Rich presence (#94): what the site would show for this session. Evaluated on demand, HERE - never per
+    // frame on the GUI thread - and never written to a log.
+    if (ach_)
+    {
+        const QString presence = ach_->richPresence();
+        auto* rp = new QLabel(presence.isEmpty() ? tr("This game has no rich presence.") : presence, slotsPage_);
+        rp->setWordWrap(true);
+        rp->setStyleSheet(presence.isEmpty()
+            ? QStringLiteral("color:#888; font-size:12px; padding:2px 4px;")
+            : QStringLiteral("color:#cfe4ff; font-size:13px; font-style:italic; padding:2px 4px;"));
+        sv->addWidget(rp);
+    }
+
+    if (boards.isEmpty())
+    {
+        auto* none = new QLabel(tr("This game has no leaderboards."), slotsPage_);
+        none->setStyleSheet(QStringLiteral("color:#999; font-size:13px;"));
+        none->setWordWrap(true);
+        sv->addWidget(none);
+    }
+    else
+    {
+        // The submission rule, stated ONCE at the top of the list rather than repeated on every row: in
+        // softcore the boards are visible and readable and plainly marked as not submitting.
+        auto* note = new QLabel(ra::submissionNote(ach_ && ach_->hardcoreActive(), ach_ && ach_->isLoggedIn()),
+                                slotsPage_);
+        note->setWordWrap(true);
+        note->setStyleSheet(ach_ && ach_->leaderboardsSubmit()
+            ? QStringLiteral("color:#9fe0a8; font-size:12px; padding:2px 4px;")
+            : QStringLiteral("color:#e0c07a; font-size:12px; padding:2px 4px;"));
+        sv->addWidget(note);
+
+        for (const ra::Leaderboard& lb : boards)
+        {
+            QString text = lb.title;
+            if (!lb.description.isEmpty()) text += QStringLiteral("\n") + lb.description;
+            if (!lb.trackerValue.isEmpty()) text += QStringLiteral("\n") + tr("Now: %1").arg(lb.trackerValue);
+            auto* row = new QLabel(text, slotsPage_);
+            row->setWordWrap(true);
+            row->setStyleSheet(QStringLiteral("color:#e8e8e8; font-size:13px; padding:4px 10px;"));
+            sv->addWidget(row);
+        }
+    }
+
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back);
+    menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
 void RetroView::keyPressEvent(QKeyEvent* e)
