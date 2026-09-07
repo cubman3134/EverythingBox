@@ -661,6 +661,21 @@ void Settings::setHwDecode(const QString& mode)
     store().setValue(QStringLiteral("video/hwdec"), mode.trimmed()); store().sync();
 }
 
+// Seek previews (#85). Clamped rather than trusted: this number bounds a background job that WRITES to the
+// user's disk, and a hand-edited ini (or a value synced from a machine with a much bigger drive) must not be
+// able to turn it into an unbounded one. 0 is the legitimate low end — it means off.
+int Settings::previewCacheMb()
+{
+    const int v = store().value(QStringLiteral("previews/cacheMb"), 512).toInt();
+    if (v <= 0) return 0;
+    return v > 32768 ? 32768 : v;
+}
+void Settings::setPreviewCacheMb(int mb)
+{
+    store().setValue(QStringLiteral("previews/cacheMb"), mb < 0 ? 0 : (mb > 32768 ? 32768 : mb));
+    store().sync();
+}
+
 bool Settings::videoRefreshSync()
 {
     const QString sk = QStringLiteral("video/refreshSync");

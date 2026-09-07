@@ -39,9 +39,12 @@
 #include "../video/PlayerGestures.h" // issue #162: the touch gesture recogniser is a value member
 #include "../comic/PageSupply.h"    // PageSupplyOptions — what a page supplier may ask of openImagePages
 #include "../ebook/OpdsPse.h"       // OpdsPseLink — pseLink_ is a value member (#153)
+#include "../core/Trickplay.h"      // issue #85: Trickplay::Index is a value member (Qt-Core-only, header-only)
+#include <QPixmap>                  // …and the one decoded preview grid is held by value beside it
 
 namespace LaunchOpts { struct Override; }   // issue #189: the per-game content levers' row-value helper
 class MpvWidget;
+class TrickplayGen;         // issue #85: the seek-preview background job, held as a pointer
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
 class RetroParkView;   // Slice 2a: the RetroPark backend's play surface, a sibling content page beside retro_
@@ -892,6 +895,25 @@ private:
     QTimer*      gestureLockTimer_ = nullptr;    // its OWN 4 s life, like skipChipTimer_
     double       gestureSpeedBefore_ = 1.0;      // the speed to restore when a long-press is released
     QElapsedTimer gestureClock_;                 // the recogniser's injected clock (started on first touch)
+    // ---- Seek previews (issue #85) -----------------------------------------------------------------------
+    // Every definition below lives in MainWindowTrickplay.cpp. The rule the whole feature is written to is
+    // that a missing strip is INVISIBLE: no empty frame, no spinner, no message — a file with no previews
+    // scrubs exactly as it did before this existed, and every function here returns quietly when there is
+    // nothing to show.
+    void initTrickplay();                 // create the background job + wire its one signal (from the ctor)
+    void armTrickplay();                  // once per open: adopt this file's sheets, or queue generating them
+    void trickplayShowAt(double seconds); // draw the frame nearest `seconds` above the seek bar, with its time
+    void trickplayHide();                 // the drag ended (or the player closed)
+    void trickplayIdle();                 // playback stopped: the background job may have the machine back
+    QLabel*          trickThumb_ = nullptr;  // the floating preview, a plain child of player_ like skipChip_
+    TrickplayGen*    trickGen_   = nullptr;
+    Trickplay::Index trickIndex_;            // the open file's sheet description (frameCount 0 == no strip)
+    QString          trickDir_;              // …and where its grids are; empty when there are none
+    QString          trickPath_;             // the local file the two above belong to
+    QPixmap          trickGrid_;             // exactly ONE decoded grid is held: scrubbing must cost a blit
+    int              trickGridNo_ = -1;
+    int              trickFrameShown_ = -1;  // the frame currently on screen (a same-frame move repaints nothing)
+
     void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
     void stepPlayerFocus(int dir); // arrow-key focus across the transport controls (dir +1/-1, or 0 = enter row)
     // The same job for the player's TOP BAND: the ‹ Back overlay and the "Issue with Streaming" chip beside

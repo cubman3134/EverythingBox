@@ -598,6 +598,16 @@ namespace Settings
     QString hwDecode();
     void setHwDecode(const QString& mode);
 
+    // Seek previews (issue #85): how much disk the thumbnail sprite sheets may occupy, in MEGABYTES, under
+    // "previews/cacheMb". This one number is the whole feature's switch as well as its bound — ZERO means
+    // previews are off and nothing is ever generated, which is why the setting is a size and not a size plus
+    // a toggle: "how much may this cost me" is the question a user actually has about a background job that
+    // writes to their disk, and two controls that can disagree ("on, 0 MB") would be two ways to say no.
+    // Default 512 MB, which at the shipped 10 s / 320x180 sheet is roughly a hundred feature films.
+    // The bound is enforced by LRU eviction on the generator's own thread (Trickplay::planEviction).
+    int  previewCacheMb();
+    void setPreviewCacheMb(int mb);
+
     // Refresh-rate matching, Tier 1 (issue #70): reduce judder by locking video to the display clock via mpv's
     // video-sync=display-resync (RefreshSync::videoSyncFor). Read at player creation and re-applied live on
     // change. The stored value is a plain bool under "video/refreshSync"; when ABSENT the default is form-factor

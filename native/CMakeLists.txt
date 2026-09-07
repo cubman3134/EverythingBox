@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.200 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.201 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -645,6 +645,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BingeStore.cpp         src/core/BingeStore.h
         src/core/MediaSegments.cpp src/core/MediaSegments.h
         src/core/SegmentStore.cpp  src/core/SegmentStore.h
+        # Issue #85: seek previews. TrickplayGen is the background sheet generator (its own thread, its
+        # own headless libmpv); Trickplay.h is the pure arithmetic beside it, listed although it is
+        # header-only so a reader of this list can see where the feature lives. probe_trickplay pins it.
+        src/core/TrickplayGen.cpp  src/core/TrickplayGen.h
+        src/core/Trickplay.h
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
@@ -885,6 +890,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         # rather than in the MainWindow.cpp monolith (the #186 direction), so a feature branch touching
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
+        # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
+        src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/MainWindowMusicServerScrobble.cpp           # one scrobble provider per music server (#193 inc 6)
         src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
@@ -3522,6 +3529,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/PlayerBarNav.h)
     target_include_directories(probe_playerbar PRIVATE src src/ui)
     target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
+
+    # Seek previews (issue #85): the trickplay arithmetic -- which sprite-sheet grid, row and column a
+    # given second of a film lives in (the last grid is SHORT, and a time past the end clamps rather than
+    # blanking), the path+mtime+size cache key that makes a replaced file lose its old strip, the resume
+    # point of an interrupted walk, the LRU eviction order, the sidecar round trip, and the guard that
+    # keeps generation off anything that is not a file on this machine. Header-only unit, so there is no
+    # .cpp to also add to the app's source list (the issue-#182 trap); Qt6::Core only -- no decoder, no
+    # window and no disk are involved in any of it.
+    add_executable(probe_trickplay tools/probe_trickplay.cpp
+        src/core/Trickplay.h)
+    target_include_directories(probe_trickplay PRIVATE src src/core)
+    target_link_libraries(probe_trickplay PRIVATE Qt6::Core)
 
     # The video player's touch gesture recogniser (issue #162): the half-screen split, the thirds, the seek
     # arithmetic and its cancel-by-returning rule, the OS edge band, the double-tap window, the long-press
