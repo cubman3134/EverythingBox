@@ -31,6 +31,11 @@ namespace FavoritesStore
 {
     QVector<FavoriteItem> list();               // for the active profile
     void add(const FavoriteItem& item);         // de-duped by itemId, newest first
+    // Add a favourite that CAME FROM the place a love would be sent to (issue #193, increment 6): a track a
+    // music server already holds a star for. Identical to add() except that the love hook is not fired, and
+    // the reason is in FavoritesStore.cpp - telling the server about a star it gave us is a request per track
+    // that changes nothing. It is not a general quiet add; see the note there.
+    void addFromSource(const FavoriteItem& item);
     void remove(const QString& itemId);
     bool isFavorite(const QString& itemId);
 

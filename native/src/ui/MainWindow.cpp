@@ -611,6 +611,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // store's change hook at it is what makes the two suppliers behave identically.
     SubsonicServerStore::setChangeHook([this] {
         if (home_) home_->refresh();
+        // ...and the scrobble destinations, because there is ONE PROVIDER PER SERVER (#193 increment 6):
+        // adding a server has to make it a destination without a restart, on every layout, exactly as it
+        // has to make the Music tab appear. SubsonicScrobbleProvider.h says why it is one per server.
+        syncSubsonicScrobbleProviders();
     });
     // #160: the same discipline for Jellyfin — connecting, switching off or removing a server changes what
     // the merged library contains, and must do so without a restart, on every layout.
@@ -656,6 +660,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // builders re-read it whenever it moves. Same shape as traktStatusUpdate_ beside it, and safe to leave
     // installed after a panel is gone: the hook is replaced by whichever builder presents next.
     connect(scrobbler_, &Scrobbler::statusChanged, this, [this] { if (scrobbleStatusUpdate_) scrobbleStatusUpdate_(); });
+    // A STAR THAT DID NOT REACH THE SERVER SAYS SO, ONCE (#193 increment 6). The local favourite stands —
+    // reverting the press because a box on the landing is asleep is the worse of the two wrong answers —
+    // so the only honest thing left is to tell the user, where they are, in the server's own words. Only
+    // raised for a destination whose love is a LIBRARY EDIT; a Last.fm love that failed belongs in the
+    // settings status line rather than over whatever somebody is doing.
+    connect(scrobbler_, &Scrobbler::loveFailed, this,
+            [this](const QString& why) { notify(why, kFeedbackLong); });
+    // One provider per configured music server, installed now and kept in step by the store's change hook.
+    syncSubsonicScrobbleProviders();
     // --- Discord Rich Presence ---
     // Built unconditionally and gated INSIDE: the controller asks Settings on every rebuild, so there is no
     // second copy of "is this switched on" out here to fall out of step with the toggles.
@@ -6861,14 +6874,18 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
         out.trackNumber = t.track;
         out.durationSec = t.durationSec;
         out.kind        = Scrobble::Kind::Music;
-        // A SUBSONIC SERVER IS A SERVER-ORIGIN PLAY (#192's Scrobble::Origin, and the exact case its note
-        // is about). We do not call the `scrobble` endpoint in this increment, so nothing is double-counted
-        // today — but Navidrome and friends can be configured to forward their own play counts upstream, and
-        // when a follow-up starts reporting back, Scrobble::Policy::serverForwards is the one flag that has
-        // to become true. Stamping the origin correctly NOW is what makes that a one-line change rather than
-        // a hunt for every site that produces a play.
+        // A SUBSONIC SERVER IS A SERVER-ORIGIN PLAY (#192's Scrobble::Origin, and the exact case its note is
+        // about). Increment 6 is the follow-up that note anticipated: the `scrobble` endpoint IS called now,
+        // the server itself is a scrobble destination, and Scrobble::Policy::serverForwards decides whether
+        // the upstream services are told as well. Stamping the origin correctly from increment 5 is what
+        // made that a setting rather than a hunt for every site that produces a play.
         out.origin      = Subsonic::isQualified(b.key) ? Scrobble::Origin::Server
                                                        : Scrobble::Origin::LocalLibrary;
+        // ...and WHICH RECORD ON WHICH SERVER, because `scrobble.view` and `star.view` take the server's own
+        // id and can be told nothing by artist and title. The qualified TRACK id, never the stream url: the
+        // url carries the credential and this struct is written to disk by the offline queue. See
+        // Scrobble::Track::sourceId.
+        out.sourceId    = Subsonic::isQualified(t.path) ? t.path : QString();
         return !out.artist.trimmed().isEmpty() && !out.title.trimmed().isEmpty();
     };
 
@@ -6877,6 +6894,30 @@ bool MainWindow::scrobbleTrackFor(const QString& path, Scrobble::Track& out) con
         if (const MusicLibrary::Album* b = idx.album(albumKey))
             for (const MusicLibrary::IndexTrack& t : b->tracks)
                 if (t.path == indexPath) return build(*b, t);
+
+    // 2b. A QUALIFIED TRACK ID WITH NO QUEUE BEHIND IT (issue #193, increment 6). A star pressed on a browse
+    // row has nothing to do with what is playing, so the queue map above answers nothing and `albumKey` is
+    // whatever album happens to be on — which is another server's, or none. The id names its own server, so
+    // walk THAT server's cache for it. Bounded by what has been browsed this session, which is what the row
+    // being on screen already implies. Without this, favouriting a server track from the shelf reaches the
+    // server only while that same track is playing, which is a feature that works once and looks broken.
+    if (Subsonic::isQualified(path))
+    {
+        const MusicLibrary::Index& own = MusicSupply::indexFor(path);
+        for (const MusicLibrary::Artist& a : own.artists)
+            for (const MusicLibrary::Album& b : a.albums)
+                for (const MusicLibrary::IndexTrack& t : b.tracks)
+                    if (t.path == path) return build(b, t);
+        // ...and the containers this app invented (a playlist, the starred record), which live in the
+        // server's OTHER index. MusicSupply::indexFor routes by Kind, and a bare TRACK id is not one of the
+        // kinds that lives there — so this half has to be asked for by name.
+        const MusicLibrary::Index& inv =
+            SubsonicClient::instance().sectionIndex(Subsonic::serverOf(path));
+        for (const MusicLibrary::Artist& a : inv.artists)
+            for (const MusicLibrary::Album& b : a.albums)
+                for (const MusicLibrary::IndexTrack& t : b.tracks)
+                    if (t.path == path) return build(b, t);
+    }
 
     // 3. The walk, for a path inside the music folder only. Everything else fails here and pays nothing.
     const QString libRoot = MusicLibrary::root();
@@ -22323,6 +22364,19 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("scrobble.lastfmstatus"), tr("Last.fm"), LastFmClient::statusText());
         toggle(QStringLiteral("scrobble.spoken"), tr("Also scrobble audiobooks and podcasts"),
                Settings::scrobbleSpokenAudio());
+        // THE DOUBLE-COUNT COORDINATION (#193), and it is ONE setting on purpose — the issue's requirement
+        // is "a single clear setting rather than two that silently conflict". Its twin is in the QWidget
+        // builder below. The label asks the question and the hint under it says what happens either way, so
+        // nobody has to reason it out: a setting whose two positions are not both spelled out is a setting
+        // people leave alone.
+        toggle(QStringLiteral("scrobble.serverforwards"),
+               tr("My music server scrobbles for me"), Settings::scrobbleServerForwards());
+        info(QStringLiteral("scrobble.serverhint"),
+             tr("Turn this on if Navidrome (or Airsonic, or Gonic) is signed in to Last.fm or ListenBrainz "
+                "itself. Off, a track played from a music server is reported to the server AND to the "
+                "services above, which is right when the server forwards nothing. On, it is reported to the "
+                "server only, and the server passes it on — otherwise every one of those plays is counted "
+                "twice. Music on this device is unaffected either way."), QString());
         // THE CONFIDENCE INDICATOR, and the reason it exists is in the issue: scrobbling that silently stops
         // working is the classic complaint about every client that has implemented it. One line, from one
         // builder, shown by both surfaces — a number that grows, or the reason it does not.
@@ -23040,6 +23094,10 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("scrobble.spoken")) {
                     Settings::setScrobbleSpokenAudio(on);
+                    setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
+                }
+                else if (id == QStringLiteral("scrobble.serverforwards")) {
+                    Settings::setScrobbleServerForwards(on);
                     setInfo(QStringLiteral("scrobble.status"), tr("Scrobbling"), scrobbleStatusLine());
                 }
                 else if (id == QStringLiteral("scrobble.lbtoken")) {
@@ -25224,6 +25282,22 @@ void MainWindow::openGeneralSettings()
         sbSpoken->setStyleSheet(QStringLiteral("font-size:15px;"));
         sbSpoken->setChecked(Settings::scrobbleSpokenAudio());
         v->addWidget(sbSpoken);
+        // The twin of the themed "scrobble.serverforwards" row (#193): a user-facing setting has to exist in
+        // BOTH surfaces or it is unreachable in one mode. Same label, and the same explanation of what each
+        // position does, so the two surfaces cannot describe one switch differently.
+        auto* sbFwd = new QCheckBox(tr("My music server scrobbles for me"));
+        sbFwd->setStyleSheet(QStringLiteral("font-size:15px;"));
+        sbFwd->setChecked(Settings::scrobbleServerForwards());
+        v->addWidget(sbFwd);
+        auto* sbFwdHint = new QLabel(
+            tr("Turn this on if Navidrome (or Airsonic, or Gonic) is signed in to Last.fm or ListenBrainz "
+               "itself. Off, a track played from a music server is reported to the server AND to the "
+               "services above, which is right when the server forwards nothing. On, it is reported to the "
+               "server only, and the server passes it on — otherwise every one of those plays is counted "
+               "twice. Music on this device is unaffected either way."));
+        sbFwdHint->setWordWrap(true);
+        sbFwdHint->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sbFwdHint);
         // ...and the twin of "scrobble.status": the same line, from the same builder, so neither surface can
         // claim something the other contradicts. It is the only place the feature says whether it is working.
         auto* sbStatus = new QLabel(scrobbleStatusLine());
@@ -25243,6 +25317,9 @@ void MainWindow::openGeneralSettings()
             sbStatus->setText(scrobbleStatusLine()); });
         connect(sbSpoken, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
             Settings::setScrobbleSpokenAudio(c);
+            sbStatus->setText(scrobbleStatusLine()); });
+        connect(sbFwd, &QCheckBox::toggled, this, [this, sbStatus](bool c) {
+            Settings::setScrobbleServerForwards(c);
             sbStatus->setText(scrobbleStatusLine()); });
 
         // --- Discord Rich Presence: the twin of every themed row above. A user-facing setting has to exist

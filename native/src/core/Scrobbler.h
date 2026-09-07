@@ -110,6 +110,17 @@ signals:
     // The counter, the queue depth or the error moved. The settings surfaces re-render their status line.
     void statusChanged();
 
+    // A LOVE THAT DID NOT LAND (issue #193, increment 6). A love is not queued and not retried (see the
+    // header), so a failure has exactly one honest outcome: say so, once. The LOCAL favourite stands — the
+    // press is recorded here and is the source of truth — because reverting the star the user just pressed
+    // because a box on the landing is asleep is the worse of the two wrong answers, and it is the one that
+    // looks like the button is broken.
+    //
+    // Only raised for a destination whose love is a LIBRARY EDIT. A Last.fm love that fails is a background
+    // fact about a third-party service and belongs in the status line, not in a notification over whatever
+    // the user is doing.
+    void loveFailed(const QString& message);
+
 private:
     // One provider and the delivery state that belongs to IT rather than to the app: whether a submission is
     // in flight, how far up the backoff ladder it has climbed, and the timer that will try again. Per
@@ -118,6 +129,10 @@ private:
     // one's worst day the other's as well.
     struct Slot;
 
+    // Which destinations the track being watched is owed to. See Scrobbler.cpp: three separate ways for a
+    // listen to be undeliverable, and one of them (the double-count coordination) is per destination.
+    bool owes(Slot* s, const Scrobble::Track& track) const;
+
     void finishCurrent();                       // the current watch owes a scrobble -> queue it, everywhere
     void pumpSlot(Slot* s);
     void scheduleRetry(Slot* s);
@@ -125,6 +140,11 @@ private:
     void clearProviders();
 
     QVector<Slot*>  slots_;
+    // Latched when the watch began: the double-count coordination excludes this play from every destination
+    // EXCEPT the one that served it. Scrobble::verdictForDestination is the rule; this is the answer for the
+    // track currently being watched, held so that a mid-track settings change cannot retroactively decide
+    // that a listen already heard was never owed.
+    bool            watchServerOnly_ = false;
     Scrobble::Watch watch_;        // ONE accumulator for every provider: the threshold, what counts and the
                                    // gapless boundary are properties of the LISTENING, not of any service.
 };

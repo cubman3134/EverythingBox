@@ -2447,6 +2447,7 @@ else
     'scrobble.lburl|addCredRow(tr("Custom API URL:")'
     'scrobble.lastfm|new QPushButton(LastFmClient::connectActionLabel())'
     'scrobble.spoken|new QCheckBox(tr("Also scrobble audiobooks and podcasts"))'
+    'scrobble.serverforwards|new QCheckBox(tr("My music server scrobbles for me"))'
     'profiles.skipsingle|new QCheckBox(tr("Skip the profile picker when there'
     'parental.setpin|new QPushButton(Settings::hasParentalPin() ? tr("Change PIN")'
     'parental.clearpin|new QPushButton(tr("Remove PIN"))'

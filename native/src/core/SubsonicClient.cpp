@@ -4,6 +4,7 @@
 #include "MetaCache.h"
 #include "MusicArt.h"
 #include "ServerMusicClient.h"
+#include "SubsonicTransport.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -22,30 +23,11 @@ QString clientName() { return QString::fromLatin1(AppBrand::kDisplayName); }
 // TRANSPORT FAILURES, IN OUR OWN WORDS
 // ==================================================================================================
 // NOT QNetworkReply::errorString(). Qt's text embeds the URL, and for this protocol the URL contains the
-// user's token and salt — see the header. These sentences are built from the ENUM and nothing else, so
-// there is no path by which a credential can reach a status line, a notification or a log.
-QString transportMessage(QNetworkReply::NetworkError err)
-{
-    switch (err)
-    {
-        case QNetworkReply::HostNotFoundError:
-            return QObject::tr("That server could not be found. Check the address.");
-        case QNetworkReply::ConnectionRefusedError:
-        case QNetworkReply::RemoteHostClosedError:
-            return QObject::tr("That server refused the connection. Is it running?");
-        case QNetworkReply::TimeoutError:
-        case QNetworkReply::OperationCanceledError:
-            return QObject::tr("That server took too long to answer.");
-        case QNetworkReply::SslHandshakeFailedError:
-            return QObject::tr("The secure connection to that server could not be established.");
-        case QNetworkReply::AuthenticationRequiredError:
-            return QObject::tr("That server refused the sign-in.");
-        case QNetworkReply::ContentNotFoundError:
-            return QObject::tr("That server answered, but not like a Subsonic server.");
-        default:
-            return QObject::tr("Could not reach that server.");
-    }
-}
+// user's token and salt — see the header. The sentences live in SubsonicTransport.h, built from the ENUM and
+// nothing else, and they are in a shared header because the scrobble provider (#193 increment 6) needs the
+// same table: two copies would have drifted, and a drift here is the door a call to errorString() gets
+// added through.
+QString transportMessage(QNetworkReply::NetworkError err) { return SubsonicTransport::message(err); }
 
 } // namespace
 
@@ -70,6 +52,13 @@ const MusicLibrary::Index& SubsonicClient::index(const QString& serverId) const
     static const MusicLibrary::Index kEmpty;
     const auto it = caches_.constFind(serverId);
     return it == caches_.constEnd() ? kEmpty : it->idx;
+}
+
+const MusicLibrary::Index& SubsonicClient::sectionIndex(const QString& serverId) const
+{
+    static const MusicLibrary::Index kEmpty;
+    const auto it = caches_.constFind(serverId);
+    return it == caches_.constEnd() ? kEmpty : it->sections;
 }
 
 bool SubsonicClient::albumTracksLoaded(const QString& albumKey) const
@@ -208,6 +197,10 @@ void SubsonicClient::fetchArtists(const QString& serverId, Done done)
             c.loadedAlbums.clear();
             c.loadedArtists.clear();
             c.artistsLoaded = true;
+            // Note what is NOT cleared: `sections`. A getArtists replaces this index wholesale, which is
+            // what keeps a bucket adoptAlbum invented from lingering beside the real one - and it is exactly
+            // why the containers this app invented live in an index of their own. Otherwise an ordinary
+            // refresh would destroy the record every starred track row on screen is queued behind.
             emit indexChanged(serverId);
         }
         inflight_.remove(tag);
@@ -237,7 +230,13 @@ void SubsonicClient::fetchArtistAlbums(const QString& artistKey, Done done)
         {
             Cache& c = cacheFor(serverId);
             const QVector<Subsonic::RemoteAlbum> albums = Subsonic::readAlbums(root);
-            Subsonic::fillArtistAlbums(c.idx, serverId, artistKey, albums);
+            // adoptArtist, not fillArtistAlbums, for the same cold-cache reason the album level uses
+            // adoptAlbum: a STARRED artist row can be opened in a session where the server's artist list was
+            // never fetched, and filling an artist that is not in the index is a silent no-op - an
+            // expandable row that opens on nothing at all.
+            const QVector<Subsonic::RemoteArtist> who = Subsonic::readArtists(root);
+            if (!who.isEmpty()) Subsonic::adoptArtist(c.idx, serverId, who.first(), albums);
+            else                Subsonic::fillArtistAlbums(c.idx, serverId, artistKey, albums);
             c.loadedArtists.insert(artistKey);
             // The cover art id is kept HERE rather than on the Album, so MusicLibrary::Album stays a struct
             // about music rather than about one supplier's URL scheme.
@@ -258,7 +257,13 @@ void SubsonicClient::fetchAlbumTracks(const QString& albumKey, Done done)
 {
     const Subsonic::Ref ref = Subsonic::parse(albumKey);
     SubsonicServer srv;
-    if (!ref.ok || ref.kind != Subsonic::Kind::Album || !SubsonicServerStore::get(ref.serverId, srv))
+    // TWO KINDS ARRIVE HERE, AND THE ID SAYS WHICH (#193 increment 6). A playlist renders as an album and is
+    // fetched with getPlaylist, so this is one entry point that ROUTES rather than two that would each have
+    // to be wired into the album level. Kind::Virtual is refused along with everything else: the starred
+    // record is one this app invented, its tracks are already in the index, and there is no endpoint to ask.
+    const bool isPlaylist = ref.ok && ref.kind == Subsonic::Kind::Playlist;
+    if (!ref.ok || (ref.kind != Subsonic::Kind::Album && !isPlaylist)
+        || !SubsonicServerStore::get(ref.serverId, srv))
     {
         if (done) done(Result{ false, false, tr("That music server is no longer set up.") });
         return;
@@ -269,6 +274,30 @@ void SubsonicClient::fetchAlbumTracks(const QString& albumKey, Done done)
     inflight_.insert(tag);
 
     const QString serverId = ref.serverId;
+    if (isPlaylist)
+    {
+        request(srv, QStringLiteral("getPlaylist"), { { QStringLiteral("id"), ref.remoteId } },
+                [this, serverId, albumKey, tag](const Subsonic::Node& root, const Result& res) {
+            if (res.ok)
+            {
+                Cache& c = cacheFor(serverId);
+                // adoptPlaylist, not fillAlbumTracks, for the cold-cache reason adoptAlbum exists: a Recents
+                // row can open a playlist in a session where the playlists level was never visited.
+                const QVector<Subsonic::RemotePlaylist> info = Subsonic::readPlaylists(root);
+                Subsonic::RemotePlaylist p = info.isEmpty() ? Subsonic::RemotePlaylist{} : info.first();
+                if (p.id.isEmpty()) p.id = Subsonic::parse(albumKey).remoteId;
+                Subsonic::adoptPlaylist(c.sections, serverId, p, Subsonic::readSongs(root));
+                c.loadedAlbums.insert(albumKey);
+                if (!p.coverArt.isEmpty() && !c.albumCoverId.contains(albumKey))
+                    c.albumCoverId.insert(albumKey, p.coverArt);
+                emit indexChanged(serverId);
+            }
+            inflight_.remove(tag);
+            const QVector<Done> cbs = waiting_.take(tag);
+            for (const Done& d : cbs) d(res);
+        });
+        return;
+    }
     request(srv, QStringLiteral("getAlbum"), { { QStringLiteral("id"), ref.remoteId } },
             [this, serverId, albumKey, tag](const Subsonic::Node& root, const Result& res) {
         if (res.ok)
@@ -296,6 +325,182 @@ void SubsonicClient::fetchAlbumTracks(const QString& albumKey, Done done)
         const QVector<Done> cbs = waiting_.take(tag);
         for (const Done& d : cbs) d(res);
     });
+}
+
+// ==================================================================================================
+// The three levels the server already has an answer for (issue #193, increment 6)
+// ==================================================================================================
+const QVector<MusicLibrary::Album>& SubsonicClient::playlists(const QString& serverId) const
+{
+    static const QVector<MusicLibrary::Album> kEmpty;
+    const auto it = caches_.constFind(serverId);
+    return it == caches_.constEnd() ? kEmpty : it->playlists;
+}
+
+const Subsonic::Starred& SubsonicClient::starred(const QString& serverId) const
+{
+    static const Subsonic::Starred kEmpty;
+    const auto it = caches_.constFind(serverId);
+    return it == caches_.constEnd() ? kEmpty : it->starredRows;
+}
+
+const QVector<MusicLibrary::Album>& SubsonicClient::newest(const QString& serverId) const
+{
+    static const QVector<MusicLibrary::Album> kEmpty;
+    const auto it = caches_.constFind(serverId);
+    return it == caches_.constEnd() ? kEmpty : it->newestAlbums;
+}
+
+bool SubsonicClient::playlistsLoaded(const QString& serverId) const
+{
+    const auto it = caches_.constFind(serverId);
+    return it != caches_.constEnd() && it->playlistsLoaded;
+}
+
+bool SubsonicClient::starredLoaded(const QString& serverId) const
+{
+    const auto it = caches_.constFind(serverId);
+    return it != caches_.constEnd() && it->starredLoaded;
+}
+
+bool SubsonicClient::newestLoaded(const QString& serverId) const
+{
+    const auto it = caches_.constFind(serverId);
+    return it != caches_.constEnd() && it->newestLoaded;
+}
+
+void SubsonicClient::fetchPlaylists(const QString& serverId, Done done)
+{
+    SubsonicServer srv;
+    if (!SubsonicServerStore::get(serverId, srv))
+    {
+        if (done) done(Result{ false, false, tr("That music server is no longer set up.") });
+        return;
+    }
+    const QString tag = QStringLiteral("playlists|") + serverId;
+    if (done) waiting_[tag].push_back(done);
+    if (inflight_.contains(tag)) return;
+    inflight_.insert(tag);
+
+    request(srv, QStringLiteral("getPlaylists"), {}, [this, serverId, tag](const Subsonic::Node& root,
+                                                                          const Result& res) {
+        if (res.ok)
+        {
+            Cache& c = cacheFor(serverId);
+            const QVector<Subsonic::RemotePlaylist> pls = Subsonic::readPlaylists(root);
+            c.playlists = Subsonic::playlistRows(serverId, pls);
+            c.playlistsLoaded = true;
+            // The cover id, kept beside the rows for the reason the album listing keeps it: MusicLibrary
+            // stays a struct about music rather than about one supplier's url scheme.
+            for (const Subsonic::RemotePlaylist& p : pls)
+            {
+                const QString key = Subsonic::qualify(serverId, Subsonic::Kind::Playlist, p.id);
+                if (!key.isEmpty() && !p.coverArt.isEmpty()) c.albumCoverId.insert(key, p.coverArt);
+            }
+            emit indexChanged(serverId);
+        }
+        inflight_.remove(tag);
+        const QVector<Done> cbs = waiting_.take(tag);
+        for (const Done& d : cbs) d(res);
+    });
+}
+
+void SubsonicClient::fetchStarred(const QString& serverId, Done done)
+{
+    SubsonicServer srv;
+    if (!SubsonicServerStore::get(serverId, srv))
+    {
+        if (done) done(Result{ false, false, tr("That music server is no longer set up.") });
+        return;
+    }
+    const QString tag = QStringLiteral("starred|") + serverId;
+    if (done) waiting_[tag].push_back(done);
+    if (inflight_.contains(tag)) return;
+    inflight_.insert(tag);
+
+    // getStarred2, the ID3 form - the same choice getArtists/getAlbum make. getStarred (no 2) answers with
+    // folder rows, whose ids are in a different namespace from every other id this client holds.
+    request(srv, QStringLiteral("getStarred2"), {}, [this, serverId, tag](const Subsonic::Node& root,
+                                                                         const Result& res) {
+        if (res.ok)
+        {
+            Cache& c = cacheFor(serverId);
+            c.starredRows   = Subsonic::readStarred(serverId, root);
+            c.starredLoaded = true;
+            // The loose tracks need a record to be queued behind, and the starred artists need buckets to
+            // fill their albums into. Both go into the browsing index; the starred ALBUMS deliberately do
+            // not (Subsonic.h says why).
+            Subsonic::adoptStarred(c.sections, serverId, c.starredRows);
+            for (const Subsonic::RemoteAlbum& b : Subsonic::readAlbums(root))
+            {
+                const QString key = Subsonic::qualify(serverId, Subsonic::Kind::Album, b.id);
+                if (!key.isEmpty() && !b.coverArt.isEmpty()) c.albumCoverId.insert(key, b.coverArt);
+            }
+            emit indexChanged(serverId);
+        }
+        inflight_.remove(tag);
+        const QVector<Done> cbs = waiting_.take(tag);
+        for (const Done& d : cbs) d(res);
+    });
+}
+
+void SubsonicClient::fetchNewest(const QString& serverId, Done done)
+{
+    SubsonicServer srv;
+    if (!SubsonicServerStore::get(serverId, srv))
+    {
+        if (done) done(Result{ false, false, tr("That music server is no longer set up.") });
+        return;
+    }
+    const QString tag = QStringLiteral("newest|") + serverId;
+    if (done) waiting_[tag].push_back(done);
+    if (inflight_.contains(tag)) return;
+    inflight_.insert(tag);
+
+    // A BOUNDED page. getAlbumList2 defaults to 10 and tops out at 500; "recently added" is a glance at what
+    // has arrived, not a second copy of the library, and asking for the maximum would make the level slow to
+    // draw for a list nobody scrolls to the end of.
+    request(srv, QStringLiteral("getAlbumList2"),
+            { { QStringLiteral("type"), QStringLiteral("newest") },
+              { QStringLiteral("size"), QStringLiteral("100") } },
+            [this, serverId, tag](const Subsonic::Node& root, const Result& res) {
+        if (res.ok)
+        {
+            Cache& c = cacheFor(serverId);
+            const QVector<Subsonic::RemoteAlbum> albums = Subsonic::readAlbums(root);
+            c.newestAlbums = Subsonic::albumRows(serverId, albums);
+            c.newestLoaded = true;
+            for (const Subsonic::RemoteAlbum& b : albums)
+            {
+                const QString key = Subsonic::qualify(serverId, Subsonic::Kind::Album, b.id);
+                if (!key.isEmpty() && !b.coverArt.isEmpty()) c.albumCoverId.insert(key, b.coverArt);
+            }
+            emit indexChanged(serverId);
+        }
+        inflight_.remove(tag);
+        const QVector<Done> cbs = waiting_.take(tag);
+        for (const Done& d : cbs) d(res);
+    });
+}
+
+void SubsonicClient::setStarred(const QString& qualifiedId, bool starred, Done done)
+{
+    const Subsonic::Ref ref = Subsonic::parse(qualifiedId);
+    const QList<QPair<QString, QString>> params =
+        ref.ok ? Subsonic::starParams(ref.kind, ref.remoteId) : QList<QPair<QString, QString>>{};
+    SubsonicServer srv;
+    if (params.isEmpty() || !SubsonicServerStore::get(ref.serverId, srv))
+    {
+        // Not something this server can be told about. The local favourite stands; nothing is said, because
+        // there is nothing the user could do about a row that was never a server's to begin with.
+        if (done) done(Result{ false, false, QString() });
+        return;
+    }
+    // NOT COALESCED, and deliberately not: star and unstar are the same target with opposite meanings, so
+    // folding a second press onto the first in-flight request would drop the press that reversed it and
+    // leave the server holding the state the user just undid.
+    request(srv, starred ? QStringLiteral("star") : QStringLiteral("unstar"), params,
+            [done](const Subsonic::Node&, const Result& res) { if (done) done(res); });
 }
 
 // ==================================================================================================
@@ -331,7 +536,9 @@ QString SubsonicClient::streamUrl(const QString& qualifiedTrackId) const
 void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<void()> then)
 {
     const Subsonic::Ref ref = Subsonic::parse(albumKey);
-    if (!ref.ok || ref.kind != Subsonic::Kind::Album) return;
+    // A PLAYLIST HAS A COVER TOO (#193 increment 6): servers that render one for a playlist serve it through
+    // the same getCoverArt endpoint under the same kind of id, so this is one route rather than two.
+    if (!ref.ok || (ref.kind != Subsonic::Kind::Album && ref.kind != Subsonic::Kind::Playlist)) return;
     // ALREADY ON DISK: return WITHOUT firing `then`. The callback means "new artwork landed, re-render",
     // and a re-render re-runs this prefetch over the same albums — so firing it for a cached cover would
     // schedule a refresh that schedules a refresh, for ever.
@@ -396,8 +603,15 @@ QString SubsonicClient::albumCoverPath(const QString& albumKey) const
 // carries its server.
 const MusicLibrary::Index& MusicSupply::indexFor(const QString& key)
 {
-    const QString server = Subsonic::serverOf(key);
-    if (!server.isEmpty()) return SubsonicClient::instance().index(server);
+    // TWO INDEXES PER SUBSONIC SERVER, and the key says which - structurally, by its Kind, never by a
+    // lookup that could miss. A Playlist or a Virtual container is one this app invented and lives in the
+    // sections index; everything else the server itself minted and lives in the browse index. See
+    // Subsonic.h at adoptStarred for why they are apart.
+    const Subsonic::Ref ref = Subsonic::parse(key);
+    if (ref.ok)
+        return (ref.kind == Subsonic::Kind::Playlist || ref.kind == Subsonic::Kind::Virtual)
+                   ? SubsonicClient::instance().sectionIndex(ref.serverId)
+                   : SubsonicClient::instance().index(ref.serverId);
     const QString jf = Jellyfin::serverOf(key);
     if (!jf.isEmpty()) return JellyfinMusicClient::instance().index(jf);
     const QString shelf = ServerMusic::sourceOf(key);

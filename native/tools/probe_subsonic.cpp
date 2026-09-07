@@ -132,9 +132,22 @@ static void testIds()
     CHECK(!Subsonic::isQualified(QStringLiteral("sub") + Subsonic::idSep() + QStringLiteral("notauuid")
                                  + Subsonic::idSep() + QStringLiteral("album") + Subsonic::idSep()
                                  + QStringLiteral("1")));
-    // An unknown kind word likewise: a stale route must fail closed, not resolve as some other kind.
+    // An unknown kind word likewise: a stale route must fail closed, not resolve as some other kind. This
+    // was spelled "playlist" until increment 6 made that a real kind - which is the hazard the assertion is
+    // about, arriving from the other side: a word that is not in the table today may be tomorrow, so the
+    // rejection has to be a TABLE LOOKUP rather than a list of the kinds somebody remembered.
     CHECK(!Subsonic::isQualified(QStringLiteral("sub") + Subsonic::idSep() + A + Subsonic::idSep()
-                                 + QStringLiteral("playlist") + Subsonic::idSep() + QStringLiteral("1")));
+                                 + QStringLiteral("sleeve") + Subsonic::idSep() + QStringLiteral("1")));
+    // ...and the two kinds increment 6 DID add round-trip like every other one.
+    for (Subsonic::Kind k : { Subsonic::Kind::Playlist, Subsonic::Kind::Virtual })
+    {
+        const QString q = Subsonic::qualify(A, k, QStringLiteral("pl-1"));
+        const Subsonic::Ref r = Subsonic::parse(q);
+        CHECK(r.ok);
+        CHECK(r.kind == k);
+        CHECK(r.serverId == A);
+        CHECK(r.remoteId == QStringLiteral("pl-1"));
+    }
 }
 
 // The structural claim, driven over REAL keys: nothing MusicLibrary::buildIndex mints can parse as a
@@ -650,6 +663,591 @@ static void testLocalUnchanged(const MusicLibrary::Index& local)
         CHECK(it.type != QString::fromLatin1(browse::kMusicServersType));
 }
 
+
+// ==================================================================================================
+// 9. WHAT THE SERVER ALREADY KNOWS (issue #193, increment 6) - playlists, starred, recently added
+// ==================================================================================================
+//
+// Every payload here is driven in BOTH encodings wherever the reader is shared, for the reason section 4
+// gives: `f=json` is a request rather than a guarantee, and a reader that could only see one of them would
+// be a silent no-op against half the deployments in the wild.
+
+static const char* kPlaylistsXml =
+    "<subsonic-response status=\"ok\" version=\"1.16.1\"><playlists>"
+    "<playlist id=\"pl-1\" name=\"Late night\" owner=\"ada\" songCount=\"3\" duration=\"600\" "
+    "coverArt=\"pl-1\"/>"
+    "<playlist id=\"pl-2\" name=\"Empty\" owner=\"ada\" songCount=\"0\" duration=\"0\"/>"
+    // MALFORMED: no id at all. A row that cannot be opened is worse than an absent one, so it is dropped.
+    "<playlist name=\"Nameless and idless\" songCount=\"9\"/>"
+    "</playlists></subsonic-response>";
+
+static const char* kPlaylistsJson =
+    "{\"subsonic-response\":{\"status\":\"ok\",\"version\":\"1.16.1\",\"playlists\":{\"playlist\":["
+    "{\"id\":\"pl-1\",\"name\":\"Late night\",\"owner\":\"ada\",\"songCount\":3,\"duration\":600,"
+    "\"coverArt\":\"pl-1\"},"
+    "{\"id\":\"pl-2\",\"name\":\"Empty\",\"owner\":\"ada\",\"songCount\":0,\"duration\":0},"
+    "{\"name\":\"Nameless and idless\",\"songCount\":9}]}}}";
+
+// getPlaylist. Its tracks are <entry>, NOT <song> - a third spelling of the same element, and the one a
+// reader written against getAlbum alone has never seen. The track NUMBERS here are deliberately out of
+// order relative to the listing: these songs came off three different records.
+static const char* kPlaylistXml =
+    "<subsonic-response status=\"ok\" version=\"1.16.1\">"
+    "<playlist id=\"pl-1\" name=\"Late night\" owner=\"ada\" songCount=\"3\" duration=\"600\">"
+    "<entry id=\"s-9\" title=\"Third on its record\" artist=\"Amber\" album=\"Dusk\" albumId=\"al-1\" "
+    "track=\"3\" duration=\"200\"/>"
+    "<entry id=\"s-1\" title=\"First on its record\" artist=\"Basin\" album=\"Reeds\" albumId=\"al-2\" "
+    "track=\"1\" duration=\"180\"/>"
+    "<entry id=\"s-5\" title=\"Fifth on its record\" artist=\"Cedar\" album=\"Bark\" albumId=\"al-3\" "
+    "track=\"5\" duration=\"220\"/>"
+    "</playlist></subsonic-response>";
+
+static const char* kStarredXml =
+    "<subsonic-response status=\"ok\" version=\"1.16.1\"><starred2>"
+    "<artist id=\"ar-7\" name=\"Delta\" albumCount=\"4\"/>"
+    "<album id=\"al-8\" name=\"Loved record\" artist=\"Echo\" artistId=\"ar-8\" songCount=\"11\" "
+    "year=\"2011\" coverArt=\"al-8\"/>"
+    "<song id=\"s-11\" title=\"Loved track\" artist=\"Foxglove\" album=\"Somewhere\" albumId=\"al-9\" "
+    "track=\"2\" duration=\"240\"/>"
+    "<song id=\"s-12\" title=\"Another loved track\" artist=\"Grove\" album=\"Elsewhere\" "
+    "albumId=\"al-10\" track=\"7\" duration=\"190\"/>"
+    "</starred2></subsonic-response>";
+
+static const char* kStarredEmptyXml =
+    "<subsonic-response status=\"ok\" version=\"1.16.1\"><starred2/></subsonic-response>";
+
+static const char* kNewestXml =
+    "<subsonic-response status=\"ok\" version=\"1.16.1\"><albumList2>"
+    "<album id=\"al-20\" name=\"Just arrived\" artist=\"Hazel\" artistId=\"ar-20\" songCount=\"9\" "
+    "year=\"2024\" duration=\"2400\" coverArt=\"al-20\"/>"
+    // MALFORMED: no id. Dropped, for the same reason the idless playlist is.
+    "<album name=\"No id here\" artist=\"Nobody\" songCount=\"4\"/>"
+    "</albumList2></subsonic-response>";
+
+static Subsonic::Node parsedOk(const char* body)
+{
+    bool ok = false;
+    const Subsonic::Node n = Subsonic::parseBody(QByteArray(body), &ok);
+    CHECK(ok);
+    return n;
+}
+
+static void testPlaylistPayload()
+{
+    const QString A = mkServerId();
+
+    // --- the LIST, in both encodings, producing identical results ---
+    const QVector<Subsonic::RemotePlaylist> fromXml = Subsonic::readPlaylists(parsedOk(kPlaylistsXml));
+    const QVector<Subsonic::RemotePlaylist> fromJson = Subsonic::readPlaylists(parsedOk(kPlaylistsJson));
+    CHECK(fromXml.size() == 2);                 // the idless row is gone from BOTH
+    CHECK(fromJson.size() == 2);
+    for (int i = 0; i < fromXml.size() && i < fromJson.size(); ++i)
+    {
+        CHECK(fromXml[i].id == fromJson[i].id);
+        CHECK(fromXml[i].name == fromJson[i].name);
+        CHECK(fromXml[i].songCount == fromJson[i].songCount);
+        CHECK(fromXml[i].owner == fromJson[i].owner);
+    }
+    CHECK(fromXml.at(0).id == QStringLiteral("pl-1"));
+    CHECK(fromXml.at(0).songCount == 3);
+    CHECK(fromXml.at(0).coverArt == QStringLiteral("pl-1"));
+    // A PLAYLIST WITH NO TRACKS IS STILL A PLAYLIST. It has to survive the read, or a level somebody made
+    // and has not filled yet simply vanishes.
+    CHECK(fromXml.at(1).id == QStringLiteral("pl-2"));
+    CHECK(fromXml.at(1).songCount == 0);
+
+    // --- an EMPTY result is empty rather than a failure ---
+    CHECK(Subsonic::readPlaylists(parsedOk(
+              "<subsonic-response status=\"ok\" version=\"1.16.1\"><playlists/></subsonic-response>"))
+              .isEmpty());
+
+    // --- the rows the level draws ---
+    const QVector<MusicLibrary::Album> rows = Subsonic::playlistRows(A, fromXml);
+    CHECK(rows.size() == 2);
+    CHECK(rows.at(0).key == Subsonic::qualify(A, Subsonic::Kind::Playlist, QStringLiteral("pl-1")));
+    CHECK(rows.at(0).title == QStringLiteral("Late night"));
+    // THE SERVER'S OWN COUNT, before any track has been fetched - the split MusicLibrary::Album::trackCount
+    // exists for. tracks.size() is 0 here and would print "0 tracks" beside a record holding three.
+    CHECK(rows.at(0).trackCount == 3);
+    CHECK(rows.at(0).tracks.isEmpty());
+    // ...and the id says PLAYLIST, which is what routes the fetch to getPlaylist rather than getAlbum.
+    CHECK(Subsonic::parse(rows.at(0).key).kind == Subsonic::Kind::Playlist);
+}
+
+static void testPlaylistTracksKeepTheirOrder()
+{
+    const QString A = mkServerId();
+    const Subsonic::Node root = parsedOk(kPlaylistXml);
+    const QVector<Subsonic::RemotePlaylist> info = Subsonic::readPlaylists(root);
+    CHECK(info.size() == 1);
+    if (info.isEmpty()) return;
+
+    // <entry>, the playlist spelling. readSongs has to see it or a playlist opens on nothing at all.
+    const QVector<Subsonic::RemoteSong> songs = Subsonic::readSongs(root);
+    CHECK(songs.size() == 3);
+    if (songs.size() != 3) return;
+    CHECK(songs.at(0).id == QStringLiteral("s-9"));
+
+    MusicLibrary::Index sections;
+    Subsonic::adoptPlaylist(sections, A, info.first(), songs);
+    const QString key = Subsonic::qualify(A, Subsonic::Kind::Playlist, QStringLiteral("pl-1"));
+    const MusicLibrary::Album* b = sections.album(key);
+    CHECK(b != nullptr);
+    if (!b) return;
+    CHECK(b->title == QStringLiteral("Late night"));
+    CHECK(b->tracks.size() == 3);
+    CHECK(b->trackCount == 3);
+    if (b->tracks.size() != 3) return;
+
+    // THE CLAIM THIS TEST EXISTS FOR. The order somebody arranged is the entire content of a playlist, and
+    // the album level's disc-then-track sort would rewrite it into 1, 3, 5 - an order nobody chose and no
+    // server would agree with. It must come out exactly as the server listed it.
+    CHECK(b->tracks.at(0).path == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-9")));
+    CHECK(b->tracks.at(1).path == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-1")));
+    CHECK(b->tracks.at(2).path == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-5")));
+    // ...and every row is queued behind the PLAYLIST, not behind the record the song is also on.
+    for (const MusicLibrary::IndexTrack& t : b->tracks) CHECK(t.albumKey == key);
+    // AN ID, NEVER A URL. The index is copied into queues and a queue is persisted; a stream url here would
+    // write the user's token onto disk. SubsonicClient.h states the rule; this asserts it.
+    for (const MusicLibrary::IndexTrack& t : b->tracks)
+    {
+        CHECK(Subsonic::parse(t.path).kind == Subsonic::Kind::Track);
+        CHECK(!t.path.contains(QStringLiteral("http")));
+        CHECK(!t.path.contains(QLatin1Char('&')));
+    }
+
+    // A PLAYLIST WITH NO TRACKS adopts as an empty record rather than not at all - the level has to say
+    // "this is empty", not "this does not exist".
+    MusicLibrary::Index none;
+    Subsonic::RemotePlaylist p;
+    p.id = QStringLiteral("pl-2"); p.name = QStringLiteral("Empty");
+    Subsonic::adoptPlaylist(none, A, p, {});
+    const MusicLibrary::Album* e = none.album(Subsonic::qualify(A, Subsonic::Kind::Playlist, p.id));
+    CHECK(e != nullptr);
+    if (e) { CHECK(e->tracks.isEmpty()); CHECK(e->trackCount == 0); }
+
+    // IDEMPOTENT: re-running the adopt replaces the tracks rather than doubling them. Not hypothetical -
+    // the level re-fetches on Back.
+    Subsonic::adoptPlaylist(sections, A, info.first(), songs);
+    const MusicLibrary::Album* again = sections.album(key);
+    CHECK(again != nullptr);
+    if (again) CHECK(again->tracks.size() == 3);
+}
+
+static void testStarredPayload()
+{
+    const QString A = mkServerId();
+    const Subsonic::Starred s = Subsonic::readStarred(A, parsedOk(kStarredXml));
+    CHECK(s.artists.size() == 1);
+    CHECK(s.albums.size() == 1);
+    CHECK(s.tracks.size() == 2);
+    CHECK(!s.isEmpty());
+    if (s.artists.size() != 1 || s.albums.size() != 1 || s.tracks.size() != 2) return;
+
+    // REAL ids for the artist and the album, so opening one takes the ordinary route and the ordinary fetch.
+    CHECK(s.artists.at(0).key == Subsonic::qualify(A, Subsonic::Kind::Artist, QStringLiteral("ar-7")));
+    CHECK(s.artists.at(0).albumCount == 4);
+    CHECK(s.artists.at(0).trackCount == 0);       // deliberate: the server told us albums and nothing else
+    CHECK(s.albums.at(0).key == Subsonic::qualify(A, Subsonic::Kind::Album, QStringLiteral("al-8")));
+    CHECK(s.albums.at(0).trackCount == 11);
+
+    // ...and the loose tracks are queued behind the ONE INVENTED RECORD, so pressing the second one plays
+    // the starred list from there. A track row with no resolvable album key would play nothing at all.
+    const QString virt = Subsonic::starredTracksKey(A);
+    CHECK(Subsonic::parse(virt).kind == Subsonic::Kind::Virtual);
+    for (const MusicLibrary::IndexTrack& t : s.tracks) CHECK(t.albumKey == virt);
+    CHECK(s.tracks.at(0).title == QStringLiteral("Loved track"));
+
+    MusicLibrary::Index sections;
+    Subsonic::adoptStarred(sections, A, s);
+    const MusicLibrary::Album* b = sections.album(virt);
+    CHECK(b != nullptr);
+    if (b) CHECK(b->tracks.size() == 2);
+    // IDEMPOTENT, and this one is load-bearing: the level re-adopts whenever it is re-read, and an append
+    // would show every starred track twice the second time somebody opened it.
+    Subsonic::adoptStarred(sections, A, s);
+    const MusicLibrary::Album* again = sections.album(virt);
+    CHECK(again != nullptr);
+    if (again) CHECK(again->tracks.size() == 2);
+
+    // AN EMPTY STARRED LIST is empty, not a failure, and invents no record for nothing.
+    const Subsonic::Starred none = Subsonic::readStarred(A, parsedOk(kStarredEmptyXml));
+    CHECK(none.isEmpty());
+    MusicLibrary::Index empty;
+    Subsonic::adoptStarred(empty, A, none);
+    CHECK(empty.artists.isEmpty());
+
+    // A MALFORMED record - a song with no id - never becomes a row that cannot be played.
+    const Subsonic::Starred bad = Subsonic::readStarred(A, parsedOk(
+        "<subsonic-response status=\"ok\" version=\"1.16.1\"><starred2>"
+        "<song title=\"No id\" artist=\"Nobody\"/></starred2></subsonic-response>"));
+    CHECK(bad.tracks.isEmpty());
+}
+
+static void testNewestPayload()
+{
+    const QString A = mkServerId();
+    const QVector<Subsonic::RemoteAlbum> albums = Subsonic::readAlbums(parsedOk(kNewestXml));
+    CHECK(albums.size() == 1);                    // the idless row is dropped
+    const QVector<MusicLibrary::Album> rows = Subsonic::albumRows(A, albums);
+    CHECK(rows.size() == 1);
+    if (rows.size() != 1) return;
+    CHECK(rows.at(0).key == Subsonic::qualify(A, Subsonic::Kind::Album, QStringLiteral("al-20")));
+    CHECK(rows.at(0).year == 2024);
+    CHECK(rows.at(0).trackCount == 9);            // the server's count; the songs arrive on drill
+    CHECK(rows.at(0).tracks.isEmpty());
+    // ...and a real ALBUM id, so opening it is the ordinary album level and the ordinary getAlbum.
+    CHECK(Subsonic::parse(rows.at(0).key).kind == Subsonic::Kind::Album);
+
+    CHECK(Subsonic::readAlbums(parsedOk(
+              "<subsonic-response status=\"ok\" version=\"1.16.1\"><albumList2/></subsonic-response>"))
+              .isEmpty());
+}
+
+// THE #160 LESSON, ONE LEVEL DOWN. Increment 5 proved it for artists, albums and tracks; every id this
+// increment mints has to hold the same property, because a bare playlist id from two servers is exactly the
+// corruption the issue opened by warning about.
+static void testTwoServersCollidingSectionIds()
+{
+    const QString A = mkServerId();
+    const QString B = mkServerId();
+
+    const QVector<Subsonic::RemotePlaylist> pls = Subsonic::readPlaylists(parsedOk(kPlaylistsXml));
+    const QVector<MusicLibrary::Album> rowsA = Subsonic::playlistRows(A, pls);
+    const QVector<MusicLibrary::Album> rowsB = Subsonic::playlistRows(B, pls);
+    CHECK(rowsA.size() == rowsB.size());
+    for (int i = 0; i < rowsA.size() && i < rowsB.size(); ++i)
+        CHECK(rowsA[i].key != rowsB[i].key);       // the SAME remote id, two different keys
+
+    // ...and an id from A does not resolve against B's index, which is the property that matters: the
+    // lookup that would have played somebody else's record cannot even be spelled.
+    MusicLibrary::Index sectionsA, sectionsB;
+    const Subsonic::Node root = parsedOk(kPlaylistXml);
+    const QVector<Subsonic::RemotePlaylist> one = Subsonic::readPlaylists(root);
+    CHECK(!one.isEmpty());
+    if (one.isEmpty()) return;
+    Subsonic::adoptPlaylist(sectionsA, A, one.first(), Subsonic::readSongs(root));
+    Subsonic::adoptPlaylist(sectionsB, B, one.first(), Subsonic::readSongs(root));
+    const QString keyA = Subsonic::qualify(A, Subsonic::Kind::Playlist, one.first().id);
+    const QString keyB = Subsonic::qualify(B, Subsonic::Kind::Playlist, one.first().id);
+    CHECK(keyA != keyB);
+    CHECK(sectionsA.album(keyA) != nullptr);
+    CHECK(sectionsA.album(keyB) == nullptr);       // B's playlist is NOT in A's index
+    CHECK(sectionsB.album(keyA) == nullptr);
+
+    // The invented containers carry their server too, so two servers' starred records are two records.
+    CHECK(Subsonic::starredTracksKey(A) != Subsonic::starredTracksKey(B));
+    CHECK(Subsonic::parse(Subsonic::starredTracksKey(A)).serverId == A);
+}
+
+// THE UNION RULE. Enforced by the function's SHAPE - there is no removal to get wrong - and asserted here
+// because "the starred read emptied my shelf" is a bug found when somebody's favourites are already gone.
+static void testStarredUnionNeverReplaces()
+{
+    const QString A = mkServerId();
+    const QVector<Subsonic::RemoteSong> songs = Subsonic::readSongs(parsedOk(kStarredXml));
+    CHECK(songs.size() == 2);
+    if (songs.size() != 2) return;
+
+    // Nothing favourite yet: both are additions, in the server's order.
+    QSet<QString> have;
+    QVector<Subsonic::StarredFavorite> add = Subsonic::starredAdditions(A, songs, have);
+    CHECK(add.size() == 2);
+    if (add.size() != 2) return;
+    CHECK(add.at(0).itemId == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-11")));
+    // The id a track ROW carries, or the heart on the row cannot find the favourite it just wrote.
+    CHECK(add.at(0).title == QStringLiteral("Loved track"));
+    CHECK(add.at(0).subtitle == QStringLiteral("Foxglove"));
+
+    // One already starred locally: it is not offered again, and - the point - the OTHER local favourites
+    // are not mentioned at all, because there is no way for this function to say "remove".
+    have.insert(Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-11")));
+    have.insert(QStringLiteral("tt0111161"));                        // a film
+    have.insert(QStringLiteral("C:/Games/Sonic.md"));                // a game
+    have.insert(Subsonic::qualify(mkServerId(), Subsonic::Kind::Track, QStringLiteral("s-11")));
+    const int before = int(have.size());
+    add = Subsonic::starredAdditions(A, songs, have);
+    CHECK(add.size() == 1);
+    CHECK(int(have.size()) == before);            // the input set is untouched: nothing was removed
+    if (add.size() == 1)
+        CHECK(add.at(0).itemId == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-12")));
+
+    // An EMPTY starred list adds nothing - and, again, removes nothing, because it cannot.
+    CHECK(Subsonic::starredAdditions(A, {}, have).isEmpty());
+
+    // A duplicate in the server's own answer is added once.
+    QVector<Subsonic::RemoteSong> dupes; dupes << songs.at(1) << songs.at(1);
+    CHECK(Subsonic::starredAdditions(A, dupes, {}).size() == 1);
+
+    // A song with no id mints no favourite: one filed under nothing can never be found again and can never
+    // be un-starred.
+    Subsonic::RemoteSong idless; idless.title = QStringLiteral("Nameless");
+    CHECK(Subsonic::starredAdditions(A, { idless }, {}).isEmpty());
+}
+
+// ==================================================================================================
+// 10. TELLING THE SERVER: the scrobble and star parameters, and how an answer ends
+// ==================================================================================================
+static QString paramValue(const QList<QPair<QString, QString>>& ps, const QString& k)
+{
+    for (const auto& p : ps) if (p.first == k) return p.second;
+    return QString();
+}
+
+static void testScrobbleAndStarParams()
+{
+    // --- MILLISECONDS. The spec's unit, and the easiest thing in a Subsonic client to get wrong: seconds
+    //     sent as milliseconds land the play in January 1970, where nothing shows it and nothing complains.
+    const qint64 t1 = 1700000000LL, t2 = 1700000300LL;
+    QList<QPair<QString, QString>> ps =
+        Subsonic::scrobbleParams({ QStringLiteral("s-1"), QStringLiteral("s-2") }, { t1, t2 }, true);
+    CHECK(paramValue(ps, QStringLiteral("submission")) == QStringLiteral("true"));
+    int ids = 0, times = 0;
+    for (const auto& p : ps)
+    {
+        if (p.first == QStringLiteral("id")) ++ids;
+        if (p.first == QStringLiteral("time")) ++times;
+    }
+    CHECK(ids == 2);
+    CHECK(times == 2);                       // repeated pairs: one request for a queue's worth
+    CHECK(ps.size() == 5);
+    if (ps.size() == 5)
+    {
+        CHECK(ps.at(0).first == QStringLiteral("id") && ps.at(0).second == QStringLiteral("s-1"));
+        CHECK(ps.at(1).first == QStringLiteral("time"));
+        CHECK(ps.at(1).second == QString::number(t1 * 1000LL));
+        CHECK(ps.at(3).second == QString::number(t2 * 1000LL));
+    }
+
+    // --- the EPHEMERAL form: submission=false, and no time at all. A now-playing hint is about this moment
+    //     by definition; a time on it would be a stale claim the instant it arrived.
+    ps = Subsonic::scrobbleParams({ QStringLiteral("s-1") }, {}, false);
+    CHECK(paramValue(ps, QStringLiteral("submission")) == QStringLiteral("false"));
+    CHECK(paramValue(ps, QStringLiteral("id")) == QStringLiteral("s-1"));
+    CHECK(paramValue(ps, QStringLiteral("time")).isEmpty());
+
+    // A non-positive time is OMITTED rather than sent as 0: "no time" means "now" everywhere, and 0 means
+    // 1970 everywhere.
+    ps = Subsonic::scrobbleParams({ QStringLiteral("s-1") }, { qint64(0) }, true);
+    CHECK(paramValue(ps, QStringLiteral("time")).isEmpty());
+
+    // NOTHING TO SAY produces no parameters at all, so the caller cannot make an empty request.
+    CHECK(Subsonic::scrobbleParams({}, {}, true).isEmpty());
+    CHECK(Subsonic::scrobbleParams({ QString() }, {}, true).isEmpty());
+
+    // --- star: THREE NAMESPACES, three parameter names. Sending an album's id as `id` stars whichever SONG
+    //     happens to carry that id - a star landing on something the user never pressed.
+    CHECK(Subsonic::starParams(Subsonic::Kind::Track, QStringLiteral("s-1")).size() == 1);
+    CHECK(paramValue(Subsonic::starParams(Subsonic::Kind::Track, QStringLiteral("s-1")),
+                     QStringLiteral("id")) == QStringLiteral("s-1"));
+    CHECK(paramValue(Subsonic::starParams(Subsonic::Kind::Album, QStringLiteral("al-1")),
+                     QStringLiteral("albumId")) == QStringLiteral("al-1"));
+    CHECK(paramValue(Subsonic::starParams(Subsonic::Kind::Artist, QStringLiteral("ar-1")),
+                     QStringLiteral("artistId")) == QStringLiteral("ar-1"));
+    // ...and the kinds that cannot be starred produce NOTHING, so no request is made. The Virtual one is
+    // the structural claim: a container this app invented is never put in a request, which is what makes
+    // its id incapable of colliding with anything the server minted.
+    CHECK(Subsonic::starParams(Subsonic::Kind::Cover, QStringLiteral("c-1")).isEmpty());
+    CHECK(Subsonic::starParams(Subsonic::Kind::Virtual, QStringLiteral("starred")).isEmpty());
+    CHECK(Subsonic::starParams(Subsonic::Kind::Playlist, QStringLiteral("pl-1")).isEmpty());
+    CHECK(Subsonic::starParams(Subsonic::Kind::Track, QString()).isEmpty());
+}
+
+static void testFate()
+{
+    using F = Subsonic::Fate;
+    auto fateOfBody = [](const char* body) {
+        bool ok = false;
+        return Subsonic::fateOf(Subsonic::envelopeOf(Subsonic::parseBody(QByteArray(body), &ok)));
+    };
+    CHECK(fateOfBody("<subsonic-response status=\"ok\" version=\"1.16.1\"/>") == F::Ok);
+    // A REFUSED CREDENTIAL: keep the listens (the user can fix the token and they still land) but stop
+    // pumping - retrying a bad token in a loop is how an account gets rate-limited.
+    CHECK(fateOfBody(kFailXml) == F::Auth);
+    // "Not found": the track was deleted or the library rescanned. No retry brings it back, and keeping it
+    // jams every listen behind it for ever.
+    CHECK(fateOfBody("<subsonic-response status=\"failed\"><error code=\"70\" message=\"Gone.\"/>"
+                     "</subsonic-response>") == F::Rejected);
+    CHECK(fateOfBody("<subsonic-response status=\"failed\"><error code=\"10\" message=\"Missing.\"/>"
+                     "</subsonic-response>") == F::Rejected);
+    // A server error is worth trying again.
+    CHECK(fateOfBody("<subsonic-response status=\"failed\"><error code=\"0\" message=\"Oops.\"/>"
+                     "</subsonic-response>") == F::Retryable);
+    CHECK(fateOfBody("<subsonic-response status=\"failed\"><error code=\"50\" message=\"No.\"/>"
+                     "</subsonic-response>") == F::Retryable);
+    // NOT A SUBSONIC RESPONSE AT ALL - a proxy's error page, a captive portal. Retryable: every one of
+    // those goes away on its own, and dropping the listens over it loses them to a router reboot.
+    CHECK(fateOfBody("<html><body>502 Bad Gateway</body></html>") == F::Retryable);
+    CHECK(fateOfBody("") == F::Retryable);
+}
+
+// ==================================================================================================
+// 11. The three levels, rendered by the builders #74 already had
+// ==================================================================================================
+static void testSectionLevels()
+{
+    const QString A = mkServerId();
+    const Subsonic::Starred s = Subsonic::readStarred(A, parsedOk(kStarredXml));
+    const browse::MusicEmptyNote note;
+    auto noCover = [](const MusicLibrary::Album&) { return QString(); };
+    const MediaCatalog cat = browse::musicSectionCatalog(QStringLiteral("Starred"), s.artists, s.albums,
+                                                         s.tracks, note, noCover);
+    CHECK(cat.title == QStringLiteral("Starred"));
+    CHECK(cat.items.size() == 4);              // 1 artist + 1 album + 2 tracks
+    if (cat.items.size() != 4) return;
+    // THE SAME ROW TYPES every other music level uses - that is the whole "same UI, different supplier"
+    // claim, and a new type here would be a second browse tree by another name.
+    CHECK(cat.items.at(0).type == QString::fromLatin1(browse::kMusicArtistType));
+    CHECK(cat.items.at(1).type == QString::fromLatin1(browse::kMusicAlbumType));
+    CHECK(cat.items.at(2).type == QString::fromLatin1(browse::kMusicTrackType));
+    CHECK(cat.items.at(0).expandable);
+    CHECK(cat.items.at(1).expandable);
+    // ...routing through the SAME prefixes, so a starred album opens the ordinary album level.
+    CHECK(cat.items.at(1).mime == QString::fromLatin1(browse::kMusicAlbumPrefix) + s.albums.at(0).key);
+    // ...and a loose track row is queued behind the starred record.
+    CHECK(cat.items.at(2).mime
+          == QString::fromLatin1(browse::kMusicTrackPrefix) + Subsonic::starredTracksKey(A));
+    CHECK(cat.items.at(2).id == s.tracks.at(0).path);      // the id a favourite is filed under
+    // NO "Play all" / "Shuffle all" here: the tracks behind an album row have not been fetched, so such a
+    // verb could only produce an empty queue, and offering one that can only no-op is worse than not.
+    for (const MediaItem& it : cat.items)
+    {
+        CHECK(it.type != QString::fromLatin1(browse::kMusicPlayArtistType));
+        CHECK(it.type != QString::fromLatin1(browse::kMusicShuffleArtistType));
+        CHECK(it.type != QString::fromLatin1(browse::kMusicShuffleAllType));
+    }
+
+    // A PLAYLIST LEVEL is album rows, and every one of them routes to the ordinary album level.
+    const QVector<MusicLibrary::Album> pls =
+        Subsonic::playlistRows(A, Subsonic::readPlaylists(parsedOk(kPlaylistsXml)));
+    const MediaCatalog plc = browse::musicSectionCatalog(QStringLiteral("Playlists"), {}, pls, {}, note,
+                                                         noCover);
+    CHECK(plc.items.size() == 2);
+    for (const MediaItem& it : plc.items)
+    {
+        CHECK(it.type == QString::fromLatin1(browse::kMusicAlbumType));
+        CHECK(it.expandable);
+    }
+
+    // AN EMPTY SECTION IS EXPLAINED rather than left blank - the rule the Music root already follows.
+    browse::MusicEmptyNote said;
+    said.text = QStringLiteral("You have not starred anything on this music server yet.");
+    const MediaCatalog empty = browse::musicSectionCatalog(QStringLiteral("Starred"), {}, {}, {}, said,
+                                                           noCover);
+    CHECK(empty.items.size() == 1);
+    if (empty.items.size() == 1)
+    {
+        CHECK(empty.items.at(0).type == QStringLiteral("info"));
+        CHECK(empty.items.at(0).title == said.text);
+    }
+    // ...and with no note there is nothing fabricated: an empty catalog stays empty.
+    CHECK(browse::musicSectionCatalog(QStringLiteral("Starred"), {}, {}, {},
+                                      browse::MusicEmptyNote{}, noCover).items.isEmpty());
+}
+
+// THE COMPATIBILITY CLAIM. The three doors appear INSIDE a server and nowhere else, so the Music root of an
+// install with a local library is byte-for-byte the catalog it was before this increment existed.
+static void testDoorsOnlyInsideAServer(const MusicLibrary::Index& local)
+{
+    const QString A = mkServerId();
+    auto noCover = [](const MusicLibrary::Album&) { return QString(); };
+
+    const MediaCatalog root = browse::musicArtistsCatalog(local, browse::MusicEmptyNote{}, noCover, 1);
+    for (const MediaItem& it : root.items)
+    {
+        CHECK(it.type != QString::fromLatin1(browse::kMusicPlaylistsType));
+        CHECK(it.type != QString::fromLatin1(browse::kMusicStarredType));
+        CHECK(it.type != QString::fromLatin1(browse::kMusicNewestType));
+    }
+
+    const MediaCatalog inside =
+        browse::musicArtistsCatalog(local, browse::MusicEmptyNote{}, noCover, 0, A);
+    int doors = 0;
+    for (const MediaItem& it : inside.items)
+    {
+        if (it.type == QString::fromLatin1(browse::kMusicPlaylistsType)
+            || it.type == QString::fromLatin1(browse::kMusicStarredType)
+            || it.type == QString::fromLatin1(browse::kMusicNewestType))
+        {
+            ++doors;
+            // KEYED BY THE SERVER, so a door pressed on one server's level cannot open another's.
+            CHECK(it.mime.endsWith(A));
+            CHECK(it.expandable);
+        }
+    }
+    CHECK(doors == 3);
+
+    // ...and an EMPTY server still shows them: a server whose artist list has not arrived may still have
+    // playlists and starred tracks, and a bare "nothing here" over the top of them is simply wrong.
+    browse::MusicEmptyNote said; said.text = QStringLiteral("Nothing yet.");
+    const MediaCatalog bare = browse::musicArtistsCatalog(MusicLibrary::Index{}, said, noCover, 0, A);
+    int bareDoors = 0;
+    for (const MediaItem& it : bare.items)
+        if (it.type == QString::fromLatin1(browse::kMusicStarredType)
+            || it.type == QString::fromLatin1(browse::kMusicPlaylistsType)
+            || it.type == QString::fromLatin1(browse::kMusicNewestType)) ++bareDoors;
+    CHECK(bareDoors == 3);
+}
+
+// ==================================================================================================
+// 12. THE CREDENTIAL BYTE-SCAN
+// ==================================================================================================
+// An ASSERTION, not a claim in a report. Everything this increment WRITES anywhere - a browse row, a
+// persisted playlist record, a favourite's id, the request parameters themselves - is scanned for the
+// password, the token and the salt. The scan is over BYTES rather than a formatted string, because what is
+// being defended against is a value ending up somewhere by accident rather than by being printed.
+static void testNoCredentialAnywhere()
+{
+    const QString A = mkServerId();
+    const QString salt = Subsonic::saltFrom(Q_UINT64_C(0x0123456789abcdef));
+    const QString token = Subsonic::tokenFor(QString::fromLatin1(kPassword), salt);
+    CHECK(!token.isEmpty() && !salt.isEmpty());
+
+    QByteArray scanned;
+    auto eat = [&scanned](const QString& s) { scanned += s.toUtf8(); scanned += '\n'; };
+
+    // Everything the three levels produce.
+    const Subsonic::Node pr = parsedOk(kPlaylistXml);
+    const QVector<Subsonic::RemotePlaylist> pl = Subsonic::readPlaylists(pr);
+    MusicLibrary::Index sections;
+    if (!pl.isEmpty()) Subsonic::adoptPlaylist(sections, A, pl.first(), Subsonic::readSongs(pr));
+    const Subsonic::Starred st = Subsonic::readStarred(A, parsedOk(kStarredXml));
+    Subsonic::adoptStarred(sections, A, st);
+    for (const MusicLibrary::Artist& a : sections.artists)
+    {
+        eat(a.key); eat(a.name);
+        for (const MusicLibrary::Album& b : a.albums)
+        {
+            eat(b.key); eat(b.title); eat(b.albumArtist);
+            for (const MusicLibrary::IndexTrack& t : b.tracks)
+                { eat(t.path); eat(t.sourcePath); eat(t.title); eat(t.albumKey); }
+        }
+    }
+    // ...the rows a level draws, in full.
+    const MediaCatalog cat = browse::musicSectionCatalog(QStringLiteral("Starred"), st.artists, st.albums,
+                                                         st.tracks, browse::MusicEmptyNote{},
+                                                         [](const MusicLibrary::Album&) { return QString(); });
+    for (const MediaItem& it : cat.items)
+        { eat(it.id); eat(it.mime); eat(it.url); eat(it.title); eat(it.subtitle); eat(it.thumbnailUrl); }
+    // ...and the favourites a starred read would write.
+    for (const Subsonic::StarredFavorite& f :
+             Subsonic::starredAdditions(A, Subsonic::readSongs(parsedOk(kStarredXml)), {}))
+        { eat(f.itemId); eat(f.title); eat(f.subtitle); }
+    // ...and the scrobble/star parameters, which are the only place an id is allowed to travel at all.
+    for (const auto& kv : Subsonic::scrobbleParams({ QStringLiteral("s-9") }, { qint64(1700000000) }, true))
+        { eat(kv.first); eat(kv.second); }
+    for (const auto& kv : Subsonic::starParams(Subsonic::Kind::Track, QStringLiteral("s-9")))
+        { eat(kv.first); eat(kv.second); }
+
+    CHECK(!scanned.contains(QByteArray(kPassword)));
+    CHECK(!scanned.contains(token.toUtf8()));
+    CHECK(!scanned.contains(salt.toUtf8()));
+    // ...and nothing that even LOOKS like a signed request: the whole family of "somebody stored the url".
+    CHECK(!scanned.contains(QByteArray("&t=")));
+    CHECK(!scanned.contains(QByteArray("&s=")));
+    CHECK(!scanned.contains(QByteArray("/rest/")));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -673,6 +1271,18 @@ int main(int argc, char** argv)
     testColdCacheAdopt();
     testServersLevel();
     testLocalUnchanged(local);
+    // ---- increment 6: what the server already knows, and telling it what happened -------------------
+    testPlaylistPayload();
+    testPlaylistTracksKeepTheirOrder();
+    testStarredPayload();
+    testNewestPayload();
+    testTwoServersCollidingSectionIds();
+    testStarredUnionNeverReplaces();
+    testScrobbleAndStarParams();
+    testFate();
+    testSectionLevels();
+    testDoorsOnlyInsideAServer(local);
+    testNoCredentialAnywhere();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");

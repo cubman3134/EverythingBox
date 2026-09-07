@@ -90,6 +90,12 @@ public:
     // route must render an empty level, never crash.
     const MusicLibrary::Index& index(const QString& serverId) const;
 
+    // The SECOND index for a server: the containers this app invented rather than the ones the server has
+    // (a playlist rendered as an album, the record the starred loose tracks are queued behind). Separate
+    // from the browse index for the two reasons Subsonic.h gives at adoptStarred; MusicSupply::indexFor
+    // routes to whichever a key belongs to by its Kind, so no surface has to know there are two.
+    const MusicLibrary::Index& sectionIndex(const QString& serverId) const;
+
     // Has this album's track list been fetched? The album level asks before deciding whether to show the
     // record or a "Loading…" row — Album::trackCount is the server's count and is set before the tracks are.
     bool albumTracksLoaded(const QString& albumKey) const;
@@ -99,6 +105,43 @@ public:
     // ever, against a server that has already answered.
     bool artistsLoaded(const QString& serverId) const;
     bool artistLoaded(const QString& artistKey) const;
+
+    // ---- The three levels the server already has an answer for (issue #193, increment 6) ---------------
+    //
+    //   playlists        getPlaylists.view            -> Subsonic::playlistRows
+    //   starred          getStarred2.view             -> Subsonic::readStarred
+    //   recently added   getAlbumList2.view?type=newest -> Subsonic::albumRows
+    //
+    // Same shape as the three browse fetches above, and same reasons: one request per level the user opens,
+    // coalesced while in flight, cached per server and per session, never persisted. Each caches ROWS rather
+    // than a whole Index, because these three are FLAT lists of records that already exist elsewhere in the
+    // index rather than a tree of their own - and a second copy of the tree is a second thing to keep in step.
+    void fetchPlaylists(const QString& serverId, Done done);
+    void fetchStarred(const QString& serverId, Done done);
+    void fetchNewest(const QString& serverId, Done done);
+
+    // The cached rows, possibly empty. Empty and harmless for an unknown server or an unfetched level: a
+    // stale route must render an empty level, never crash.
+    const QVector<MusicLibrary::Album>& playlists(const QString& serverId) const;
+    const Subsonic::Starred&            starred(const QString& serverId) const;
+    const QVector<MusicLibrary::Album>& newest(const QString& serverId) const;
+
+    // Has this level been fetched? Asked rather than inferred from "is the list empty", for the reason
+    // artistsLoaded gives: a genuinely empty level would otherwise be re-fetched on every Back, for ever.
+    bool playlistsLoaded(const QString& serverId) const;
+    bool starredLoaded(const QString& serverId) const;
+    bool newestLoaded(const QString& serverId) const;
+
+    // ---- Telling the server (issue #193, increment 6) --------------------------------------------------
+
+    // Star or unstar one qualified id on the server named inside it. BEST EFFORT BY CONTRACT: the local
+    // favourite has already been written and is the source of truth, so a failure here leaves the press
+    // standing and is reported once - reverting the star the user just pressed because a box is asleep is
+    // the worse of the two wrong answers, and it is the one that looks like the button is broken.
+    //
+    // A no-op (with a failed Result) for anything that is not a qualified Artist/Album/Track id - which
+    // includes every local file path and the one Virtual container this app invents.
+    void setStarred(const QString& qualifiedId, bool starred, Done done);
 
     // ---- Playback and art -----------------------------------------------------------------------------
     // The signed stream url for a qualified TRACK id. Empty for anything else, including a local file path —
@@ -130,6 +173,19 @@ private:
         QSet<QString>          loadedAlbums;     // qualified album keys whose tracks have been fetched
         QSet<QString>          loadedArtists;    // qualified artist keys whose albums have been fetched
         bool                   artistsLoaded = false;
+        // The three flat levels (#193 increment 6). Rows, not a second Index - see the header.
+        //
+        // ...and `sections`, which IS a second Index and has to be: it holds the containers this app
+        // invented (a playlist rendered as an album, the starred loose tracks' record). Subsonic.h states
+        // the two bugs that keeping them out of `idx` avoids - an artists level that grows rows nobody made,
+        // and an ordinary getArtists refresh destroying the record a track row on screen is queued behind.
+        MusicLibrary::Index          sections;
+        QVector<MusicLibrary::Album> playlists;
+        Subsonic::Starred            starredRows;
+        QVector<MusicLibrary::Album> newestAlbums;
+        bool playlistsLoaded = false;
+        bool starredLoaded   = false;
+        bool newestLoaded    = false;
     };
 
     Cache& cacheFor(const QString& serverId);

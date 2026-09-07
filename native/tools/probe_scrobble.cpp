@@ -51,6 +51,9 @@
 #include "LastFmClient.h"
 #include "BuiltinSecretBlob.h"
 #include "ScrobbleProvider.h"
+#include "Subsonic.h"                   // the protocol the third provider speaks (#193 increment 6)
+#include "SubsonicScrobbleProvider.h"
+#include "SubsonicServerStore.h"
 #include "Settings.h"
 #include "SettingsTxn.h"
 #include "ProfileStore.h"
@@ -66,6 +69,8 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QDateTime>
+#include <QUrl>
 #include <QUrlQuery>
 #include <cstdio>
 
@@ -295,6 +300,90 @@ private:
         c->disconnectFromHost();
     }
 };
+
+// ==================================================================================================
+// A FAKE SUBSONIC SERVER (issue #193, increment 6)
+// ==================================================================================================
+// Everything a Subsonic server answers arrives as HTTP 200 with an envelope inside, INCLUDING every error -
+// which is the trap the whole protocol sets and the reason this fake answers 200 to everything. A fake that
+// used HTTP statuses would let a status-only client pass, which is exactly the bug being defended against.
+//
+// NO REAL SERVER AND NO REAL ACCOUNT. It listens on 127.0.0.1 on an ephemeral port, the password below is
+// the literal string "probe-not-a-real-password", and 8g asserts that neither it nor the token derived from
+// it appears in anything the app would show, log or persist.
+class FakeSubsonic : public QObject
+{
+public:
+    QTcpServer server;
+    QByteArray answerWith;              // the envelope to reply with; empty == a plain ok
+    QStringList methods;                // "scrobble", "star", "unstar" ... in arrival order
+    QVector<QUrlQuery> queries;         // every request's query, in arrival order
+
+    FakeSubsonic() { connect(&server, &QTcpServer::newConnection, this, &FakeSubsonic::onConn); }
+    bool listen() { return server.listen(QHostAddress::LocalHost, 0); }
+    QString root() const
+    { return QStringLiteral("http://127.0.0.1:") + QString::number(server.serverPort()); }
+    void forget() { methods.clear(); queries.clear(); }
+
+    // Every value a repeated parameter carried on the LAST request, in order.
+    QStringList valuesOf(const QString& key) const
+    {
+        QStringList out;
+        if (queries.isEmpty()) return out;
+        for (const auto& kv : queries.last().queryItems())
+            if (kv.first == key) out << kv.second;
+        return out;
+    }
+    QString lastValue(const QString& key) const
+    { return queries.isEmpty() ? QString() : queries.last().queryItemValue(key); }
+
+private:
+    void onConn()
+    {
+        while (QTcpSocket* c = server.nextPendingConnection())
+            connect(c, &QTcpSocket::readyRead, this, [this, c] { onData(c); });
+    }
+    void onData(QTcpSocket* c)
+    {
+        const QByteArray req = c->readAll();
+        const int hdrEnd = req.indexOf("\r\n\r\n");
+        if (hdrEnd < 0) return;
+        const QList<QByteArray> reqLine = req.left(hdrEnd).split('\n').value(0).trimmed().split(' ');
+        const QUrl u(QString::fromUtf8(reqLine.value(1)));
+        QString method = u.path();
+        method = method.mid(method.lastIndexOf(QLatin1Char('/')) + 1);
+        if (method.endsWith(QStringLiteral(".view"))) method.chop(5);
+        methods << method;
+        queries << QUrlQuery(u.query());
+
+        const QByteArray body = answerWith.isEmpty()
+            ? QByteArray("<subsonic-response status=\"ok\" version=\"1.16.1\"/>")
+            : answerWith;
+        const QByteArray out = "HTTP/1.1 200 OK\r\n"                  // ALWAYS 200 - see the note above
+                               "Content-Type: text/xml\r\n"
+                               "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
+                               "Connection: close\r\n\r\n" + body;
+        c->write(out);
+        c->flush();
+        c->disconnectFromHost();
+    }
+};
+
+static Track subsonicTrack(const QString& sourceId, const QString& title, int durationSec)
+{
+    Track t = musicTrack(QStringLiteral("Amber"), title, durationSec);
+    t.origin   = Scrobble::Origin::Server;
+    t.sourceId = sourceId;
+    return t;
+}
+
+// Play a track past its threshold through a Scrobbler, the way the host reports it.
+static void playThrough(Scrobbler& s, const Track& t, int seconds)
+{
+    s.trackStarted(t);
+    for (int i = 0; i <= seconds; ++i) s.positionTick(double(i));
+    s.playbackStopped();
+}
 
 // Spin the event loop until `pred` holds or the deadline passes. Returns whether it held.
 static bool spinUntil(std::function<bool()> pred, int msec = 5000)
@@ -1212,6 +1301,374 @@ int main(int argc, char** argv)
         Settings::setScrobbleEnabled(false);
         ScrobbleQueue::clear(QStringLiteral("lastfm"));
         ScrobbleQueue::setLastError(QStringLiteral("lastfm"), QString());
+    }
+
+    // =====================================================================================================
+    // 8. A MUSIC SERVER AS A SCROBBLE DESTINATION (issue #193, increment 6)
+    // =====================================================================================================
+    // The THIRD implementation of this seam, and the first that is not a public service. What is under test
+    // is not the Subsonic protocol - probe_subsonic drives every pure part of that - but the seam itself:
+    //
+    //   * a destination that can only be told about SOME listens (a music server has no way to name a file
+    //     on this disk), which is a queue-jamming bug if the orchestrator files the others with it anyway;
+    //   * the DOUBLE-COUNT COORDINATION, driven both ways, including the arm that would count a listen zero
+    //     times instead of once;
+    //   * a supplier's own id surviving the offline queue, because `scrobble.view` takes an id and nothing
+    //     else and a listen that spends a night on disk arrives without one otherwise;
+    //   * a LOVE that is a library edit rather than a broadcast, and is therefore gated differently;
+    //   * and, again, that no credential reaches anything the app shows, logs or persists.
+    {
+        FakeSubsonic fake;
+        CHECK(fake.listen(), "subsonic: the fake music server is listening on loopback");
+
+        const QString sidA = QStringLiteral("11111111-1111-4111-8111-111111111111");
+        const QString sidB = QStringLiteral("22222222-2222-4222-8222-222222222222");
+        SubsonicServer srv;
+        srv.id = sidA;
+        srv.name = QStringLiteral("Fake Navidrome");
+        srv.url = fake.root();
+        srv.username = QStringLiteral("probe");
+        srv.password = QStringLiteral("probe-not-a-real-password");
+        srv.allowPlainHttp = true;            // loopback http, explicitly opted into - never a downgrade
+        SubsonicServerStore::add(srv);
+
+        const QString trackA = Subsonic::qualify(sidA, Subsonic::Kind::Track, QStringLiteral("s-1"));
+        const QString trackA2 = Subsonic::qualify(sidA, Subsonic::Kind::Track, QStringLiteral("s-2"));
+        const QString trackB = Subsonic::qualify(sidB, Subsonic::Kind::Track, QStringLiteral("s-1"));
+        const QString providerId = SubsonicScrobbleProvider::idFor(sidA);
+        ScrobbleQueue::clear(providerId);
+        ScrobbleQueue::setLastError(providerId, QString());
+
+        // ---- 8a. who this destination is, and which listens it can be told about ----------------------
+        {
+            SubsonicScrobbleProvider p(sidA);
+            CHECK(p.id() == QStringLiteral("subsonic:") + sidA,
+                  "subsonic: the provider id carries the SERVER - one queue, one backoff and one counter "
+                  "per server, so a batch is homogeneous and one asleep box does not hold up another");
+            CHECK(p.displayName() == QStringLiteral("Fake Navidrome"),
+                  "subsonic: ...and the status line names the server, which is what makes it an answer");
+            CHECK(p.configured(), "subsonic: a saved server with a usable address is configured");
+
+            CHECK(p.accepts(subsonicTrack(trackA, QStringLiteral("Mine"), 60)),
+                  "subsonic: a play of THIS server's track can be reported to it");
+            CHECK(!p.accepts(subsonicTrack(trackB, QStringLiteral("Theirs"), 60)),
+                  "subsonic: ...and another server's cannot - its id means nothing here, and queueing it "
+                  "would jam this queue behind a row that can never be delivered");
+            CHECK(!p.accepts(musicTrack(QStringLiteral("Amber"), QStringLiteral("A local file"), 60)),
+                  "subsonic: nor can a local file: scrobble.view takes an id and there is no id for it");
+            CHECK(p.ownsSource(subsonicTrack(trackA, QStringLiteral("Mine"), 60)),
+                  "subsonic: a play this server served is one it OWNS - reporting it back is the first "
+                  "count of that play, not a second one");
+            CHECK(p.supportsLove() && p.loveIsLibraryEdit(),
+                  "subsonic: a star is a library edit rather than a broadcast");
+
+            SubsonicScrobbleProvider gone(sidB);
+            CHECK(!gone.configured(),
+                  "subsonic: a server that is not in the store is not configured - which is how a REMOVED "
+                  "server stops being a destination with nothing having to hunt its provider down");
+            CHECK(!gone.ownsSource(subsonicTrack(trackA, QStringLiteral("Mine"), 60)),
+                  "subsonic: ...and it owns nothing");
+        }
+
+        // ---- 8b. now playing: ephemeral, and never queued --------------------------------------------
+        {
+            Settings::setScrobbleEnabled(true);
+            Settings::setScrobbleServerForwards(false);
+            fake.forget();
+            Scrobbler s;
+            s.setProvider(new SubsonicScrobbleProvider(sidA));
+            s.trackStarted(subsonicTrack(trackA, QStringLiteral("Announced"), 600));
+            spinUntil([&] { return !fake.methods.isEmpty(); });
+            CHECK(fake.methods.value(0) == QStringLiteral("scrobble"),
+                  "subsonic: a track starting announces itself through scrobble.view");
+            CHECK(fake.lastValue(QStringLiteral("submission")) == QStringLiteral("false"),
+                  "subsonic: ...as submission=false, the ephemeral hint");
+            CHECK(fake.lastValue(QStringLiteral("time")).isEmpty(),
+                  "subsonic: ...carrying NO time, because a now-playing hint is about this moment and a "
+                  "timestamp on it would be a stale claim the instant it arrived");
+            CHECK(fake.lastValue(QStringLiteral("id")) == QStringLiteral("s-1"),
+                  "subsonic: ...naming the server's OWN id for the track");
+            CHECK(ScrobbleQueue::count(providerId) == 0,
+                  "subsonic: a now-playing is NEVER queued - delivering one four minutes late would tell "
+                  "the server about something the listener finished");
+            // Only a few ticks: nowhere near the threshold, so nothing is owed at the boundary either.
+            s.positionTick(0.0); s.positionTick(1.0);
+            s.playbackStopped();
+            CHECK(ScrobbleQueue::count(providerId) == 0,
+                  "subsonic: ...and stopping short of the threshold still queues nothing");
+        }
+
+        // ---- 8c. a completed listen: submission=true, backdated in MILLISECONDS ------------------------
+        {
+            Settings::setScrobbleEnabled(true);
+            Settings::setScrobbleServerForwards(false);
+            ScrobbleQueue::clear(providerId);
+            fake.forget();
+            Scrobbler s;
+            s.setProvider(new SubsonicScrobbleProvider(sidA));
+            playThrough(s, subsonicTrack(trackA, QStringLiteral("Heard"), 60), 40);
+            spinUntil([&] { return ScrobbleQueue::count(providerId) == 0
+                                && fake.methods.count(QStringLiteral("scrobble")) >= 2; });
+            CHECK(ScrobbleQueue::count(providerId) == 0,
+                  "subsonic: a listened-to track is delivered and leaves the queue");
+            CHECK(ScrobbleQueue::delivered(providerId) >= 1,
+                  "subsonic: ...and the confidence counter says so");
+            CHECK(fake.lastValue(QStringLiteral("submission")) == QStringLiteral("true"),
+                  "subsonic: the durable form is submission=true");
+            const QString ms = fake.lastValue(QStringLiteral("time"));
+            CHECK(ms.size() >= 13,
+                  "subsonic: the time is in MILLISECONDS - seconds here would file the play in 1970, where "
+                  "nothing displays it and nothing complains");
+            CHECK(ms.toLongLong() / 1000 >= QDateTime::currentSecsSinceEpoch() - 300,
+                  "subsonic: ...and it is the moment the track STARTED, backdated rather than restamped");
+            CHECK(ScrobbleQueue::lastError(providerId).isEmpty(),
+                  "subsonic: a success clears the last error");
+        }
+
+        // ---- 8d. the offline queue carries the SERVER'S OWN ID across a restart ------------------------
+        {
+            Scrobble::Play p;
+            p.track      = subsonicTrack(trackA, QStringLiteral("Kept overnight"), 300);
+            p.listenedAt = 1700000000LL;
+            const QVector<Scrobble::Play> back = ScrobbleQueue::decode(ScrobbleQueue::encode({ p }));
+            CHECK(back.size() == 1 && back.at(0).track.sourceId == trackA,
+                  "subsonic: the supplier's own id survives the queue - without it a listen that waited out "
+                  "an outage arrives with no way to name the track, and can never be delivered at all");
+            CHECK(back.size() == 1 && back.at(0).listenedAt == 1700000000LL,
+                  "subsonic: ...with its original timestamp, as every queued listen keeps");
+            CHECK(!QString::fromUtf8(ScrobbleQueue::encode({ p })).contains(QStringLiteral("http")),
+                  "subsonic: and what is written is the ID, never the signed stream url - the url carries "
+                  "the token, and this row goes on disk");
+            // A LOCAL play still encodes to what it always did: no id, no extra key.
+            Scrobble::Play local;
+            local.track      = musicTrack(QStringLiteral("Amber"), QStringLiteral("A file"), 300);
+            local.listenedAt = 1700000000LL;
+            CHECK(!QString::fromUtf8(ScrobbleQueue::encode({ local })).contains(QStringLiteral("sid")),
+                  "subsonic: ...and a local listen costs not one extra byte");
+        }
+
+        // ---- 8e. THE DOUBLE-COUNT COORDINATION, both ways ---------------------------------------------
+        // Two destinations at once: the music server, and a ListenBrainz pointed at a port nobody is
+        // listening on so its queue simply fills. What is being asserted is WHO IS TOLD, not who succeeded.
+        {
+            Settings::setListenBrainzToken(QString::fromLatin1(kFakeToken));
+            Settings::setListenBrainzApiUrl(QStringLiteral("http://127.0.0.1:1"));
+            Settings::setScrobbleEnabled(true);
+
+            // --- OFF (the default): the server AND the upstream service are both told. ---
+            Settings::setScrobbleServerForwards(false);
+            ScrobbleQueue::clear(providerId);
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            fake.forget();
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                s.addProvider(new ListenBrainzClient(nullptr));
+                playThrough(s, subsonicTrack(trackA, QStringLiteral("Counted once"), 60), 40);
+                // Spin on the SERVER's side of it as well as the queue's: a queue append is synchronous, so
+                // waiting only on that returns before the event loop has run once and the fake has been
+                // handed nothing at all.
+                spinUntil([&] { return ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1
+                                    && fake.methods.count(QStringLiteral("scrobble")) >= 2; });
+                CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1,
+                      "coordination OFF: a server-sourced play is reported to the listening service too - "
+                      "which is right when the server forwards nothing, the ordinary setup");
+                CHECK(fake.methods.contains(QStringLiteral("scrobble")),
+                      "coordination OFF: ...and to the server itself");
+            }
+
+            // --- ON: the server ONLY. The upstream service is left to the server, which is the whole
+            //     point; and the SERVER IS STILL TOLD, because it can only forward what it hears.
+            Settings::setScrobbleServerForwards(true);
+            ScrobbleQueue::clear(providerId);
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            fake.forget();
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                s.addProvider(new ListenBrainzClient(nullptr));
+                playThrough(s, subsonicTrack(trackA2, QStringLiteral("Counted once too"), 60), 40);
+                spinUntil([&] { return fake.methods.count(QStringLiteral("scrobble")) >= 2
+                                    && ScrobbleQueue::count(providerId) == 0; });
+                CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 0,
+                      "coordination ON: the listening service is NOT told - the server forwards it, and "
+                      "telling both is the double count the setting exists to prevent");
+                CHECK(fake.methods.count(QStringLiteral("scrobble")) >= 1,
+                      "coordination ON: ...but the SERVER IS STILL TOLD. Suppressing this too would count "
+                      "the listen zero times instead of once: scrobble.view is the only way a client play "
+                      "reaches the server, so a server told nothing forwards nothing");
+                CHECK(fake.lastValue(QStringLiteral("submission")) == QStringLiteral("true"),
+                      "coordination ON: ...as a real, durable submission");
+            }
+
+            // --- ...and a LOCAL play is unaffected either way: there is no server in the middle of it. ---
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            ScrobbleQueue::clear(providerId);
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                s.addProvider(new ListenBrainzClient(nullptr));
+                playThrough(s, musicTrack(QStringLiteral("Amber"), QStringLiteral("On this disk"), 60), 40);
+                spinUntil([&] { return ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1; });
+                CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1,
+                      "coordination ON: music on this device still scrobbles - the setting is about plays a "
+                      "server served, and nothing else");
+                CHECK(ScrobbleQueue::count(providerId) == 0,
+                      "coordination: ...and the music server is not offered a listen it could never name, "
+                      "which is what keeps its queue from jamming behind an undeliverable row");
+            }
+            Settings::setScrobbleServerForwards(false);
+            Settings::setListenBrainzApiUrl(QString());
+            Settings::setListenBrainzToken(QString());
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            ScrobbleQueue::setLastError(QStringLiteral("listenbrainz"), QString());
+        }
+
+        // ---- 8f. the failure envelopes, which arrive as 200 -------------------------------------------
+        {
+            Settings::setScrobbleEnabled(true);
+            ScrobbleQueue::clear(providerId);
+            ScrobbleQueue::setLastError(providerId, QString());
+
+            // A REFUSED CREDENTIAL. The listens are KEPT: the user can fix the password and they still land.
+            fake.answerWith = "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                              "<error code=\"40\" message=\"Wrong username or password.\"/>"
+                              "</subsonic-response>";
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                playThrough(s, subsonicTrack(trackA, QStringLiteral("Refused"), 60), 40);
+                spinUntil([&] { return !ScrobbleQueue::lastError(providerId).isEmpty(); });
+                CHECK(ScrobbleQueue::count(providerId) == 1,
+                      "subsonic: a 200 carrying a failure envelope is NOT a success - the listen is kept. "
+                      "A client that read the HTTP status would have reported it delivered and lost it");
+                CHECK(ScrobbleQueue::lastError(providerId)
+                          == QStringLiteral("Wrong username or password."),
+                      "subsonic: ...and the user is told the SERVER'S OWN words");
+            }
+
+            // PERMANENTLY GONE. Dropped, or the queue jams for ever behind one row and every listen after
+            // it is lost too.
+            fake.answerWith = "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                              "<error code=\"70\" message=\"The requested data was not found.\"/>"
+                              "</subsonic-response>";
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                s.retryNow();
+                spinUntil([&] { return ScrobbleQueue::count(providerId) == 0; });
+                CHECK(ScrobbleQueue::count(providerId) == 0,
+                      "subsonic: a listen the server says will never be accepted is DROPPED - keeping it "
+                      "would stop everything behind it being delivered, which is a silent total failure");
+            }
+            fake.answerWith.clear();
+            ScrobbleQueue::clear(providerId);
+            ScrobbleQueue::setLastError(providerId, QString());
+        }
+
+        // ---- 8g. the favourite verb: star and unstar, and the gate it passes ---------------------------
+        {
+            fake.forget();
+            Settings::setScrobbleEnabled(true);
+            Scrobbler s;
+            s.setProvider(new SubsonicScrobbleProvider(sidA));
+            s.noteFavorite(subsonicTrack(trackA, QStringLiteral("Loved"), 300), true);
+            spinUntil([&] { return !fake.methods.isEmpty(); });
+            CHECK(fake.methods.value(0) == QStringLiteral("star"),
+                  "subsonic: the favourite verb the app already has reaches the server as star.view");
+            CHECK(fake.lastValue(QStringLiteral("id")) == QStringLiteral("s-1"),
+                  "subsonic: ...naming the SONG id, not an album or artist id in the same namespace");
+
+            fake.forget();
+            s.noteFavorite(subsonicTrack(trackA, QStringLiteral("Loved"), 300), false);
+            spinUntil([&] { return !fake.methods.isEmpty(); });
+            CHECK(fake.methods.value(0) == QStringLiteral("unstar"),
+                  "subsonic: and un-starring reaches it as unstar.view");
+
+            // THE GATE A LOVE PASSES IS NOT THE GATE A LISTEN PASSES. Scrobbling off, and the star still
+            // reaches the server: it is an edit to the user's OWN library, in the place the track already
+            // lives, and gating it on the listening-history switch makes a pressed button do nothing.
+            Settings::setScrobbleEnabled(false);
+            fake.forget();
+            s.noteFavorite(subsonicTrack(trackA, QStringLiteral("Loved"), 300), true);
+            spinUntil([&] { return !fake.methods.isEmpty(); });
+            CHECK(fake.methods.value(0) == QStringLiteral("star"),
+                  "subsonic: a star still reaches the server with scrobbling switched off - a library edit "
+                  "is not a broadcast, and two unrelated things behind one switch is a feature that "
+                  "silently stops working");
+
+            // ...and the coordination is about PLAYS, not stars. A server that forwards its plays upstream
+            // does not forward its stars, and suppressing the star would be the same bug in another dress.
+            Settings::setScrobbleEnabled(true);
+            Settings::setScrobbleServerForwards(true);
+            fake.forget();
+            s.noteFavorite(subsonicTrack(trackA, QStringLiteral("Loved"), 300), true);
+            spinUntil([&] { return !fake.methods.isEmpty(); });
+            CHECK(fake.methods.value(0) == QStringLiteral("star"),
+                  "subsonic: ...and with the double-count coordination on, because that is about plays");
+            Settings::setScrobbleServerForwards(false);
+
+            // A track from ANOTHER server is not this destination's to star, and nothing is sent at all.
+            fake.forget();
+            s.noteFavorite(subsonicTrack(trackB, QStringLiteral("Somebody else's"), 300), true);
+            spinUntil([&] { return !fake.methods.isEmpty(); }, 400);
+            CHECK(fake.methods.isEmpty(),
+                  "subsonic: a track this server never held is not starred here - matching on artist and "
+                  "title instead would star the wrong record on the wrong box");
+        }
+
+        // ---- 8h. THE CREDENTIAL SCAN ------------------------------------------------------------------
+        // The password, and the token derived from it, appear in nothing the app shows, logs or persists.
+        // An assertion rather than a claim: `QNetworkReply::errorString()` embeds the url, and for this
+        // protocol the url IS the credential, so the one idiomatic diagnostic line is the leak.
+        {
+            ScrobbleQueue::clear(providerId);
+            Settings::setScrobbleEnabled(true);
+            // Point the server at a dead port so a TRANSPORT failure - the errorString() path - is what
+            // produces the message. This is the arm the rule is actually about.
+            SubsonicServer dead;
+            SubsonicServerStore::get(sidA, dead);
+            const QString liveUrl = dead.url;
+            dead.url = QStringLiteral("http://127.0.0.1:1");
+            SubsonicServerStore::update(dead);
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                playThrough(s, subsonicTrack(trackA, QStringLiteral("Unreachable"), 60), 40);
+                spinUntil([&] { return !ScrobbleQueue::lastError(providerId).isEmpty(); });
+            }
+            QByteArray scanned;
+            scanned += ScrobbleQueue::lastError(providerId).toUtf8();
+            scanned += ScrobbleQueue::encode(ScrobbleQueue::head(providerId, 50));
+            {
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                scanned += s.statusLine().toUtf8();
+            }
+            CHECK(!scanned.contains(QByteArray("probe-not-a-real-password")),
+                  "subsonic: the password appears in no message, no status line and no queue row");
+            const QString salt = Subsonic::saltFrom(Q_UINT64_C(0x0123456789abcdef));
+            CHECK(!scanned.contains(Subsonic::tokenFor(QStringLiteral("probe-not-a-real-password"),
+                                                       salt).toUtf8()),
+                  "subsonic: nor does a token derived from it");
+            CHECK(!scanned.contains(QByteArray("&t=")) && !scanned.contains(QByteArray("&s=")),
+                  "subsonic: nor anything shaped like a signed request - the whole family of 'somebody "
+                  "logged the failing url', which for this protocol logs the credential");
+            CHECK(!scanned.contains(QByteArray("/rest/")),
+                  "subsonic: ...and no request url reaches a message at all, which is the rule rather than "
+                  "the symptom");
+            CHECK(!ScrobbleQueue::lastError(providerId).isEmpty(),
+                  "subsonic: ...while the user is still TOLD something went wrong, in our own words");
+
+            dead.url = liveUrl;
+            SubsonicServerStore::update(dead);
+            ScrobbleQueue::clear(providerId);
+            ScrobbleQueue::setLastError(providerId, QString());
+        }
+
+        SubsonicServerStore::remove(sidA);
+        Settings::setScrobbleEnabled(false);
+        Settings::setScrobbleServerForwards(false);
     }
 
     if (fails) { printf("SCROBBLE-FAIL %d\n", fails); return 1; }

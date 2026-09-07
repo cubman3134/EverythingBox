@@ -87,6 +87,15 @@ QByteArray ScrobbleQueue::encode(const QVector<Scrobble::Play>& plays)
             o.insert(QStringLiteral("k"), kindToken(p.track.kind));
         if (p.track.origin != Scrobble::Origin::LocalLibrary)
             o.insert(QStringLiteral("o"), originToken(p.track.origin));
+        // THE SUPPLIER'S OWN ID (#193 increment 6), when there is one. It has to survive a night on disk or a
+        // music server can never be told about a listen it was offline for: `scrobble.view` takes the id and
+        // nothing else, so a row that arrives without it is a row that can never be delivered. Absent for
+        // every local and addon play, which is the ordinary case and costs nothing.
+        //
+        // It is not a credential — Scrobble.h says so where the field is declared, and the reason the point
+        // is worth making is that the LAZY way to carry the same fact would have been the signed stream url,
+        // which would have written the user's token into this file.
+        if (!p.track.sourceId.isEmpty()) o.insert(QStringLiteral("sid"), p.track.sourceId);
         arr.append(o);
     }
     return QJsonDocument(arr).toJson(QJsonDocument::Compact);
@@ -111,6 +120,7 @@ QVector<Scrobble::Play> ScrobbleQueue::decode(const QByteArray& json)
         p.track.durationSec   = o.value(QStringLiteral("d")).toInt();
         p.track.kind          = kindFromToken(o.value(QStringLiteral("k")).toString());
         p.track.origin        = originFromToken(o.value(QStringLiteral("o")).toString());
+        p.track.sourceId      = o.value(QStringLiteral("sid")).toString();
         // A row with no timestamp cannot be backdated and would land at "now" — which is the one outcome this
         // whole file exists to prevent. Drop it rather than deliver a lie.
         if (p.listenedAt <= 0) continue;

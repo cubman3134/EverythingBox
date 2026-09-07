@@ -3811,6 +3811,28 @@ void HomeView::mergeAlbumInteractive(const QString& albumKey)
 // A readable one-row failure instead of a blank shelf. The message is the SERVER's own words or one of
 // SubsonicClient's transport sentences - never a request, because a Subsonic request url carries the user's
 // token and salt (SubsonicClient.h says why at length).
+namespace {
+
+// The three server-only door types (#193 increment 6) and the prefix each of their keys carries. ONE reader
+// for both questions, so the four places that route these rows - activation, Back, the library-changed
+// repopulate and the artwork refresh - cannot answer them differently. That drift is exactly what
+// browse/LeafRoute.h exists to have removed for leaves.
+bool isMusicSectionType(const QString& t)
+{
+    return t == QString::fromLatin1(browse::kMusicPlaylistsType)
+        || t == QString::fromLatin1(browse::kMusicStarredType)
+        || t == QString::fromLatin1(browse::kMusicNewestType);
+}
+
+const char* musicSectionPrefix(const QString& type)
+{
+    if (type == QString::fromLatin1(browse::kMusicPlaylistsType)) return browse::kMusicPlaylistsPrefix;
+    if (type == QString::fromLatin1(browse::kMusicStarredType))   return browse::kMusicStarredPrefix;
+    return browse::kMusicNewestPrefix;
+}
+
+} // namespace
+
 void HomeView::showMusicServerError(const QString& title, const QString& why)
 {
     MediaCatalog c;
@@ -3846,7 +3868,8 @@ void HomeView::scheduleMusicArtRefresh()
         if (stack_.isEmpty()) return;
         const QString t = stack_.last().item.type;
         if (t == QStringLiteral("_musicserver") || t == QStringLiteral("_musicartist")
-            || t == QStringLiteral("_musicalbum") || t == QStringLiteral("_musicroot"))
+            || t == QStringLiteral("_musicalbum") || t == QStringLiteral("_musicroot")
+            || isMusicSectionType(t))
             loadTop();
     });
 }
@@ -3921,11 +3944,117 @@ void HomeView::renderMusicServer(const QString& serverId)
     browse::MusicEmptyNote note;
     if (idx.artists.isEmpty())
         note.text = tr("This music server has no artists in it yet.");
-    MediaCatalog cat = browse::musicArtistsCatalog(idx, note, musicCover(), /*musicServerCount*/ 0);
+    // ...and the three doors this server has an answer for (#193 increment 6), keyed by THIS server so a
+    // door pressed here cannot open another server's playlists.
+    MediaCatalog cat = browse::musicArtistsCatalog(idx, note, musicCover(), /*musicServerCount*/ 0,
+                                                   /*serverDoorsFor*/ serverId);
     if (!stack_.isEmpty()) cat.title = stack_.last().title;
     showSyntheticCatalog(cat);
 }
 
+
+// ==================================================================================================
+// The three levels the server already has an answer for (issue #193, increment 6)
+// ==================================================================================================
+// BY VALUE - see the declaration in HomeView.h. `it.type` is a reference into the model this function is
+// about to replace, and a const& here reads as an empty string from the first repopulate onwards.
+void HomeView::openMusicSectionLevel(QString type, QString serverId)
+{
+    SubsonicServer srv;
+    if (serverId.isEmpty() || !SubsonicServerStore::get(serverId, srv)) return;  // removed under the row
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.title = type == QString::fromLatin1(browse::kMusicPlaylistsType) ? tr("Playlists")
+              : type == QString::fromLatin1(browse::kMusicStarredType)   ? tr("Starred")
+                                                                         : tr("Recently added");
+    lvl.item.id = type;
+    lvl.item.type = type;
+    lvl.item.expandable = true;
+    lvl.item.mime = QString::fromLatin1(musicSectionPrefix(type)) + serverId;   // Back repopulates
+    stack_.push_back(lvl);
+    populateMusicSection(type, serverId);
+}
+
+void HomeView::populateMusicSection(QString type, QString serverId)
+{
+    SubsonicClient& c = SubsonicClient::instance();
+    const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+    const bool playlists = type == QString::fromLatin1(browse::kMusicPlaylistsType);
+    const bool starred   = type == QString::fromLatin1(browse::kMusicStarredType);
+    const bool loaded = playlists ? c.playlistsLoaded(serverId)
+                      : starred   ? c.starredLoaded(serverId)
+                                  : c.newestLoaded(serverId);
+    if (!loaded)
+    {
+        // The SAME generation latch every other music fetch uses: a reply that lands after the user has
+        // navigated away must not repaint the level they are standing in now.
+        const int gen = ++musicFetchGen_;
+        showMusicLoading(title);
+        auto done = [this, type, serverId, title, gen](const SubsonicClient::Result& r) {
+            if (gen != musicFetchGen_) return;
+            if (!r.ok) { showMusicServerError(title, r.message); return; }
+            if (type == QString::fromLatin1(browse::kMusicStarredType)) adoptStarredFavourites(serverId);
+            renderMusicSection(type, serverId);
+        };
+        if (playlists)    c.fetchPlaylists(serverId, done);
+        else if (starred) c.fetchStarred(serverId, done);
+        else              c.fetchNewest(serverId, done);
+        return;
+    }
+    renderMusicSection(type, serverId);
+}
+
+void HomeView::renderMusicSection(QString type, QString serverId)
+{
+    SubsonicClient& c = SubsonicClient::instance();
+    const QString title = stack_.isEmpty() ? tr("Music") : stack_.last().title;
+    browse::MusicEmptyNote note;
+    QVector<MusicLibrary::Artist>     artists;
+    QVector<MusicLibrary::Album>      albums;
+    QVector<MusicLibrary::IndexTrack> tracks;
+    if (type == QString::fromLatin1(browse::kMusicPlaylistsType))
+    {
+        albums = c.playlists(serverId);
+        note.text = tr("There are no playlists on this music server yet.");
+    }
+    else if (type == QString::fromLatin1(browse::kMusicStarredType))
+    {
+        const Subsonic::Starred& s = c.starred(serverId);
+        artists = s.artists; albums = s.albums; tracks = s.tracks;
+        note.text = tr("You have not starred anything on this music server yet.");
+    }
+    else
+    {
+        albums = c.newest(serverId);
+        note.text = tr("Nothing has been added to this music server yet.");
+    }
+    prefetchAlbumCovers(albums);
+    showSyntheticCatalog(browse::musicSectionCatalog(title, artists, albums, tracks, note, musicCover()));
+}
+
+void HomeView::adoptStarredFavourites(const QString& serverId)
+{
+    // UNION, NEVER REPLACE. Subsonic::starredAdditions returns ADDITIONS and has no other return value, so
+    // there is no removal here to get wrong: a favourite this server has never held - a film, a game, a
+    // track on another server - is untouched by reading this list. Making the local list "match" the remote
+    // one would empty somebody's shelf the first time they opened a Starred level.
+    QSet<QString> have;
+    for (const FavoriteItem& f : FavoritesStore::list()) have.insert(f.itemId);
+    const Subsonic::Starred& s = SubsonicClient::instance().starred(serverId);
+    for (const MusicLibrary::IndexTrack& t : s.tracks)
+    {
+        if (t.path.isEmpty() || have.contains(t.path)) continue;
+        FavoriteItem f;
+        f.itemId   = t.path;          // the id a track ROW carries, or the heart on the row cannot find it
+        f.title    = t.title;
+        f.subtitle = t.artist;
+        f.type     = QStringLiteral("track");
+        // addFromSource, not add: these stars CAME FROM this server, and add() would fire the love hook and
+        // send each one straight back to it - one request per track for the act of opening a level.
+        FavoritesStore::addFromSource(f);
+    }
+}
 
 void HomeView::openMusicArtistLevel(const QString& artistKey)
 {
@@ -4158,6 +4287,12 @@ void HomeView::onMusicLibraryChanged()
     if (top.item.type == QStringLiteral("_musicservers")) { populateMusicServers(); return; }
     if (top.item.type == QStringLiteral("_musicserver"))
         { populateMusicServer(browse::musicKeyOf(top.item.mime, browse::kMusicServerPrefix)); return; }
+    if (isMusicSectionType(top.item.type))
+    {
+        populateMusicSection(top.item.type,
+                             browse::musicKeyOf(top.item.mime, musicSectionPrefix(top.item.type)));
+        return;
+    }
     if (top.item.type == QStringLiteral("_musiccomposers")) { populateMusicComposers(); return; }
     if (top.item.type == QStringLiteral("_musiccomposer"))
         { populateMusicComposer(browse::musicKeyOf(top.item.mime, browse::kMusicComposerPrefix)); return; }
@@ -8194,6 +8329,11 @@ void HomeView::activateItem(int row)
         { openMusicServersLevel(); return; }
     if (it.type == QString::fromLatin1(browse::kMusicServerType))
         { openMusicServerLevel(browse::musicKeyOf(it.mime, browse::kMusicServerPrefix)); return; }
+    // The three levels the server already has an answer for (#193 increment 6). All three start with '_', so
+    // the themed XMB sends them down this ordinary browse path rather than to its per-leaf action chooser -
+    // the same idiom the composer and server doors use, and the reason they are reachable on that layout.
+    if (isMusicSectionType(it.type))
+        { openMusicSectionLevel(it.type, browse::musicKeyOf(it.mime, musicSectionPrefix(it.type))); return; }
     if (it.type == QString::fromLatin1(browse::kMusicAddServerType))
     {
         QMetaObject::invokeMethod(this, [this] { addMusicServerInteractive(); }, Qt::QueuedConnection);
@@ -9272,6 +9412,12 @@ void HomeView::loadTop()
     if (top.detail && top.item.type == QStringLiteral("_musicservers")) { populateMusicServers(); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicserver"))
         { populateMusicServer(browse::musicKeyOf(top.item.mime, browse::kMusicServerPrefix)); return; }
+    if (top.detail && isMusicSectionType(top.item.type))
+    {
+        populateMusicSection(top.item.type,
+                             browse::musicKeyOf(top.item.mime, musicSectionPrefix(top.item.type)));
+        return;
+    }
     if (top.detail && top.item.type == QStringLiteral("_musicartist"))
         { populateMusicArtist(browse::musicKeyOf(top.item.mime, browse::kMusicArtistPrefix)); return; }
     if (top.detail && top.item.type == QStringLiteral("_musicalbum"))

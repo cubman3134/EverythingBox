@@ -14,29 +14,35 @@
 
 namespace {
 
-const char* kKindArtist = "artist";
-const char* kKindAlbum  = "album";
-const char* kKindTrack  = "track";
-const char* kKindCover  = "cover";
+const char* kKindArtist   = "artist";
+const char* kKindAlbum    = "album";
+const char* kKindTrack    = "track";
+const char* kKindCover    = "cover";
+const char* kKindPlaylist = "playlist";
+const char* kKindVirtual  = "virtual";
 
 QString kindWord(Subsonic::Kind k)
 {
     switch (k)
     {
-        case Subsonic::Kind::Artist: return QString::fromLatin1(kKindArtist);
-        case Subsonic::Kind::Album:  return QString::fromLatin1(kKindAlbum);
-        case Subsonic::Kind::Track:  return QString::fromLatin1(kKindTrack);
-        case Subsonic::Kind::Cover:  return QString::fromLatin1(kKindCover);
+        case Subsonic::Kind::Artist:   return QString::fromLatin1(kKindArtist);
+        case Subsonic::Kind::Album:    return QString::fromLatin1(kKindAlbum);
+        case Subsonic::Kind::Track:    return QString::fromLatin1(kKindTrack);
+        case Subsonic::Kind::Cover:    return QString::fromLatin1(kKindCover);
+        case Subsonic::Kind::Playlist: return QString::fromLatin1(kKindPlaylist);
+        case Subsonic::Kind::Virtual:  return QString::fromLatin1(kKindVirtual);
     }
     return QString();
 }
 
 bool kindFromWord(const QString& w, Subsonic::Kind& out)
 {
-    if (w == QLatin1String(kKindArtist)) { out = Subsonic::Kind::Artist; return true; }
-    if (w == QLatin1String(kKindAlbum))  { out = Subsonic::Kind::Album;  return true; }
-    if (w == QLatin1String(kKindTrack))  { out = Subsonic::Kind::Track;  return true; }
-    if (w == QLatin1String(kKindCover))  { out = Subsonic::Kind::Cover;  return true; }
+    if (w == QLatin1String(kKindArtist))   { out = Subsonic::Kind::Artist;   return true; }
+    if (w == QLatin1String(kKindAlbum))    { out = Subsonic::Kind::Album;    return true; }
+    if (w == QLatin1String(kKindTrack))    { out = Subsonic::Kind::Track;    return true; }
+    if (w == QLatin1String(kKindCover))    { out = Subsonic::Kind::Cover;    return true; }
+    if (w == QLatin1String(kKindPlaylist)) { out = Subsonic::Kind::Playlist; return true; }
+    if (w == QLatin1String(kKindVirtual))  { out = Subsonic::Kind::Virtual;  return true; }
     return false;
 }
 
@@ -430,9 +436,13 @@ QVector<Subsonic::RemoteAlbum> Subsonic::readAlbums(const Node& root)
 QVector<Subsonic::RemoteSong> Subsonic::readSongs(const Node& root)
 {
     QVector<RemoteSong> out;
-    // "song" is the ID3 spelling (getAlbum, search3); "child" is the folder spelling (getMusicDirectory).
-    // Reading both costs one extra walk and makes this work against a server whose ID3 endpoints are off.
+    // "song" is the ID3 spelling (getAlbum, search3, getStarred2); "entry" is what a PLAYLIST's tracks are
+    // called (getPlaylist, #193 increment 6); "child" is the folder spelling (getMusicDirectory). Three
+    // spellings of the same element, and reading all three costs two extra walks and makes this work against
+    // a playlist, an album and a server whose ID3 endpoints are off - with ONE reader rather than three that
+    // would drift. The order is most-specific-first; a reply carries only one of them.
     QVector<const Node*> nodes = root.findAll(QStringLiteral("song"));
+    if (nodes.isEmpty()) nodes = root.findAll(QStringLiteral("entry"));
     if (nodes.isEmpty()) nodes = root.findAll(QStringLiteral("child"));
     for (const Node* n : nodes)
     {
@@ -601,4 +611,328 @@ void Subsonic::fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId
     int secs = 0;
     for (const MusicLibrary::IndexTrack& t : tracks) secs += t.durationSec;
     if (secs > 0) target->durationSec = secs;
+}
+
+// ==================================================================================================
+// WHAT THE SERVER ALREADY KNOWS (issue #193, increment 6)
+// ==================================================================================================
+
+QVector<Subsonic::RemotePlaylist> Subsonic::readPlaylists(const Node& root)
+{
+    QVector<RemotePlaylist> out;
+    for (const Node* n : root.findAll(QStringLiteral("playlist")))
+    {
+        RemotePlaylist p;
+        p.id          = n->attr(QStringLiteral("id"));
+        p.name        = n->attr(QStringLiteral("name"));
+        p.comment     = n->attr(QStringLiteral("comment"));
+        p.owner       = n->attr(QStringLiteral("owner"));
+        p.coverArt    = n->attr(QStringLiteral("coverArt"));
+        p.songCount   = n->attrInt(QStringLiteral("songCount"));
+        p.durationSec = n->attrInt(QStringLiteral("duration"));
+        if (p.id.isEmpty()) continue;   // a row that cannot be opened is worse than an absent row
+        out.push_back(p);
+    }
+    return out;
+}
+
+namespace {
+
+// One RemoteSong as the browse row it becomes, carrying the key of whatever record it is queued behind.
+// Shared by the playlist level and the starred level so the two cannot describe a track differently; the
+// ORDER is the caller's business, which is the whole reason this does not sort (see adoptPlaylist).
+MusicLibrary::IndexTrack songRow(const QString& serverId, const Subsonic::RemoteSong& s,
+                                 const QString& albumKey)
+{
+    MusicLibrary::IndexTrack t;
+    // THE QUALIFIED ID, NOT A STREAM URL - the rule fillAlbumTracks states at length. A stream url carries
+    // the token and the salt, and this struct is copied into queues and (for a saved playlist) onto disk.
+    const QString path = Subsonic::qualify(serverId, Subsonic::Kind::Track, s.id);
+    t.path        = path;
+    t.sourcePath  = path;
+    t.title       = s.title.isEmpty() ? path : s.title;
+    t.artist      = s.artist;
+    t.albumKey    = albumKey;
+    t.disc        = s.disc;
+    t.track       = s.track;
+    t.durationSec = s.durationSec;
+    t.hasCover    = false;
+    return t;
+}
+
+// Find an artist bucket by key, creating it if it is not there. Returns a pointer INTO idx.artists, which is
+// only valid until the vector next grows - every caller below uses it and drops it before pushing again.
+MusicLibrary::Artist* bucketFor(MusicLibrary::Index& idx, const QString& key, const QString& name)
+{
+    for (MusicLibrary::Artist& a : idx.artists) if (a.key == key) return &a;
+    MusicLibrary::Artist a;
+    a.key  = key;
+    a.name = name;
+    idx.artists.push_back(a);
+    return &idx.artists.last();
+}
+
+} // namespace
+
+QVector<MusicLibrary::Album> Subsonic::playlistRows(const QString& serverId,
+                                                    const QVector<RemotePlaylist>& playlists)
+{
+    QVector<MusicLibrary::Album> out;
+    for (const RemotePlaylist& p : playlists)
+    {
+        const QString key = qualify(serverId, Kind::Playlist, p.id);
+        if (key.isEmpty()) continue;
+        MusicLibrary::Album b;
+        b.key         = key;
+        b.title       = p.name;
+        // WHO MADE IT, in the album-artist slot, because that is where the album row's own builder reads the
+        // second line from and a playlist's owner is the one fact that distinguishes two identically named
+        // ones on a shared server. Empty for a personal server, which reads exactly as it did.
+        b.albumArtist = p.owner;
+        b.trackCount  = p.songCount;   // the server's own count; `tracks` fills in when it is opened
+        b.durationSec = p.durationSec;
+        b.discCount   = 1;
+        out.push_back(b);
+    }
+    return out;
+}
+
+QVector<MusicLibrary::Album> Subsonic::albumRows(const QString& serverId,
+                                                 const QVector<RemoteAlbum>& albums)
+{
+    QVector<MusicLibrary::Album> out;
+    for (const RemoteAlbum& a : albums)
+    {
+        const QString key = qualify(serverId, Kind::Album, a.id);
+        if (key.isEmpty()) continue;
+        MusicLibrary::Album b;
+        b.key         = key;
+        b.albumArtist = a.artist;
+        b.title       = a.name;
+        b.year        = a.year;
+        b.durationSec = a.durationSec;
+        b.trackCount  = a.songCount;
+        b.discCount   = 1;
+        b.mbidRelease = a.musicBrainzId;
+        out.push_back(b);
+    }
+    return out;
+}
+
+QVector<MusicLibrary::Artist> Subsonic::artistRows(const QString& serverId,
+                                                   const QVector<RemoteArtist>& artists)
+{
+    QVector<MusicLibrary::Artist> out;
+    for (const RemoteArtist& a : artists)
+    {
+        const QString key = qualify(serverId, Kind::Artist, a.id);
+        if (key.isEmpty()) continue;
+        MusicLibrary::Artist r;
+        r.key        = key;
+        r.name       = a.name;
+        r.albumCount = a.albumCount;
+        r.trackCount = 0;              // deliberate - see the note in Subsonic.h
+        r.mbid       = a.musicBrainzId;
+        out.push_back(r);
+    }
+    return out;
+}
+
+QString Subsonic::starredTracksKey(const QString& serverId)
+{
+    return qualify(serverId, Kind::Virtual, QStringLiteral("starred"));
+}
+
+Subsonic::Starred Subsonic::readStarred(const QString& serverId, const Node& root)
+{
+    Starred s;
+    s.artists = artistRows(serverId, readArtists(root));
+    s.albums  = albumRows(serverId, readAlbums(root));
+    const QString key = starredTracksKey(serverId);
+    for (const RemoteSong& song : readSongs(root))
+    {
+        const MusicLibrary::IndexTrack t = songRow(serverId, song, key);
+        if (t.path.isEmpty()) continue;
+        s.tracks.push_back(t);
+    }
+    return s;
+}
+
+void Subsonic::adoptStarred(MusicLibrary::Index& idx, const QString& serverId, const Starred& s)
+{
+    // The starred ARTISTS and ALBUMS need nothing here: both have real ids and open through the ordinary
+    // artist and album routes, which adoptArtist and adoptAlbum already handle from a cold cache. Only the
+    // loose tracks need a record invented for them.
+    if (s.tracks.isEmpty()) return;
+
+    // The one invented record. IDEMPOTENT by replacement rather than by append: this is re-run whenever a
+    // getArtists has replaced the cache wholesale, and an append would give the level two copies of every
+    // starred track the second time it was opened.
+    const QString albumKey  = starredTracksKey(serverId);
+    const QString bucketKey = qualify(serverId, Kind::Virtual, QStringLiteral("starredbucket"));
+    MusicLibrary::Artist* bucket = bucketFor(idx, bucketKey, QString());
+    MusicLibrary::Album* target = nullptr;
+    for (MusicLibrary::Album& b : bucket->albums) if (b.key == albumKey) { target = &b; break; }
+    if (!target)
+    {
+        MusicLibrary::Album b;
+        b.key = albumKey;
+        bucket->albums.push_back(b);
+        target = &bucket->albums.last();
+    }
+    target->title      = QStringLiteral("Starred");
+    target->tracks     = s.tracks;
+    target->trackCount = int(s.tracks.size());
+    target->discCount  = 1;
+    int secs = 0;
+    for (const MusicLibrary::IndexTrack& t : s.tracks) secs += t.durationSec;
+    target->durationSec = secs;
+    bucket->albumCount  = int(bucket->albums.size());
+}
+
+void Subsonic::adoptPlaylist(MusicLibrary::Index& idx, const QString& serverId,
+                             const RemotePlaylist& playlist, const QVector<RemoteSong>& songs)
+{
+    const QString albumKey = qualify(serverId, Kind::Playlist, playlist.id);
+    if (albumKey.isEmpty()) return;
+
+    // The record, wherever it already is - the playlists level put it under the bucket below, but a Recents
+    // row may be opening it in a session where that level was never visited.
+    MusicLibrary::Album* target = nullptr;
+    for (MusicLibrary::Artist& a : idx.artists)
+        for (MusicLibrary::Album& b : a.albums)
+            if (b.key == albumKey) { target = &b; break; }
+    if (!target)
+    {
+        const QString bucketKey = qualify(serverId, Kind::Virtual, QStringLiteral("playlists"));
+        MusicLibrary::Artist* bucket = bucketFor(idx, bucketKey, QString());
+        MusicLibrary::Album b;
+        b.key         = albumKey;
+        b.title       = playlist.name;
+        b.albumArtist = playlist.owner;
+        bucket->albums.push_back(b);
+        bucket->albumCount = int(bucket->albums.size());
+        target = &bucket->albums.last();
+    }
+    if (!playlist.name.isEmpty()) target->title = playlist.name;
+
+    // THE PLAYLIST'S OWN ORDER, AND THIS IS THE ONE PLACE IT MATTERS. fillAlbumTracks sorts by disc and then
+    // track number, which is right for a record and destroys a playlist: the sequence somebody arranged is
+    // the entire content of the thing, and re-sorting it by the track numbers the songs happen to carry on
+    // their own albums would shuffle it into an order nobody chose and no server would agree with. So the
+    // rows go in exactly as the server listed them.
+    QVector<MusicLibrary::IndexTrack> tracks;
+    for (const RemoteSong& s : songs)
+    {
+        const MusicLibrary::IndexTrack t = songRow(serverId, s, albumKey);
+        if (t.path.isEmpty()) continue;
+        tracks.push_back(t);
+    }
+    target->tracks     = tracks;
+    target->trackCount = int(tracks.size());
+    target->discCount  = 1;
+    int secs = 0;
+    for (const MusicLibrary::IndexTrack& t : tracks) secs += t.durationSec;
+    if (secs > 0) target->durationSec = secs;
+}
+
+QVector<Subsonic::StarredFavorite> Subsonic::starredAdditions(const QString& serverId,
+                                                              const QVector<RemoteSong>& songs,
+                                                              const QSet<QString>& alreadyFavourite)
+{
+    QVector<StarredFavorite> out;
+    QSet<QString> seen;
+    for (const RemoteSong& s : songs)
+    {
+        // The favourite is filed under the SAME id a track row carries (MusicCatalogs' trackRow sets
+        // MediaItem::id to IndexTrack::path), or the star would be recorded against something the heart on
+        // the row cannot find - a favourite that exists and does not show.
+        const QString id = qualify(serverId, Kind::Track, s.id);
+        if (id.isEmpty() || alreadyFavourite.contains(id) || seen.contains(id)) continue;
+        seen.insert(id);
+        StarredFavorite f;
+        f.itemId   = id;
+        f.title    = s.title.isEmpty() ? id : s.title;
+        f.subtitle = s.artist;
+        out.push_back(f);
+    }
+    return out;
+}
+
+QList<QPair<QString, QString>> Subsonic::scrobbleParams(const QVector<QString>& remoteIds,
+                                                        const QVector<qint64>& atUnixSeconds,
+                                                        bool submission)
+{
+    QList<QPair<QString, QString>> out;
+    for (int i = 0; i < remoteIds.size(); ++i)
+    {
+        if (remoteIds.at(i).isEmpty()) continue;
+        out.append({ QStringLiteral("id"), remoteIds.at(i) });
+        const qint64 at = i < atUnixSeconds.size() ? atUnixSeconds.at(i) : 0;
+        // MILLISECONDS, which is the spec's unit. A non-positive time is OMITTED rather than sent as 0:
+        // "no time" means "now" to every server, while 0 means January 1970, where the play is filed
+        // half a century in the past and nothing anywhere complains about it.
+        if (at > 0) out.append({ QStringLiteral("time"), QString::number(at * 1000LL) });
+    }
+    if (out.isEmpty()) return out;   // nothing to say: the caller must not make the request at all
+    out.append({ QStringLiteral("submission"), submission ? QStringLiteral("true")
+                                                          : QStringLiteral("false") });
+    return out;
+}
+
+QList<QPair<QString, QString>> Subsonic::starParams(Kind kind, const QString& remoteId)
+{
+    if (remoteId.isEmpty()) return {};
+    switch (kind)
+    {
+        // A SONG is `id`; an ID3 ALBUM and ARTIST have parameters of their own. The three namespaces are
+        // independent, so sending an album's id as `id` stars whichever SONG happens to carry that id on
+        // that server - a star that lands on something the user never pressed.
+        case Kind::Track:  return { { QStringLiteral("id"),       remoteId } };
+        case Kind::Album:  return { { QStringLiteral("albumId"),  remoteId } };
+        case Kind::Artist: return { { QStringLiteral("artistId"), remoteId } };
+        // A cover is not a thing that can be starred, and a Virtual container is one this app invented and
+        // the server has never heard of - putting either in a request is the bug Kind::Virtual exists to
+        // make impossible. Empty, so the caller does not make the request.
+        case Kind::Cover:
+        case Kind::Playlist:
+        case Kind::Virtual: break;
+    }
+    return {};
+}
+
+Subsonic::Fate Subsonic::fateOf(const Envelope& env)
+{
+    switch (env.status)
+    {
+        case Status::Ok: return Fate::Ok;
+        case Status::Unparsable:
+            // Not a subsonic-response at all: a proxy's HTML error page, a captive portal, a truncated body.
+            // RETRYABLE, because every one of those is a transport problem that goes away on its own, and
+            // dropping the listens over it would lose them to a router reboot.
+            return Fate::Retryable;
+        case Status::Failed: break;
+    }
+    if (isAuthCode(env.code)) return Fate::Auth;
+    // 70 "the requested data was not found". The track has been deleted or the library rescanned out from
+    // under the queue; no amount of retrying brings it back, and keeping it would jam every listen behind it.
+    if (env.code == 70) return Fate::Rejected;
+    // 10 "required parameter is missing" and 0 "a generic error" are OURS to have got wrong, not the
+    // network's - retrying them for ever would be a loop. Everything else (server error, upgrade required,
+    // a trial expiring) is worth another attempt.
+    if (env.code == 10) return Fate::Rejected;
+    return Fate::Retryable;
+}
+
+void Subsonic::adoptArtist(MusicLibrary::Index& idx, const QString& serverId, const RemoteArtist& artist,
+                           const QVector<RemoteAlbum>& albums)
+{
+    const QString artistKey = qualify(serverId, Kind::Artist, artist.id);
+    if (artistKey.isEmpty()) return;
+    MusicLibrary::Artist* target = bucketFor(idx, artistKey, artist.name);
+    // The name and the mbid come from the server's own answer and overwrite whatever a colder route put
+    // there: this reply is the authoritative one about this artist.
+    if (!artist.name.isEmpty())          target->name = artist.name;
+    if (!artist.musicBrainzId.isEmpty()) target->mbid = artist.musicBrainzId;
+    fillArtistAlbums(idx, serverId, artistKey, albums);
 }

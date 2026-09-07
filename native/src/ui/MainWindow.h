@@ -1836,6 +1836,10 @@ private:
     // The tags for a track, or false when there are none to be had. `path` is what PlaybackSession holds —
     // the file path for a library track, the url for a stream.
     bool scrobbleTrackFor(const QString& path, Scrobble::Track& out) const;
+    // ONE SCROBBLE PROVIDER PER CONFIGURED MUSIC SERVER (issue #193, increment 6), kept in step with the
+    // store by its change hook so adding a server makes it a destination without a restart. Defined in
+    // MainWindowMusicServerScrobble.cpp; SubsonicScrobbleProvider.h says why the set is per server.
+    void syncSubsonicScrobbleProviders();
     // Tell the scrobbler a track began, from the ONE signal that crosses a gapless boundary.
     void noteScrobbleTrack(const QString& path);
 

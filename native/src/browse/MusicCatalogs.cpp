@@ -160,14 +160,49 @@ MediaCatalog musicServersCatalog(const QStringList& ids, const QStringList& name
     return cat;
 }
 
+// The three SERVER-ONLY doors (#193 increment 6). One builder for the three, so the level cannot describe
+// them in three slightly different ways, and keyed by the SERVER so a door pressed on one server's level
+// cannot open another server's playlists.
+static MediaItem serverSectionDoor(const char* type, const char* prefix, const QString& serverId,
+                                   const QString& title, const QString& subtitle)
+{
+    MediaItem it;
+    it.id         = QString::fromLatin1(prefix) + serverId;
+    it.type       = QString::fromLatin1(type);
+    it.mime       = QString::fromLatin1(prefix) + serverId;
+    it.expandable = true;
+    it.title      = title;
+    it.subtitle   = subtitle;
+    return it;
+}
+
+static void addServerSectionDoors(MediaCatalog& cat, const QString& serverId)
+{
+    if (serverId.isEmpty()) return;   // the Music root: the local library has none of these
+    cat.items.push_back(serverSectionDoor(browse::kMusicPlaylistsType, browse::kMusicPlaylistsPrefix,
+                                          serverId, QObject::tr("Playlists"),
+                                          QObject::tr("The playlists saved on this server")));
+    cat.items.push_back(serverSectionDoor(browse::kMusicStarredType, browse::kMusicStarredPrefix,
+                                          serverId, QObject::tr("Starred"),
+                                          QObject::tr("What you have starred here, and your favourites")));
+    cat.items.push_back(serverSectionDoor(browse::kMusicNewestType, browse::kMusicNewestPrefix,
+                                          serverId, QObject::tr("Recently added"),
+                                          QObject::tr("The newest records on this server")));
+}
+
 MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
-                                 const MusicCoverFn& cover, int musicServerCount)
+                                 const MusicCoverFn& cover, int musicServerCount,
+                                 const QString& serverDoorsFor)
 {
     MediaCatalog cat; cat.title = QObject::tr("Music");
     cat.hasMore = false;
 
     if (idx.artists.isEmpty())
     {
+        // ...and the doors come first HERE TOO, for the reason the servers door does one line below: a
+        // server whose artist list is empty (or has not arrived) may still have playlists and starred
+        // tracks on it, and a bare "nothing here" over the top of them is simply wrong.
+        addServerSectionDoors(cat, serverDoorsFor);
         // A configured server is an answer to "there is nothing here", so the door comes FIRST and the
         // explanation — if the caller still has one — after it. Without this ordering a person whose whole
         // library is a Navidrome box would land on a sentence about choosing a folder with the thing they
@@ -234,6 +269,9 @@ MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmpt
     // both are DIMENSIONS over music and the artists below are contents. Offered only when at least one
     // server is configured, so an install with none gets this catalog exactly as it was.
     if (musicServerCount > 0) cat.items.push_back(musicServersDoor(musicServerCount));
+    // ...and, inside a server, its own three doors - above the artists for the same reason Composers is:
+    // they are DIMENSIONS over this server's music and the artists below them are its contents.
+    addServerSectionDoors(cat, serverDoorsFor);
 
     for (const MusicLibrary::Artist& a : idx.artists)
     {
@@ -507,6 +545,65 @@ MediaCatalog musicWorkCatalog(const MusicLibrary::Index& idx, const QString& wor
         if (who.isEmpty() && !t.artist.isEmpty()) who << t.artist;
         cat.items.push_back(trackRow(t, t.albumKey, art, num + name,
                                      joinDot({ who.join(QStringLiteral("; ")), fmtDuration(t.durationSec) })));
+    }
+    return cat;
+}
+
+// ---- One SECTION of a server (issue #193, increment 6) --------------------------------------------------
+MediaCatalog musicSectionCatalog(const QString& title,
+                                 const QVector<MusicLibrary::Artist>& artists,
+                                 const QVector<MusicLibrary::Album>& albums,
+                                 const QVector<MusicLibrary::IndexTrack>& tracks,
+                                 const MusicEmptyNote& note,
+                                 const MusicCoverFn& cover)
+{
+    MediaCatalog cat; cat.title = title;
+    cat.hasMore = false;
+
+    // ARTISTS, THEN ALBUMS, THEN TRACKS - containers before leaves, which is the order every other level in
+    // this file uses and the order a person scans a shelf in. Only the starred section ever has all three;
+    // the other two are albums alone, and an empty vector simply contributes nothing.
+    for (const MusicLibrary::Artist& a : artists)
+    {
+        MediaItem it;
+        it.id         = QString::fromLatin1(kMusicArtistPrefix) + a.key;
+        it.type       = QString::fromLatin1(kMusicArtistType);
+        it.mime       = QString::fromLatin1(kMusicArtistPrefix) + a.key;   // -> musicArtistCatalog
+        it.expandable = true;
+        it.title      = MusicLibrary::displayArtist(a);
+        // The track clause is omitted at zero for the reason the artists level omits it: a server tells us
+        // how many albums somebody has and nothing about their tracks, and "0 tracks" would be a number
+        // this app invented.
+        it.subtitle   = joinDot({ QObject::tr("%n album(s)", "", a.albumCount),
+                                  a.trackCount > 0 ? QObject::tr("%n track(s)", "", a.trackCount)
+                                                   : QString() });
+        if (!a.albums.isEmpty()) it.thumbnailUrl = coverFor(a.albums.first(), cover);
+        cat.items.push_back(it);
+    }
+
+    // THE SAME albumRow every other album level draws, so a starred album and that album under its artist
+    // are one row reached two ways. Its subtitle reads Album::trackCount, which for a record whose songs
+    // have not been fetched is the only honest number there is (MusicLibrary.h).
+    for (const MusicLibrary::Album& b : albums) cat.items.push_back(albumRow(b, cover));
+
+    // ...and the loose tracks, each carrying the key of whatever it is queued behind - which for a starred
+    // list is the starred list itself, so pressing the fourth one plays from there. Numbered nothing: a
+    // track number is meaningful in a record's listing and meaningless in a list of one-off favourites,
+    // exactly as it is for a credit row.
+    for (const MusicLibrary::IndexTrack& t : tracks)
+        cat.items.push_back(trackRow(t, t.albumKey, QString(), t.title,
+                                     joinDot({ t.artist, fmtDuration(t.durationSec) })));
+
+    // An empty section EXPLAINED rather than left blank - the rule the root level already follows. Only when
+    // there is genuinely nothing: a section with one row in it needs no sentence.
+    if (cat.items.isEmpty() && !note.isEmpty())
+    {
+        MediaItem info;
+        info.type     = QStringLiteral("info");
+        info.id       = QStringLiteral("_musicsectionempty");
+        info.title    = note.text;
+        info.subtitle = note.detail;
+        cat.items.push_back(info);
     }
     return cat;
 }
