@@ -100,6 +100,10 @@ quint64 hashOfLineup(const Channel& ch, qint64 dayStart, const QVector<LineupIte
     h = fnv1aNum(h, toInt(ch.sourceKind));
     h = fnv1aNum(h, toInt(ch.ordering));
     h = fnv1aNum(h, ch.startEpoch);
+    // #179 inc 2: the break grid MOVES programmes, so it is an input to the timeline and belongs in the hash.
+    // ch.interstitialDir deliberately is NOT — a bumper folder cannot move a programme, and hashing it would
+    // make "today's lineup has drifted" fire when the user only pointed the idents somewhere else.
+    h = fnv1aNum(h, normalizeBreakGrid(ch.breakGridSec));
     h = fnv1aNum(h, dayStart);
     h = fnv1aNum(h, lineup.size());
     for (const LineupItem& li : lineup)
@@ -152,7 +156,20 @@ Schedule buildDay(const Channel& ch, qint64 dayStart, const QVector<LineupItem>&
     const QVector<int> perm = orderFor(ch, dayStart, lineup.size());
     if (perm.isEmpty()) return s;
 
-    qint64 t = airFrom;
+    // #179 inc 2 — THE BREAK GRID. With grid 0 this is the identity and every line below behaves exactly as
+    // increment 1 did (probe_channels' whole increment-1 section is the assertion of that). With a grid, a
+    // programme may only start on a multiple of it MEASURED FROM THE DAY'S OWN MIDNIGHT — not from the
+    // channel's start epoch, or two channels made minutes apart would print guides that never line up.
+    const int grid = normalizeBreakGrid(ch.breakGridSec);
+    const auto onGrid = [grid, dayStart](qint64 x) -> qint64 {
+        if (grid <= 0) return x;
+        const qint64 d = x - dayStart;
+        // Ceil towards +inf. d can be negative only for a pre-epoch day, where floorDiv's rule applies.
+        const qint64 cells = (d >= 0) ? ((d + grid - 1) / grid) : -(((-d) / grid));
+        return dayStart + cells * grid;
+    };
+
+    qint64 t = onGrid(airFrom);
     int step = 0;
     while (t < dayEnd && s.programmes.size() < kMaxSlotsPerDay)
     {
@@ -164,7 +181,8 @@ Schedule buildDay(const Channel& ch, qint64 dayStart, const QVector<LineupItem>&
         sl.startUtc    = t;
         sl.durationSec = li.durationSec;
         s.programmes.push_back(sl);
-        t += li.durationSec;   // > 0 by withDurations' gate, so this loop always advances
+        // > 0 by withDurations' gate, so this always advances; onGrid only ever moves it further forward.
+        t = onGrid(t + li.durationSec);
         ++step;
     }
     return s;
@@ -203,6 +221,7 @@ QVector<xmltv::Programme> toProgrammes(const Schedule& s)
     out.reserve(s.programmes.size());
     for (const Slot& sl : s.programmes)
     {
+        if (sl.interstitial) continue;   // the guide prints programmes; a bumper is not one
         xmltv::Programme p;
         p.channelId = rowProducerKey(s.channelId);
         p.startUtc  = QDateTime::fromSecsSinceEpoch(sl.startUtc, Qt::UTC);
@@ -210,6 +229,123 @@ QVector<xmltv::Programme> toProgrammes(const Schedule& s)
         p.title     = sl.title;
         out.push_back(p);
     }
+    return out;
+}
+
+bool programmeStartingAt(const Schedule& s, qint64 startUtc, Slot& out)
+{
+    for (const Slot& sl : s.programmes)
+    {
+        if (sl.interstitial) continue;
+        if (sl.startUtc == startUtc) { out = sl; return true; }
+        if (sl.startUtc > startUtc) break;      // ascending: nothing later can match
+    }
+    return false;
+}
+
+bool nextProgrammeAfter(const Schedule& s, qint64 nowUtc, Slot& out)
+{
+    for (const Slot& sl : s.programmes)
+    {
+        if (sl.interstitial) continue;
+        if (sl.startUtc > nowUtc) { out = sl; return true; }
+    }
+    return false;
+}
+
+// ---- interstitials (issue #179, increment 2) ---------------------------------------------------------------
+
+QString breakGridLabel(int sec)
+{
+    switch (normalizeBreakGrid(sec))
+    {
+        case 60:   return QStringLiteral("On the minute");
+        case 300:  return QStringLiteral("Every 5 minutes");
+        case 900:  return QStringLiteral("Every 15 minutes");
+        case 1800: return QStringLiteral("Every half hour");
+        default:   break;
+    }
+    return QStringLiteral("Back to back");
+}
+
+QString interstitialDirFor(const Channel& ch, const QString& globalDir)
+{
+    const QString own = ch.interstitialDir.trimmed();
+    return own.isEmpty() ? globalDir.trimmed() : own;
+}
+
+Schedule withInterstitials(const Schedule& s, const QVector<LineupItem>& pool, const BreakRules& rules)
+{
+    // IDEMPOTENT: strip anything a previous pass laid down before deciding anything, so re-filling a frozen
+    // day (which is what every re-tune does) can never stack bumper on bumper.
+    Schedule out = s;
+    out.programmes.clear();
+    out.programmes.reserve(s.programmes.size());
+    for (const Slot& sl : s.programmes) if (!sl.interstitial) out.programmes.push_back(sl);
+
+    if (pool.isEmpty() || out.programmes.size() < 2) return out;
+
+    int shortest = pool.first().durationSec;
+    for (const LineupItem& li : pool) shortest = qMin(shortest, li.durationSec);
+    if (shortest <= 0) return out;   // withDurations cannot produce this; a hand-built pool could
+
+    const int maxRun   = qMax(0, rules.maxRunSec);
+    const int maxCount = qMax(0, rules.maxPerBreak);
+    if (maxRun < shortest || maxCount <= 0) return out;
+
+    QVector<Slot> filled;
+    filled.reserve(out.programmes.size() * 2);
+    QString lastAired;   // the "never twice in a row" memory — carried ACROSS breaks, not reset per gap
+
+    for (int i = 0; i < out.programmes.size(); ++i)
+    {
+        filled.push_back(out.programmes.at(i));
+        if (i + 1 >= out.programmes.size()) break;                 // never after the last programme
+        const qint64 gapStart = out.programmes.at(i).endUtc();
+        const qint64 gapEnd   = out.programmes.at(i + 1).startUtc;
+        if (gapEnd - gapStart < shortest) continue;                // too short for the shortest bumper: dead air
+
+        // The seeded walk. Seeded by the CHANNEL and the GAP'S OWN START, so the break at 20:25 holds the
+        // same idents on every device and does not change when the one at 21:00 does.
+        quint64 state = seedFor(s.channelId, gapStart);
+        qint64  t     = gapStart;
+        int     run   = 0;
+        int     count = 0;
+        while (count < maxCount)
+        {
+            const qint64 room = qMin(gapEnd - t, static_cast<qint64>(maxRun - run));
+            if (room < shortest) break;
+            // Draw from the items that FIT the room left and are not the one that just aired. Walking the
+            // pool from a seeded offset (rather than picking an index outright) keeps the choice deterministic
+            // while making "the only fitting item is the one that just aired" resolve to "air nothing".
+            const int n = pool.size();
+            const int from = static_cast<int>(splitmix64(state) % static_cast<quint64>(n));
+            int chosen = -1;
+            for (int k = 0; k < n; ++k)
+            {
+                const LineupItem& c = pool.at((from + k) % n);
+                if (c.durationSec > room) continue;
+                if (c.itemId == lastAired) continue;
+                chosen = (from + k) % n;
+                break;
+            }
+            if (chosen < 0) break;
+            const LineupItem& li = pool.at(chosen);
+            Slot sl;
+            sl.itemId       = li.itemId;
+            sl.title        = li.title;
+            sl.playKey      = li.playKey;
+            sl.startUtc     = t;
+            sl.durationSec  = li.durationSec;
+            sl.interstitial = true;
+            filled.push_back(sl);
+            lastAired = li.itemId;
+            t   += li.durationSec;
+            run += li.durationSec;
+            ++count;
+        }
+    }
+    out.programmes = filled;
     return out;
 }
 

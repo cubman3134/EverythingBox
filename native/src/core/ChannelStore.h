@@ -1,7 +1,10 @@
 // Per-profile storage for personal TV channels (issue #179, increment 1) — a channel's SOURCE, ORDERING and
 // START EPOCH, kept beside the other small per-profile stores and synced with them.
 //
-// Layout: channels/<profile>/items -> JSON array of { id, name, src, srcid, ord, start, beg, ts }. QtCore
+// Layout: channels/<profile>/items -> JSON array of { id, name, src, srcid, ord, start, beg, grid, bump, ts }.
+// (`grid`/`bump` are issue #179 increment 2 — the break grid and this channel's own bumper folder. A row
+// written by an increment-1 build simply lacks them and reads back as 0 / empty, which is that build's own
+// behaviour exactly.) QtCore
 // only (no Quick/Widgets), so it rides the same profile-scoped ini FavoritesStore/FilterPresetStore use.
 //
 // THE SHAPE IS FilterPresetStore's, DELIBERATELY, down to the field names it shares, because the two rules

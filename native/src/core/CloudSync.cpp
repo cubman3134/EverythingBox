@@ -176,6 +176,7 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     static const QSet<QString> kExact = {
         QStringLiteral("roms/folder"),          // where THIS machine keeps its ROMs
         QStringLiteral("library/folder"),        // where THIS machine keeps its local video library
+        QStringLiteral("interstitials/folder"),  // where THIS machine keeps its channel bumpers (#179 inc 2)
         QStringLiteral("emulators/root"),        // this machine's standalone-emulator install root
         QStringLiteral("emulators/fullscreen"),  // per-machine display preference
         QStringLiteral("player/externalPath"),   // this machine's external-player exe path

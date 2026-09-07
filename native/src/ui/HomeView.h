@@ -477,6 +477,11 @@ signals:
     // Up/Down surfing that follows — so this view only names the channel. Carries the CHANNEL ID, not the
     // row's index or its MediaItem, because the id is the one thing a repopulate cannot invalidate.
     void tuneChannelRequested(const QString& channelId);
+    // A GUIDE CELL was activated (issue #179, increment 2): tune that channel, and say so if the programme
+    // the cell named is not the one the clock has reached. `cellStartUtc` is the second the grid PRINTED for
+    // that programme — carried rather than re-derived, because the whole claim of the guide is that the cell
+    // and the tuner agree, and a tuner that recomputed the cell's meaning could not be caught disagreeing.
+    void tuneChannelCellRequested(const QString& channelId, qint64 cellStartUtc);
     // "Check for new items now" (issue #155). MainWindow owns the FollowScheduler — it is the only object
     // that can reach the addon manager, the playback state and the network — so the view asks rather than
     // runs, the same shape as chooseSourceRequested above. Also fired right after a fresh follow, so the
@@ -875,6 +880,8 @@ private:
     // that ONE implementation serves both layouts; every caller defers past the QML emission first, because
     // NavMenu::pick / Osk::getText spin nested loops (the #28 family).
     void openChannelsLevel();                                  // drill Home's "Channels" folder -> the shelf
+    void openChannelGuideLevel();                              // …and its "Guide (today)" row -> the grid (#179 inc 2)
+    void populateChannelGuide();                               // (re)build the grid; also what Back re-runs
     void populateChannels();                                   // (re)build it: one row per channel + a "create" row
     void editChannelInteractive(const QString& channelId);     // create ("") or edit/delete one channel
     bool pickChannelSource(channels::SourceKind& kind, QString& sourceId, QString& label); // the source menu

@@ -1704,8 +1704,26 @@ private:
     QTimer*                  channelBannerTimer_ = nullptr; // …and what takes it down again
     bool channelTuned() const;                              // "a scheduled channel is on"
     void tuneChannel(const QString& channelId);             // resolve what's on now + join it at its offset
+    // ---- the guide, and the bumpers between programmes (issue #179, increment 2) --------------------------
+    // A guide CELL was pressed: tune that channel, and — when the clock has not reached the programme the
+    // cell named — say when it starts rather than silently landing somewhere else. `cellStartUtc` is the
+    // second the grid PRINTED; the whole claim of the guide is that it and the tuner agree, which is only
+    // checkable because the cell's own number comes back here rather than being re-derived.
+    // Defined in ui/MainWindowChannelGuide.cpp.
+    void tuneChannelFromGuide(const QString& channelId, qint64 cellStartUtc);
+    // The bumper pool for a channel: its own folder if it names one, else the global Setting, through the
+    // duration gate. One log line per build for what the gate dropped, exactly as the lineup gets.
+    QVector<channels::LineupItem> channelInterstitials(const channels::Channel& ch);
+    // Dead air: the clock is in a gap this channel's bumpers could not fill. Arms a one-shot for the next
+    // programme's start rather than untuning, so a five-second hole does not throw the viewer out of the
+    // channel they are watching. Bounded — a hole longer than kChannelGapWaitMax is treated as off air.
+    void awaitChannelProgramme(const QString& channelId, qint64 nowUtc, qint64 startsAtUtc);
+    QTimer* channelGapTimer_ = nullptr;                     // …and what fires it (created on first use)
     void surfChannel(int delta);                            // Up/Down: one step through the ring, then re-tune
-    void showChannelBanner(const channels::Channel& ch, const channels::Airing& air);
+    // The now-playing card. Takes the SCHEDULE as well as the airing (#179 inc 2) because what a viewer needs
+    // to be told during a BUMPER is the next PROGRAMME — not the next slot, which may well be another bumper.
+    void showChannelBanner(const channels::Channel& ch, const channels::Airing& air,
+                           const channels::Schedule& sched);
     void prefetchChannelNeighbours();                       // cut + freeze the +/-1 neighbours' days
     void exitTunedChannel();                                // every path that takes playback away from it
 

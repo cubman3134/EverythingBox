@@ -114,6 +114,8 @@
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
 #include "../core/XmltvGuide.h"        // XMLTV EPG parse + gunzip (#75 inc 3)
 #include "../browse/LiveTvGuide.h"     // now/next-by-tvg-id + the guide-grid builder (#75 inc 3)
+#include "../browse/ChannelGuide.h"    // the personal-channel supplier of that same grid (#179 inc 2)
+#include "../core/ChannelLineup.h"    // the lineup + bumper pool a guide row is cut from (#179)
 #include "../browse/SearchAggregator.h"
 #include <QAbstractItemView>
 #include <QMenu>
@@ -5447,6 +5449,60 @@ void HomeView::openChannelsLevel()
 void HomeView::populateChannels()
 { showSyntheticCatalog(browse::channelsCatalog(ChannelStore::list().toList())); }
 
+// ---- The guide (#179, increment 2) -------------------------------------------------------------------------
+// A DETAIL level like the Live TV grid's, for the same reason: Back re-populates it from the store and the
+// clock rather than from a snapshot, so a guide come back to five minutes later is a guide for now.
+void HomeView::openChannelGuideLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Guide");
+    lvl.item.id = QStringLiteral("_channelguidegrid");
+    lvl.item.type = QStringLiteral("_channelguidegrid");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("channelguide");   // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateChannelGuide();
+}
+
+// Build the grid. THE SCHEDULE IS CUT HERE AND NOWHERE ELSE IN THIS FILE — through the same pure functions
+// the tuner uses, from the same lineup builder, with the wall clock read exactly once — which is what makes
+// "the guide never lies" a property of the code rather than a hope. Nothing is opened: every length comes
+// from the duration index (channels::withDurations), so drawing a guide costs no I/O.
+void HomeView::populateChannelGuide()
+{
+    const QVector<channels::Channel> chans = ChannelStore::list();
+    const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+    const int    tzOff  = QDateTime::currentDateTime().offsetFromUtc();
+    const qint64 dayUtc = channels::dayStartUtc(nowSec, tzOff);
+
+    QVector<channels::Schedule> days;
+    days.reserve(chans.size());
+    QHash<QString, QString> logos;
+    for (const channels::Channel& c : chans)
+    {
+        // The day as the TUNER would cut it, bumpers and all: withInterstitials leaves every programme's
+        // start where it was, and toProgrammes drops the bumpers again, so the grid is the programme contract
+        // either way. Cutting it the same way is what stops the two drifting the day someone changes one.
+        channels::Schedule sched = channels::buildDay(c, dayUtc, ChannelLineup::build(c));
+        const QVector<channels::LineupItem> pool =
+            ChannelLineup::interstitials(c, Settings::interstitialFolder());
+        if (!pool.isEmpty()) sched = channels::withInterstitials(sched, pool, channels::BreakRules{});
+        days.push_back(sched);
+        // Channel art where a theme or the metadata cache happens to have some; its absence is unremarkable
+        // and nothing is fetched to find out.
+        // …under the channel's own row-producer key, the identity everything else in this feature uses. A
+        // user who has dropped a logo in through the metadata editor gets it here; nobody else has one, and
+        // that is unremarkable.
+        const QString art = MetaCache::imagePath(channels::rowProducerKey(c.id), QStringLiteral("poster"));
+        if (!art.isEmpty()) logos.insert(c.id, art);
+    }
+    const QDateTime dayStart = QDateTime::fromSecsSinceEpoch(dayUtc, Qt::UTC);
+    showSyntheticCatalog(browse::channelGuideCatalog(chans, days, logos,
+                                                     QDateTime::fromSecsSinceEpoch(nowSec, Qt::UTC),
+                                                     dayStart, dayStart.addSecs(86400)));
+}
+
 // THE SOURCE PICKER. Increment 1 offers the two source kinds it can actually ENUMERATE — a saved video
 // playlist and a local series — and deliberately does not offer the third the store understands (a #63 saved
 // filter preset): resolving one means evaluating a game filter over the whole game library, an enumeration
@@ -5524,6 +5580,12 @@ void HomeView::editChannelInteractive(const QString& channelId)
         row("order",  tr("Ordering: %1").arg(channels::label(ch.ordering)));
         row("beg",    tr("Start programmes from the beginning: %1")
                           .arg(ch.startFromBeginning ? tr("On") : tr("Off")));
+        // #179 inc 2. The grid is what MAKES a break: on "Back to back" (the default, and increment 1's only
+        // behaviour) the day has no gaps and no bumper can ever air, which is why the two rows sit together.
+        row("grid",   tr("Programmes start: %1").arg(channels::breakGridLabel(ch.breakGridSec)));
+        row("bump",   ch.interstitialDir.trimmed().isEmpty()
+                          ? tr("Bumpers: the folder in Settings")
+                          : tr("Bumpers: %1").arg(QDir::toNativeSeparators(ch.interstitialDir)));
         // The star lives HERE rather than on the grid's own favourite verb, and it is the same row on both
         // layouts. A channel is not a game and not an addon leaf, so the generic star would have filed it with
         // neither a `path` nor a `kind` — the exact shape #203 fixed for a Live TV channel, where the star
@@ -5558,6 +5620,38 @@ void HomeView::editChannelInteractive(const QString& channelId)
                                                                        : channels::Ordering::InOrder;
         }
         else if (id == QLatin1String("beg")) ch.startFromBeginning = !ch.startFromBeginning;
+        else if (id == QLatin1String("grid"))
+        {
+            // A picker, not a cycle: five values, and the one a viewer wants is rarely the next one along.
+            QStringList rows2; QVector<int> vals;
+            for (int g : channels::kBreakGridsSec) { vals << g; rows2 << channels::breakGridLabel(g); }
+            const int g = NavMenu::pick(tr("Programmes start"), rows2, window());
+            if (g >= 0 && g < vals.size()) ch.breakGridSec = vals.at(g);
+        }
+        else if (id == QLatin1String("bump"))
+        {
+            // TYPED, not browsed: this view has no file picker of its own and must not grow a QFileDialog
+            // (the nav kit is the whole UI here). An empty answer clears the override and hands the channel
+            // back to the global folder, which is the only way back out of a mistake.
+            const QString d = Osk::getText(tr("Bumper folder for this channel (blank = the one in Settings):"),
+                                           ch.interstitialDir, QLineEdit::Normal, window());
+            if (!d.isNull())
+            {
+                ch.interstitialDir = d.trimmed();
+                if (!ch.interstitialDir.isEmpty())
+                {
+                    // Say so NOW rather than at tune time: an unenumerable folder is a typo nine times in ten,
+                    // and the moment to report a typo is while the person is still looking at what they typed.
+                    QString why;
+                    const QVector<channels::Candidate> found =
+                        ChannelLineup::interstitialCandidates(ch.interstitialDir, &why);
+                    if (!why.isEmpty()) showToast(why, kFeedbackLong);
+                    else if (found.isEmpty())
+                        showToast(tr("No video files in that folder — this channel will air no bumpers."),
+                                  kFeedbackLong);
+                }
+            }
+        }
         else if (id == QLatin1String("fav"))
         {
             if (starred) FavoritesStore::remove(favKey);
@@ -8524,6 +8618,18 @@ void HomeView::activateItem(int row)
         QMetaObject::invokeMethod(this, [this] { editChannelInteractive(QString()); }, Qt::QueuedConnection);
         return;
     }
+    // …and increment 2: the "Guide (today)" row opens the grid, and a CELL in that grid tunes the channel it
+    // belongs to. The cell carries the second the guide printed for its programme, resolved here while the row
+    // is still valid, so the window can say "that starts at 21:00" instead of silently tuning somewhere else.
+    if (it.type == QStringLiteral("_channelguide")) { openChannelGuideLevel(); return; }
+    if (it.type == QStringLiteral("_guidetune"))
+    {
+        QString cid; qint64 cellStart = 0;
+        if (!browse::parseChannelGuideCell(it.mime.isEmpty() ? it.id : it.mime, cid, cellStart)) return;
+        QMetaObject::invokeMethod(this, [this, cid, cellStart] {
+            emit tuneChannelCellRequested(cid, cellStart); }, Qt::QueuedConnection);
+        return;
+    }
 
     // Recomps (#248 inc a). The Games "Recomps" folder opens the section; a system header is inert; a port row
     // opens the SAME card the game row's *Native port* verb opens — one implementation of the verbs, reached
@@ -9478,6 +9584,7 @@ void HomeView::loadTop()
     // Back onto the Channels shelf: rebuild it from the STORE, never from a snapshot — a channel created or
     // deleted while it was off screen must be there / gone.
     if (top.detail && top.item.type == QStringLiteral("_channels")) { populateChannels(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_channelguidegrid")) { populateChannelGuide(); return; }
     if (top.detail && top.item.type == QStringLiteral("_livetvsources"))
         { populateLiveTvSources(); return; }
     // Returning to a source's channels level (Back out of a played channel): re-show its channels from the

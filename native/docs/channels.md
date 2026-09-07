@@ -4,8 +4,9 @@ A **channel** turns part of your library into something you tune to rather than 
 runs to a clock, and when you switch to it you join whatever is on **in progress** — you land at 00:12:34
 because that is where the clock is, the way a television always worked.
 
-This page describes what shipped in the first increment of issue #179. What is *not* here yet is listed at
-the bottom, and it is a real list — read it before wondering why something is missing.
+This page describes what shipped in the first two increments of issue #179 — the schedule, surfing, the
+guide and the interstitials. What is *not* here yet is listed at the bottom, and it is a real list — read it
+before wondering why something is missing.
 
 ## What a channel is
 
@@ -17,8 +18,9 @@ Three things, and nothing else:
 | **An ordering** | **In order** (the source's own order) or **Shuffle**. |
 | **A start epoch** | The moment it went on air. Before that moment the channel simply has no programmes — a channel you make this afternoon does not claim to have been broadcasting all morning. |
 
-Plus a name, and one switch: **Start programmes from the beginning**, for people who would rather not join
-halfway through.
+Plus a name, and three more things: **Start programmes from the beginning**, for people who would rather not
+join halfway through; **Programmes start**, the break grid described below; and an optional **bumper folder**
+of its own.
 
 Channels are stored per profile and sync between your devices with the rest of your small stores
 (favourites, playlists, saved filters). Deleting one leaves a dated tombstone, so another device that still
@@ -91,11 +93,79 @@ its own schedule, because each programme is watched in full before the next one 
 
 Starting from the beginning also overrides any position you left in that file. It means what it says.
 
+## The guide
+
+**Video → Channels → Guide (today)** is a channels × time grid for the rest of today: one section per
+channel, one row per programme, `HH:mm  Title`, with a ● beside whatever is on now. It is the *same grid* the
+XMLTV guide for Live TV (#75) draws — one builder, two suppliers — so a computed channel and a broadcast EPG
+look and behave alike.
+
+It is D-pad native, because that is what it is for: **left/right** moves through a channel's evening,
+**up/down** moves between channels, and **pressing a cell tunes that channel**. Pressing a programme that is
+on now joins it in progress, at the offset the clock has reached, exactly as tuning the channel row does.
+Pressing one that has not started yet tunes the channel anyway — you land on whatever is actually on — and the
+app tells you when the thing you pressed begins. Nothing can play a programme early; saying so is the honest
+answer, and it is the only place the guide and the tuner are allowed to differ.
+
+**The guide never lies, and that is a tested claim.** For a set of channels and a set of times, the programme
+the grid shows and the programme tuning resolves are asserted to be the same item at the same second, with the
+same join offset (`probe_channels` §17). The one thing that makes it possible is that both come from the same
+pure function of the channel, the day and the item lengths.
+
+Nothing is opened to draw a guide. Every length comes from the duration index, so a channel whose items have
+no known length yet shows its name and the line *“Nothing with a known length yet”* rather than a spinner — and
+a channel that is simply not broadcasting today shows *“Off air today”*. Neither is ever dropped from the grid.
+Channel logos come from the metadata cache where a channel has one; most do not, and that is unremarkable.
+
+## Breaks, and the bumpers that fill them
+
+### Programme starts
+
+A channel lays its programmes **back to back** by default, which is what increment 1 shipped: a 22-minute
+episode is followed immediately by the next one, and the day has no room in it for anything else.
+
+A channel can instead be told to start its programmes **on a grid** — on the minute, every 5, 15 or 30
+minutes — in its editor, under *Programmes start*. Two things follow:
+
+* the printed guide becomes readable (20:00, 20:25, 20:50 rather than 20:00, 20:22:13, 20:44:26); and
+* every programme that does not exactly fill its slot leaves a **gap** before the next one. That gap is the
+  only place a bumper may ever air.
+
+The grid is part of the timeline, so every device computes the same one; changing it re-cuts the channel from
+the next day, like any other change to a lineup.
+
+### Interstitials
+
+Bumpers and idents come from a folder you name — **Settings → Channels → bumper folder** for all channels, or
+a per-channel folder in the channel's own editor, which beats the global one. Nothing is downloaded and
+nothing is generated: they are ordinary video files, and like any other item **each one needs a known length**,
+so a new ident joins the rotation after it has been played through once.
+
+The rules, all of them pinned by probes:
+
+1. **An interstitial never moves a programme's start time.** The schedule is the contract the guide printed.
+   Bumpers fill gaps; they never push the evening later. Add a hundred idents or remove them all and every
+   programme starts at the same second it did before.
+2. **They only air in a gap** — never before the first programme of the day, never after the last.
+3. **If a gap is too short for the shortest bumper, nothing airs.** A few seconds of dead air is honest; a
+   programme starting late is not.
+4. **Never the same one twice in a row**, across a break boundary as well as within one.
+5. **A maximum run**: ten minutes and six pieces per break, whichever is reached first.
+6. A missing or empty folder means **no interstitials**, not an error. A folder that cannot be read at all — a
+   path that is not there, or a file where a folder was meant — says so in a sentence, once.
+
+Which bumper airs in which break is deterministic, seeded by the channel and the break's own start second, so
+two devices watching the same channel are inside the same ident. The bumper folder is **not** part of the
+schedule's hash: it cannot move a programme, so pointing it somewhere else is not a change to the lineup.
+
+**A back-to-back channel airs no bumpers**, however full the folder is — it has no gaps. That is not a bug to
+report; it is rule 1 doing its job.
+
+If a gap is left empty, the channel does not throw you out: it waits, says *“next up at 20:25”*, and tunes the
+programme when it starts. A hole longer than about half an hour is treated as off air.
+
 ## Not here yet
 
-* **The guide.** A channels × time grid is the next increment; it shares the programme model the XMLTV
-  guide (#75) already uses, so both feed one grid.
-* **Interstitials.** Bumpers and idents between programmes.
 * **Time-blocked ordering** ("this block from 20:00").
 * **Saved-filter, addon-catalogue and server sources.** A saved filter (#63) can be *stored* as a channel's
   source and survives a sync, but nothing enumerates it yet: a saved filter is a game-library filter, and
