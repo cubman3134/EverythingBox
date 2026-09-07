@@ -42,6 +42,15 @@ public:
     bool saveState(std::vector<uint8_t>& out);
     bool loadState(const uint8_t* data, size_t size);
 
+    // How many bytes one serialized state occupies right now (0 = this core/content can't be serialized at
+    // all). Runahead (#100) needs this BEFORE it commits to a rollback loop: a core with no state has nothing
+    // to roll back to, and the size is what its per-frame cost is measured against.
+    size_t serializeSize() const;
+    // Serialization quirks the core declared through RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS — a bitmask of
+    // RETRO_SERIALIZATION_QUIRK_*, 0 when the core declared none (the overwhelmingly common case). Frame-
+    // sensitive features (runahead, netplay) refuse cores whose quirks make state ops unreliable.
+    uint64_t serializationQuirks() const { return serializationQuirks_; }
+
     // Cheats (libretro cheat API). cheatReset() clears all; cheatSet() enables/updates the code at an index
     // (Game Genie / Action Replay / raw, format depends on the core). Frontend re-applies the whole enabled
     // set after a reset whenever the list changes. No-ops if the core doesn't export the cheat functions.
@@ -176,6 +185,7 @@ private:
     std::vector<retro_memory_descriptor> memDescriptors_; // copied from SET_MEMORY_MAPS (achievements)
     retro_memory_map memoryMap_{};
     unsigned controllerPorts_ = 0;  // ports declared via SET_CONTROLLER_INFO (0 = undeclared)
+    uint64_t serializationQuirks_ = 0; // bitmask from SET_SERIALIZATION_QUIRKS (0 = the core declared none)
 
     std::vector<CoreOption> options_;             // definitions, in menu order
     std::map<std::string, std::string> optionValues_; // key -> current value (c_str() served to the core)

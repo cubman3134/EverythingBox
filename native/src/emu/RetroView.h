@@ -20,6 +20,7 @@
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 #include "CheatSearch.h"    // pure cheat-search engine (#96): snapshot RAM -> narrow candidates -> freeze
+#include "Runahead.h"       // pure runahead schedule + eligibility (#100): the ordering, testable off a core
 #include "../core/Hardcore.h" // the ONE hardcore-mode policy (#94): which affordances a hardcore session forbids
 
 class QTimer;
@@ -171,7 +172,10 @@ private:
     int      shaderLogTick_ = 0;          // throttles logShaderFrame
 
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
-    bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
+    // Advance the core one frame (hw or sw); returns false if it crashed + stopped. `shown` is false only for
+    // a HIDDEN runahead run (#100) — speculative emulation the player never sees. Every non-runahead caller
+    // leaves it at the default, so the loop is byte-for-byte what it was before runahead existed.
+    bool runOneCoreFrame(bool shown = true);
     // The frame-advance body shared by the non-threaded tick() and the worker stepWorker(): rewind playback, or
     // one/several forward frames (fast-forward) with a rewind snapshot before each real frame. Assumes the
     // fastForward_/rewinding_ flags are already resolved and leaves the repaint to the caller (tick -> update(),
@@ -448,6 +452,33 @@ private:
     size_t rewindBytes_ = 0;                       // total bytes held in rewindBuf_
     static constexpr size_t kRewindMaxBytes = 96u * 1024 * 1024; // ~96 MB cap (fewer seconds for big-state cores)
     static constexpr int kFfSpeed = 4;             // fast-forward multiplier
+
+    // ---- Runahead (issue #100): show the frame the game will draw N frames from now, computed with the input
+    // being held right now, then roll the timeline back to where it really is. The ORDERING lives in the pure
+    // Runahead.h schedule; this half supplies the four side effects and the eligibility measurement.
+    //
+    // N = 0 (the default everywhere) short-circuits EVERY line of this: runaheadWanted_ is 0, so no sample is
+    // taken, no calibration runs, runaheadActive_ never becomes true and advanceEmulation() executes exactly
+    // the loop it executed before this feature landed.
+    int  runaheadWanted_ = 0;                 // N for the running game (per-game override > global default)
+    bool runaheadActive_ = false;             // the sequence is engaged (measured, eligible, not excluded)
+    bool runaheadCalibrated_ = false;         // the session-start measurement has finished (decision is final)
+    runahead::Refusal runaheadRefusal_ = runahead::Refusal::Off; // why it is not engaged
+    std::vector<double> runaheadRunSamples_;  // per-frame retro_run costs, collected at session start
+    std::vector<uint8_t> runaheadState_;      // the one buffer the sequence serializes into and restores from
+    // True only while a HIDDEN run is executing. Read by pushAudio (which may be called on the emulation
+    // worker in threaded mode) — atomic like its fast-forward/rewind neighbours (M1), though runahead never
+    // engages on a threaded view, so in that configuration nothing ever writes it.
+    std::atomic<bool> runaheadHidden_{false};
+    static constexpr int kRunaheadCalibrationFrames = 30; // ~half a second of real play before deciding
+    void resolveRunahead();                   // openGame: read N for this game, reset the session's decision
+    void noteRunaheadRunSample(double ms);    // collect a run cost; on the last sample, measure + decide
+    void runRunaheadSequence();               // one displayed frame through the pure schedule
+    void disengageRunahead(runahead::Refusal why); // stop mid-session (netplay started, a state op failed)
+    int  runaheadFramesForGame() const;       // the resolved N: per-game override if present, else the default
+    QString runaheadLabel() const;            // "Runahead: Off / 1 frame / …" for the pause-menu row
+    void cycleRunahead();                     // pause-menu row: write the next N for THIS GAME and re-decide
+    QPushButton* runaheadBtn_ = nullptr;      // the "Runahead: N" cycle row on the pause menu's main page
 
     QAudioSink* audioSink_ = nullptr;
     QIODevice* audioIo_ = nullptr; // push-mode sink input (owned by audioSink_)

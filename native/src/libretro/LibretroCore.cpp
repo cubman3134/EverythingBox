@@ -57,6 +57,7 @@ bool LibretroCore::loadCore(const std::string& corePath, std::string* error)
     optionValues_.clear();
     optionsDirty_ = false;
     crashed_ = false;
+    serializationQuirks_ = 0;   // a fresh core declares its own quirks (or none); never inherit the last one's
 
     resolve("retro_init", (void**)&retro_init_);
     resolve("retro_deinit", (void**)&retro_deinit_);
@@ -149,6 +150,12 @@ bool LibretroCore::saveState(std::vector<uint8_t>& out)
     if (size == 0) return false; // core doesn't support save states for this content
     out.resize(size);
     return retro_serialize_(out.data(), size);
+}
+
+size_t LibretroCore::serializeSize() const
+{
+    if (!gameLoaded_ || !retro_serialize_size_) return 0;
+    return retro_serialize_size_();
 }
 
 bool LibretroCore::loadState(const uint8_t* data, size_t size)
@@ -304,6 +311,15 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
         unsigned n = 0;
         if (info) while (info[n].types) ++n;
         self->controllerPorts_ = n;
+        return true;
+    }
+    case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+    {
+        // The core declares (and asks the frontend to acknowledge) how its save states behave. We read the
+        // core's half — the bits that tell frame-sensitive features like runahead (#100) whether a state can
+        // be trusted — and acknowledge nothing extra, so the value the core sees back is its own.
+        auto* q = (uint64_t*)data;
+        if (q) self->serializationQuirks_ = *q;
         return true;
     }
     case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:

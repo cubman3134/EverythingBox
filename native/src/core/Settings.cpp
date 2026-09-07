@@ -1368,6 +1368,41 @@ QMap<QString, QString> Settings::gameOptionDelta(const QString& token, const QSt
     return out;
 }
 
+// ---- Runahead frames (issue #100) -----------------------------------------------------------------------
+// Clamped on the way OUT as well as in, so a hand-edited ini can never ask the frame loop for more runs than
+// the feature supports. Default 0 = off: an install that has never heard of runahead runs today's frame loop.
+static int clampRunahead(int n) { return n < 0 ? 0 : (n > 3 ? 3 : n); }
+
+int Settings::runaheadFrames()
+{
+    return clampRunahead(store().value(QStringLiteral("emu/runahead"), 0).toInt());
+}
+void Settings::setRunaheadFrames(int frames)
+{
+    store().setValue(QStringLiteral("emu/runahead"), clampRunahead(frames)); store().sync();
+}
+// Per-game N, keyed "runaheadgame/<token>" — its own keyspace, never the global emu/runahead, so a value set
+// for one game cannot leak into the next (the #95 no-leak rail). A game with no key inherits the default.
+bool Settings::gameHasRunaheadFrames(const QString& token)
+{
+    return !token.isEmpty() && store().contains(QStringLiteral("runaheadgame/%1").arg(token));
+}
+int Settings::gameRunaheadFrames(const QString& token)
+{
+    if (token.isEmpty()) return 0;
+    return clampRunahead(store().value(QStringLiteral("runaheadgame/%1").arg(token), 0).toInt());
+}
+void Settings::setGameRunaheadFrames(const QString& token, int frames)
+{
+    if (token.isEmpty()) return;
+    store().setValue(QStringLiteral("runaheadgame/%1").arg(token), clampRunahead(frames)); store().sync();
+}
+void Settings::clearGameRunaheadFrames(const QString& token)
+{
+    if (token.isEmpty()) return;
+    store().remove(QStringLiteral("runaheadgame/%1").arg(token)); store().sync();
+}
+
 bool Settings::turboButton(int port, int retroId)
 {
     return store().value(QStringLiteral("turbo/%1/%2").arg(port).arg(retroId), false).toBool();

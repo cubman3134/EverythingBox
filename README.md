@@ -46,7 +46,9 @@ Everything lives under [`native/`](native/):
   [**Game updates and DLC**](native/docs/game-updates-and-dlc.md) (the `updates/`
   and `dlc/` sidecar convention and what each emulator does with them) and
   [**Audiobooks**](native/docs/audiobooks.md) (how a folder becomes a book, and what
-  online matching fills in — narrator, series, cover — and how to reject a bad match).
+  online matching fills in — narrator, series, cover — and how to reject a bad match), and
+  [**Runahead**](native/docs/runahead.md) (removing a game's own internal input lag — what it
+  costs, why the setting is per game, and when it refuses instead of slowing the game down).
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.201 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.202 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1637,6 +1637,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_hardcore PRIVATE src src/core)
     target_link_libraries(probe_hardcore PRIVATE Qt6::Core)
+
+    # Runahead (issue #100): the pure single-instance schedule + eligibility gate (src/emu/Runahead.h,
+    # header-only, Qt-free) driven against a fake serializable core, plus the Settings store that holds N
+    # (global default + the per-game keyspace). QtCore-only; Settings.cpp pulls FormFactor.cpp, same as
+    # probe_hardcore. src/libretro is on the include path for the RETRO_SERIALIZATION_QUIRK_* constants only.
+    add_executable(probe_runahead tools/probe_runahead.cpp
+        src/emu/Runahead.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_runahead PRIVATE src src/core src/emu src/libretro)
+    target_link_libraries(probe_runahead PRIVATE Qt6::Core)
 
     # Subtitle styling (issue #71): the pure Style->mpv-option map (src/video/SubtitleStyle.h, header-only) plus
     # the Settings defaults + round-trip that feed it. QtCore-only; Settings.cpp pulls FormFactor.cpp

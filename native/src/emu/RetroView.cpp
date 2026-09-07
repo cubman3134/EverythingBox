@@ -62,6 +62,7 @@
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFunctions>
 #include <QSurfaceFormat>
+#include <algorithm>
 #include <cstring>
 
 RetroView::RetroView(QWidget* parent) : QWidget(parent)
@@ -133,11 +134,12 @@ void RetroView::buildMenu()
 #endif
     vpadBtn_        = new QPushButton(mainPage_);
     vpadOpacityBtn_ = new QPushButton(mainPage_);
+    runaheadBtn_    = new QPushButton(mainPage_);   // #100: this GAME's runahead frames (Off / 1 / 2 / 3)
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
     for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
-                            vpadBtn_, vpadOpacityBtn_, shot, netp, exit }) mp->addWidget(b);
+                            vpadBtn_, vpadOpacityBtn_, runaheadBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -188,9 +190,14 @@ void RetroView::buildMenu()
         if (vpad_) vpad_->setOpacity(Settings::virtualPadOpacity());
     });
 
+    // Runahead (#100): cycle THIS GAME's N. The label is re-read on every showMainMenu() so it reflects a
+    // value changed elsewhere (the global default in Settings) as well as one changed here.
+    runaheadBtn_->setText(runaheadLabel());
+    connect(runaheadBtn_, &QPushButton::clicked, this, [this] { cycleRunahead(); });
+
     // Remember the main buttons so showMainMenu() can restore navigation to them.
     mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, cheatSearch, filterBtn_,
-                     vpadBtn_, vpadOpacityBtn_, shot, netp, exit };
+                     vpadBtn_, vpadOpacityBtn_, runaheadBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -228,6 +235,7 @@ void RetroView::showMainMenu()
     const bool showOpt  = running_ && hasOpts;
     if (diskBtn_) diskBtn_->setVisible(showDisk);
     if (optBtn_)  optBtn_->setVisible(showOpt);
+    if (runaheadBtn_) runaheadBtn_->setText(runaheadLabel()); // #100: re-read, the value may have moved
     // Hardcore (#94): grey the affordances the active session forbids so the user sees WHY, not a silent
     // failure. Disabled (not hidden) — the entries stay visible, just unclickable — and dropped from the nav
     // list below so controller/keyboard focus never lands on them. When hardcore is off every call returns
@@ -1586,6 +1594,10 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // hand-off (a shader-off core like NES is fine; a GBA with lcd-grid is not). resolvedShaderPreset_ was set
     // above by refreshShaderPreset() — before setupHwRender() and this flip — so shaderActive() is reliable here.
     if (!splitPane_ && !hwMode_ && !core_.usesHwRender() && !shaderActive()) threaded_ = true;
+    // Runahead (#100): read this game's N (its own override, else the global default) and arm the session-start
+    // measurement. Must follow the threaded_ flip above — a threaded view is one of the structural exclusions.
+    // With the default N = 0 this leaves every runahead field zeroed and the frame loop untouched.
+    resolveRunahead();
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded mode
     applyCheats();               // push the enabled code cheats into the core (marshals via runOnCore when threaded)
     updateVirtualPad();          // build/show the on-screen gamepad if the form factor (or setting) calls for it
@@ -1799,6 +1811,12 @@ void RetroView::stop()
     virtualPad_ = 0;
     if (vpad_) { vpad_->reset(); vpad_->hide(); }
     ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
+    // Runahead (#100) is per session, exactly like the rewind ring below: the next game re-reads its own N and
+    // re-measures. A refusal must never outlive the game that earned it.
+    runaheadWanted_ = 0; runaheadActive_ = false; runaheadCalibrated_ = false;
+    runaheadRefusal_ = runahead::Refusal::Off;
+    runaheadHidden_.store(false, std::memory_order_relaxed);
+    runaheadRunSamples_.clear(); runaheadState_.clear();
     // M3: a single-player view re-derives threaded_ per game in openGame() (the flip, after hwMode_ is known),
     // so clear it here — otherwise a software game (threaded_=true) followed by a core that must not thread would
     // inherit the stale true. A split pane keeps threaded_ (set once at construction via setThreaded, and its
@@ -1877,20 +1895,32 @@ void RetroView::resizeEvent(QResizeEvent*)
 
 // Advance the core one frame (hardware or software path) and do the per-frame bookkeeping. Returns false if
 // the core crashed and was stopped, so the caller bails out of the frame.
-bool RetroView::runOneCoreFrame()
+//
+// `shown` is the runahead (#100) hidden-frame gate, and it is false ONLY for a speculative run. Everything a
+// hidden run must not touch reads it: the frame read-back, the play-statistics counter, achievement
+// evaluation, the battery-RAM autosave and the black-screen watchdog. (Audio is gated one level down, in
+// pushAudio, because the core pushes it from inside runFrame; the rewind ring is gated one level up, in the
+// schedule, which snapshots before the sequence and never inside it.) Every caller other than the runahead
+// sequence leaves `shown` at its default true, so the pre-runahead behaviour is unchanged line for line.
+bool RetroView::runOneCoreFrame(bool shown)
 {
     if (hwMode_ && glCtx_)  // GL core: run inside our context so it renders into the FBO, then read it back
     {
         glCtx_->makeCurrent(glSurface_);
         glFbo_->bind();                 // the core queries get_current_framebuffer, but bind it as a default too
         core_.runFrame();
-        if (core_.takeHwFramePending()) readbackHwFrame();
+        // Always CONSUME the pending flag (it is a one-shot), but only pay for the read-back on a frame the
+        // player will actually see — a hidden run's picture is overwritten by the shown run that follows it.
+        if (core_.takeHwFramePending() && shown) readbackHwFrame();
         glFbo_->release();
         glCtx_->doneCurrent();
     }
     else
-        core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding)
-    ++sessionFrames_;       // "did this session go anywhere?" — the save-on-exit overwrite rail (writeAutoState)
+        core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding / hidden)
+    if (shown) ++sessionFrames_; // "did this session go anywhere?" — the save-on-exit rail (writeAutoState)
+    // Deliberately NOT gated on `shown`: an address freeze is part of the emulation, not a consumer of it. A
+    // speculative run that skipped the freeze would draw the un-frozen value, and that is the picture the
+    // player would be shown.
     applyFreezeCheats();    // #96: hold any address-freeze cheats by writing them back post-run
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
@@ -1914,10 +1944,14 @@ bool RetroView::runOneCoreFrame()
     // Achievements only on the GUI path here. rc_client issues HTTP via a GUI-thread QNetworkAccessManager whose
     // reply callbacks run on the GUI thread, so doFrame() must never run on the worker (C1) — the threaded path
     // drives it from pollInput() (GUI, inputTimer_ cadence) instead.
-    if (!threaded_ && ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
-    if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
+    // …and never against a HIDDEN runahead frame's memory (#100): rc_client would evaluate — and could unlock
+    // — an achievement on a speculative timeline that is about to be rolled back.
+    if (shown && !threaded_ && ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame
+    // Short-circuits on `shown`, so a hidden run does not advance the counter either: otherwise the ~10 s
+    // autosave would fire N+1 times as often, and would persist battery RAM from a speculative state.
+    if (shown && ++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave
     // Black-screen watchdog: note when the game first paints, or warn if it produces no picture at all.
-    if (!firstFrameLogged_)
+    if (shown && !firstFrameLogged_)
     {
         if (core_.hasFrame())
         {
@@ -2001,6 +2035,10 @@ void RetroView::ensureNetSession()
         emit statusMessage(m); });
     connect(net_, &NetplaySession::started, this, [this] {
         netActive_ = true; netFrame_ = netGenFrame_ = 0; netCurLocal_ = netCurRemote_ = 0;
+        // Runahead (#100) and lockstep netplay are mutually exclusive: lockstep owns the timeline, and a peer
+        // speculating on top of it would desync the session rather than merely feel different. Say so; never
+        // produce a silently-desynced game.
+        disengageRunahead(runahead::Refusal::Netplay);
         netLocalInputs_.clear();
         netLocalPort_  = net_->isHost() ? 0 : 1;
         netRemotePort_ = net_->isHost() ? 1 : 0;
@@ -2200,13 +2238,204 @@ void RetroView::advanceEmulation()
         return;
     }
 
+    // Runahead (#100): when N > 0 and the session-start measurement said this core and this device can afford
+    // it, ONE displayed frame is the RetroArch single-instance sequence instead of one plain run. Excluded by
+    // exactly the flags rewind and fast-forward already exclude on — a split pane, and fast-forward/rewind
+    // themselves (both of which would be speculating on top of speculation) — plus netplay, which never
+    // reaches this function at all (tick() hands off to netTick()). runaheadActive_ is false for every session
+    // that did not ask for runahead, so with N = 0 this whole branch is one comparison against a zeroed bool.
+    if (runaheadActive_ && !fastForward_ && !rewinding_) { runRunaheadSequence(); return; }
+
     // Normal / fast-forward: run one or several core frames. Capture a rewind snapshot before each real frame
     // (skipped while fast-forwarding, to keep its cost down).
     const int frames = (fastForward_ && !splitPane_) ? kFfSpeed : 1;
+    // Session-start runahead measurement (#100): time the plain frames we were going to run anyway, and once
+    // there are enough samples decide whether runahead can be afforded. Only ever true when the user asked for
+    // runahead on this game, so with N = 0 the loop below is exactly the two lines it always was.
+    const bool sampling = runaheadWanted_ > 0 && !runaheadCalibrated_ && frames == 1 && !splitPane_;
     for (int i = 0; i < frames; ++i)
     {
         if (!splitPane_ && !fastForward_) captureRewind();
+        if (!sampling) { if (!runOneCoreFrame()) return; continue; }
+        QElapsedTimer runClock; runClock.start();
         if (!runOneCoreFrame()) return;
+        noteRunaheadRunSample(double(runClock.nsecsElapsed()) / 1.0e6);
+    }
+}
+
+// ---- Runahead (#100) -------------------------------------------------------------------------------------
+// The ordering lives in Runahead.h (pure, probe-driven against a fake core). What lives here is the four side
+// effects it drives, and the measurement that decides whether to drive them at all.
+
+// The N this game runs with: its own override if it has one (the right value IS a property of the game — its
+// internal input lag), else the global default. Both are clamped 0..3 by the store.
+int RetroView::runaheadFramesForGame() const
+{
+    if (!overrideToken_.isEmpty() && Settings::gameHasRunaheadFrames(overrideToken_))
+        return Settings::gameRunaheadFrames(overrideToken_);
+    return Settings::runaheadFrames();
+}
+
+// Called from openGame once the game's identity (and therefore its override token) is settled. Resets the
+// whole decision: a refusal is per session, never sticky across games.
+void RetroView::resolveRunahead()
+{
+    runaheadWanted_     = runahead::clampFrames(runaheadFramesForGame());
+    runaheadActive_     = false;
+    runaheadCalibrated_ = false;
+    runaheadRefusal_    = runahead::Refusal::Off;
+    runaheadRunSamples_.clear();
+    runaheadState_.clear();
+    runaheadHidden_.store(false, std::memory_order_relaxed);
+    if (runaheadWanted_ <= 0) return;
+    // Structural exclusions are known before a single frame runs, so don't spend half a second measuring for
+    // an answer we already have. These are the same conditions rewind and fast-forward refuse on.
+    runahead::Conditions c;
+    c.frames = runaheadWanted_; c.splitPane = splitPane_; c.threaded = threaded_; c.netplay = netActive_;
+    const runahead::Refusal structural = runahead::evaluate(c);
+    if (structural == runahead::Refusal::Netplay || structural == runahead::Refusal::SplitPane
+        || structural == runahead::Refusal::Threaded)
+    {
+        runaheadCalibrated_ = true;
+        runaheadRefusal_    = structural;
+        qInfo("runahead: not engaged — %s", runahead::refusalMessage(structural));
+    }
+}
+
+// Collect one plain frame's cost. On the last sample, price a real save + restore round trip (which is also
+// the only proof this core's state ops actually work) and make the call, once, for the session.
+void RetroView::noteRunaheadRunSample(double ms)
+{
+    if (runaheadCalibrated_ || runaheadWanted_ <= 0) return;
+    runaheadRunSamples_.push_back(ms);
+    if (int(runaheadRunSamples_.size()) < kRunaheadCalibrationFrames) return;
+    runaheadCalibrated_ = true;
+
+    // Median, not mean: the first frames after a load are dominated by one-off work (lazy allocation, the
+    // shader/first-paint hitch) and one outlier must not condemn a core that is comfortably fast.
+    std::vector<double> sorted = runaheadRunSamples_;
+    std::sort(sorted.begin(), sorted.end());
+    const double runMs = sorted[sorted.size() / 2];
+    runaheadRunSamples_.clear();
+    runaheadRunSamples_.shrink_to_fit();
+
+    // A save immediately followed by a restore of those same bytes is a no-op on the timeline — the core ends
+    // exactly where it started — so this measurement costs the session nothing but the time it takes.
+    QElapsedTimer clock; clock.start();
+    const bool saved = core_.saveState(runaheadState_) && !runaheadState_.empty();
+    const double saveMs = double(clock.nsecsElapsed()) / 1.0e6;
+    double loadMs = 0.0;
+    bool restored = false;
+    if (saved)
+    {
+        clock.restart();
+        restored = core_.loadState(runaheadState_.data(), runaheadState_.size());
+        loadMs = double(clock.nsecsElapsed()) / 1.0e6;
+    }
+
+    runahead::Conditions c;
+    c.frames    = runaheadWanted_;
+    c.netplay   = netActive_;
+    c.splitPane = splitPane_;
+    c.threaded  = threaded_;
+    c.stateSize = saved ? runaheadState_.size() : core_.serializeSize();
+    c.quirks    = core_.serializationQuirks();
+    c.stateOpsVerified = saved && restored;
+    c.runMs = runMs; c.saveMs = saveMs; c.loadMs = loadMs;
+    c.frameMs = frameIntervalMsF_;
+    runaheadRefusal_ = runahead::evaluate(c);
+    runaheadActive_  = (runaheadRefusal_ == runahead::Refusal::None);
+
+    qInfo("runahead: N=%d run=%.3fms save=%.3fms load=%.3fms state=%llu frame=%.3fms budget=%.3fms -> %s",
+          runaheadWanted_, runMs, saveMs, loadMs, (unsigned long long)c.stateSize, c.frameMs,
+          runahead::sequenceCostMs(runaheadWanted_, runMs, saveMs, loadMs),
+          runaheadActive_ ? "engaged" : runahead::refusalMessage(runaheadRefusal_));
+    if (!runaheadActive_)
+    {
+        // The user asked for runahead on this game and is not getting it: say why, rather than leaving a
+        // setting that silently did nothing. Slow motion is never the alternative.
+        runaheadState_.clear();
+        runaheadState_.shrink_to_fit();
+        const char* msg = runahead::refusalMessage(runaheadRefusal_);
+        if (msg && *msg) emit statusMessage(QString::fromUtf8(msg));
+    }
+}
+
+// One displayed frame. Everything about WHICH runs happen, which one is seen, and when the state is saved and
+// restored comes from the pure schedule; this supplies only the side effects.
+void RetroView::runRunaheadSequence()
+{
+    struct Ops
+    {
+        RetroView* v;
+        // The rewind ring is fed from the REAL timeline only: this fires once, before any run, so the buffer
+        // holds exactly the states it would hold with runahead off (issue #100's rewind rail).
+        void captureRewind() { v->captureRewind(); }
+        bool run(bool shown)
+        {
+            v->runaheadHidden_.store(!shown, std::memory_order_relaxed);
+            const bool alive = v->runOneCoreFrame(shown);
+            v->runaheadHidden_.store(false, std::memory_order_relaxed);
+            return alive;
+        }
+        bool save() { return v->core_.saveState(v->runaheadState_) && !v->runaheadState_.empty(); }
+        bool load() { return v->core_.loadState(v->runaheadState_.data(), v->runaheadState_.size()); }
+    } ops{ this };
+
+    const runahead::Plan plan = runahead::planFrame(runaheadWanted_, !splitPane_);
+    const runahead::Outcome out = runahead::runPlan(plan, ops);
+    // Aborted means the core crashed and runOneCoreFrame already stopped it — nothing left to do. A failed
+    // state op means the core lied about its serialization: stop speculating on it for the rest of the
+    // session rather than rolling the dice every frame.
+    if (out == runahead::Outcome::SaveFailed || out == runahead::Outcome::LoadFailed)
+        disengageRunahead(runahead::Refusal::StateOpsFailed);
+}
+
+// Turn runahead off mid-session and tell the user. Silent for a session that never wanted it (starting
+// netplay in a game with N = 0 is not news).
+void RetroView::disengageRunahead(runahead::Refusal why)
+{
+    if (runaheadWanted_ <= 0) return;
+    if (!runaheadActive_ && runaheadRefusal_ == why) return;
+    runaheadActive_     = false;
+    runaheadCalibrated_ = true;   // final for this session; do not quietly re-engage
+    runaheadRefusal_    = why;
+    runaheadHidden_.store(false, std::memory_order_relaxed);
+    runaheadState_.clear();
+    runaheadState_.shrink_to_fit();
+    qInfo("runahead: disengaged — %s", runahead::refusalMessage(why));
+    const char* msg = runahead::refusalMessage(why);
+    if (msg && *msg) emit statusMessage(QString::fromUtf8(msg));
+}
+
+QString RetroView::runaheadLabel() const
+{
+    const int n = runaheadWanted_;
+    if (n <= 0) return tr("Runahead: Off");
+    return tr("Runahead: %n frame(s)", nullptr, n);
+}
+
+// The pause-menu row writes THIS GAME's value (#95's per-game keyspace), because the correct N is the game's
+// own internal input lag. Off -> 1 -> 2 -> 3 -> Off; landing back on Off REMOVES the key so the game falls
+// back to the global default rather than storing a 0 that looks like a deliberate refusal.
+void RetroView::cycleRunahead()
+{
+    const int next = runaheadWanted_ >= runahead::kMaxFrames ? 0 : runaheadWanted_ + 1;
+    if (!overrideToken_.isEmpty())
+    {
+        if (next <= 0) Settings::clearGameRunaheadFrames(overrideToken_);
+        else           Settings::setGameRunaheadFrames(overrideToken_, next);
+    }
+    resolveRunahead();          // re-read + re-arm the measurement for the new N
+    if (runaheadBtn_) runaheadBtn_->setText(runaheadLabel());
+    if (menuStatus_)
+    {
+        if (runaheadWanted_ <= 0)
+            menuStatus_->setText(tr("Runahead off for this game."));
+        else if (runaheadRefusal_ != runahead::Refusal::Off)
+            menuStatus_->setText(QString::fromUtf8(runahead::refusalMessage(runaheadRefusal_)));
+        else
+            menuStatus_->setText(tr("Measuring whether this game can run ahead…"));
     }
 }
 
@@ -3181,6 +3410,11 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
 {
     if (!audioIo_ || frames == 0) return;
     if (fastForward_ || rewinding_) return; // muted: N× or reversed audio is just noise
+    // …and a HIDDEN runahead run (#100) is emulation the player never sees, so its samples must never reach
+    // the sink: only the one SHOWN run per displayed frame produces audio, which is why runahead does not
+    // multiply the sample rate by N+1. The core pushes from inside runFrame, so this is the only place the
+    // gate can sit.
+    if (runaheadHidden_.load(std::memory_order_relaxed)) return;
     // Dynamic rate control (PI), applied on EVERY frame — including when the core's sample rate equals the
     // device rate. The frame timer's integer-ms interval never matches the core's true frame rate (NES 60.10fps
     // stepped every 17ms => 58.8fps => the core emits ~2.1% fewer samples/sec than a 48kHz device consumes), so
