@@ -53,6 +53,35 @@ public:
     Q_INVOKABLE void forceActiveFocus() { ++kicks; }
 };
 
+// §26: a stand-in for MainWindow's key routing, and the ONLY piece of it that matters here — a key that
+// reaches the window is handed to NavContext::routeKey (MainWindow::keyPressEvent, the panelPage_ branch).
+// The probe needs a real window with that one line, because issue #305's loop is closed by it: the ring
+// synthesises a Return, the focused widget leaves it unaccepted, QApplication::notify propagates it up the
+// parent chain to the window, and the window routes it straight back into the ring. A bare QWidget host
+// would never see the bounce and the probe would pass against the broken code.
+class RoutingWindow : public QWidget
+{
+public:
+    int entries = 0;      // how many key presses reached this window at all
+    int depth = 0;        // current re-entrancy depth of keyPressEvent
+    int maxDepth = 0;     // the high-water mark — 1 means "no re-entry", >1 means the loop is alive
+    void reset() { entries = depth = maxDepth = 0; }
+
+protected:
+    void keyPressEvent(QKeyEvent* e) override
+    {
+        ++entries;
+        ++depth;
+        if (depth > maxDepth) maxDepth = depth;
+        // A BAIL-OUT, not the behaviour under test: against the pre-fix code this recursion is unbounded,
+        // and a probe that reproduced it faithfully would die of the very c00000fd it exists to prevent
+        // (the shipped crash reached 387 levels). 8 is far past anything legitimate and far short of that.
+        if (depth <= 8 && NavContext::instance() && NavContext::instance()->routeKey(e->key())) e->accept();
+        else QWidget::keyPressEvent(e);
+        --depth;
+    }
+};
+
 static void pump() { QApplication::processEvents(); QApplication::processEvents(); }
 
 // Every ring member that arrow keys can NEVER land on, starting from the ring's own initial selection.
@@ -1281,6 +1310,104 @@ int main(int argc, char** argv)
 
         ctx.setActiveRing(nullptr);
         delete host;
+        pump();
+    }
+
+    // -------------------------------- 26. Enter on a ring member must not re-enter the router (issue #305)
+    // The crash: pressing Enter on a row of the CLASSIC Appearance theme list killed the app with c00000fd
+    // — a stack overflow, 387 identical levels of
+    //     MainWindow::keyPressEvent -> NavContext::routeKey -> NavRing::handleKey -> (activate) sendEvent
+    //     -> QCoreApplication::notifyInternal2 -> QApplication::notify -> notify_helper -> QWidget::event
+    //     -> MainWindow::keyPressEvent -> …
+    // NavRing::activate's fallback synthesised the Return into the focused widget; QAbstractItemView answers
+    // Return by emitting activated() and then IGNORING the event (Qt's own source warns that re-delivering
+    // it "start[s] an endless loop"); QApplication::notify propagates an unaccepted key up the parent chain
+    // to the window; and the window's keyPressEvent routes it back into the same ring. Nothing bounded it.
+    //
+    // What this section actually covers: the RE-ENTRY, not the theme list. The list is the reported gesture,
+    // but the loop belongs to the kit, so the invariant asserted is the general one — one press enters the
+    // window's routing at most once — over both widget classes that leave Return unaccepted (an item view,
+    // and a QSlider, which reaches the generic fallback) and over both key paths (a physical key, which Qt
+    // delivers to the focused widget first, and a controller/injected key, which is routed straight in).
+    {
+        auto* win2 = new RoutingWindow();
+        win2->resize(500, 400);
+        auto* host = new QWidget(win2);
+        host->setGeometry(0, 0, 500, 400);
+        auto* v = new QVBoxLayout(host);
+        auto* list = new QListWidget(host);
+        for (const char* t : { "Triple", "Night", "Channels" }) new QListWidgetItem(QString::fromLatin1(t), list);
+        list->setCurrentRow(0);
+        v->addWidget(list);
+        auto* slider = new QSlider(Qt::Horizontal, host);   // the OTHER widget class that ignores Return
+        v->addWidget(slider);
+        v->addWidget(new QPushButton(QStringLiteral("Browse community themes…"), host));
+        NavRing ring(host);
+        ctx.setActiveRing(&ring);
+        win2->show();
+        win2->activateWindow();
+        pump();
+
+        int activated = 0;
+        QObject::connect(list, &QListWidget::itemActivated, [&](QListWidgetItem*) { ++activated; });
+
+        // a) THE PHYSICAL KEY PATH — exactly what Qt does with a real Enter: deliver it to the focus widget
+        //    and let it propagate if unaccepted. Pre-fix this never came back.
+        list->setCurrentRow(0);
+        list->setFocus(Qt::OtherFocusReason);
+        pump();
+        win2->reset();
+        activated = 0;
+        {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(list, &press);
+        }
+        pump();
+        CHECK(win2->maxDepth <= 1, "Enter on a list row enters the window's key routing at most once (#305)");
+        CHECK(activated == 1, "…and activates the row exactly once — one press, one activation");
+
+        // b) …and it is not a one-shot: five presses in a row each behave the same. A guard that forgot to
+        //    reset would pass (a) and then silently swallow every Enter after it, which is the failure mode
+        //    a re-entrancy flag is most likely to ship with.
+        for (int i = 0; i < 5; ++i)
+        {
+            win2->reset();
+            activated = 0;
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(list, &press);
+            pump();
+            CHECK(win2->maxDepth <= 1, "repeated Enter on the same row keeps not re-entering");
+            CHECK(activated == 1, "…and each press still activates the row exactly once");
+        }
+
+        // c) THE CONTROLLER / INJECTED PATH (sendNavKey step 6): the key never touches the view, so the ring
+        //    is the only thing that can activate the row — and it must, or picking a theme with a pad commits
+        //    nothing. SyntheticScope is what tells the two paths apart, exactly as sendNavKey sets it.
+        win2->reset();
+        activated = 0;
+        {
+            NavContext::SyntheticScope synth;
+            ctx.routeKey(Qt::Key_Return);
+        }
+        pump();
+        CHECK(activated == 1, "a controller Enter activates the current row (the pad's only route in)");
+        CHECK(win2->maxDepth <= 1, "…without bouncing back through the window's routing");
+
+        // d) THE GENERIC FALLBACK, which is where a QSlider lands: no branch of activate() claims it, so it
+        //    gets the synthesised Return — and QAbstractSlider ignores anything that is not an arrow/page key,
+        //    so this is the same loop with a different widget. It is bounded now, whatever the widget does.
+        slider->setFocus(Qt::OtherFocusReason);
+        pump();
+        win2->reset();
+        {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(slider, &press);
+        }
+        pump();
+        CHECK(win2->maxDepth <= 2, "Enter on a slider is bounded too — the fallback cannot feed itself (#305)");
+
+        ctx.setActiveRing(nullptr);
+        delete win2;
         pump();
     }
 
