@@ -819,6 +819,32 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         else if (ok)
             notify(tr("🏆  No RetroAchievements set for this game."), kFeedbackLong);
     });
+    // Leaderboards (#94 increment 2). rc_client raises these from the game data it has already fetched, so
+    // none of this costs a request. Every one of them lands on the emulator surface: the notices reuse the
+    // unlock toast's queue, and the tracker is a painted card, so nothing here can take focus or swallow a
+    // button press during a run. Nothing is logged - a leaderboard title and its value say what is being
+    // played and how well.
+    connect(ach_, &Achievements::leaderboardAttemptStarted, this,
+            [this](unsigned, const QString& title, const QString&, bool willSubmit) {
+        retro_->showLeaderboardNotice(title, ra::attemptNotice(ra::EventKind::AttemptStarted, ra::Leaderboard{}, willSubmit));
+    });
+    connect(ach_, &Achievements::leaderboardAttemptFailed, this, [this](unsigned, const QString& title) {
+        retro_->showLeaderboardNotice(title, ra::attemptNotice(ra::EventKind::AttemptFailed, ra::Leaderboard{}, false));
+    });
+    connect(ach_, &Achievements::leaderboardAttemptSubmitted, this,
+            [this](unsigned, const QString& title, const QString& value, bool willSubmit) {
+        // rcheevos raises this in softcore too and sends nothing; the notice says which happened.
+        ra::Leaderboard lb; lb.trackerValue = value;   // the notice needs the VALUE; the name is the card's title
+        retro_->showLeaderboardNotice(title, ra::attemptNotice(ra::EventKind::AttemptSubmitted, lb, willSubmit));
+    });
+    connect(ach_, &Achievements::leaderboardSubmitResult, this,
+            [this](unsigned, const QString& submitted, const QString& best, unsigned rank, unsigned entries) {
+        ra::Scoreboard sb; sb.submitted = submitted; sb.best = best; sb.newRank = rank; sb.numEntries = entries;
+        retro_->showLeaderboardNotice(QString(), ra::scoreboardNotice(sb));
+    });
+    connect(ach_, &Achievements::leaderboardTrackerChanged, this, [this](bool visible, const QString& display) {
+        retro_->setLeaderboardTracker(visible, display);
+    });
     ach_->tryLoginWithStoredToken();
     PerfTrace::end(QStringLiteral("startup.settings"));
 

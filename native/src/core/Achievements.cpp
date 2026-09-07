@@ -151,6 +151,33 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
     });
 }
 
+// Leaderboards (#94 increment 2). Leaderboards.h hand-transcribes the RC_CLIENT_EVENT_* ids it routes on so
+// the pure layer (and its probe) need no rcheevos header. Pin them to the real enum HERE: a rcheevos bump that
+// renumbers the events then fails the build instead of quietly delivering a submit into the "failed" arm.
+static_assert(ra::kRcLeaderboardStarted   == RC_CLIENT_EVENT_LEADERBOARD_STARTED,        "rcheevos event id moved");
+static_assert(ra::kRcLeaderboardFailed    == RC_CLIENT_EVENT_LEADERBOARD_FAILED,         "rcheevos event id moved");
+static_assert(ra::kRcLeaderboardSubmitted == RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED,      "rcheevos event id moved");
+static_assert(ra::kRcTrackerShow          == RC_CLIENT_EVENT_LEADERBOARD_TRACKER_SHOW,   "rcheevos event id moved");
+static_assert(ra::kRcTrackerHide          == RC_CLIENT_EVENT_LEADERBOARD_TRACKER_HIDE,   "rcheevos event id moved");
+static_assert(ra::kRcTrackerUpdate        == RC_CLIENT_EVENT_LEADERBOARD_TRACKER_UPDATE, "rcheevos event id moved");
+static_assert(ra::kRcScoreboard           == RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD,     "rcheevos event id moved");
+
+// Copy an rcheevos leaderboard into the UI-facing POD. rc_client's strings are only valid for the duration of
+// the event callback, so everything is deep-copied here.
+ra::Leaderboard toLeaderboard(const rc_client_leaderboard_t* lb)
+{
+    ra::Leaderboard out;
+    if (!lb) return out;
+    out.id            = lb->id;
+    out.title         = QString::fromUtf8(lb->title ? lb->title : "");
+    out.description   = QString::fromUtf8(lb->description ? lb->description : "");
+    out.trackerValue  = QString::fromUtf8(lb->tracker_value ? lb->tracker_value : "");
+    out.lowerIsBetter = lb->lower_is_better != 0;
+    out.active        = lb->state == RC_CLIENT_LEADERBOARD_STATE_ACTIVE
+                     || lb->state == RC_CLIENT_LEADERBOARD_STATE_TRACKING;
+    return out;
+}
+
 void eventHandlerCb(const rc_client_event_t* event, rc_client_t*)
 {
     if (!g_ach) return;
@@ -162,8 +189,52 @@ void eventHandlerCb(const rc_client_event_t* event, rc_client_t*)
                                         QString::fromUtf8(event->achievement->description),
                                         (int)event->achievement->points,
                                         QString::fromUtf8(badge));
+        return;
     }
+
+    // Leaderboards + their tracker overlay. Decode into the POD and hand it to the object; ra::dispatch is the
+    // ONE place an event becomes a UI-visible fact, so this stays a pure translation. NOTHING here is logged -
+    // a leaderboard title and its running value say what the user is playing and how well.
+    const ra::EventKind kind = ra::kindForRcEvent(event->type);
+    if (kind == ra::EventKind::None) return;
+    ra::Event e;
+    e.kind = kind;
+    if (event->leaderboard) e.leaderboard = toLeaderboard(event->leaderboard);
+    if (event->leaderboard_tracker)
+    {
+        e.trackerId = event->leaderboard_tracker->id;
+        e.trackerDisplay = QString::fromUtf8(event->leaderboard_tracker->display);
+    }
+    if (event->leaderboard_scoreboard)
+    {
+        const rc_client_leaderboard_scoreboard_t* sb = event->leaderboard_scoreboard;
+        e.scoreboard.id         = sb->leaderboard_id;
+        e.scoreboard.submitted  = QString::fromUtf8(sb->submitted_score);
+        e.scoreboard.best       = QString::fromUtf8(sb->best_score);
+        e.scoreboard.newRank    = sb->new_rank;
+        e.scoreboard.numEntries = sb->num_entries;
+    }
+    g_ach->handleLeaderboardEvent(e);
 }
+
+// Achievements' own ra::Sink: every method is a single emit, so the mapping from an event to a signal lives in
+// ra::dispatch and nowhere else.
+struct SignalSink : ra::Sink
+{
+    Achievements* ach = nullptr;
+    bool submits = false;   // the hardcore-only submission verdict, snapshotted for this one event
+    SignalSink(Achievements* a, bool s) : ach(a), submits(s) {}
+    void attemptStarted(const ra::Leaderboard& lb) override
+    { emit ach->leaderboardAttemptStarted(lb.id, lb.title, lb.description, submits); }
+    void attemptFailed(const ra::Leaderboard& lb) override
+    { emit ach->leaderboardAttemptFailed(lb.id, lb.title); }
+    void attemptSubmitted(const ra::Leaderboard& lb) override
+    { emit ach->leaderboardAttemptSubmitted(lb.id, lb.title, lb.trackerValue, submits); }
+    void submitResult(const ra::Scoreboard& sb) override
+    { emit ach->leaderboardSubmitResult(sb.id, sb.submitted, sb.best, sb.newRank, sb.numEntries); }
+    void trackerChanged(bool visible, const QString& display) override
+    { emit ach->leaderboardTrackerChanged(visible, display); }
+};
 
 void loginCb(int result, const char* error_message, rc_client_t* client, void*)
 {
@@ -289,6 +360,8 @@ void Achievements::loadGame(LibretroCore* core, unsigned console, const QString&
     // Start clean: a load without a prior explicit unloadGame() must not leave a reply from the previous game
     // able to deliver into the fresh session.
     abortPendingReplies(st);
+    // #94: a previous game's tracker must not bleed into this one (loadGame is legal without an unloadGame).
+    clearLeaderboardTracker();
     if (!st->client || !st->loggedIn || console == 0 || !core) return; // no RA without login / known system
     st->core = core;
     std::memset(&st->regions, 0, sizeof(st->regions));
@@ -308,6 +381,9 @@ void Achievements::unloadGame()
     if (st->client) rc_client_unload_game(st->client);
     if (st->memReady) { rc_libretro_memory_destroy(&st->regions); st->memReady = false; }
     st->core = nullptr;
+    // #94: the tracker overlay must never outlive the game it belongs to. Clear it and announce that, so a
+    // hide event rc_client will now never raise cannot leave a running value on screen over the next game.
+    clearLeaderboardTracker();
 }
 
 void Achievements::doFrame()
@@ -327,6 +403,10 @@ void Achievements::setHardcore(bool on)
     // starts clean. With no game loaded it is a harmless no-op. (Disabling never resets — dropping to softcore
     // keeps playing.) The emulator core itself is NOT force-reset here; the RA session is what resets.
     if (on) rc_client_reset(st->client);
+    // rc_client_reset() puts every leaderboard back to its initial state and drops its trackers, but it does so
+    // internally - no hide event reaches us - so the overlay would sit there showing a value from a run that no
+    // longer exists. Clear it here (#94 increment 2).
+    if (on) clearLeaderboardTracker();
 }
 
 bool Achievements::hardcoreActive() const
@@ -336,6 +416,73 @@ bool Achievements::hardcoreActive() const
     // session is actually loaded. Either being false means nothing to protect — the gates no-op.
     return st && st->client && rc_client_get_hardcore_enabled(st->client) != 0
         && rc_client_get_game_info(st->client) != nullptr;
+}
+
+// ---- Leaderboards (#94 increment 2) ----------------------------------------------------------------------
+
+void Achievements::handleLeaderboardEvent(const ra::Event& e)
+{
+    // The submission verdict is read ONCE per event and carried into the signals, so a start and its submit
+    // cannot disagree about whether the run counts.
+    SignalSink sink(this, leaderboardsSubmit());
+    ra::dispatch(e, tracker_, sink);
+}
+
+void Achievements::clearLeaderboardTracker()
+{
+    if (!tracker_.visible()) { tracker_.clear(); return; }  // nothing on screen: no repaint to ask for
+    tracker_.clear();
+    emit leaderboardTrackerChanged(false, QString());
+}
+
+QString Achievements::leaderboardTracker() const { return tracker_.display(); }
+
+bool Achievements::leaderboardsSubmit() const { return ra::willSubmit(hardcoreActive(), isLoggedIn()); }
+
+bool Achievements::hasLeaderboards() const
+{
+    auto* st = static_cast<RAState*>(impl_);
+    return st && st->client && rc_client_has_leaderboards(st->client) != 0;
+}
+
+QVector<ra::Leaderboard> Achievements::leaderboards() const
+{
+    QVector<ra::Leaderboard> out;
+    auto* st = static_cast<RAState*>(impl_);
+    if (!st || !st->client) return out;
+    // Already-fetched game data - this makes no network call. GROUPING_NONE keeps rc_client's own order in one
+    // bucket; the pause list shows every board, active or not, because a softcore player must be able to READ a
+    // board they are not currently submitting to.
+    rc_client_leaderboard_list_t* list =
+        rc_client_create_leaderboard_list(st->client, RC_CLIENT_LEADERBOARD_LIST_GROUPING_NONE);
+    if (!list) return out;
+    for (uint32_t b = 0; b < list->num_buckets; ++b)
+        for (uint32_t i = 0; i < list->buckets[b].num_leaderboards; ++i)
+            if (const rc_client_leaderboard_t* lb = list->buckets[b].leaderboards[i])
+                out.push_back(toLeaderboard(lb));
+    rc_client_destroy_leaderboard_list(list);
+    return out;
+}
+
+// ---- Rich presence (#94 increment 2) ---------------------------------------------------------------------
+
+bool Achievements::hasRichPresence() const
+{
+    auto* st = static_cast<RAState*>(impl_);
+    return st && st->client && rc_client_has_rich_presence(st->client) != 0;
+}
+
+QString Achievements::richPresence() const
+{
+    auto* st = static_cast<RAState*>(impl_);
+    if (!st || !st->client) return QString();
+    // Gate on has_rich_presence: without a presence script rc_client synthesises "Playing <title>", which is
+    // not what the site would show and only echoes a title the UI already displays. Empty is the honest answer.
+    // The message itself is NEVER logged - it names what is being played and how far in.
+    if (!rc_client_has_rich_presence(st->client)) return QString();
+    char buf[512] = { 0 };
+    const size_t n = rc_client_get_rich_presence_message(st->client, buf, sizeof(buf));
+    return n ? QString::fromUtf8(buf, static_cast<int>(n)) : QString();
 }
 
 unsigned Achievements::consoleIdForExtension(const QString& e)
