@@ -1104,6 +1104,22 @@ private:
     // row is still activatable from inside one — see installThemeRegistryEntry, which refuses and says why.
     bool themeInstallBusy_ = false;
 
+    // ---- Issue #91: what the gallery gained beyond "install". Defined in MainWindowThemes.cpp, not here —
+    // MainWindow.cpp is the file every concurrent branch collides in, and these are a feature's members
+    // (the #143 / #186 direction). Only the declarations live in this header.
+    //
+    // The registry list, the bundled-theme list and the trust-posture sentence are FUNCTIONS rather than
+    // literals at the call sites because the classic surface needs the same three answers, and a second copy
+    // of "which registries" or "which themes ship with the app" is how the two surfaces start disagreeing
+    // about what may be updated.
+    QStringList themeRegistryUrls() const;      // the built-in index + the user's `registry/themesExtras`
+    QStringList themeExtraRegistryUrls() const; // ONLY the user's, which is what the download host rule takes
+    QStringList bundledThemeFolders() const;    // the themes that ship inside the app — never updated, never removed
+    // Remove an installed theme, refusing a bundled one (ThemeRegistry owns every refusal, so both surfaces
+    // refuse the same set). By value for the same reason its neighbours are: `entry` is an element of fetch
+    // state a panel callback owns. The twin of removeDecorationPack, patching the row rather than rebuilding.
+    void removeInstalledTheme(ThemeRegistry::Entry entry, const QString& rowId);
+
     // ---- Themed decoration (bezel) pack gallery (issue #187): the twin of the classic
     // RegistryBrowser(Decorations), for exactly the reason the theme pair above exists. Packs come from the
     // SAME registry index document under a `decorations` key, and everything that is easy to get subtly

@@ -4,6 +4,7 @@
 #include "../core/DecorationInstall.h"   // #187: zip -> bezels/<system>/<packId>/
 #include "../core/SystemCatalog.h"       // #187: the system ids a pack's folders are matched against
 #include "../core/ThemeRegistry.h"
+#include "../core/ThemeZip.h"   // #91: the zip install lane, shared with the themed surface
 #include "../addons/AddonManager.h"
 
 #include <QVBoxLayout>
@@ -191,6 +192,21 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     // is not forced to scroll sideways; a short one still degrades gracefully because the panel scrolls.
     scroll->setMinimumHeight(360);
     v->addWidget(scroll, 1);
+
+    // Issue #91: the trust posture, said on the surface rather than left implicit. A theme has no script
+    // surface, so installing one from a stranger's registry is not the decision installing an ADD-ON is, and
+    // a user who cannot see that difference will either avoid both or trust both. Themes only — it would be
+    // a false reassurance on the add-on kind, which is exactly the kind that runs code.
+    if (kind_ == Themes)
+    {
+        auto* trust = new QLabel(tr("Themes are data, not code — a theme is JSON and artwork, and the format "
+                                    "has no script in it. Views a theme doesn't declare fall back to the "
+                                    "built-in ones."), this);
+        trust->setWordWrap(true);
+        trust->setTextFormat(Qt::PlainText);
+        trust->setStyleSheet(QStringLiteral("color:#666; font-size:11px;"));
+        v->addWidget(trust);
+    }
 
     status_ = new QLabel(this);
     status_->setWordWrap(true);
@@ -564,16 +580,84 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
 // being re-read from JSON, so the row and the install act on the same values.
 void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl)
 {
-    addCard(entry.name, entry.author, entry.description, entry.formFactors, indexUrl,
-            isThemeInstalled(entry),
-            [this, entry, indexUrl](QPushButton* btn) {
+    // The version goes in the description line rather than a slot of its own: it is the fact the update
+    // verb rests on, and a card that offers "Update to 1.3" without saying what is installed is a card the
+    // user has to take on faith.
+    QString desc = entry.description;
+    if (!entry.version.isEmpty())
+        desc += (desc.isEmpty() ? QString() : QStringLiteral(" · ")) + tr("version %1").arg(entry.version);
+
+    const bool bundled  = isThemeBundled(entry);
+    const bool onDisk   = isThemeInstalled(entry);
+    const bool updatable = !bundled && onDisk && isThemeUpdatable(entry);
+
+    // ONE verb per card, and it is the strongest one that applies — the same rule the themed twin's rows
+    // follow, so the two surfaces cannot offer a different set of actions for the same theme. A bundled
+    // theme keeps the old disabled label, because for it nothing here IS available.
+    QString verb;
+    if (bundled)        verb.clear();                       // disabled "Installed ✓"
+    else if (updatable) verb = tr("Update to %1").arg(entry.version);
+    else if (onDisk)    verb = tr("Remove");
+
+    addCard(entry.name, entry.author, desc, entry.formFactors, indexUrl,
+            bundled || onDisk,
+            [this, entry, indexUrl, bundled, updatable](QPushButton* btn) {
+        if (bundled)   // unreachable: addCard disables a card with no verb. Refuse anyway — see the header.
+        { status_->setText(tr("This theme ships with the app, so it isn't updated or removed here."));
+          btn->setText(tr("Installed ✓")); btn->setEnabled(false); return; }
+
+        // Installed and current: the verb is Remove. Installed and behind: the verb is Update, which is the
+        // ordinary install path over the top — installFiles replaces by rename, so it is atomic.
+        if (isThemeInstalled(entry) && !updatable)
+        {
+            removeThemeEntry(entry);
+            const bool still = isThemeInstalled(entry);
+            btn->setText(still ? tr("Remove") : tr("Install"));
+            btn->setEnabled(true);
+            return;
+        }
         // Refused (another install is already running): nothing was attempted, so restore the card
         // addCard already greyed to "Installing…" instead of relabelling it "Retry" — see renderEntry.
-        if (!installThemeEntry(entry, indexUrl)) { btn->setText(tr("Install")); btn->setEnabled(true); return; }
+        if (!installThemeEntry(entry, indexUrl))
+        { btn->setText(updatable ? tr("Update to %1").arg(entry.version) : tr("Install"));
+          btn->setEnabled(true); return; }
         const bool ok = isThemeInstalled(entry);
-        btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
-        btn->setEnabled(!ok);
-    });
+        btn->setText(ok ? tr("Remove") : tr("Retry"));
+        btn->setEnabled(true);
+    },
+    verb);
+}
+
+// The themes that ship inside the app, and the two predicates the card rests on. ThemeRegistry owns both
+// answers so this surface and the themed one cannot disagree about which themes are the app's.
+QStringList RegistryBrowser::bundledThemes() const
+{
+    if (bundledCache_.isEmpty()) bundledCache_ = ThemeRegistry::bundledFolders(themesRoot());
+    return bundledCache_;
+}
+
+bool RegistryBrowser::isThemeBundled(const ThemeRegistry::Entry& entry) const
+{
+    return ThemeRegistry::isBundled(entry.folder(), bundledThemes());
+}
+
+bool RegistryBrowser::isThemeUpdatable(const ThemeRegistry::Entry& entry) const
+{
+    const ThemeRegistry::Record rec = ThemeRegistry::readRecord(themesRoot(), entry.folder());
+    return ThemeRegistry::compareOffered(rec.version, entry.version)
+           == ThemeRegistry::VersionCheck::Newer;
+}
+
+void RegistryBrowser::removeThemeEntry(const ThemeRegistry::Entry& entry)
+{
+    QString err;
+    if (!ThemeRegistry::removeInstalled(themesRoot(), entry.folder(), bundledThemes(), &err))
+    { status_->setText(err); return; }
+    // installed_ means "this dialog changed what is on disk", which is what the hosts re-render on — a
+    // REMOVE changes it exactly as much as an install does.
+    installed_ = true;
+    status_->setText(tr("Removed “%1”.")
+                         .arg(entry.name.isEmpty() ? entry.folder() : entry.name));
 }
 
 bool RegistryBrowser::fetchToBuffer(const QString& url, qint64 maxBytes, QByteArray* out, QString* error,
@@ -829,8 +913,54 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
     const QString folder = e.folder();
     if (folder.isEmpty()) { status_->setText(tr("This entry doesn't name a usable theme folder.")); return true; }
 
-    status_->setText(installStatus(tr("Reading the registry's file list…")));
+    // A BUNDLED theme is never written from a registry, and the refusal is here as well as on the card for
+    // the reason every refusal in this feature is doubled: the card was built from a list that may be
+    // minutes old, and this function is the one that turns a registry's bytes into files.
+    if (ThemeRegistry::isBundled(folder, bundledThemes()))
+    { status_->setText(tr("“%1” ships with the app and is not installed from the registry.").arg(folder));
+      return true; }
+
+    // What this install records about where it came from. Without it an installed theme cannot say which
+    // registry served it or what version it was, and every card would offer a reinstall rather than an update.
+    ThemeRegistry::Record record;
+    record.source  = indexUrl;
+    record.dir     = e.dir;
+    record.version = e.version;
+    record.name    = e.name;
+
     QString err;
+
+    // THE ZIP LANE (issue #91), the twin of the themed surface's. One bounded download instead of up to 64,
+    // no trees API call (and so none of the 60-an-hour unauthenticated budget), and the only lane a registry
+    // that is not hosted on GitHub has. The URL is resolved and checked by ThemeRegistry — https, ending in
+    // .zip, and on the index's own host or on one the user added — because an entry free to name any URL
+    // would turn browsing a community registry into unpacking whatever that document points at.
+    if (!e.zip.trimmed().isEmpty())
+    {
+        const ThemeRegistry::Download dl = ThemeRegistry::downloadUrlFor(indexUrl, e.zip, extraRegistries());
+        if (!dl.ok()) { status_->setText(dl.error); return true; }
+
+        status_->setText(installStatus(tr("Downloading “%1”…")
+                                           .arg(e.name.isEmpty() ? folder : e.name)));
+        QByteArray archive;
+        bool over = false;
+        if (!fetchToBuffer(dl.url, ThemeRegistry::kMaxTotalBytes, &archive, &err, &over))
+        { status_->setText(over ? tr("Refused: %1").arg(err) : tr("Download failed: %1").arg(err));
+          return true; }
+
+        // Unpack, stamp, land — one call, shared with the themed surface, so neither can assemble the
+        // three steps differently. Every member refusal happens before a byte is written and the landing is
+        // a rename, so a refusal leaves any previous copy exactly as it was.
+        if (!ThemeZip::install(archive, themesRoot(), folder, record, &err))
+        { status_->setText(err); return true; }
+
+        installed_ = true;
+        status_->setText(tr("Installed “%1”. Pick it from the theme list.")
+                             .arg(e.name.isEmpty() ? folder : e.name));
+        return true;
+    }
+
+    status_->setText(installStatus(tr("Reading the registry's file list…")));
     const QByteArray tree = treeFor(indexUrl, &err);
     if (tree.isEmpty()) { status_->setText(err); return true; }
 
@@ -885,7 +1015,7 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
     // No "Writing the theme folder…" line here: installFiles is synchronous and no event loop spins between
     // setting such a label and replacing it, so it would never reach the screen. A status that cannot paint
     // is a comment written to the wrong place.
-    if (!ThemeRegistry::installFiles(themesRoot(), folder, blobs, &err))
+    if (!ThemeRegistry::installFiles(themesRoot(), folder, ThemeRegistry::withRecord(blobs, record), &err))
     { status_->setText(err); return true; }
 
     installed_ = true;

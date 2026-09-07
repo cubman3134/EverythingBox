@@ -220,6 +220,12 @@ Index parseIndex(const QByteArray& json)
         e.author      = o.value(QStringLiteral("author")).toString();
         e.description = o.value(QStringLiteral("description")).toString();
         e.dir         = o.value(QStringLiteral("dir")).toString();
+        // Optional, and read with .toString() so a number, an object or a null in either field yields an
+        // empty string rather than a type error: a malformed version degrades to "not badged" and a
+        // malformed zip to "install over the tree lane", which are the two behaviours an entry without them
+        // already has. Neither is allowed to drop the entry — the theme is still installable.
+        e.version     = o.value(QStringLiteral("version")).toString();
+        e.zip         = o.value(QStringLiteral("zip")).toString();
         for (const QJsonValue& f : o.value(QStringLiteral("formFactors")).toArray())
             if (!f.toString().isEmpty()) e.formFactors << f.toString();
 
@@ -557,6 +563,239 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     }
     clean();
     if (error) error->clear();
+    return true;
+}
+
+Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStringList& userRegistries)
+{
+    Download out;
+    const QString spec = zip.trimmed();
+    if (spec.isEmpty())
+    {
+        out.error = QStringLiteral("This entry doesn't name a download.");
+        return out;
+    }
+
+    const QUrl index(indexUrl);
+    if (!index.isValid() || index.host().isEmpty())
+    {
+        out.error = QStringLiteral("This registry's own URL names no host, so there is nothing to check a "
+                                   "download against.");
+        return out;
+    }
+
+    const QUrl raw(spec);
+    if (!raw.isValid())
+    {
+        out.error = QStringLiteral("This entry's download isn't a URL: %1").arg(spec);
+        return out;
+    }
+    // Resolve FIRST, check afterwards. A relative "packs/x.zip" cannot leave the index's host by
+    // construction; a scheme-relative "//elsewhere.test/x.zip" is also "relative" to QUrl and DOES replace
+    // the host, which is precisely why the host rule below runs on the resolved URL rather than on the
+    // string the index supplied.
+    const QUrl abs = raw.isRelative() ? index.resolved(raw) : raw;
+    if (!abs.isValid() || abs.host().isEmpty())
+    {
+        out.error = QStringLiteral("This entry's download doesn't resolve to a host: %1").arg(spec);
+        return out;
+    }
+    if (abs.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) != 0)
+    {
+        out.error = QStringLiteral("This entry's download isn't https (it is \"%1\"), so it was refused.")
+                        .arg(abs.scheme());
+        return out;
+    }
+
+    // Whole-host equality, never a suffix test: "raw.githubusercontent.com.evil.test" ENDS WITH the index's
+    // host and is a completely different machine.
+    QStringList allowed;
+    allowed << index.host();
+    for (const QString& u : userRegistries)
+    {
+        const QUrl r(u.trimmed());
+        if (r.isValid() && !r.host().isEmpty()) allowed << r.host();
+    }
+    bool hostOk = false;
+    for (const QString& h : allowed)
+        if (h.compare(abs.host(), Qt::CaseInsensitive) == 0) { hostOk = true; break; }
+    if (!hostOk)
+    {
+        out.error = QStringLiteral("This registry points its download at another host (%1), which is not "
+                                   "one you added. Refused.").arg(abs.host());
+        return out;
+    }
+
+    if (!abs.path().endsWith(QLatin1String(".zip"), Qt::CaseInsensitive))
+    {
+        out.error = QStringLiteral("This entry's download is not a .zip: %1").arg(abs.path());
+        return out;
+    }
+
+    out.url = abs.toString();
+    return out;
+}
+
+namespace {
+
+// "1.2.3" / "v1.2.3" -> [1,2,3]. false for anything else, which is the whole point: an honest refusal to
+// compare beats a comparison that ranks "3.0-beta" against "3.0" by guessing what the suffix meant.
+bool parseVersion(const QString& v, QVector<qint64>* out)
+{
+    QString s = v.trimmed();
+    if (s.startsWith(QLatin1Char('v')) || s.startsWith(QLatin1Char('V'))) s = s.mid(1);
+    if (s.isEmpty()) return false;
+    const QStringList parts = s.split(QLatin1Char('.'), Qt::KeepEmptyParts);
+    for (const QString& p : parts)
+    {
+        // 19 digits is past qint64 anyway, and a bounded length is what keeps a hostile "999…9" from
+        // being an interesting question at all.
+        if (p.isEmpty() || p.size() > 18) return false;
+        for (const QChar c : p)
+            if (c.unicode() < u'0' || c.unicode() > u'9') return false;
+        bool ok = false;
+        const qint64 n = p.toLongLong(&ok);
+        if (!ok) return false;
+        out->append(n);
+    }
+    return !out->isEmpty();
+}
+
+} // namespace
+
+VersionCheck compareOffered(const QString& installed, const QString& offered)
+{
+    QVector<qint64> a, b;
+    if (!parseVersion(installed, &a) || !parseVersion(offered, &b)) return VersionCheck::Unknown;
+    const int n = qMax(a.size(), b.size());
+    for (int i = 0; i < n; ++i)
+    {
+        // A missing trailing segment is zero, so "1.2" and "1.2.0" are the same version rather than two.
+        const qint64 x = i < a.size() ? a[i] : 0;
+        const qint64 y = i < b.size() ? b[i] : 0;
+        if (y > x) return VersionCheck::Newer;
+        if (y < x) return VersionCheck::Older;
+    }
+    return VersionCheck::Same;
+}
+
+QString recordName() { return QStringLiteral(".eb-registry.json"); }
+
+QByteArray makeRecord(const Record& r)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("source"),  r.source);
+    o.insert(QStringLiteral("dir"),     r.dir);
+    o.insert(QStringLiteral("version"), r.version);
+    o.insert(QStringLiteral("name"),    r.name);
+    return QJsonDocument(o).toJson(QJsonDocument::Indented);
+}
+
+Record parseRecord(const QByteArray& json)
+{
+    Record r;
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) return r;    // present stays false: an unreadable record is no record
+    const QJsonObject o = doc.object();
+    r.source  = o.value(QStringLiteral("source")).toString();
+    r.dir     = o.value(QStringLiteral("dir")).toString();
+    r.version = o.value(QStringLiteral("version")).toString();
+    r.name    = o.value(QStringLiteral("name")).toString();
+    // An object that parsed IS a record, even one with nothing in it. It says "installed from the browser,
+    // and it does not know from where" — which is a different fact from a hand-dropped folder, and the
+    // version-comparison side already treats an empty version as Unknown.
+    r.present = true;
+    return r;
+}
+
+Record readRecord(const QString& themesRoot, const QString& folder)
+{
+    Record r;
+    if (themesRoot.isEmpty() || folder.isEmpty() || !isPlainSegment(folder)) return r;
+    QFile f(themesRoot + QLatin1Char('/') + folder + QLatin1Char('/') + recordName());
+    if (!f.open(QIODevice::ReadOnly)) return r;
+    // Bounded: this is a file inside a folder a registry supplied, so it is as attacker-controlled as
+    // anything else in it, and nothing here needs more than a few hundred bytes.
+    return parseRecord(f.read(64 * 1024));
+}
+
+QVector<QPair<QString, QByteArray>> withRecord(const QVector<QPair<QString, QByteArray>>& files,
+                                               const Record& r)
+{
+    const QString key = recordName().toCaseFolded();
+    QVector<QPair<QString, QByteArray>> out;
+    out.reserve(files.size() + 1);
+    for (const auto& f : files)
+        if (f.first.toCaseFolded() != key) out << f;
+    out << qMakePair(recordName(), makeRecord(r));
+    return out;
+}
+
+QStringList bundledFolders(const QString& themesRoot)
+{
+    // The floor. Not the answer — the manifest below is — but the answer this returns when there is no
+    // manifest to read, so that a missing file cannot quietly make every bundled theme replaceable.
+    QStringList out{ QStringLiteral("Channels"), QStringLiteral("Night"), QStringLiteral("Triple") };
+
+    if (!themesRoot.isEmpty())
+    {
+        QFile f(themesRoot + QStringLiteral("/REGISTRY-SYNC.json"));
+        if (f.open(QIODevice::ReadOnly))
+        {
+            const QJsonDocument doc = QJsonDocument::fromJson(f.read(1024 * 1024));
+            const QJsonObject root = doc.object();
+            // Both halves of the manifest: a theme the registry carries, and one that ships here and is not
+            // published. Both are the app's, and neither is the browser's to replace.
+            const QStringList sections{ QStringLiteral("publishedThemes"), QStringLiteral("notPublished") };
+            for (const QString& section : sections)
+                for (const QString& k : root.value(section).toObject().keys())
+                    if (!k.isEmpty() && !out.contains(k, Qt::CaseInsensitive)) out << k;
+        }
+    }
+    out.sort();
+    return out;
+}
+
+bool isBundled(const QString& folder, const QStringList& bundled)
+{
+    if (folder.isEmpty()) return false;
+    for (const QString& b : bundled)
+        if (b.compare(folder, Qt::CaseInsensitive) == 0) return true;
+    return false;
+}
+
+bool removeInstalled(const QString& themesRoot, const QString& folder, const QStringList& bundled,
+                     QString* error)
+{
+    auto fail = [error](const QString& msg) { if (error) *error = msg; return false; };
+
+    if (themesRoot.isEmpty())
+        return fail(QStringLiteral("No themes folder to remove from."));
+    if (folder.isEmpty() || !isPlainSegment(folder))
+        return fail(QStringLiteral("Unusable theme folder name."));
+    // The same two reserved names installFiles refuses, refused here for the sharper reason: these are the
+    // staging directory and a parked copy of somebody else's theme, and this function deletes recursively.
+    if (folder.compare(kStagingDirName, Qt::CaseInsensitive) == 0
+        || folder.endsWith(kReplacedSuffix, Qt::CaseInsensitive))
+        return fail(QStringLiteral("That theme folder name is reserved."));
+    if (isBundled(folder, bundled))
+        return fail(QStringLiteral("\"%1\" ships with the app, so it can't be removed here.").arg(folder));
+
+    // isPlainSegment has already refused every separator, so this cannot resolve outside the root — which
+    // is exactly why it is checked anyway. This is the one function in the product that deletes a directory
+    // tree the user did not name, and its containment must not rest on a predicate written for filenames.
+    const QString rootAbs = QDir::cleanPath(QDir(themesRoot).absolutePath());
+    const QString dest    = QDir::cleanPath(QDir(themesRoot).absoluteFilePath(folder));
+    if (rootAbs.isEmpty() || dest == rootAbs || !dest.startsWith(rootAbs + QLatin1Char('/')))
+        return fail(QStringLiteral("That theme isn't inside the themes folder."));
+
+    // Not a theme, not ours to delete. A folder without a theme.json is not what the picker offers and not
+    // what this browser installed, so removing it would be deleting something on a guess.
+    if (!QFile::exists(dest + QStringLiteral("/theme.json")))
+        return fail(QStringLiteral("There is no theme installed at %1.").arg(dest));
+
+    if (!QDir(dest).removeRecursively())
+        return fail(QStringLiteral("Couldn't remove %1 — some of its files may be in use.").arg(dest));
     return true;
 }
 

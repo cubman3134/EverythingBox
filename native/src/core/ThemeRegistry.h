@@ -55,6 +55,20 @@ struct Entry {
     QString     dir;           // "themes2/<Name>", relative to the index URL's directory
     QStringList formFactors;   // advisory note on the row; does not filter
 
+    // OPTIONAL, and both are why an entry can carry an update rather than only an install.
+    //
+    // `version` is display text and a comparison key, never a path. An entry without one is installable and
+    // is simply never badged — an update badge is a claim about two versions and we only have one.
+    //
+    // `zip` is an ALTERNATIVE TRANSPORT for the same folder, not a second kind of entry: `dir` still names
+    // where it lands, so a zip entry and a tree entry install to the same place under the same rules. It is
+    // what makes a registry that is not hosted on GitHub installable at all (the tree lane needs the GitHub
+    // trees API and says "Manual" without it), and it is the lane an update rides. Relative to the index
+    // URL, or absolute — see downloadUrlFor, which is the only thing allowed to turn this string into a
+    // request.
+    QString     version;
+    QString     zip;
+
     // The install folder: the last segment of `dir`. Empty when `dir` is unusable, which is the single
     // predicate callers check — parseIndex already drops those, so an Entry in hand always has one.
     QString folder() const;
@@ -219,5 +233,99 @@ QString themesRoot(const QString& dataDir);
 // is occupied is the residue of a swap that DID succeed, and only that one is removed.
 bool installFiles(const QString& themesRoot, const QString& folder,
                   const QVector<QPair<QString, QByteArray>>& files, QString* error);
+
+// ---- Where an install is allowed to fetch from (issue #91) --------------------------------------------
+//
+// A registry index is DATA, and it is data anyone may open a pull request against. An entry that could name
+// an arbitrary download URL would turn "browse the community registry" into "run whatever this document
+// points at", which is the entire attack surface of this feature — the bytes it names are unzipped and
+// written into the user's themes folder.
+//
+// So the rule, applied to every entry before a request is made: the URL resolves against the index (a
+// relative `zip` is the ordinary case and cannot leave the index's own host at all), it is https, it ends in
+// .zip, and its host is either the INDEX'S OWN HOST or the host of a registry THE USER ADDED THEMSELVES.
+// The second clause is not a loophole — it is the only way a community registry that serves its index from
+// one host and its archives from another can work at all, and a user who typed that registry in has already
+// made the trust decision the built-in list makes for them.
+//
+// Hosts are compared whole and case-insensitively. No suffix matching: "raw.githubusercontent.com.evil.test"
+// is a different host from "raw.githubusercontent.com", and a rule written with endsWith would accept it.
+struct Download
+{
+    QString url;     // the absolute URL to fetch; empty when refused
+    QString error;   // the user-facing reason it was refused; empty on success
+    bool ok() const { return error.isEmpty(); }
+};
+Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStringList& userRegistries);
+
+// ---- Is the registry offering something newer than what is installed? ---------------------------------
+//
+// Dotted numeric versions, compared segment by segment as numbers, with a leading "v" tolerated on either
+// side and missing trailing segments read as zero ("1.2" == "1.2.0"). ANY segment that is not a plain
+// non-negative number on either side makes the whole comparison Unknown, as does an empty version on either
+// side: a badge is a claim, and "3.0-beta" against "3.0" is not a claim this can make honestly. Unknown
+// never badges — the row offers a reinstall, not an update.
+enum class VersionCheck { Same, Newer, Older, Unknown };
+VersionCheck compareOffered(const QString& installed, const QString& offered);
+
+// ---- What an installed theme remembers about where it came from ---------------------------------------
+//
+// Written INTO the installed folder as one more file in the atomic file set, so it lands and is replaced by
+// the same rename the theme itself rides, and removing the folder removes it. A theme dropped in by hand has
+// none, and is therefore never badged and never updated — which is right: we have no idea what it is a copy
+// of.
+QString recordName();   // ".eb-registry.json"
+
+struct Record
+{
+    QString source;    // the index URL it was installed from
+    QString dir;       // the entry's `dir`, so an update re-resolves the same folder in the same repo
+    QString version;   // what the registry called it at install time
+    QString name;      // display text, for a row that wants to say what it is without re-reading theme.json
+    bool    present = false;   // false = there is no record (a hand-installed theme), not "an empty one"
+};
+
+QByteArray makeRecord(const Record& r);
+Record     parseRecord(const QByteArray& json);
+// Read the record out of an installed folder. Returns a Record with present == false when the folder holds
+// none, or holds one that is not a JSON object — an unreadable record is the same fact as no record, and
+// must not be a crash or a half-filled struct.
+Record     readRecord(const QString& themesRoot, const QString& folder);
+
+// Put `r` into a downloaded file set, replacing any copy of recordName() the registry itself shipped. That
+// replacement is the point rather than tidiness: installFiles refuses two paths that differ only in case, so
+// appending ours beside a registry-supplied one would refuse the whole install — and a registry-supplied
+// record would otherwise get to state which source and version this install "came from".
+QVector<QPair<QString, QByteArray>> withRecord(const QVector<QPair<QString, QByteArray>>& files,
+                                               const Record& r);
+
+// ---- Bundled themes are the app's, not the registry's ---------------------------------------------------
+//
+// The themes that ship inside the app. They are never updated and never removed by the browser: the
+// registry's copies of them have drifted from what the app ships (issue #57, and the publish job that would
+// fix it is #262), so letting a stale registry copy land over a bundled theme would ship that drift to the
+// user, and letting the browser delete one would take away a theme the app guarantees is present.
+//
+// WHERE THIS ANSWER COMES FROM, because it cannot come from the directory listing: on desktop the bundled
+// themes are staged INTO the same themes2 the user's installs land in, so "is this folder on disk" cannot
+// tell the two apart. It is read from themes2/REGISTRY-SYNC.json — the manifest that already names exactly
+// the bundled themes the registry also serves, that is maintained by theme-registry-sync.py rather than by
+// hand, and that is copied beside the themes on every platform.
+//
+// UNION with a small floor, and the floor is not a second source of truth: a data directory assembled by
+// hand may have no manifest at all, and this function failing OPEN would let a stale registry copy land over
+// a bundled theme, which is the one outcome the rule exists to prevent. The manifest is what keeps the
+// answer current; the floor is what keeps it safe when there isn't one. Over-protecting a folder is a
+// refusal the user can work around by hand; under-protecting one silently replaces a theme the app ships.
+QStringList bundledFolders(const QString& themesRoot);
+bool        isBundled(const QString& folder, const QStringList& bundled);
+
+// Delete an installed theme folder. Refuses — without deleting anything — an empty root, a folder name that
+// is not one plain segment, the reserved staging name, a bundled theme, a folder that resolves outside
+// `themesRoot`, and a folder that is not a theme at all (no theme.json): this function's whole job is to be
+// the only thing in the product that removes a directory the user did not name, so it refuses everything it
+// cannot prove is a theme sitting directly inside the themes root.
+bool removeInstalled(const QString& themesRoot, const QString& folder, const QStringList& bundled,
+                     QString* error);
 
 } // namespace ThemeRegistry
