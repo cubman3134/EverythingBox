@@ -108,6 +108,12 @@ public:
 private:
     void activate(QWidget* w);          // Return pressed on w
     QPointer<QWidget> container_;
+    // True only while activate()'s fallback is delivering a synthesized Return to a ring member. A widget
+    // that leaves that Return unaccepted makes QApplication::notify propagate it up the parent chain to the
+    // window, whose keyPressEvent routes it back into this ring — the same press arriving as if it were a
+    // new one. This says "it is the same press", so handleKey consumes it rather than activating again.
+    // Issue #305 (a stack overflow on the classic Appearance theme list) is that loop, unbroken.
+    bool delivering_ = false;
     mutable QPointer<QWidget> lastFocus_;  // last ring widget that had focus (for ensureSelection)
     mutable QPoint lastCenter_;            // its centre, so recovery lands near where the user was
 };

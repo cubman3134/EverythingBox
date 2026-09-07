@@ -10,6 +10,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPlainTextEdit>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
@@ -390,7 +391,38 @@ void NavRing::activate(QWidget* w)
     if (auto* combo = qobject_cast<QComboBox*>(w)) { combo->showPopup(); return; }
     if (auto* edit = qobject_cast<QLineEdit*>(w)) { NavOverlay::editLineEdit(edit); return; }
     if (auto* spin = qobject_cast<QAbstractSpinBox*>(w)) { NavOverlay::editSpinBox(spin); return; }
+    // An item view (a list/tree/table: the classic Appearance theme list, the Library's source list) is ONE
+    // ring member whose activation means "activate the current ROW" — so say that, rather than re-sending
+    // the key. It cannot go through the fallback below, because QAbstractItemView::keyPressEvent answers
+    // Return by emitting activated() and then calling event->ignore() (Qt's own comment there warns that
+    // re-delivering it "start[s] an endless loop"), and an ignored key is propagated by QApplication::notify
+    // up the parent chain to MainWindow::keyPressEvent, which routes it straight back in here. That is
+    // issue #305: 387 nested keyPressEvent -> routeKey -> handleKey -> sendEvent levels, then c00000fd.
+    // activated(currentIndex()) is exactly the signal Qt emits for Return, so QListWidget::itemActivated and
+    // its siblings still fire and every existing handler is unchanged — the signal, without the key.
+    if (auto* view = qobject_cast<QAbstractItemView*>(w))
+    {
+        // ONE PRESS IS ONE ACTIVATION, and which half fires depends on how the key got here:
+        //   * a CONTROLLER/injected Return never touched the view (sendNavKey routes straight into the ring),
+        //     so this emit is its only activation — without it the theme row would never commit;
+        //   * a PHYSICAL Return reached the view FIRST, which is the only reason it is here at all: the view
+        //     emitted activated() itself and then ignored the key. Emitting again would activate the row
+        //     twice for one press. Consuming it (handleKey returns true) is the whole job on that path.
+        const QModelIndex idx = view->currentIndex();
+        if (idx.isValid() && NavContext::syntheticKey()) emit view->activated(idx);
+        return;
+    }
     // Anything else: synthesize the Return it would have received.
+    //
+    // GUARDED, and this is the cycle the guard breaks — not a depth cap. The propagation described above is
+    // not specific to item views: ANY ring member that leaves Return unaccepted (a QSlider does too) hands
+    // this very event back to MainWindow::keyPressEvent, which calls NavContext::routeKey, which calls
+    // handleKey, which arrives here again with the same widget. The kit cannot see the difference between
+    // that bounce and a fresh press by looking at the event, so it records it: while `delivering_` is set,
+    // the Return currently arriving IS the one we just sent, and handleKey consumes it instead of activating
+    // a second time. Deliberately a per-RING member and not a static — a screen that opens another screen
+    // with its own NavRing is a different object and is not muted by this one.
+    QScopedValueRollback<bool> delivering(delivering_, true);
     QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
     QApplication::sendEvent(w, &press);
 }
@@ -422,6 +454,10 @@ bool NavRing::handleKey(int key)
     }
     case Qt::Key_Return: case Qt::Key_Enter:
     {
+        // The bounce, consumed. See activate()'s fallback: a Return arriving while we are still inside the
+        // delivery of one is the SAME press coming back up the parent chain, not a new one. Consuming it
+        // (true) is what stops it there; letting it through would re-enter activate() and re-send it.
+        if (delivering_) return true;
         QWidget* cur = focusIn(container_);
         const QVector<QWidget*> ring = widgets();
         if (!cur || !ring.contains(cur)) { ensureSelection(); return true; }
