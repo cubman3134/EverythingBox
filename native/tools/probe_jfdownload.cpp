@@ -28,6 +28,7 @@
 // Prints JFDOWNLOAD-OK on success; any failure prints JFDOWNLOAD-FAIL <cond> and exits non-zero.
 #include "AppPaths.h"
 #include "DownloadManager.h"
+#include "DownloadsStore.h"
 #include "Jellyfin.h"
 #include "JellyfinDownload.h"
 #include "JellyfinServerStore.h"
@@ -617,6 +618,167 @@ static void sectionSettingsKeys()
     CHECK(JellyfinDownload::capGb() == 50);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// 8. "REMOVE AFTER WATCHED" — THE ONLY THING IN THIS FEATURE THAT DELETES A USER'S FILE
+// ---------------------------------------------------------------------------------------------------------
+// The switch is visible in both settings builders, so it has to DO something; and what it does is delete
+// somebody's content, so every branch of it is pinned here rather than described.
+//
+// Three separate questions, and they fail separately on purpose:
+//
+//   (a) WHEN is the offer made at all — and, far more importantly, when is it NOT. A mid-item exit must
+//       never reach the card; nor must a streamed item; nor must a second stop after the user already said
+//       Keep; nor must an item whose length was never measured.
+//   (b) WHAT MAY BE DELETED. A real file is created OUTSIDE a real downloads folder and handed to the
+//       remover, and the assertion is not merely that it returned a refusal — it is that the file is STILL
+//       THERE afterwards.
+//   (c) WHAT THE STORE DOES ON EACH BRANCH, driven against the REAL DownloadsStore: the row goes when the
+//       file went, and stays, exactly as it was, when it did not.
+static void sectionRemoveAfterWatched()
+{
+    // ---- (a) the trigger -------------------------------------------------------------------------------
+    // The fraction itself is pinned, because moving it is the difference between "you finished this" and
+    // "you were most of the way through this".
+    CHECK(JellyfinDownload::kWatchedFraction > 0.85 && JellyfinDownload::kWatchedFraction <= 0.95);
+
+    const double dur = 100.0;
+    // THE SETTING OFF MEANS NO OFFER AT ALL — not a quieter one, not one on the next item.
+    CHECK(!JellyfinDownload::shouldOfferRemoval(false, true, false, 100.0, dur));
+    CHECK(!JellyfinDownload::shouldOfferRemoval(false, true, false,  95.0, dur));
+    // On, finished, from a local file, never declined -> the one true case.
+    CHECK(JellyfinDownload::shouldOfferRemoval(true, true, false, 100.0, dur));
+    CHECK(JellyfinDownload::shouldOfferRemoval(true, true, false,  90.0, dur));   // exactly at the fraction
+    CHECK(JellyfinDownload::shouldOfferRemoval(true, true, false, 140.0, dur));   // past the end (mpv does)
+    // A MID-ITEM EXIT IS NOT A FINISH. This is the assertion the whole design is arranged around: somebody
+    // who stops halfway must never be offered the deletion of what they are halfway through.
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false,  50.0, dur));
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false,  89.9, dur));
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false,   0.0, dur));
+    // Streaming an item puts no copy of it on this disk, so there is nothing to offer to remove.
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, false, false, 100.0, dur));
+    // DECLINING IS REMEMBERED: the same file is not put to the user twice.
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, true, 100.0, dur));
+    // No measured length -> no fraction to be past. Guessing here is exactly a mid-item deletion offer.
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false, 100.0,  0.0));
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false, 100.0, -1.0));
+    CHECK(!JellyfinDownload::shouldOfferRemoval(true, true, false,  -5.0, dur));
+
+    // ---- (b) what may be deleted -----------------------------------------------------------------------
+    // Two REAL folders and three REAL files, inside this process's own scratch dir. The refusal is asserted
+    // by the file still being there, which is the only form of that assertion worth making.
+    const QString base = AppPaths::dataDir() + QStringLiteral("/s8");
+    QDir(base).removeRecursively();
+    const QString dl   = base + QStringLiteral("/downloads");
+    const QString away = base + QStringLiteral("/elsewhere");
+    QDir().mkpath(dl);
+    QDir().mkpath(away);
+    auto put = [](const QString& p) {
+        QFile f(p);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        f.write("x", 1);
+        f.close();
+        return true;
+    };
+    const QString inside  = dl   + QStringLiteral("/Fixture Film [aaaaaaaa-bbbbbbbb].mkv");
+    const QString outside = away + QStringLiteral("/Somebody's Own Library Copy.mkv");
+    CHECK(put(inside));
+    CHECK(put(outside));
+
+    CHECK(JellyfinDownload::isInsideDownloads(inside, dl));
+    CHECK(!JellyfinDownload::isInsideDownloads(outside, dl));
+    // The folder ITSELF is not a file inside the folder — a row whose path had been emptied down to the
+    // directory would otherwise hand the deletion the whole downloads folder.
+    CHECK(!JellyfinDownload::isInsideDownloads(dl, dl));
+    CHECK(!JellyfinDownload::isInsideDownloads(dl + QStringLiteral("/"), dl));
+    // A path that SPELLS its way out of the folder is out of the folder, however it is spelled.
+    CHECK(!JellyfinDownload::isInsideDownloads(dl + QStringLiteral("/../elsewhere/x.mkv"), dl));
+    CHECK(!JellyfinDownload::isInsideDownloads(QString(), dl));
+    CHECK(!JellyfinDownload::isInsideDownloads(inside, QString()));
+    // "downloads2" is not "downloads": a prefix match without the separator would delete out of it.
+    CHECK(!JellyfinDownload::isInsideDownloads(dl + QStringLiteral("2/x.mkv"), dl));
+    // Native separators are the same path (this is how a Windows store row is actually spelled).
+    CHECK(JellyfinDownload::isInsideDownloads(QDir::toNativeSeparators(inside),
+                                              QDir::toNativeSeparators(dl)));
+
+    // A SYMLINK THAT SITS INSIDE THE FOLDER AND POINTS OUT OF IT — the case cleaning the TEXT of a path
+    // cannot see, and the reason isInsideDownloads resolves through canonicalFilePath at all.
+    //
+    // ASSERTED ONLY WHERE THIS PROCESS CAN ACTUALLY MAKE ONE. On Windows QFile::link writes a .lnk
+    // shortcut, which is a document and not a link the filesystem follows, and a real symlink needs a
+    // privilege CI does not have — so staging it there would assert the wrong thing rather than the same
+    // thing weakly. On the Linux runner it is a real symlink and this is a real assertion.
+#ifndef Q_OS_WIN
+    const QString escape = dl + QStringLiteral("/escape.mkv");
+    if (QFile::link(outside, escape))
+    {
+        CHECK(!JellyfinDownload::isInsideDownloads(escape, dl));
+        CHECK(JellyfinDownload::removeDownloadedFile(escape, dl)
+              == JellyfinDownload::RemovalOutcome::RefusedOutsideDownloads);
+        CHECK(QFileInfo::exists(outside));   // the thing it pointed at is untouched
+        QFile::remove(escape);
+    }
+#endif
+
+    using RO = JellyfinDownload::RemovalOutcome;
+    // THE REFUSAL, AND THE FILE SURVIVING IT.
+    CHECK(JellyfinDownload::removeDownloadedFile(outside, dl) == RO::RefusedOutsideDownloads);
+    CHECK(QFileInfo::exists(outside));
+    CHECK(!JellyfinDownload::entryMayLeaveDownloads(RO::RefusedOutsideDownloads));
+    // ...and it is refused whether or not anything is at the end of it: the answer is about what this
+    // feature is allowed to touch, not about what happens to be there.
+    CHECK(JellyfinDownload::removeDownloadedFile(away + QStringLiteral("/never-existed.mkv"), dl)
+          == RO::RefusedOutsideDownloads);
+
+    // A DELETE THE OS REFUSES. A directory stands in for it — QFile::remove declines one on every platform,
+    // and it is the portable way to ask "what happens when the file does not go?".
+    const QString notAFile = dl + QStringLiteral("/a-folder-not-a-file");
+    QDir().mkpath(notAFile);
+    CHECK(JellyfinDownload::removeDownloadedFile(notAFile, dl) == RO::DeleteFailed);
+    CHECK(QFileInfo::exists(notAFile));
+    CHECK(!JellyfinDownload::entryMayLeaveDownloads(RO::DeleteFailed));
+
+    // ---- (c) the store, on every branch ----------------------------------------------------------------
+    // The REAL DownloadsStore, over this process's own isolated data dir.
+    const QString refIn   = qual(kSrvA, kItem);
+    const QString refOut  = qual(kSrvA, kItem2);
+    const QString refFail = qual(kSrvB, kItem);
+    DownloadsStore::add({ inside,   QStringLiteral("Fixture Film"), QStringLiteral("video"),
+                          QString(), refIn,   QString(), QString() });
+    DownloadsStore::add({ outside,  QStringLiteral("Library Copy"), QStringLiteral("video"),
+                          QString(), refOut,  QString(), QString() });
+    DownloadsStore::add({ notAFile, QStringLiteral("Not A File"),   QStringLiteral("video"),
+                          QString(), refFail, QString(), QString() });
+    auto held = [](const QString& key) {
+        for (const DownloadedItem& d : DownloadsStore::list()) if (d.key == key) return true;
+        return false;
+    };
+    CHECK(held(refIn) && held(refOut) && held(refFail));
+
+    // REFUSED: nothing removed, and the row is exactly where it was.
+    CHECK(JellyfinDownload::removeDownloadedItem(refOut, outside, dl) == RO::RefusedOutsideDownloads);
+    CHECK(QFileInfo::exists(outside));
+    CHECK(held(refOut));
+    // FAILED: the same. A Downloads folder that forgets an item it did not manage to remove lies about the
+    // disk, and that is the state a user finds when they go looking for the space back.
+    CHECK(JellyfinDownload::removeDownloadedItem(refFail, notAFile, dl) == RO::DeleteFailed);
+    CHECK(QFileInfo::exists(notAFile));
+    CHECK(held(refFail));
+    // ACCEPTED: the file goes, and only then does the row.
+    CHECK(JellyfinDownload::removeDownloadedItem(refIn, inside, dl) == RO::Removed);
+    CHECK(!QFileInfo::exists(inside));
+    CHECK(!held(refIn));
+    // ...and the neighbours are untouched by it.
+    CHECK(held(refOut) && held(refFail));
+    // ALREADY GONE is still gone: asked a second time the file is absent, which is the state the row was
+    // being removed for, so the row may go too (it already has).
+    CHECK(JellyfinDownload::removeDownloadedFile(inside, dl) == RO::NotFound);
+    CHECK(JellyfinDownload::entryMayLeaveDownloads(RO::NotFound));
+
+    QDir(base).removeRecursively();
+    DownloadsStore::remove(refOut);
+    DownloadsStore::remove(refFail);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -637,6 +799,9 @@ int main(int argc, char** argv)
     sectionQueue();
     sectionCap();
     sectionSettingsKeys();
+    // LAST, and deliberately after the credential scan in §3: this is the only section that creates and
+    // destroys real files, and §3 walks the whole data dir asserting what is in it.
+    sectionRemoveAfterWatched();
 
     if (failures) { std::fprintf(stderr, "JFDOWNLOAD-FAIL %d check(s)\n", failures); return 1; }
     std::printf("JFDOWNLOAD-OK\n");

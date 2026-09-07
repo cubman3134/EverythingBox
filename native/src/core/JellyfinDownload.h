@@ -54,7 +54,9 @@
 // A per-profile storage cap that deleted silently would eventually delete the one film somebody downloaded
 // for the flight they are on. So evictionSuggestion() returns a VERDICT — how much is used, what the cap is,
 // and which items an LRU pass WOULD free, oldest-touched first, stopping as soon as the total is back under
-// the cap. Nothing in this file removes a file. The caller shows the list and the user decides.
+// the cap. THE CAP REMOVES NOTHING: the caller shows the list and the user decides. (The one deletion this
+// file is allowed to make at all is the ACCEPTED half of "remove after watched" further down — likewise
+// never taken without the user answering a card, and refusing any path outside the downloads folder.)
 //
 // LRU is by lastPlayedMs, falling back to downloadedMs for something never played: "least recently useful",
 // not "smallest" and not "oldest download". Ties break on the qualified id so two runs suggest the same
@@ -136,6 +138,71 @@ namespace JellyfinDownload
     // The "remove after watched" candidates: everything flagged watched. Also a suggestion — the toggle
     // decides whether the caller acts on it, and the caller is the only thing that touches a file.
     QStringList watchedCandidates(const QVector<StoredItem>& items);
+
+    // ---- "Remove after watched": the offer, and the ONE deletion this feature may make --------------
+    //
+    // THE TRIGGER IS "STOPPED PAST THE WATCHED FRACTION", NOT "MPV REPORTED END-OF-FILE", and that is a
+    // decision, not an accident. An EOF-only rule reads the credits as the item: somebody who watches to the
+    // last scene and presses Back has finished the episode by every meaning the word has, and is exactly the
+    // person who turned this setting on. mpv's EOF seam would never fire for them, and a housekeeping rule
+    // that silently does nothing for the commonest way of finishing something is the same failure as a
+    // switch that does nothing at all. So the rule is the one the rest of the app already speaks
+    // (MainWindow::stopScrobble computes the same percentage for Trakt) — measured at the ONE stop site
+    // every leave-the-media route runs through, so no route can miss it.
+    //
+    // 0.90 AND NOT TRAKT'S 0.80, because the two answers cost different things. Trakt being early marks a
+    // row on a website; this being early offers to delete a file somebody is still watching. Ten per cent of
+    // a film is six minutes of slack, and the offer is refusable — but the cheap direction is the careful
+    // one, and a threshold this side of the credits is still comfortably reached by anyone who saw the end.
+    //
+    // A duration of zero is NOT "finished". An item whose length was never reported (a stream mpv could not
+    // measure, a file closed before the duration arrived) has no fraction to be past, and guessing produces
+    // exactly the mid-item deletion offer this must never make.
+    constexpr double kWatchedFraction = 0.90;
+
+    // Was this playback a finish, of a downloaded file, that the user has not already said no to?
+    //   * settingOn false            -> false. The switch off means no offer AT ALL, not a quieter one.
+    //   * playedFromLocalFile false  -> false. Streaming an item does not put a copy of it on this disk.
+    //   * alreadyDeclined            -> false. "No" is remembered; being asked twice about the same file is
+    //                                  how a considerate prompt becomes the thing people switch off.
+    //   * durationSeconds <= 0       -> false (see above), as is a negative position.
+    // Pure so probe_jfdownload can pin the mid-item case, which is the one that must never be true.
+    bool shouldOfferRemoval(bool settingOn, bool playedFromLocalFile, bool alreadyDeclined,
+                            double positionSeconds, double durationSeconds);
+
+    // IS `path` A FILE THIS FEATURE IS ALLOWED TO DELETE? True only for something strictly inside
+    // `downloadsDir` — the folder this feature writes into and nothing else. A local-library film, a ROM, a
+    // path assembled out of a store row that has since been edited by hand, and the downloads directory
+    // ITSELF all answer false. Both sides are cleaned, made native-separator-blind and (where they exist)
+    // resolved through canonicalFilePath, so a junction or a "..\.." spelling cannot walk out of the folder
+    // and back in. Case-insensitive on Windows only, because that is where two spellings are one file.
+    bool isInsideDownloads(const QString& path, const QString& downloadsDir);
+
+    enum class RemovalOutcome
+    {
+        Removed,                  // the file was there and is now gone
+        NotFound,                 // there was nothing to delete — also "gone", for the store's purposes
+        RefusedOutsideDownloads,  // the path is not inside the downloads folder: NOTHING was touched
+        DeleteFailed              // the OS refused (open elsewhere, read-only, not a file)
+    };
+
+    // The only line in this feature that removes anything from a disk. The containment check is made FIRST,
+    // before the file is even asked whether it exists, so a path outside the folder is refused whatever is
+    // or is not at the end of it.
+    RemovalOutcome removeDownloadedFile(const QString& path, const QString& downloadsDir);
+
+    // MAY THE DOWNLOADS ENTRY GO NOW? Only when the file is actually gone. A refusal or a failed delete
+    // leaves the row exactly where it was, pointing at a file that is still there — a Downloads folder that
+    // forgets an item it did not manage to remove is a folder that lies about what is on the disk.
+    bool entryMayLeaveDownloads(RemovalOutcome outcome);
+
+    // THE TWO STEPS IN THEIR ONE ORDER: delete the file, and drop the Downloads row for `qualifiedId` only
+    // if that actually happened. Here rather than at the call site so the ordering is a single fact that a
+    // probe can drive against the REAL DownloadsStore — a caller that got it the other way round would
+    // forget an item that is still occupying the disk, and nothing above this line would notice.
+    // The caller still owns everything a person sees, and everything that is not this store.
+    RemovalOutcome removeDownloadedItem(const QString& qualifiedId, const QString& path,
+                                        const QString& downloadsDir);
 
     // ---- Settings (per profile, device-local) -------------------------------------------------------
     // Both keys live under "downloads/", which CloudSync::isDeviceLocalKey already carves out of the synced

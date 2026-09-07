@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.206 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.207 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2459,7 +2459,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # manager the app's download sites go through keeps it out. StreamHeaders comes with it (a job's
         # per-request headers); NetHeaderApply and LogSafeText are header-only.
         src/core/DownloadManager.cpp     src/core/DownloadManager.h
-        src/core/StreamHeaders.cpp       src/core/StreamHeaders.h)
+        src/core/StreamHeaders.cpp       src/core/StreamHeaders.h
+        # ...and the REAL Downloaded-folder store, for the same reason: section 8 asserts what the row
+        # does on every branch of a removal, and a hand-built list beside it would assert only that the
+        # probe can keep its own vector consistent. QtCore-only (QSettings over the shared ini).
+        src/core/DownloadsStore.cpp      src/core/DownloadsStore.h)
     target_include_directories(probe_jfdownload PRIVATE src src/core tools)
     # The ini-redirect seam, same macro and same rule as probe_jellyfin's: the stores this probe drives hold
     # TOKENS, so without the redirect a run would write a fixture credential into a settings file.

@@ -229,6 +229,10 @@ void MainWindow::stopJellyfinPlayback()
     const QString id = jellyfinPlayingId_;
     const QString ps = jellyfinPlaySessionId_;
     const QString ms = jellyfinMediaSourceId_;
+    // #110: READ BEFORE THE CLEAR, for the offer below. "Was the thing that just played a file on this
+    // disk?" is the whole precondition of remove-after-watched, and the flag that answers it is cleared at
+    // the bottom of this function.
+    const bool wasLocal = jellyfinPlayingOffline_;
     // CLEARED BEFORE THE REPORT, not after: this function is reached from several routes, and a second
     // entry while the first was still in flight would report the same stop twice.
     jellyfinPlayingId_.clear();
@@ -241,6 +245,12 @@ void MainWindow::stopJellyfinPlayback()
     // final position straight at a server that is not there, losing the one report that matters most.
     // The re-entrancy the fields above guard against is already handled by jellyfinPlayingId_ being empty.
     jellyfinPlayingOffline_ = false;
+    // #110: AND THE HOUSEKEEPING OFFER, LAST. This is the one site every leave-the-media route reaches, so
+    // it is the only place that can be sure a finished download is noticed however the viewing ended — and
+    // it is placed after the report because the server hearing about the viewing matters more than this
+    // device's disk does. `duration_` is the length mpv measured for the file that just played, the same
+    // number stopScrobble computes its watched percentage from. It never deletes anything itself.
+    maybeOfferRemoveAfterWatched(id, pos > 0.0 ? pos : 0.0, duration_, wasLocal);
 }
 
 // ---- The offline route (issue #110) --------------------------------------------------------------------

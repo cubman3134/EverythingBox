@@ -353,3 +353,141 @@ void MainWindow::checkJellyfinDownloadCap()
     jfdLog(QStringLiteral("jfdownload: over cap (%1 of %2 bytes), %3 eviction candidate(s), deleting none")
               .arg(v.usedBytes).arg(v.capBytes).arg(v.victims.size()));
 }
+
+// ---- "Remove after watched": an offer, and the one deletion this feature may make --------------------
+//
+// THE SETTING NOW DOES SOMETHING, which is the whole of this section. A switch the user can turn on that has
+// no effect is worse than one that is absent: they turn it on, believe their disk is being managed, and it
+// is not.
+//
+// AND IT IS AN OFFER. The same rule the storage cap already takes, for the same reason — this app does not
+// delete somebody's content without them watching it happen. Three things follow from that, and all three
+// are load-bearing:
+//
+//   * KEEP IS A TRUE NO-OP. Nothing is deleted, nothing leaves the Downloads folder, no setting changes and
+//     no store is written. The only thing that happens is that the id is remembered so the same file is not
+//     offered again — being asked twice is how a considerate prompt becomes the thing people switch off.
+//   * ONLY WHAT THIS FEATURE PUT ON DISK. removeDownloadedFile refuses anything that is not strictly inside
+//     the downloads folder, before it asks the filesystem anything at all. A local-library film, a ROM and a
+//     store row that has been edited by hand all answer the same way: nothing is touched, and the user is
+//     told so. probe_jfdownload pins that refusal with a real file outside a real folder and asserts it is
+//     still there afterwards.
+//   * THE ROW LEAVES ONLY ONCE THE FILE IS GONE. A refused or failed delete says so plainly and changes
+//     nothing else — a Downloads folder that forgets an item it did not manage to remove is a folder that
+//     lies about what is on the disk.
+//
+// The trigger — stopped past the watched fraction rather than mpv's end-of-file — is argued in
+// JellyfinDownload.h beside kWatchedFraction. It is measured at stopJellyfinPlayback, the one site every
+// leave-the-media route runs through, and it cannot fire on a mid-item exit.
+
+namespace {
+
+// A size a person can read, for the one sentence that says what removing this would get back. Local rather
+// than MainWindow.cpp's humanBytes for the reason jfdLog above is local: lifting a file-static out of the
+// busiest file in the tree to reach it is a worse trade than four lines here.
+QString freedText(qint64 bytes)
+{
+    constexpr double kMb = 1024.0 * 1024.0;
+    const double mb = double(bytes) / kMb;
+    return mb >= 1024.0 ? QStringLiteral("%1 GB").arg(mb / 1024.0, 0, 'f', 1)
+                        : QStringLiteral("%1 MB").arg(mb, 0, 'f', mb < 10.0 ? 1 : 0);
+}
+
+} // namespace
+
+void MainWindow::maybeOfferRemoveAfterWatched(const QString& qualifiedId, double positionSeconds,
+                                              double durationSeconds, bool playedFromLocalFile)
+{
+    if (!Jellyfin::isQualified(qualifiedId)) return;
+    if (!JellyfinDownload::shouldOfferRemoval(JellyfinDownload::removeAfterWatched(), playedFromLocalFile,
+                                              jellyfinRemoveDeclined_.contains(qualifiedId),
+                                              positionSeconds, durationSeconds))
+        return;
+    const QString path = jellyfinLocalCopy(qualifiedId);
+    if (path.isEmpty()) return;                 // nothing on this disk to offer to remove
+
+    QString title;
+    for (const DownloadedItem& d : DownloadsStore::list())
+        if (d.key == qualifiedId) { title = d.title; break; }
+    // NEVER THE QUALIFIED ID AS A NAME. "jf:<server>:<item>" reaching a sentence a person reads is #83's
+    // own bug (see PlaybackSession::setResumeIdentityNotAName); an unnamed row gets a phrase instead.
+    const QString label = title.isEmpty() ? tr("this download") : title;
+
+    // A NESTED EVENT LOOP UNDER AN OUTER EMISSION IS THE #28/#211 FAMILY, and NavConfirm::ask spins one.
+    // This is reached from stopScrobble, which on the natural-end route runs inside queueFinished's own
+    // delivery, itself inside mpv's end-of-file callback. Deferred a turn, exactly as the batch menu is.
+    deferPastQmlEmission([this, qualifiedId, path, label] {
+        // A TURN HAS PASSED, so everything the decision rested on is asked again. The setting can have been
+        // switched off, the file can have been removed from the Downloads panel, and a second stop can have
+        // arrived and been answered — all of which make this card wrong to show now.
+        if (!JellyfinDownload::removeAfterWatched()) return;
+        if (jellyfinRemoveDeclined_.contains(qualifiedId)) return;
+        const QFileInfo fi(path);
+        if (!fi.exists()) return;
+
+        const int go = NavConfirm::ask(
+            tr("Remove the download?"),
+            tr("You have finished “%1”. Remove this device's downloaded copy and free %2?\n\n"
+               "It stays on your server — only the copy on this device is deleted.")
+                .arg(label, freedText(fi.size())),
+            { tr("Remove"), tr("Keep") }, /*focusIndex=*/1, /*cancelIndex=*/1, this);
+        if (go != 0)
+        {
+            // KEEP — and Back cancels to the same answer. Nothing is touched; the id is remembered so the
+            // question is not put again for this file.
+            jellyfinRemoveDeclined_.insert(qualifiedId);
+            jfdLog(QStringLiteral("jfdownload: remove-after-watched declined for %1 — nothing removed")
+                      .arg(Jellyfin::serverOf(qualifiedId)));
+            return;
+        }
+        removeJellyfinDownloadedCopy(qualifiedId, path, label);
+    });
+}
+
+void MainWindow::removeJellyfinDownloadedCopy(const QString& qualifiedId, const QString& path,
+                                              const QString& title)
+{
+    using RO = JellyfinDownload::RemovalOutcome;
+    const qint64 was = QFileInfo(path).size();
+    // The file AND, only if the file actually went, the Downloads row — in that order, in one place
+    // (JellyfinDownload::removeDownloadedItem), so the ordering is what a probe drives rather than what
+    // this function remembers to do.
+    const RO outcome = JellyfinDownload::removeDownloadedItem(qualifiedId, path, downloadsDir());
+
+    if (outcome == RO::RefusedOutsideDownloads)
+    {
+        // NOT AN ERROR MESSAGE ABOUT THE APP — a statement about what was and was not touched. This is the
+        // rule that keeps a hand-edited store row, or a Downloads entry pointing at somebody's own library,
+        // from being deleted by a housekeeping switch they turned on for downloads.
+        notify(tr("“%1” is not in this app's downloads folder, so nothing was removed.").arg(title),
+               kFeedbackLong);
+        jfdLog(QStringLiteral("jfdownload: refused to remove a path outside the downloads folder; "
+                              "the file was not touched"));
+        return;
+    }
+    if (outcome == RO::DeleteFailed)
+    {
+        notify(tr("Couldn't remove the downloaded copy of “%1”. It is still on this device.").arg(title),
+               kFeedbackLong);
+        jfdLog(QStringLiteral("jfdownload: delete failed for %1 — the Downloads entry is unchanged")
+                  .arg(Jellyfin::serverOf(qualifiedId)));
+        return;
+    }
+    // THE FILE IS ACTUALLY GONE (removed, or already absent), and the row has followed it.
+    if (!JellyfinDownload::entryMayLeaveDownloads(outcome)) return;   // belt beside the braces above
+    // ...AND THE FINISHED JOB, which is the half that is easy to miss: jellyfinDownloadedIds() counts a
+    // Done job's sourceRef as "this device has it", so a job left in the list would make the batch verbs go
+    // on skipping an episode whose file no longer exists — a download the user could never queue again.
+    if (dm_)
+        for (const DownloadJob& j : dm_->jobs())
+            if (j.sourceRef == qualifiedId && (j.state == DownloadJob::Done || j.state == DownloadJob::Failed))
+            { dm_->removeJob(j.id); break; }
+    // The RECENT row is deliberately left alone: it records that this item was watched, not that a file
+    // existed, and re-opening it simply finds no local copy and streams from the server again.
+    notify(outcome == RO::Removed
+               ? tr("Removed the downloaded copy of “%1” — %2 free.").arg(title, freedText(was))
+               : tr("“%1” was already gone from this device.").arg(title),
+           kFeedbackLong);
+    jfdLog(QStringLiteral("jfdownload: removed the downloaded copy of %1 (%2 bytes) and its Downloads entry")
+              .arg(Jellyfin::serverOf(qualifiedId)).arg(was));
+}

@@ -1859,6 +1859,18 @@ private:
     void flushJellyfinProgressQueues();
     // The storage-cap check: shows the LRU suggestion, deletes nothing. Run after a download completes.
     void checkJellyfinDownloadCap();
+    // "REMOVE AFTER WATCHED", the acting half. Called from the ONE stop site (stopJellyfinPlayback) with the
+    // playback that has just ended; decides — through the pure JellyfinDownload::shouldOfferRemoval — whether
+    // this was a finish of a downloaded file, and if it was, OFFERS to delete this device's copy. It never
+    // deletes by itself, and "Keep" leaves everything exactly as it was.
+    void maybeOfferRemoveAfterWatched(const QString& qualifiedId, double positionSeconds,
+                                      double durationSeconds, bool playedFromLocalFile);
+    // ...and the accepted branch: delete the file, and only if it is really gone drop the Downloads row and
+    // the finished job that still claims this device has it.
+    void removeJellyfinDownloadedCopy(const QString& qualifiedId, const QString& path, const QString& title);
+    // Ids the user has answered "Keep" for. In memory and for this run only: it exists so a decline is not
+    // re-asked, not to be a preference — a fact about one conversation does not belong in a settings file.
+    QSet<QString> jellyfinRemoveDeclined_;
     // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
     // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
     // the same seam in later increments, and nothing below names AniList except the construction.

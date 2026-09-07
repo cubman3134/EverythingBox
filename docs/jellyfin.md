@@ -71,6 +71,16 @@ included in anything the app syncs):
 * **Offer to remove downloads once watched** — off by default. Turn it on and finishing a downloaded item
   offers to free the space it was using. It always asks.
 
+  "Finishing" means you got past **90%** of it — so skipping the credits still counts, and stopping halfway
+  never does. The card names the item and the space it would free, and **Keep** is the answer already
+  selected, so pressing Back keeps the file. Keeping is a true no-op: nothing is deleted, nothing leaves
+  your Downloads, and you are not asked about that file again.
+
+  If you choose Remove, only the copy on **this device** is deleted — the item stays on your server and can
+  be streamed or downloaded again — and the file only leaves your Downloads once it is really gone. Nothing
+  outside the app's own downloads folder can ever be removed this way, so an item on your own drives that
+  found its way into the list is refused and said so, rather than deleted.
+
 ### What is not here yet
 
 * the **optimised-for-device** transcoded download (a smaller file for a small screen);

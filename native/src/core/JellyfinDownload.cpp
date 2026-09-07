@@ -2,8 +2,12 @@
 
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "DownloadsStore.h"
 #include "ProfileStore.h"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 #include <QUrl>
 #include <QUrlQuery>
@@ -232,6 +236,85 @@ QStringList JellyfinDownload::watchedCandidates(const QVector<StoredItem>& items
     for (const StoredItem& it : items)
         if (it.watched && !it.qualifiedId.isEmpty()) out << it.qualifiedId;
     return out;
+}
+
+// ---- "Remove after watched" --------------------------------------------------------------------------
+
+bool JellyfinDownload::shouldOfferRemoval(bool settingOn, bool playedFromLocalFile, bool alreadyDeclined,
+                                          double positionSeconds, double durationSeconds)
+{
+    if (!settingOn) return false;            // the switch off means NO offer, not a quieter one
+    if (!playedFromLocalFile) return false;  // streaming an item puts no copy of it on this disk
+    if (alreadyDeclined) return false;       // "no" is remembered
+    if (durationSeconds <= 0.0) return false;// no length reported: there is no fraction to be past
+    if (positionSeconds < 0.0) return false;
+    return positionSeconds / durationSeconds >= kWatchedFraction;
+}
+
+namespace {
+
+#ifdef Q_OS_WIN
+constexpr Qt::CaseSensitivity kPathCase = Qt::CaseInsensitive;
+#else
+constexpr Qt::CaseSensitivity kPathCase = Qt::CaseSensitive;
+#endif
+
+// One spelling of a path: forward separators, no "." / ".." segments, no trailing slash, and resolved
+// through the filesystem when the thing is actually there (which is what defeats a junction/symlink that
+// points out of the folder — cleanPath alone only fixes the TEXT).
+QString onePath(const QString& p)
+{
+    if (p.isEmpty()) return QString();
+    const QFileInfo fi(p);
+    const QString canon = fi.exists() ? fi.canonicalFilePath() : QString();
+    QString out = QDir::cleanPath(QDir::fromNativeSeparators(canon.isEmpty() ? p : canon));
+    while (out.size() > 1 && out.endsWith(QLatin1Char('/'))) out.chop(1);
+    return out;
+}
+
+} // namespace
+
+bool JellyfinDownload::isInsideDownloads(const QString& path, const QString& downloadsDir)
+{
+    if (path.isEmpty() || downloadsDir.isEmpty()) return false;
+    const QString f = onePath(path);
+    const QString d = onePath(downloadsDir);
+    if (f.isEmpty() || d.isEmpty()) return false;
+    // THE SEPARATOR IS PART OF THE TEST, and it is doing three jobs at once, which is why there is no
+    // second line here: "<dir>" and "<dir>/" (both of which onePath spells the same) answer false, so a
+    // store row whose path had been emptied down to the directory cannot hand the deletion the whole
+    // downloads folder; and "<dir>2/x.mkv" answers false, so a neighbouring folder whose name merely starts
+    // the same way is not inside this one. An explicit `f == d` guard beside this was written first and was
+    // INERT — a mutation sweep removed it and nothing failed. probe_jfdownload pins all three behaviours.
+    return f.startsWith(d + QLatin1Char('/'), kPathCase);
+}
+
+JellyfinDownload::RemovalOutcome JellyfinDownload::removeDownloadedFile(const QString& path,
+                                                                       const QString& downloadsDir)
+{
+    // FIRST, AND BEFORE ANYTHING IS ASKED OF THE FILESYSTEM. A path outside the downloads folder is refused
+    // whether or not there is anything at the end of it — the answer is about what this feature is allowed
+    // to touch, not about what happens to be there.
+    if (!isInsideDownloads(path, downloadsDir)) return RemovalOutcome::RefusedOutsideDownloads;
+    if (!QFileInfo::exists(path)) return RemovalOutcome::NotFound;
+    if (!QFile::remove(path)) return RemovalOutcome::DeleteFailed;
+    return RemovalOutcome::Removed;
+}
+
+bool JellyfinDownload::entryMayLeaveDownloads(RemovalOutcome outcome)
+{
+    return outcome == RemovalOutcome::Removed || outcome == RemovalOutcome::NotFound;
+}
+
+JellyfinDownload::RemovalOutcome JellyfinDownload::removeDownloadedItem(const QString& qualifiedId,
+                                                                       const QString& path,
+                                                                       const QString& downloadsDir)
+{
+    const RemovalOutcome outcome = removeDownloadedFile(path, downloadsDir);
+    // THE FILE FIRST, THE ROW SECOND, AND THE ROW ONLY IF THE FILE WENT. The other order forgets an item
+    // that is still on the disk the moment a delete is refused.
+    if (entryMayLeaveDownloads(outcome) && !qualifiedId.isEmpty()) DownloadsStore::remove(qualifiedId);
+    return outcome;
 }
 
 // ---- Settings --------------------------------------------------------------------------------------
