@@ -170,6 +170,39 @@ public:
     using SegmentsDone = std::function<void(const QVector<Jellyfin::RemoteSegment>& segments)>;
     void fetchMediaSegments(const QString& qualifiedId, int budgetMs, SegmentsDone done);
 
+    // ---- Offline downloads (issue #110, increment 1) ----------------------------------------------------
+    // THE URL MINTER. Resolves a qualified id against the device-local server store and returns the server's
+    // own /Items/<id>/Download link WITH the account's token in its query — or "" when the server has been
+    // removed, switched off or signed out.
+    //
+    // This is a MINT, not a getter: the value exists for the one request it is about to be handed to, and
+    // nothing that holds a Jellyfin download holds a url (DownloadJob::sourceRef, JellyfinDownload.h). It is
+    // `const` and synchronous because it touches no socket — it is a lookup and a QUrl build.
+    //
+    // NOTHING MAY LOG THE RESULT. The one caller is DownloadManager::start(), which puts it straight into a
+    // QNetworkRequest.
+    QString downloadUrlFor(const QString& qualifiedId) const;
+
+    // What the server already knows about an item's playback position — the input to the stale-report rule
+    // (OfflineProgress::shouldApply). `reachable` is false when the server did not answer at all, which is a
+    // different fact from "answered without a UserData block" (UserState::ok) and must not be confused with
+    // it: an unreachable server has not told us the queued report is stale, so the flush must leave it
+    // queued rather than decide against it.
+    using UserStateDone = std::function<void(const Jellyfin::UserState& state, bool reachable)>;
+    void fetchUserState(const QString& qualifiedId, int budgetMs, UserStateDone done);
+
+    // ONE REQUEST, BOTH ANSWERS. /Users/<uid>/Items/<id> reports the user's position AND the file's own
+    // container, and the two callers want one each — the progress flush wants the position, a download
+    // wants the container to name the file with. Asking twice would be two round trips for one body, so
+    // fetchUserState above is a thin wrapper on this.
+    struct ItemFacts
+    {
+        Jellyfin::UserState state;
+        QString             container;   // "mkv" / "mp4" / …; empty when the server did not say
+    };
+    using ItemFactsDone = std::function<void(const ItemFacts& facts, bool reachable)>;
+    void fetchItemFacts(const QString& qualifiedId, int budgetMs, ItemFactsDone done);
+
 private:
     // The shared tail of the three single-server list fetches: they differ only in the path and the query,
     // and three copies of the reply handling is three chances to disagree about what an empty answer means.

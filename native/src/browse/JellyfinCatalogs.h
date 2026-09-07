@@ -118,4 +118,26 @@ namespace browse
     // rather than four times, and because a second copy of "what a playable Jellyfin row looks like" is
     // exactly how the url would come back.
     MediaItem jellyfinLeafRow(const Jellyfin::UnionItem& it, bool tagServer);
+
+    // ---- OFFLINE DOWNLOADS (issue #110, increment 1) -----------------------------------------------
+    // WHAT "Download" MEANS ON A JELLYFIN ROW, ASKED IN ONE PLACE. Both layouts have their own Download
+    // verb (HomeView::startDownload on the classic detail page, HomeView::downloadThemedLeaf on the themed
+    // action row) and they reach entirely different code; the one thing they must not do is disagree about
+    // WHICH rows are downloadable and what a press on one means. That is the same rule browse::LeafRoute
+    // exists for, and the same three drifts are available here — so it is a table, not two lists.
+    struct JellyfinDownloadTarget
+    {
+        enum class Kind
+        {
+            None,     // not a Jellyfin row: the caller's ordinary crawl owns it
+            Item,     // a film or an episode: one file
+            Series,   // a series container: the batch verbs, over every season
+            Season,   // a season container: the batch verbs, narrowed to this season
+        };
+        Kind    kind = Kind::None;
+        QString ref;         // Item: the item. Series/Season: the SERIES — /Shows/<series>/Episodes wants it.
+        QString seasonRef;   // Season only: what the batch is narrowed to. Empty otherwise.
+        bool ok() const { return kind != Kind::None; }
+    };
+    JellyfinDownloadTarget jellyfinDownloadTargetFor(const MediaItem& it);
 }

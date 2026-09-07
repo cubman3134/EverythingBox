@@ -403,6 +403,15 @@ namespace Jellyfin
     };
     UserState readUserState(const QByteArray& body);
 
+    // THE SAME BODY, ASKED A SECOND QUESTION (issue #110). The single-item endpoint reports the file's own
+    // container ("mkv", "mp4", "avi", ...) beside the UserData block, at the top level or on the first
+    // MediaSource. A downloaded copy is named with it, so a folder of downloads carries the extensions the
+    // files actually have rather than one guess repeated.
+    //
+    // Empty when the server did not say, which is a real answer and not a failure: the caller falls back to
+    // a default rather than refusing to download something it could not name.
+    QString readItemContainer(const QByteArray& body);
+
     // WHERE AN OPEN STARTS. The server wins whenever it answered - including with zero, which is the case
     // this rule exists for: finishing a film elsewhere resets the position, and a local mark that beat it
     // would restart every re-watch two minutes from the end. When the server did NOT answer (it is down,

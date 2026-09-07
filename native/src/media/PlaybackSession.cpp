@@ -462,6 +462,7 @@ void PlaybackSession::beginResume(const QString& pathOrKey)
     // route reaches beginResume, and the one route that wants the flag sets it immediately afterwards -
     // which makes "off" the default for everything that has not asked, rather than a state left behind.
     resumeServerOwned_ = false;
+    resumeIdentityNotAName_ = false;   // #110: the identity half, reset with its sibling and for its reason
     // #197: A SERVER'S OWN ITEM IS ASKED OF THE SERVER FIRST, and its answer wins over anything on this
     // disk — including a mark this build wrote before the hook existed. `< 0` is the hook saying "not
     // mine"; 0 is a real answer and must not be confused with one (which is why the test is on the hook's
@@ -517,7 +518,7 @@ QString PlaybackSession::resumeDisplayTitle() const
     // (that is the same argument setResumeOwnedByServer is a flag for). "Server owns this position" and
     // "this identity is a machine key" are the same fact about the same route.
     const bool notAName = StoredUrl::isNetworkUrl(resumePath_) || resumePath_.contains(QChar(0x1F))
-                       || resumeServerOwned_;
+                       || resumeServerOwned_ || resumeIdentityNotAName_;
     if (notAName && trackIndex_ >= 0 && trackIndex_ < titles_.size() && !titles_.at(trackIndex_).isEmpty())
         return StoredUrl::label(titles_.at(trackIndex_));
     if (notAName) return QString();   // no display title either: store nothing rather than a machine string

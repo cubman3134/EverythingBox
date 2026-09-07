@@ -431,6 +431,27 @@ QString Jellyfin::itemPath(const QString& userId, const QString& itemId)
     return QStringLiteral("/Users/") + userId + QStringLiteral("/Items/") + itemId;
 }
 
+QString Jellyfin::readItemContainer(const QByteArray& body)
+{
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return QString();
+    const QJsonObject o = doc.object();
+    // The top-level field first: it is the item's own container. A MediaSource's is the same string for a
+    // direct-play file and is only consulted when the top-level one is absent, which some server versions
+    // and some item types leave out.
+    const QString top = o.value(QStringLiteral("Container")).toString();
+    if (!top.isEmpty()) return top;
+    const QJsonArray sources = o.value(QStringLiteral("MediaSources")).toArray();
+    for (const QJsonValue& v : sources)
+    {
+        if (!v.isObject()) continue;
+        const QString c = v.toObject().value(QStringLiteral("Container")).toString();
+        if (!c.isEmpty()) return c;
+    }
+    return QString();
+}
+
 Jellyfin::UserState Jellyfin::readUserState(const QByteArray& body)
 {
     UserState s;

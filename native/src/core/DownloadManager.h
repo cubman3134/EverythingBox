@@ -9,6 +9,8 @@
 #include <QObject>
 #include <QString>
 #include <QVector>
+#include <functional>
+#include <utility>
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -27,6 +29,16 @@ struct DownloadJob
                      // and for the same reason: kind is "document" for all three of them.
     QString thumb;
     QString key;     // stable identity for de-dup / recording
+    // AN IDENTITY INSTEAD OF A URL (issue #110). Set, `url` is left EMPTY and the link is MINTED at the top
+    // of every start() by DownloadManager::setUrlMinter's hook — see JellyfinDownload.h for the whole
+    // argument. A Jellyfin download url carries the user's ACCESS TOKEN in its query, and this struct is
+    // written to queue.json, which is an ordinary file in the app folder and not a credential store: the
+    // same rule headerGated below states about proxy headers, one notch stronger, because unlike a header
+    // set an id survives a restart and therefore RESUMES rather than failing.
+    //
+    // Persisted: the ref is the durable half. It carries no credential — "jf:<serverId>:<itemId>" is two
+    // ids — and it is exactly what a restart needs in order to ask for the link again.
+    QString sourceRef;
     // The source's behaviorHints.proxyHeaders.request, declared for `url` (#59). A download is a plain HTTP
     // fetch of the very URL the player would have played, so a header-gated source that PLAYS fine used to
     // fail here with a 403 the user reads as "the download is broken".
@@ -67,6 +79,15 @@ public:
     explicit DownloadManager(QObject* parent = nullptr);
 
     void enqueue(const DownloadJob& job);       // add + start (de-dups by dest); no-op if the file already exists
+    // The url-minter hook (#110). Called with a job's `sourceRef` at the top of start(), and must answer
+    // with a fetchable url or an empty string. Installed once by MainWindow; a manager without one simply
+    // has no ref-backed jobs to run, which is what every probe and every non-app build sees.
+    //
+    // A std::function rather than an #include of the Jellyfin client: this class is the generic downloader
+    // and knows about HTTP, files and Range. Nothing else about it should have to learn what a media server
+    // is, and nothing in it should be able to reach a token store.
+    using UrlMinter = std::function<QString(const QString& sourceRef)>;
+    void setUrlMinter(UrlMinter minter) { minter_ = std::move(minter); }
     const QVector<DownloadJob>& jobs() const { return jobs_; }
     bool hasActiveOrQueued() const;
 
@@ -114,4 +135,5 @@ private:
     qint64 bodyExpected_ = -1;          // its Content-Length, or -1 when it declared none
     qint64 bodyReceived_ = 0;           // bytes of THIS response written so far (not the .part's total size)
     bool rangeAsked_ = false;           // we sent a resume Range, so a 416 is an answer about OUR offset
+    UrlMinter minter_;                  // #110: sourceRef -> a fresh url, asked once per start()
 };

@@ -1,6 +1,7 @@
 #include "JellyfinClient.h"
 
 #include "AppBrand.h"
+#include "JellyfinDownload.h"     // #110: the /Items/<id>/Download url, built in one place
 #include "JellyfinServerStore.h"
 #include "Settings.h"
 
@@ -590,6 +591,49 @@ void JellyfinClient::reportProgress(const QString& qualifiedId, Jellyfin::Progre
     // FIRE AND FORGET. The reply is consumed only to free it: nothing is read from it, nothing is logged
     // and nothing is shown. See the header for why a failed progress report is not worth a word.
     connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
+}
+
+// ---- Offline downloads (issue #110) ----------------------------------------------------------------------
+
+QString JellyfinClient::downloadUrlFor(const QString& qualifiedId) const
+{
+    const Resolved r = resolveRef(qualifiedId);
+    // NO SENTENCE AND NO LOG. An empty answer is the whole vocabulary here: the one caller is
+    // DownloadManager::start(), which already has its own sentence for it, and r.error would be the SECOND
+    // wording of a state the user reads once. See the header on why this is a mint and not a getter.
+    if (!r.ok) return QString();
+    return JellyfinDownload::downloadUrl(r.root, r.itemId, r.server.token);
+}
+
+void JellyfinClient::fetchUserState(const QString& qualifiedId, int budgetMs, UserStateDone done)
+{
+    fetchItemFacts(qualifiedId, budgetMs, [done](const ItemFacts& f, bool reachable) {
+        if (done) done(f.state, reachable);
+    });
+}
+
+void JellyfinClient::fetchItemFacts(const QString& qualifiedId, int budgetMs, ItemFactsDone done)
+{
+    const Resolved r = resolveRef(qualifiedId);
+    // A server that is gone is not a server that says "keep waiting": there is nobody left to tell, and the
+    // caller's queue should be allowed to decide. `reachable` true with an empty state says exactly that —
+    // the same shape a 404 for a deleted item has, and the same conclusion (nothing later to protect).
+    if (!r.ok) { if (done) done({}, true); return; }
+
+    QNetworkRequest req{ QUrl(r.root + Jellyfin::itemPath(r.server.userId, r.itemId)) };
+    applyCommonHeaders(req, r.server.token);
+    QNetworkReply* reply = nam()->get(req);
+    QTimer* t = armDeadline(reply, budgetMs);
+    connect(reply, &QNetworkReply::finished, this, [reply, t, done] {
+        t->stop();
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) { if (done) done({}, false); return; }
+        const QByteArray body = reply->readAll();
+        ItemFacts f;
+        f.state     = Jellyfin::readUserState(body);
+        f.container = Jellyfin::readItemContainer(body);
+        if (done) done(f, true);
+    });
 }
 
 // ---- Media segments ------------------------------------------------------------------------------------
