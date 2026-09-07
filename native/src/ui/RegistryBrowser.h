@@ -159,6 +159,19 @@ private:
     void renderThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl);
     bool isThemeInstalled(const ThemeRegistry::Entry& entry) const;
     bool installThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl); // false = refused
+    // Issue #91. A theme's card gained the two verbs the add-on cards never had, and both need an answer
+    // this dialog cannot derive from the directory listing alone:
+    //   * BUNDLED — the themes that ship inside the app. Neither updated nor removed here: the registry's
+    //     copies of them have drifted from what the app ships (#57), so a stale copy landing over one would
+    //     ship that drift, and deleting one would take away a theme the app guarantees is present. Cached
+    //     for this dialog's lifetime because it is a file read and the answer cannot change while it is open.
+    //   * UPDATABLE — the registry offers a version newer than the one this install recorded when it landed.
+    //     A theme dropped in by hand has no record, so it is never claimed to be out of date.
+    QStringList bundledThemes() const;
+    bool isThemeBundled(const ThemeRegistry::Entry& entry) const;
+    bool isThemeUpdatable(const ThemeRegistry::Entry& entry) const;
+    void removeThemeEntry(const ThemeRegistry::Entry& entry);
+    mutable QStringList bundledCache_;
     QByteArray treeFor(const QString& indexUrl, QString* error);
     QHash<QString, QByteArray> treeCache_;
 

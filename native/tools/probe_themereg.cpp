@@ -8,14 +8,27 @@
 // legacy spelling. Every path in a listing arrives over the network and is about to become a filename, so
 // isSafeRelPath REJECTS rather than sanitises — a rewritten path is a guess about intent.
 //
+// Blocks 13-19 are issue #91's half: the entry fields an UPDATE needs, the rule about which host an
+// install may fetch from, the version comparison the badge rests on, what an installed theme remembers
+// about where it came from, the refusal to update or remove a BUNDLED theme, and the zip lane's four
+// member refusals (traversal, absolute, drive letter, symlink) with the atomic landing under a refusal
+// taken partway through an archive.
+//
 // Prints THEMEREG-OK on success; any failure prints THEMEREG-FAIL <cond> and exits non-zero.
 #include "ThemeRegistry.h"
 #include "DecorationPack.h"   // #187: the `decorations` section of the SAME index document — block 12
+#include "ThemeZip.h"         // #91: the zip install lane's member rules — blocks 18 and 19
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <cstdio>
+
+// The zip fixtures below are BUILT rather than checked in, and building one needs the reader's own
+// library: the CRC-32 a central directory carries, and the constants a stored entry is spelled with.
+extern "C" {
+#include "miniz.h"
+}
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -188,6 +201,122 @@ static const char* const kLiveIndex = R"JSON({
     }
   ]
 })JSON";
+
+// ---- Zip fixtures, built here rather than checked in (issue #91) -------------------------------------
+//
+// The archives this probe drives are HOSTILE ones: a member that climbs out of the destination, one that is
+// absolute, one carrying a drive letter, one that is a symbolic link. A checked-in fixture of any of those
+// is a file in the repository whose whole purpose is to escape a directory — it would be flagged by every
+// scanner the project passes through, and (the practical objection) the four are one byte apart from each
+// other, so a binary fixture hides the very difference each case exists to pin.
+//
+// So they are emitted here, as STORED (uncompressed) entries with a hand-written central directory. That is
+// also the only way to set a member's EXTERNAL ATTRIBUTES: miniz's writer API has no parameter for them, and
+// the symlink refusal is a rule about exactly those bits.
+struct ZipMember
+{
+    QByteArray name;
+    QByteArray data;
+    mz_uint32  externalAttr = 0;   // high 16 bits = Unix mode when the archive was made on a Unix host
+    // DEFLATE this member rather than storing it. Needed by exactly one kind of case — the size caps —
+    // and needed there because a zip may not LIE about a stored member's size: miniz refuses an archive
+    // whose stored entry claims a compressed size different from its uncompressed one, so a cap that is
+    // applied to the central directory's claim can only be reached honestly. A member of 8 MB of zeros
+    // deflates to a couple of hundred bytes, so the fixture stays small while the CLAIM is real.
+    bool       deflate = false;
+};
+
+static void put16(QByteArray& b, mz_uint16 v)
+{
+    b.append(char(v & 0xFF));
+    b.append(char((v >> 8) & 0xFF));
+}
+static void put32(QByteArray& b, mz_uint32 v)
+{
+    b.append(char(v & 0xFF));
+    b.append(char((v >> 8) & 0xFF));
+    b.append(char((v >> 16) & 0xFF));
+    b.append(char((v >> 24) & 0xFF));
+}
+
+static QByteArray makeZip(const QVector<ZipMember>& members)
+{
+    QByteArray out;
+    QVector<mz_uint32> offsets;
+    QVector<mz_uint32> crcs;
+    QVector<QByteArray> payloads;   // what actually goes in the file: the data, or its raw deflate stream
+    for (const ZipMember& m : members)
+    {
+        offsets << mz_uint32(out.size());
+        const mz_uint32 crc = mz_uint32(mz_crc32(MZ_CRC32_INIT,
+                                                 reinterpret_cast<const mz_uint8*>(m.data.constData()),
+                                                 size_t(m.data.size())));
+        crcs << crc;
+        QByteArray payload = m.data;
+        if (m.deflate)
+        {
+            // RAW deflate (no zlib header), which is what method 8 means inside a zip.
+            size_t outLen = 0;
+            void* z = tdefl_compress_mem_to_heap(m.data.constData(), size_t(m.data.size()), &outLen,
+                                                 TDEFL_DEFAULT_MAX_PROBES);
+            payload = z ? QByteArray(reinterpret_cast<const char*>(z), int(outLen)) : QByteArray();
+            if (z) mz_free(z);
+        }
+        payloads << payload;
+        put32(out, 0x04034b50);                    // local file header
+        put16(out, 20); put16(out, 0); put16(out, m.deflate ? 8 : 0);   // version, flags, method
+        put16(out, 0);  put16(out, 0);                  // mod time, mod date
+        put32(out, crc);
+        put32(out, mz_uint32(payload.size()));          // compressed size
+        put32(out, mz_uint32(m.data.size()));           // uncompressed size
+        put16(out, mz_uint16(m.name.size())); put16(out, 0);
+        out.append(m.name);
+        out.append(payload);
+    }
+    const mz_uint32 cdOffset = mz_uint32(out.size());
+    for (int i = 0; i < members.size(); ++i)
+    {
+        const ZipMember& m = members[i];
+        put32(out, 0x02014b50);                    // central directory header
+        // "made by" 0x031E = Unix host (3), spec 3.0. The host byte is what makes the external attributes
+        // readable as a Unix mode at all, which is the point of the symlink case below.
+        put16(out, 0x031E); put16(out, 20); put16(out, 0); put16(out, m.deflate ? 8 : 0);
+        put16(out, 0); put16(out, 0);
+        put32(out, crcs[i]);
+        put32(out, mz_uint32(payloads[i].size()));
+        put32(out, mz_uint32(m.data.size()));
+        put16(out, mz_uint16(m.name.size())); put16(out, 0); put16(out, 0);
+        put16(out, 0); put16(out, 0);
+        put32(out, m.externalAttr);
+        put32(out, offsets[i]);
+        out.append(m.name);
+    }
+    const mz_uint32 cdSize = mz_uint32(out.size()) - cdOffset;
+    put32(out, 0x06054b50);                        // end of central directory
+    put16(out, 0); put16(out, 0);
+    put16(out, mz_uint16(members.size())); put16(out, mz_uint16(members.size()));
+    put32(out, cdSize); put32(out, cdOffset);
+    put16(out, 0);
+    return out;
+}
+
+// One well-formed theme archive, so every refusal below differs from a working install by exactly the thing
+// it is refusing.
+static ZipMember goodThemeJson()
+{
+    ZipMember m;
+    m.name = QByteArrayLiteral("theme.json");
+    m.data = QByteArrayLiteral("{\"name\":\"Probe\"}");
+    return m;
+}
+
+// Did `error` refuse for the stated reason? Compared on a distinctive phrase rather than the whole
+// sentence, so re-wording a message does not fail the suite — but on a phrase UNIQUE to that one refusal,
+// so the four cases cannot satisfy each other's assertion, which is the entire point of having four.
+static bool refusedBecause(const QString& error, const char* phrase)
+{
+    return error.contains(QLatin1String(phrase), Qt::CaseInsensitive);
+}
 
 int main(int argc, char** argv)
 {
@@ -1353,6 +1482,529 @@ int main(int argc, char** argv)
         CHECK(DecorationPack::packDir(QStringLiteral("/data/bezels"), QStringLiteral(".."),
                                       QStringLiteral("shells")).isEmpty());
         CHECK(DecorationPack::packDir(QString(), QStringLiteral("snes"), QStringLiteral("shells")).isEmpty());
+    }
+
+    // 13. THE ENTRY FIELDS AN UPDATE NEEDS (issue #91). `version` and `zip` are OPTIONAL, and every
+    //     malformed shape of either degrades to the behaviour of an entry that omits it — never a dropped
+    //     entry and never a refusal, because neither field is what makes a theme installable.
+    {
+        const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(R"({"themes2":[
+            {"name":"Full","dir":"themes2/Full","version":"1.2.0","zip":"packs/full-1.2.0.zip"},
+            {"name":"NoExtras","dir":"themes2/NoExtras"},
+            {"name":"NumberVersion","dir":"themes2/NumberVersion","version":3},
+            {"name":"ObjectZip","dir":"themes2/ObjectZip","zip":{"url":"x.zip"}},
+            {"name":"NullBoth","dir":"themes2/NullBoth","version":null,"zip":null},
+            {"name":"Extra","dir":"themes2/Extra","version":"2.0","unknownField":{"a":[1,2]}},
+            {"name":"NoDir","version":"9.9","zip":"x.zip"}]})");
+        CHECK(ix.ok());
+        // Six entries: every malformed-field row survives, and only the one with no `dir` is dropped.
+        CHECK(ix.entries.size() == 6);
+        CHECK(ix.entries[0].version == QStringLiteral("1.2.0"));
+        CHECK(ix.entries[0].zip == QStringLiteral("packs/full-1.2.0.zip"));
+        CHECK(ix.entries[1].version.isEmpty() && ix.entries[1].zip.isEmpty());
+        CHECK(ix.entries[2].version.isEmpty());     // a JSON number is not a version string
+        CHECK(ix.entries[3].zip.isEmpty());         // a JSON object is not a URL
+        CHECK(ix.entries[4].version.isEmpty() && ix.entries[4].zip.isEmpty());
+        CHECK(ix.entries[5].version == QStringLiteral("2.0"));   // an unknown sibling field changes nothing
+    }
+
+    // 14. THE HOST RULE. An entry's download URL is the one place a registry index gets to point this app at
+    //     bytes it will unzip into the user's data directory, so the rule is: resolved against the index,
+    //     https, a .zip, and on the index's OWN host or on one the user added themselves.
+    {
+        const QString ix = QStringLiteral("https://raw.githubusercontent.com/o/r/main/index.json");
+        const QStringList mine{ QStringLiteral("https://themes.example.test/index.json") };
+
+        // A relative URL is the ordinary case and cannot leave the index's host by construction.
+        const ThemeRegistry::Download rel = ThemeRegistry::downloadUrlFor(ix, QStringLiteral("packs/a.zip"), {});
+        CHECK(rel.ok());
+        CHECK(rel.url == QStringLiteral("https://raw.githubusercontent.com/o/r/main/packs/a.zip"));
+
+        // Absolute, same host: allowed.
+        CHECK(ThemeRegistry::downloadUrlFor(
+                  ix, QStringLiteral("https://raw.githubusercontent.com/o/r/main/a.zip"), {}).ok());
+        // A query string is not part of the path, so a signed-looking URL still ends in .zip.
+        CHECK(ThemeRegistry::downloadUrlFor(
+                  ix, QStringLiteral("https://raw.githubusercontent.com/a.zip?ref=main"), {}).ok());
+
+        // Absolute, ANOTHER host: refused — this is the redirect-an-install attack, and it is the reason
+        // this function exists at all.
+        const ThemeRegistry::Download away =
+            ThemeRegistry::downloadUrlFor(ix, QStringLiteral("https://elsewhere.test/a.zip"), {});
+        CHECK(!away.ok());
+        CHECK(away.url.isEmpty());
+        CHECK(refusedBecause(away.error, "elsewhere.test"));   // the row must NAME where it was pointed
+
+        // …unless that host is a registry the user added themselves, which is the only way a community
+        // registry that serves its archives from a CDN can work.
+        CHECK(ThemeRegistry::downloadUrlFor(ix, QStringLiteral("https://themes.example.test/a.zip"), mine).ok());
+        CHECK(!ThemeRegistry::downloadUrlFor(ix, QStringLiteral("https://other.example.test/a.zip"), mine).ok());
+
+        // A scheme-relative URL is "relative" to QUrl and DOES replace the host, which is exactly why the
+        // host rule is applied after resolution rather than to the string the index supplied.
+        CHECK(!ThemeRegistry::downloadUrlFor(ix, QStringLiteral("//elsewhere.test/a.zip"), {}).ok());
+
+        // Whole-host equality, never a suffix: this one ENDS WITH the index's host and is a different machine.
+        CHECK(!ThemeRegistry::downloadUrlFor(
+                   ix, QStringLiteral("https://raw.githubusercontent.com.evil.test/a.zip"), {}).ok());
+
+        // Not https, even on the right host.
+        const ThemeRegistry::Download plain =
+            ThemeRegistry::downloadUrlFor(ix, QStringLiteral("http://raw.githubusercontent.com/a.zip"), {});
+        CHECK(!plain.ok());
+        CHECK(refusedBecause(plain.error, "https"));
+
+        // Not a zip.
+        const ThemeRegistry::Download tgz =
+            ThemeRegistry::downloadUrlFor(ix, QStringLiteral("https://raw.githubusercontent.com/a.tar.gz"), {});
+        CHECK(!tgz.ok());
+        CHECK(refusedBecause(tgz.error, ".zip"));
+
+        // Nothing named, and an index URL that names no host: both refused with a reason rather than an
+        // empty URL that a caller might fetch.
+        CHECK(!ThemeRegistry::downloadUrlFor(ix, QString(), {}).ok());
+        CHECK(!ThemeRegistry::downloadUrlFor(ix, QStringLiteral("   "), {}).ok());
+        CHECK(!ThemeRegistry::downloadUrlFor(QStringLiteral("not a url"), QStringLiteral("a.zip"), {}).ok());
+        CHECK(!ThemeRegistry::downloadUrlFor(QString(), QStringLiteral("https://x.test/a.zip"), {}).ok());
+    }
+
+    // 15. THE UPDATE BADGE'S COMPARISON. Newer badges, Same and Older do not, and Unknown does not either —
+    //     a badge is a claim, and a version this cannot rank is a version it must not rank.
+    {
+        using VC = ThemeRegistry::VersionCheck;
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.0"), QStringLiteral("1.1")) == VC::Newer);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.9"), QStringLiteral("1.10")) == VC::Newer);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.1"), QStringLiteral("1.0")) == VC::Older);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("2.0"), QStringLiteral("2.0")) == VC::Same);
+        // A missing trailing segment is zero: "1.2" and "1.2.0" are one version, not two.
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.2"), QStringLiteral("1.2.0")) == VC::Same);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.2"), QStringLiteral("1.2.1")) == VC::Newer);
+        // A leading "v" is tolerated on either side; registries spell it both ways.
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("v1.2"), QStringLiteral("1.3")) == VC::Newer);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.2"), QStringLiteral("V1.2")) == VC::Same);
+        // Unparseable on either side, empty on either side, and a pre-release suffix: all Unknown.
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.0"), QStringLiteral("banana")) == VC::Unknown);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("3.0-beta"), QStringLiteral("3.0")) == VC::Unknown);
+        CHECK(ThemeRegistry::compareOffered(QString(), QStringLiteral("1.0")) == VC::Unknown);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.0"), QString()) == VC::Unknown);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1..0"), QStringLiteral("1.0")) == VC::Unknown);
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("v"), QStringLiteral("1.0")) == VC::Unknown);
+        // Bounded rather than interesting: a segment past qint64 is refused, not wrapped.
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("1"),
+                                            QStringLiteral("9999999999999999999")) == VC::Unknown);
+        // Numeric, not lexicographic — the whole reason this is not a string compare.
+        CHECK(ThemeRegistry::compareOffered(QStringLiteral("9"), QStringLiteral("10")) == VC::Newer);
+    }
+
+    // 16. WHAT AN INSTALLED THEME REMEMBERS. The record rides the same atomic file set as the theme, so it
+    //     lands with it, is replaced by an update, and goes away with a removal.
+    {
+        ThemeRegistry::Record r;
+        r.source  = QStringLiteral("https://raw.githubusercontent.com/o/r/main/index.json");
+        r.dir     = QStringLiteral("themes2/Probe");
+        r.version = QStringLiteral("1.2.0");
+        r.name    = QStringLiteral("Probe");
+        const ThemeRegistry::Record back = ThemeRegistry::parseRecord(ThemeRegistry::makeRecord(r));
+        CHECK(back.present);
+        CHECK(back.source == r.source && back.dir == r.dir && back.version == r.version && back.name == r.name);
+
+        // An unreadable record is NO record, not a half-filled one.
+        CHECK(!ThemeRegistry::parseRecord(QByteArrayLiteral("not json at all")).present);
+        CHECK(!ThemeRegistry::parseRecord(QByteArrayLiteral("[1,2,3]")).present);
+        // An empty object IS a record: "installed from the browser, and it does not know from where".
+        CHECK(ThemeRegistry::parseRecord(QByteArrayLiteral("{}")).present);
+        CHECK(ThemeRegistry::parseRecord(QByteArrayLiteral("{}")).version.isEmpty());
+
+        // withRecord REPLACES a registry-supplied copy rather than appending beside it — installFiles
+        // refuses two paths differing only in case, so appending would refuse the whole install, and a
+        // registry-supplied record would otherwise get to state where this install "came from".
+        QVector<QPair<QString, QByteArray>> files;
+        files << qMakePair(QStringLiteral("theme.json"), QByteArrayLiteral("{}"));
+        files << qMakePair(QStringLiteral(".EB-Registry.JSON"), QByteArrayLiteral("{\"source\":\"evil\"}"));
+        const QVector<QPair<QString, QByteArray>> merged = ThemeRegistry::withRecord(files, r);
+        CHECK(merged.size() == 2);
+        int records = 0;
+        for (const auto& f : merged)
+            if (f.first.toCaseFolded() == ThemeRegistry::recordName().toCaseFolded()) ++records;
+        CHECK(records == 1);
+        CHECK(merged.last().first == ThemeRegistry::recordName());
+        CHECK(!merged.last().second.contains(QByteArrayLiteral("evil")));
+    }
+
+    // 17. BUNDLED THEMES ARE THE APP'S. Which folders those are cannot be read off the directory listing —
+    //     on desktop they are staged into the SAME themes2 the user's installs land in — so it is read from
+    //     the manifest that ships beside them, over a floor that keeps the answer safe when a hand-assembled
+    //     data directory has no manifest at all. The browser refuses to update or remove one: the registry's
+    //     copies have drifted (#57), so letting a stale copy land over one would ship that drift.
+    {
+        const QString base = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-bundled");
+        QDir(base).removeRecursively();
+        const QString root = base + QStringLiteral("/themes2");
+        auto plantTheme = [](const QString& dir) {
+            QDir().mkpath(dir);
+            QFile f(dir + QStringLiteral("/theme.json"));
+            if (f.open(QIODevice::WriteOnly)) f.write(QByteArrayLiteral("{}"));
+        };
+        auto plantManifest = [&root](const QByteArray& body) {
+            QDir().mkpath(root);
+            QFile f(root + QStringLiteral("/REGISTRY-SYNC.json"));
+            if (f.open(QIODevice::WriteOnly)) f.write(body);
+        };
+
+        // No manifest: the floor still names the themes this app ships, so nothing fails OPEN.
+        QDir().mkpath(root);
+        const QStringList floorOnly = ThemeRegistry::bundledFolders(root);
+        CHECK(floorOnly.contains(QStringLiteral("Channels")));
+        CHECK(floorOnly.contains(QStringLiteral("Night")));
+        CHECK(floorOnly.contains(QStringLiteral("Triple")));
+        CHECK(ThemeRegistry::bundledFolders(QString()).contains(QStringLiteral("Triple")));
+        // An unreadable manifest is the same as none — never a crash, never an empty answer.
+        plantManifest(QByteArrayLiteral("<html>not json</html>"));
+        CHECK(ThemeRegistry::bundledFolders(root).contains(QStringLiteral("Channels")));
+
+        // A manifest naming a fourth theme, in either of its two sections, adds it — which is the half a
+        // hardcoded list cannot do and the reason the floor is not the source of truth.
+        plantManifest(QByteArrayLiteral(
+            "{\"publishedThemes\":{\"Channels\":{},\"Aurora\":{}},"
+            " \"notPublished\":{\"Workshop\":{}}}"));
+        const QStringList bundled = ThemeRegistry::bundledFolders(root);
+        CHECK(bundled.contains(QStringLiteral("Aurora")));
+        CHECK(bundled.contains(QStringLiteral("Workshop")));
+        CHECK(bundled.contains(QStringLiteral("Triple")));      // the floor survives a manifest that omits it
+        CHECK(bundled.count(QStringLiteral("Channels")) == 1);  // and is not doubled by one that names it
+
+        // Case-insensitively, because the folder on disk and the folder in the index need not agree on it
+        // and a Windows filesystem does not either.
+        CHECK(ThemeRegistry::isBundled(QStringLiteral("channels"), bundled));
+        CHECK(!ThemeRegistry::isBundled(QStringLiteral("Community"), bundled));
+        CHECK(!ThemeRegistry::isBundled(QString(), bundled));
+
+        // Remove: refuses a bundled theme, and the folder is still there afterwards.
+        plantTheme(root + QStringLiteral("/Channels"));
+        plantTheme(root + QStringLiteral("/Community"));
+        QString err;
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("Channels"), bundled, &err));
+        CHECK(refusedBecause(err, "ships with the app"));
+        CHECK(QFile::exists(root + QStringLiteral("/Channels/theme.json")));
+
+        // ...and removes one the registry supplied, leaving the themes root itself alone.
+        err.clear();
+        CHECK(ThemeRegistry::removeInstalled(root, QStringLiteral("Community"), bundled, &err));
+        CHECK(err.isEmpty());
+        CHECK(!QDir(root + QStringLiteral("/Community")).exists());
+        CHECK(QDir(root).exists());
+
+        // ONLY inside the themes root, and only a theme. Every one of these is refused without deleting
+        // anything, which the surviving sibling below proves.
+        QDir().mkpath(base + QStringLiteral("/secrets"));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral(".."), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("../secrets"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("/etc"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("C:/Windows"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("a/b"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QString(), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(QString(), QStringLiteral("Community"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral(".eb-installing"), bundled, &err));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("Keep.replaced"), bundled, &err));
+        CHECK(QDir(base + QStringLiteral("/secrets")).exists());
+        // A folder with no theme.json is not a theme and is not this function's to delete.
+        QDir().mkpath(root + QStringLiteral("/JustAFolder"));
+        CHECK(!ThemeRegistry::removeInstalled(root, QStringLiteral("JustAFolder"), bundled, &err));
+        CHECK(QDir(root + QStringLiteral("/JustAFolder")).exists());
+        QDir(base).removeRecursively();
+    }
+
+    // 18. THE ZIP LANE'S MEMBER RULES (issue #91). A member name is attacker-controlled and is about to
+    //     become a filename in the user's data directory. Four shapes are refused, each on its own, because
+    //     they fail for four different reasons — and each assertion names a phrase unique to its own
+    //     refusal, so no two of these cases can satisfy each other.
+    {
+        // The floor: a well-formed archive installs, so every refusal below differs from a working install
+        // by exactly the member it is refusing.
+        {
+            ZipMember font;
+            font.name = QByteArrayLiteral("fonts/Body.ttf");
+            font.data = QByteArrayLiteral("FONTBYTES");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(ThemeZip::unpack(makeZip({ goodThemeJson(), font }), &files, &err));
+            CHECK(err.isEmpty());
+            CHECK(files.size() == 2);
+            CHECK(files[0].first == QStringLiteral("theme.json"));
+            CHECK(files[0].second == QByteArrayLiteral("{\"name\":\"Probe\"}"));
+            CHECK(files[1].first == QStringLiteral("fonts/Body.ttf"));   // subdirectories survive
+            CHECK(files[1].second == QByteArrayLiteral("FONTBYTES"));
+        }
+
+        // (1) TRAVERSAL.
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("../../evil.exe");
+            evil.data = QByteArrayLiteral("x");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "climbs out"));
+            CHECK(files.isEmpty());   // and NOTHING from the archive is handed back — see block 19
+        }
+        // …including one spelled with backslashes, which is a traversal and must be reported as one.
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("..\\..\\evil.exe");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "climbs out"));
+        }
+        // …and one that climbs and comes back, which resolves inside but is still not a listing we run.
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("a/../theme-extra.json");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "climbs out"));
+        }
+
+        // (2) ABSOLUTE — POSIX and UNC.
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("/etc/cron.d/evil");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "absolute path"));
+        }
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("\\\\host\\share\\evil");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "absolute path"));
+        }
+
+        // (3) DRIVE LETTER — "C:/x", "C:x" and a bare "C:" are all absolute on Windows, and QDir::cleanPath
+        //     carries the "C:" through a join, which is how such a member escapes.
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("C:/Windows/System32/evil.dll");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "drive-letter"));
+        }
+        {
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("C:evil.dll");
+            evil.data = QByteArrayLiteral("x");
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), evil }), &files, &err));
+            CHECK(refusedBecause(err, "drive-letter"));
+        }
+
+        // (4) SYMLINK — a plausible name and plausible content; the only thing wrong with it is the Unix
+        //     mode in its external attributes (S_IFLNK, 0xA000, under the S_IFMT mask).
+        {
+            ZipMember link;
+            link.name = QByteArrayLiteral("fonts/Body.ttf");
+            link.data = QByteArrayLiteral("../../../../../../etc/passwd");
+            link.externalAttr = 0xA1FF0000u;   // 0120777
+            QString err;
+            QVector<QPair<QString, QByteArray>> files;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), link }), &files, &err));
+            CHECK(refusedBecause(err, "symbolic link"));
+            // The SAME member with an ordinary file mode installs, so what was refused was the link bit and
+            // not the name or the content.
+            ZipMember plain = link;
+            plain.externalAttr = 0x81A40000u;  // 0100644
+            files.clear();
+            err.clear();
+            CHECK(ThemeZip::unpack(makeZip({ goodThemeJson(), plain }), &files, &err));
+            CHECK(files.size() == 2);
+        }
+    }
+
+    // 19. THE REST OF WHAT AN ARCHIVE MAY NOT BE, and the atomic landing under an interruption. The
+    //     interruption this lane can actually suffer is a member that fails halfway through the set: the
+    //     unpack refuses, installFiles is never reached, and an already-installed copy is untouched.
+    {
+        {   // Not an archive at all.
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(QByteArrayLiteral("<html>404</html>"), &files, &err));
+            CHECK(refusedBecause(err, "not a readable"));
+            CHECK(!ThemeZip::unpack(QByteArray(), &files, &err));
+        }
+        {   // A wrapper folder — what every "Download ZIP" button produces — is stripped, so an archive of
+            // "MyTheme/theme.json" installs identically to one of "theme.json".
+            ZipMember tj;   tj.name = QByteArrayLiteral("MyTheme/theme.json"); tj.data = QByteArrayLiteral("{}");
+            ZipMember snd;  snd.name = QByteArrayLiteral("MyTheme/sounds/ok.wav"); snd.data = QByteArrayLiteral("W");
+            ZipMember dir;  dir.name = QByteArrayLiteral("MyTheme/sounds/");   // a directory entry is skipped
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(ThemeZip::unpack(makeZip({ dir, tj, snd }), &files, &err));
+            CHECK(files.size() == 2);
+            CHECK(files[0].first == QStringLiteral("theme.json"));
+            CHECK(files[1].first == QStringLiteral("sounds/ok.wav"));
+        }
+        {   // TWO tops is not a wrapper, and neither top holds a theme.json at the root once nothing is
+            // stripped, so this is refused rather than guessed at.
+            ZipMember a; a.name = QByteArrayLiteral("One/theme.json"); a.data = QByteArrayLiteral("{}");
+            ZipMember b; b.name = QByteArrayLiteral("Two/theme.json"); b.data = QByteArrayLiteral("{}");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ a, b }), &files, &err));
+            CHECK(refusedBecause(err, "no theme.json"));
+        }
+        {   // No theme.json anywhere: not a theme.
+            ZipMember a; a.name = QByteArrayLiteral("readme.txt"); a.data = QByteArrayLiteral("hi");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ a }), &files, &err));
+            CHECK(refusedBecause(err, "no theme.json"));
+        }
+        {   // Two members that differ only in case are two entries in an archive and ONE file on Windows.
+            ZipMember a; a.name = QByteArrayLiteral("sounds/Ok.wav"); a.data = QByteArrayLiteral("A");
+            ZipMember b; b.name = QByteArrayLiteral("sounds/OK.WAV"); b.data = QByteArrayLiteral("B");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), a, b }), &files, &err));
+            CHECK(refusedBecause(err, "same name"));
+        }
+        {   // A Windows reserved device name is a file on Linux and a device on Windows; the tree lane
+            //  already refuses one and the zip lane must not be the way in.
+            ZipMember a; a.name = QByteArrayLiteral("con.wav"); a.data = QByteArrayLiteral("A");
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), a }), &files, &err));
+            CHECK(refusedBecause(err, "will not write"));
+        }
+        {   // The size caps, read off the CENTRAL DIRECTORY and refused before a byte is decompressed —
+            //  which is the only place a zip bomb can be refused at all, since after decompression the
+            //  memory it costs has already been spent. The fixture is a few hundred bytes on disk and
+            //  claims (truthfully) to unpack to more than a theme may be, which is the shape of the thing.
+            ZipMember big;
+            big.name = QByteArrayLiteral("fonts/Huge.ttf");
+            big.data = QByteArray(int(ThemeRegistry::kMaxFileBytes) + 1, '\0');
+            big.deflate = true;
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip({ goodThemeJson(), big }), &files, &err));
+            CHECK(refusedBecause(err, "larger than"));
+
+            // …and the running total across members, which the per-file cap alone does not bound: five
+            // members each just inside it are four times what an entry may bring in total. They share one
+            // buffer (QByteArray is implicitly shared), so the fixture costs 8 MB once, not five times.
+            const QByteArray justInside(int(ThemeRegistry::kMaxFileBytes), '\0');
+            QVector<ZipMember> lots;
+            lots << goodThemeJson();
+            for (int i = 0; i < 5; ++i)
+            {
+                ZipMember m;
+                m.name = QByteArrayLiteral("fonts/F") + QByteArray::number(i) + QByteArrayLiteral(".ttf");
+                m.data = justInside;
+                m.deflate = true;
+                lots << m;
+            }
+            files.clear(); err.clear();
+            CHECK(!ThemeZip::unpack(makeZip(lots), &files, &err));
+            CHECK(refusedBecause(err, "more than a theme may be"));
+        }
+        {   // More members than a theme may have.
+            QVector<ZipMember> many;
+            many << goodThemeJson();
+            for (int i = 0; i <= ThemeRegistry::kMaxFiles; ++i)
+            {
+                ZipMember m;
+                m.name = QByteArrayLiteral("f") + QByteArray::number(i) + QByteArrayLiteral(".txt");
+                m.data = QByteArrayLiteral("x");
+                many << m;
+            }
+            QVector<QPair<QString, QByteArray>> files;
+            QString err;
+            CHECK(!ThemeZip::unpack(makeZip(many), &files, &err));
+            CHECK(refusedBecause(err, "more files than"));
+        }
+
+        // THE ATOMIC LANDING. An install lands through ThemeRegistry::installFiles, so a refused unpack
+        // never reaches it — the destination is not created, and an already-installed copy of the same
+        // theme is byte-for-byte what it was.
+        {
+            const QString base = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-ziplanding");
+            QDir(base).removeRecursively();
+            const QString root = base + QStringLiteral("/themes2");
+            QDir().mkpath(root);
+
+            ThemeRegistry::Record rec;
+            rec.source  = QStringLiteral("https://raw.githubusercontent.com/o/r/main/index.json");
+            rec.dir     = QStringLiteral("themes2/Probe");
+            rec.version = QStringLiteral("1.0.0");
+            rec.name    = QStringLiteral("Probe");
+
+            // A first install, through the whole lane in ONE call — which is what both surfaces call, so
+            // neither can assemble the three steps differently from the other.
+            QString err;
+            ZipMember first = goodThemeJson();
+            first.data = QByteArrayLiteral("{\"name\":\"v1\"}");
+            CHECK(ThemeZip::install(makeZip({ first }), root, QStringLiteral("Probe"), rec, &err));
+            CHECK(err.isEmpty());
+            CHECK(QFile::exists(root + QStringLiteral("/Probe/theme.json")));
+
+            // The record round-trips off disk, which is what the update badge reads.
+            const ThemeRegistry::Record onDisk = ThemeRegistry::readRecord(root, QStringLiteral("Probe"));
+            CHECK(onDisk.present);
+            CHECK(onDisk.version == QStringLiteral("1.0.0"));
+            CHECK(onDisk.dir == QStringLiteral("themes2/Probe"));
+            CHECK(ThemeRegistry::compareOffered(onDisk.version, QStringLiteral("1.1.0"))
+                  == ThemeRegistry::VersionCheck::Newer);
+            // A theme nobody installed from a registry has no record and is therefore never badged.
+            QDir().mkpath(root + QStringLiteral("/HandCopied"));
+            CHECK(!ThemeRegistry::readRecord(root, QStringLiteral("HandCopied")).present);
+
+            // Now the interruption: an "update" whose archive turns hostile after its first member. It is
+            // refused, nothing is written, and the installed copy is exactly what it was.
+            ZipMember second = goodThemeJson();
+            second.data = QByteArrayLiteral("{\"name\":\"v2\"}");
+            ZipMember evil;
+            evil.name = QByteArrayLiteral("../../../evil.exe");
+            evil.data = QByteArrayLiteral("x");
+            err.clear();
+            CHECK(!ThemeZip::install(makeZip({ second, evil }), root, QStringLiteral("Probe"), rec, &err));
+            CHECK(refusedBecause(err, "climbs out"));
+            QFile check(root + QStringLiteral("/Probe/theme.json"));
+            CHECK(check.open(QIODevice::ReadOnly));
+            CHECK(check.readAll() == QByteArrayLiteral("{\"name\":\"v1\"}"));
+            check.close();
+            CHECK(!QFile::exists(base + QStringLiteral("/evil.exe")));
+            CHECK(!QFile::exists(QDir::tempPath() + QStringLiteral("/evil.exe")));
+
+            // A real update lands over the top, atomically, and REPLACES the record rather than leaving the
+            // old version beside it.
+            rec.version = QStringLiteral("1.1.0");
+            err.clear();
+            CHECK(ThemeZip::install(makeZip({ second }), root, QStringLiteral("Probe"), rec, &err));
+            QFile after(root + QStringLiteral("/Probe/theme.json"));
+            CHECK(after.open(QIODevice::ReadOnly));
+            CHECK(after.readAll() == QByteArrayLiteral("{\"name\":\"v2\"}"));
+            after.close();
+            CHECK(ThemeRegistry::readRecord(root, QStringLiteral("Probe")).version == QStringLiteral("1.1.0"));
+            CHECK(ThemeRegistry::compareOffered(QStringLiteral("1.1.0"), QStringLiteral("1.1.0"))
+                  == ThemeRegistry::VersionCheck::Same);
+
+            // And remove takes the whole folder, record included.
+            err.clear();
+            CHECK(ThemeRegistry::removeInstalled(root, QStringLiteral("Probe"), {}, &err));
+            CHECK(!QDir(root + QStringLiteral("/Probe")).exists());
+            CHECK(QDir(root).exists());
+            QDir(base).removeRecursively();
+        }
     }
 
     if (failures == 0) std::printf("THEMEREG-OK\n");

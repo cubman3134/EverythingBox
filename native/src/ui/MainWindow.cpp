@@ -37,6 +37,7 @@
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/DecorationInstall.h"   // #187: decoration-pack zip -> bezels/<system>/<packId>/
+#include "../core/ThemeZip.h"           // #91: theme-zip -> the file set installFiles lands atomically
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
 #include "../core/RecompFeed.h" // issue #248 (b): the RetComM feed, for a feed-only row's entry
 #include "../core/RecompRows.h" // issue #248: the tier a catalogue entry belongs to
@@ -9534,22 +9535,55 @@ void MainWindow::presentThemeRegistry()
                             ? tr("%n theme(s) available.", "", int(st->entries.size()))
                             : tr("%1 available. %2").arg(int(st->entries.size())).arg(unreadable);
               rows << r; }
+            // The trust posture, said on the panel rather than left implicit. A theme has no script surface,
+            // so installing one from a stranger's registry is not the decision installing an ADD-ON is, and
+            // a user who cannot see that difference will either avoid both or trust both.
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.trust");
+              r.label = tr("Themes are data, not code");
+              r.value = tr("A theme is JSON and artwork — the format has no script in it, so installing one "
+                           "carries none of the trust questions an add-on does. Views a theme doesn't declare "
+                           "fall back to the built-in ones.");
+              rows << r; }
+            // Which themes ship inside the app. Read once for the whole list rather than per row: it is a
+            // file read, and the answer cannot change while this list is being built.
+            const QStringList bundledFolders = bundledThemeFolders();
             for (int i = 0; i < st->entries.size(); ++i)
             {
                 const ThemeRegistry::Entry& e = st->entries[i].first;
-                // Installed = the folder is on disk, the same predicate availableThemes() uses. The bundled
-                // themes are therefore never offered, which is what keeps the registry's older copies of
-                // them (issue #131) from replacing the ones already in the app.
+                // Installed = the folder is on disk, the same predicate availableThemes() uses.
                 const bool installed =
                     QFile::exists(ThemeEngine::themesRoot() + QStringLiteral("/") + e.folder()
                                   + QStringLiteral("/theme.json"));
+                // BUNDLED is a different state from installed and gets its own row, not a silent omission:
+                // the registry's copies of the bundled themes have drifted from what the app ships (#57),
+                // so this panel neither updates nor removes one — and it says which theme that is about
+                // rather than leaving the user to wonder why the row they can see does nothing.
+                const bool bundled = ThemeRegistry::isBundled(e.folder(), bundledFolders);
+                // What the registry offers against what this install recorded when it landed. A theme the
+                // user dropped in by hand has no record, so its version is empty and this is Unknown —
+                // which is right: we have no idea what it is a copy of, and must not claim it is out of date.
+                const ThemeRegistry::Record rec =
+                    installed ? ThemeRegistry::readRecord(ThemeEngine::themesRoot(), e.folder())
+                              : ThemeRegistry::Record();
+                const bool updatable =
+                    installed && !bundled
+                    && ThemeRegistry::compareOffered(rec.version, e.version)
+                           == ThemeRegistry::VersionCheck::Newer;
+
                 PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("treg:") + QString::number(i);
                 r.label = e.name.isEmpty() ? e.folder() : e.name;
                 QString sub = e.author.isEmpty() ? QString() : tr("by %1").arg(e.author);
+                if (!e.version.isEmpty())
+                    sub += (sub.isEmpty() ? QString() : QStringLiteral(" · ")) + e.version;
                 if (!e.formFactors.isEmpty())
                     sub += (sub.isEmpty() ? QString() : QStringLiteral(" · ")) + e.formFactors.join(QStringLiteral(", "));
-                r.value = installed ? tr("Installed ✓") : sub;
-                r.enabled = !installed;
+                // ONE verb per row, and it is the strongest one that applies: update a theme the registry
+                // has moved on from, otherwise take an installed one back off, otherwise install it. The
+                // decoration gallery's cards work exactly this way, and two verbs on one D-pad row do not.
+                if (bundled)          { r.value = tr("Ships with the app"); r.enabled = false; }
+                else if (updatable)   { r.value = tr("Update to %1").arg(e.version); r.enabled = true; }
+                else if (installed)   { r.value = tr("Remove"); r.enabled = true; }
+                else                  { r.value = sub; r.enabled = true; }
                 rows << r;
             }
         }
@@ -9573,7 +9607,26 @@ void MainWindow::presentThemeRegistry()
                 if (i < 0 || i >= st->entries.size())
                 { updatePanelInfo(QStringLiteral("treg.status"),
                                   tr("That entry is no longer in this list — reopen this page.")); return; }
-                installThemeRegistryEntry(st->entries[i].first, st->entries[i].second, id);
+                const ThemeRegistry::Entry& e = st->entries[i].first;
+                // The state is re-derived HERE rather than captured when the row was built. The rows are
+                // built once and this panel stays live across an install, a removal and a theme folder the
+                // user may have changed from another surface, so a verb decided minutes ago is a verb that
+                // may no longer be the right one.
+                if (ThemeRegistry::isBundled(e.folder(), bundledThemeFolders()))
+                { updatePanelInfo(QStringLiteral("treg.status"),
+                                  tr("\"%1\" ships with the app, so it isn't updated or removed from here.")
+                                      .arg(e.name.isEmpty() ? e.folder() : e.name)); return; }
+                const bool installed =
+                    QFile::exists(ThemeEngine::themesRoot() + QStringLiteral("/") + e.folder()
+                                  + QStringLiteral("/theme.json"));
+                const ThemeRegistry::Record rec =
+                    installed ? ThemeRegistry::readRecord(ThemeEngine::themesRoot(), e.folder())
+                              : ThemeRegistry::Record();
+                if (installed && ThemeRegistry::compareOffered(rec.version, e.version)
+                                     != ThemeRegistry::VersionCheck::Newer)
+                    removeInstalledTheme(e, id);
+                else
+                    installThemeRegistryEntry(e, st->entries[i].second, id);
             },
             [this] { openAppearance(); });
     };
@@ -9646,6 +9699,63 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
     if (folder.isEmpty())
     { updatePanelInfo(QStringLiteral("treg.status"), tr("This entry doesn't name a usable theme folder."));
       setRow(tr("Retry"), true); return; }
+
+    // A BUNDLED theme is never written by this panel, and the refusal is here as well as on the row for the
+    // reason every refusal in this feature is doubled: the row was built from a list that may be minutes
+    // old, and this function is the one that turns a registry's bytes into files. The registry's copies of
+    // the bundled themes have drifted from what the app ships (#57), so an install "over the top" of one
+    // would ship that drift as an update.
+    if (ThemeRegistry::isBundled(folder, bundledThemeFolders()))
+    { updatePanelInfo(QStringLiteral("treg.status"),
+                      tr("\"%1\" ships with the app and is not installed from the registry.").arg(folder));
+      setRow(tr("Ships with the app"), false); return; }
+
+    // Where the theme's bytes come from and the record they land with. The record is what an update reads
+    // next time: without it an installed theme cannot say which registry it came from or what version it
+    // was, and every row would offer a reinstall instead of an update.
+    ThemeRegistry::Record record;
+    record.source  = indexUrl;
+    record.dir     = entry.dir;
+    record.version = entry.version;
+    record.name    = entry.name;
+
+    // THE ZIP LANE (issue #91). An entry that names an archive installs from that archive whatever host
+    // serves the index: one bounded download instead of up to 64, no GitHub trees call (and so none of the
+    // 60-an-hour unauthenticated budget), and it is the ONLY lane a registry that is not on GitHub has —
+    // the tree lane below can only say "Manual" for one. It is also the lane an update rides.
+    //
+    // The URL is resolved and checked by ThemeRegistry, not here: https, ending in .zip, and on the index's
+    // own host or on one the user added themselves. An entry free to name any URL would turn browsing a
+    // community registry into fetching and unpacking whatever that document points at.
+    if (!entry.zip.trimmed().isEmpty())
+    {
+        const ThemeRegistry::Download dl =
+            ThemeRegistry::downloadUrlFor(indexUrl, entry.zip, themeExtraRegistryUrls());
+        if (!dl.ok())
+        { // Nothing about this registry's answer will differ next time, so this is not a Retry.
+          updatePanelInfo(QStringLiteral("treg.status"), dl.error);
+          setRow(tr("Refused"), false); return; }
+
+        updatePanelInfo(QStringLiteral("treg.status"), tr("Downloading “%1”…").arg(label));
+        QByteArray archive;
+        QString err;
+        bool over = false;
+        if (!registryFetchToBuffer(docNam_, dl.url, ThemeRegistry::kMaxTotalBytes, &archive, &err, &over))
+        { updatePanelInfo(QStringLiteral("treg.status"),
+                          over ? tr("Refused: %1").arg(err) : tr("Download failed: %1").arg(err));
+          setRow(tr("Retry"), true); return; }
+
+        // Unpack, stamp, land — one call, shared with the classic surface, so neither can assemble the
+        // three steps differently. Every member refusal happens before a byte is written, and the landing
+        // is a rename, so a refusal leaves any previous copy exactly as it was.
+        if (!ThemeZip::install(archive, ThemeEngine::themesRoot(), folder, record, &err))
+        { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
+
+        setRow(tr("Remove"), true);
+        updatePanelInfo(QStringLiteral("treg.status"),
+                        tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
+        return;
+    }
 
     const QString api = ThemeRegistry::treeApiUrl(indexUrl);
     if (api.isEmpty())
@@ -9720,10 +9830,13 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
     // No "Writing the theme folder…" line here: installFiles is synchronous and no event loop spins between
     // setting such a label and replacing it, so it would never reach the screen. A status that cannot paint is
     // a comment written to the wrong place.
-    if (!ThemeRegistry::installFiles(ThemeEngine::themesRoot(), folder, blobs, &err))
+    if (!ThemeRegistry::installFiles(ThemeEngine::themesRoot(), folder,
+                                     ThemeRegistry::withRecord(blobs, record), &err))
     { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
 
-    setRow(tr("Installed ✓"), false);
+    // The verb an INSTALLED row carries. Not the old disabled "Installed" tick: an installed theme is one
+    // the user may now want to take back off, and the panel they installed it from is where they will look.
+    setRow(tr("Remove"), true);
     updatePanelInfo(QStringLiteral("treg.status"),
                     tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
 }
@@ -13717,7 +13830,6 @@ void MainWindow::openAppearance()
              QString());
         action(QStringLiteral("appr.browse"), tr("Browse community themes…"));
         action(QStringLiteral("appr.decorations"), tr("Browse decoration packs…"));
-        action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         auto onAct =
             [this, dispOpts, dispValues](const QString& id, const QString& val) {
@@ -13776,10 +13888,6 @@ void MainWindow::openAppearance()
                     // on this host (present -> one more graph level), so Back lands back on Appearance and the
                     // theme installed here is in Theme…'s picker the moment that panel is rebuilt.
                     presentThemeRegistry();
-                }
-                else if (id == QStringLiteral("appr.gallery")) {
-                    // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
-                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/cubman3134/everythingbox-themes")));
                 }
             };
         // defensive root onBack: Appearance is nested, so a pop re-renders the hub

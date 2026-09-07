@@ -404,6 +404,53 @@ keys — there is no drag-and-drop to reach for.
   or a saved filter); a themed home arranges its media-type categories and catalogue tiles. Rows that belong
   to the other layout are kept in your list and simply skipped, so switching layouts never loses them. Theme
   authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
+## Themes
+
+A theme decides what the app looks like: colours, layout, artwork, the sounds it makes. Three ship with the
+app, and **Settings ▸ Appearance ▸ Theme…** switches between them with a live preview.
+
+**Browse community themes…**, on the same panel, is the in-app gallery. It lists what the community theme
+registry is offering, installs a theme in one press, and puts it straight into the picker — the preview and
+hot reload are the same ones the picker already uses, so you can see a theme before you commit to it.
+
+- **Themes are data, not code.** A theme is JSON and artwork; the format has no script in it. Installing one
+  from a stranger's registry is not the decision installing an add-on is, and the app does not ask you to
+  make it. A theme that declares a view the app doesn't know about, or omits one it does, falls back to the
+  built-in layout for that view rather than failing.
+- **Updates.** An installed theme remembers which registry it came from and what version it was. When the
+  registry lists a newer one the row offers **Update to …**; updating is the same install over the top, and
+  it either replaces the theme completely or leaves the copy you had exactly as it was.
+- **Removing one.** An installed theme's row offers **Remove**. It deletes that theme's folder and nothing
+  else.
+- **The three that ship with the app are never touched here.** They are marked *Ships with the app* and the
+  gallery will neither update nor remove them — the registry's copies of them are not always in step with
+  the ones in the app, and an "update" that replaced a bundled theme with an older copy of itself is not an
+  update.
+- **Your own registry.** **Add registry…** takes the URL of any `index.json` in the same format, and its
+  themes appear beside the built-in ones. It is the same list the decoration-pack gallery reads, so adding a
+  registry gets you its themes *and* its packs.
+- **Where the bytes may come from.** A registry entry may point its download at its own host, or at a host
+  you added yourself by adding that registry. It may not redirect an install anywhere else, and it may not
+  fetch over plain HTTP. Inside the archive, a file that would be written outside the theme's own folder —
+  by climbing out of it, by naming an absolute path or a drive letter, or by being a symbolic link — is
+  refused, and the install is refused with it rather than partially applied.
+
+You can also install a theme by hand: drop its folder into the themes directory named on the Appearance
+panel. Theme authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
+
+**Running a registry.** A registry is one `index.json` holding a `themes2` array. An entry is
+`{"name", "author", "description", "dir": "themes2/<Folder>", "formFactors": []}`, and two optional fields
+drive the rest:
+
+- `"version": "1.3.0"` — dotted numbers (a leading `v` is fine). This is what an update is measured against;
+  an entry without one is installable and simply never badged, and a version this app cannot rank as a
+  number never badges either, rather than guessing.
+- `"zip": "packs/mytheme-1.3.0.zip"` — an archive of the theme folder, relative to the index or an absolute
+  `https://` URL on the index's own host. When it is present the app downloads that one file instead of
+  walking the repository; it is the only way to publish from a host that is not GitHub, and it is what an
+  update downloads. The archive may wrap the theme in a single folder or not — either installs the same.
+
+
 ## Trackers (anime and manga)
 
 **AniList** keeps your anime and manga progress in step with the app: finish a chapter or an episode here

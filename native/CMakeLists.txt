@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.202 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.203 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -771,6 +771,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # ThemeRegistry: what a community registry index means and which remote paths may become filenames.
         # QtCore-only, so it compiles in every configuration incl. the no-QML kit; RegistryBrowser links it.
         src/core/ThemeRegistry.cpp src/core/ThemeRegistry.h
+        # ThemeZip: the zip install lane's member rules (#91). The impure half of a theme install, split off
+        # ThemeRegistry so that unit stays QtCore-only; miniz is already on this target for ArchiveRom.
+        src/core/ThemeZip.cpp src/core/ThemeZip.h
         # DecorationPack / DecorationInstall: decoration (bezel) packs from the SAME registry index (#187).
         # DecorationPack is QtCore-only (index parse, install layout, the wrapper-folder strip) and is on the
         # app because RetroView asks it which packs are installed for a system every time a game opens;
@@ -897,6 +900,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
         src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
+        src/ui/MainWindowThemes.cpp                        # issue #91: the theme browser's update/remove/zip members, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.
@@ -1143,8 +1147,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     # can only reach the feature here.
     add_executable(probe_themereg tools/probe_themereg.cpp
         src/core/ThemeRegistry.cpp
-        src/core/DecorationPack.cpp)   # block 12: the `decorations` section of the same index document (#187)
-    target_include_directories(probe_themereg PRIVATE src src/core)
+        src/core/ThemeZip.cpp          # issue #91: the zip install lane's member rules (miniz, hence the
+        src/core/ThemeZip.h            # third_party include dir and the zlib-name define below)
+        src/core/DecorationPack.cpp    # block 12: the `decorations` section of the same index document (#187)
+        third_party/miniz.c)
+    target_include_directories(probe_themereg PRIVATE src src/core third_party)
+    target_compile_definitions(probe_themereg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_themereg PRIVATE Qt6::Core)
 
     # ItemMarks store: per-profile hidden/completion/tags + tag vocab + pinned shelves, the persistence
