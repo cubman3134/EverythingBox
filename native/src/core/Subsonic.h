@@ -84,6 +84,7 @@
 #include <QByteArray>
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QPair>
 #include <QString>
 #include <QVector>
@@ -94,7 +95,17 @@ namespace Subsonic
 
     // What a qualified id points AT. The kind is in the key so a stale route cannot resolve an album id as
     // a track id and hand mpv something that is not audio.
-    enum class Kind { Artist, Album, Track, Cover };
+    //
+    // `Playlist` (issue #193, increment 6) is a FIFTH kind rather than a re-used Album, and the reason is
+    // the routing: a playlist is fetched with getPlaylist and an album with getAlbum, so an id that could
+    // not say which it was would have to be guessed at by the one function that must never guess. It renders
+    // as an album — MusicLibrary::Album is "a titled, ordered list of tracks with a cover", which is what a
+    // playlist is — so no second row type, no second level and no second player exists for it.
+    // `Virtual` is the one kind the SERVER has never heard of: a container this app invented (today, exactly
+    // one - the record the starred loose tracks are queued behind). No endpoint takes it, SubsonicClient
+    // refuses to put one in a request, and that refusal is what makes it impossible for an invented id to
+    // collide with a server-minted one whatever ids that server uses. See starredTracksKey().
+    enum class Kind { Artist, Album, Track, Cover, Playlist, Virtual };
 
     // The separator. 0x1F (UNIT SEPARATOR) — the same character MusicLibrary joins its own key fields with,
     // which is what makes the two key families comparable at all (see the header's third property).
@@ -264,9 +275,18 @@ namespace Subsonic
         int track = 0, disc = 0, year = 0, durationSec = 0;
     };
 
+    // ONE PLAYLIST, as the three levels of #193 increment 6 need it. `songCount` is the server's own count
+    // and is the only honest number between the playlists level and the moment the playlist is opened —
+    // exactly the split MusicLibrary::Album::trackCount exists for.
+    struct RemotePlaylist { QString id, name, comment, owner, coverArt; int songCount = 0, durationSec = 0; };
+
     QVector<RemoteArtist> readArtists(const Node& root);
     QVector<RemoteAlbum>  readAlbums(const Node& root);
     QVector<RemoteSong>   readSongs(const Node& root);
+
+    // getPlaylists / getPlaylist. A record with no id is dropped for the same reason an artist without one
+    // is: a row that cannot be pressed is worse than an absent row.
+    QVector<RemotePlaylist> readPlaylists(const Node& root);
 
     // ---- Onto the EXISTING music catalog shapes --------------------------------------------------------
     //
@@ -315,4 +335,129 @@ namespace Subsonic
     // a bucket invented here from lingering beside the real one.
     void adoptAlbum(MusicLibrary::Index& idx, const QString& serverId, const RemoteAlbum& album,
                     const QVector<RemoteSong>& songs);
+
+    // ====================================================================================================
+    // WHAT THE SERVER ALREADY KNOWS (issue #193, increment 6) - playlists, starred, recently added
+    // ====================================================================================================
+    //
+    // Three more levels, built exactly the way the three above were: one request each, a pure reader over the
+    // envelope, and the result poured into the SAME MusicLibrary shapes #74's browse builders render. A
+    // Subsonic playlist and a local album are the same UI with a different supplier, which is the whole
+    // claim this feature rests on - so nothing below mints a row type, a level or a player of its own.
+    //
+    // WHY A PLAYLIST IS AN ALBUM. MusicLibrary::Album is "a titled, ordered list of tracks with a cover and a
+    // count". That is a playlist. Giving playlists a parallel struct would have duplicated the album level,
+    // the track row, the queue-behind-a-track rule and the cover cache, and the four copies would have
+    // drifted the first time one of them was corrected. What a playlist does NOT share with an album is how
+    // it is FETCHED (getPlaylist, not getAlbum), and that is why its qualified id carries Kind::Playlist:
+    // the routing question is answered by the id itself rather than guessed at.
+
+    // The rows a list of playlists becomes. Album::trackCount is the server's songCount and `tracks` is
+    // empty - the same "counted before it is fetched" split the album level already has.
+    QVector<MusicLibrary::Album> playlistRows(const QString& serverId,
+                                              const QVector<RemotePlaylist>& playlists);
+
+    // The rows a flat album list becomes (getAlbumList2?type=newest, and getStarred2's albums). Real album
+    // keys, so opening one takes the ordinary album route and the ordinary getAlbum fetch.
+    QVector<MusicLibrary::Album> albumRows(const QString& serverId, const QVector<RemoteAlbum>& albums);
+
+    // The rows a flat artist list becomes (getStarred2's artists). Real artist keys, same reasoning.
+    QVector<MusicLibrary::Artist> artistRows(const QString& serverId, const QVector<RemoteArtist>& artists);
+
+    // ---- The one container this app invents ------------------------------------------------------------
+    //
+    // A level of LOOSE TRACKS - the songs a user starred, which belong to as many different records as they
+    // like - still has to answer "what does pressing one play?". Every track row in this app carries the key
+    // of the record it is queued behind (MusicCatalogs.h), and for these the honest answer is "the starred
+    // list itself": press the fourth starred track and the starred tracks play from there.
+    //
+    // So there is one synthetic record, and its id carries Kind::Virtual for a structural reason rather than
+    // a tidy one: a Virtual id is NEVER put in a request. The server has never heard of it, no endpoint takes
+    // it, and SubsonicClient refuses to fetch one - which is what makes it impossible for this invented id to
+    // collide with anything the server minted, whatever ids that server happens to use.
+    QString starredTracksKey(const QString& serverId);
+
+    // What one getStarred2 answer is, as the three row lists the level draws and nothing else.
+    struct Starred
+    {
+        QVector<MusicLibrary::Artist>     artists;
+        QVector<MusicLibrary::Album>      albums;
+        QVector<MusicLibrary::IndexTrack> tracks;   // all carrying starredTracksKey(serverId)
+        bool isEmpty() const { return artists.isEmpty() && albums.isEmpty() && tracks.isEmpty(); }
+    };
+    Starred readStarred(const QString& serverId, const Node& root);
+
+    // ---- THE SECTIONS INDEX, WHICH IS A SEPARATE INDEX ON PURPOSE --------------------------------------
+    //
+    // The two functions below fill a DIFFERENT MusicLibrary::Index from the browse one: the containers this
+    // app invented (a playlist rendered as an album, the starred loose tracks' record) live apart from the
+    // server's own artists -> albums -> tracks. That separation is not tidiness; it is two bugs avoided.
+    //
+    //   * THE ARTISTS LEVEL WOULD GROW ROWS NOBODY MADE. Every invented record has to hang off an artist
+    //     bucket, because that is the only place an Index holds an album - and musicArtistsCatalog draws one
+    //     row per bucket. Put them in the browse index and the server's artist list gains an "Unknown Artist"
+    //     holding the user's playlists.
+    //   * A getArtists REPLACES THE BROWSE INDEX WHOLESALE (adoptAlbum's note says why that matters). Any
+    //     invented record in it is destroyed by an ordinary refresh, and every track row already on screen
+    //     that was queued behind one then plays nothing at all.
+    //
+    // MusicSupply::indexFor routes to whichever of the two a key belongs to, structurally, by its Kind - so
+    // nothing above this file has to know there are two.
+    void adoptStarred(MusicLibrary::Index& sections, const QString& serverId, const Starred& s);
+
+    // ...and a playlist's tracks, once getPlaylist has answered. Same cold-cache story as adoptAlbum: the
+    // playlist may be opened from a Recents row in a session where the playlists level was never visited.
+    // Idempotent - re-running it replaces the record's tracks rather than doubling them.
+    void adoptPlaylist(MusicLibrary::Index& sections, const QString& serverId,
+                       const RemotePlaylist& playlist, const QVector<RemoteSong>& songs);
+
+    // ...and the ARTIST cold-cache case, which starred made ordinary. fillArtistAlbums is a no-op for an
+    // artist the index has never heard of, and until now that could only happen on a stale route; a starred
+    // artist row opened before the server's artist list was ever fetched reaches it legitimately. Creates
+    // the bucket from the server's own answer and then fills it, so the row leads somewhere.
+    void adoptArtist(MusicLibrary::Index& idx, const QString& serverId, const RemoteArtist& artist,
+                     const QVector<RemoteAlbum>& albums);
+
+    // ---- Starred, and the local favourites (issue #193, increment 6) -----------------------------------
+    //
+    // THE UNION RULE, ENFORCED BY THIS FUNCTION'S SHAPE RATHER THAN BY A COMMENT. Reading a server's starred
+    // list may ADD favourites; it may never remove one. A user's local favourites include things this server
+    // has never held - a film, a game, a track on another server - and "make the local list match the remote
+    // one" would delete every one of them the first time a Starred level was opened. That is not a bug you
+    // find in testing; it is a bug you find when somebody's shelf is empty.
+    //
+    // So there is no removal to get wrong: this returns ADDITIONS and there is no other return value. Pure,
+    // with the existing favourites passed IN as a set of ids, so the probe drives the rule with no store.
+    struct StarredFavorite { QString itemId, title, subtitle; };
+    QVector<StarredFavorite> starredAdditions(const QString& serverId, const QVector<RemoteSong>& songs,
+                                              const QSet<QString>& alreadyFavourite);
+
+    // ---- Telling the server what happened --------------------------------------------------------------
+
+    // `scrobble.view`'s parameters for one batch. Repeated `id`/`time` pairs, which the spec allows and every
+    // server implements - one request for a queue's worth rather than one per listen. `submission=false` is
+    // the ephemeral "now playing" hint and `true` is the durable play.
+    //
+    // The times are UNIX SECONDS here and MILLISECONDS on the wire, which is the spec's unit and the single
+    // easiest thing to get wrong in a Subsonic client: seconds read as milliseconds land the play in January
+    // 1970, where nothing displays it and nothing complains. A non-positive time is omitted rather than sent
+    // as zero, because "no time" means "now" to every server and 1970 means nothing to any of them.
+    QList<QPair<QString, QString>> scrobbleParams(const QVector<QString>& remoteIds,
+                                                  const QVector<qint64>& atUnixSeconds, bool submission);
+
+    // `star.view` / `unstar.view`'s parameter for one thing. WHICH parameter depends on the kind - `id` for a
+    // song, `albumId` for an ID3 album, `artistId` for an ID3 artist - and sending the wrong one stars
+    // whatever record happens to share that id in the other namespace. Empty for a kind that cannot be
+    // starred (a cover, a virtual container), so a caller can hand it anything.
+    QList<QPair<QString, QString>> starParams(Kind kind, const QString& remoteId);
+
+    // How one answer ends, in the four fates the scrobble orchestrator acts on. Pure over the envelope, so
+    // every arm is drivable from a recorded body with no socket:
+    //   Ok         the server took it
+    //   Auth       a credential code (see isAuthCode) - keep the listens, stop pumping
+    //   Rejected   the server understood and refused permanently (a missing or unknown id): DROP, or the
+    //              queue jams for ever behind one row and everything after it is lost too
+    //   Retryable  anything else, including an unparsable body - a proxy's error page is a transport problem
+    enum class Fate { Ok, Retryable, Auth, Rejected };
+    Fate fateOf(const Envelope& env);
 }

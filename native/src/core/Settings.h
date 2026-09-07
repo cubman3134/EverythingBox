@@ -267,6 +267,22 @@ namespace Settings
     void setScrobbleEnabled(bool on);
     bool scrobbleSpokenAudio();                  // include audiobooks + podcasts, default OFF (see Scrobble.h)
     void setScrobbleSpokenAudio(bool on);
+    // THE DOUBLE-COUNT COORDINATION (issue #193). ONE setting, which is the issue's exact requirement ("a
+    // single clear setting rather than two that silently conflict"), and it answers one question: does the
+    // music server forward its own plays to Last.fm / ListenBrainz already?
+    //
+    //   OFF (default): this app reports a play from a music server to the server AND to the listening
+    //                  services you have connected here. Right for a server that keeps its own play counts
+    //                  and forwards nothing, which is the ordinary setup.
+    //   ON:            this app reports a play from a music server to that server ONLY, and lets the server
+    //                  do the forwarding. Right when Navidrome (or Airsonic, or Gonic) is signed in to
+    //                  Last.fm or ListenBrainz itself — otherwise every one of those plays is counted twice.
+    //
+    // Note which half it does NOT touch: local files and addon streams are unaffected either way, because
+    // there is no server in the middle of those to forward anything. Scrobble::verdictForDestination is the
+    // rule, and it is why the server itself is still told when this is on: it can only forward what it hears.
+    bool scrobbleServerForwards();               // default OFF
+    void setScrobbleServerForwards(bool on);
 
     // ---- DISCORD RICH PRESENCE ---------------------------------------------------------------------
     // OFF by default and opted into once, because this broadcasts what somebody is watching to everyone who

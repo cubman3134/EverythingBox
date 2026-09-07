@@ -118,6 +118,22 @@ namespace Scrobble
         int     durationSec = 0;   // 0 == unknown (see thresholdSec)
         Kind    kind   = Kind::Music;
         Origin  origin = Origin::LocalLibrary;
+
+        // THE SUPPLIER'S OWN ID for this track, when the supplier has one AND the destination being told
+        // about it is that same supplier (issue #193, increment 6). Empty for everything else, which is the
+        // ordinary case and stays the ordinary case: Last.fm and ListenBrainz are told about a track by
+        // ARTIST and TITLE, and an id out of somebody's private server would mean nothing to either.
+        //
+        // It exists because a Subsonic server cannot be told anything about a track any other way — its
+        // `scrobble.view` and `star.view` take the server's own id and nothing else — and because a listen
+        // that spends a night in the offline queue has to arrive with that id still attached. So it rides on
+        // the Track, through ScrobbleQueue's encoding, to the request.
+        //
+        // IT IS NOT A CREDENTIAL AND IT IS NOT A URL. It is Subsonic::qualify()'s output: an opaque
+        // server-chosen id behind the server's own uuid, which is exactly what the browse index is allowed
+        // to hold. The lazy way to carry the same information would have been the signed stream url, and
+        // that would have written the user's token into the queue file on disk. See SubsonicClient.h.
+        QString sourceId;
     };
 
     // A COMPLETED listen, waiting to be delivered. `listenedAt` is the moment the track STARTED, in unix
@@ -194,6 +210,55 @@ namespace Scrobble
     }
 
     inline bool eligible(const Track& t, const Policy& p) { return verdictFor(t, p) == Verdict::Submit; }
+
+    // ---- ...AND THE ONE ARM OF IT THAT IS ABOUT THE DESTINATION (issue #193, increment 6) --------------
+    //
+    // verdictFor() answers a question about the LISTENING: is this a play at all, and does this profile want
+    // plays reported. Four of its five arms are exactly that. `SkipServerForwards` is not — it is about WHO
+    // ELSE IS ALREADY COUNTING, which is a property of the destination rather than of the listening, and
+    // applying it to every destination alike is a specific bug with a specific, silent symptom.
+    //
+    // THE SYMPTOM: a Subsonic server only learns that a play happened because this app tells it —
+    // `scrobble.view` is the only route a client play has into it. A server configured to forward its own
+    // plays upstream therefore forwards what this app reported to it. Suppress the report to EVERY
+    // destination and the server never hears about the play, so it forwards nothing, so the listen is
+    // counted ZERO times rather than the one time the coordination exists to guarantee. The user's symptom
+    // is a listening history that stops growing the moment they switch the coordination ON — which is the
+    // exact opposite of what the setting says it does.
+    //
+    // So the arm is evaluated PER DESTINATION. `destinationOwnsSource` is true for the one provider that IS
+    // the server that served this play; for it the report is the FIRST count of the play, not a second one.
+    // Every other arm is unchanged and is evaluated identically for every destination, which is what keeps
+    // "the threshold, what counts, the audiobook rule" in one place, as the header insists.
+    inline Verdict verdictForDestination(const Track& t, const Policy& p, bool destinationOwnsSource)
+    {
+        const Verdict v = verdictFor(t, p);
+        if (v == Verdict::SkipServerForwards && destinationOwnsSource) return Verdict::Submit;
+        return v;
+    }
+
+    // ---- ...AND THE GATE A LOVE PASSES, WHICH IS NOT THE GATE A LISTEN PASSES --------------------------
+    //
+    // A "love" sent to Last.fm or ListenBrainz is a broadcast: it tells a third party what somebody likes,
+    // so it is gated exactly as a listen is. A star sent BACK to the Subsonic server the track came from is
+    // not a broadcast at all — it is an edit to the user's OWN library, in the same place the track already
+    // lives, and it is the thing the favourite button visibly did.
+    //
+    // Two arms differ, and both were wrong the obvious way round:
+    //   * `enabled` — the listening-history switch. Gating a star on it means a user who never wanted a
+    //     scrobbling account finds that favouriting a track on their own server silently does nothing.
+    //   * `serverForwards` — see above. It is about double-counted PLAYS; a server that forwards its plays
+    //     upstream does not forward its stars, and a star is not a play.
+    // The untagged and spoken arms are NOT relaxed: a star still needs something to star, and a library
+    // edit made about an audiobook is still governed by the same per-source opt-in.
+    inline Verdict loveVerdictFor(const Track& t, const Policy& p, bool destinationIsALibraryEdit)
+    {
+        if (!destinationIsALibraryEdit) return verdictFor(t, p);
+        Policy q = p;
+        q.enabled        = true;
+        q.serverForwards = false;
+        return verdictFor(t, q);
+    }
 
     // ---- The accumulator ------------------------------------------------------------------------------
 

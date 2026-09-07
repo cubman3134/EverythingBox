@@ -91,12 +91,13 @@ Scrobble::Policy Scrobbler::policy()
     Scrobble::Policy p;
     p.enabled       = Settings::scrobbleEnabled();
     p.includeSpoken = Settings::scrobbleSpokenAudio();
-    // FALSE, today, and the arm exists so it can become true without a redesign. EverythingBoxServer's
-    // Subsonic endpoint records plays LOCALLY and forwards nothing, so a client that also scrobbles counts
-    // each play once. The day the server grows upstream forwarding, this is the one line that changes — it
-    // reads the server's own capability answer — and Scrobble::verdictFor already refuses a Server-origin play
-    // when it is set. Nothing else in the feature moves.
-    p.serverForwards = false;
+    // THE COORDINATION, AND IT IS NOW A SETTING (issue #193, increment 6). The arm was written in increment
+    // 1 against the day a music server would forward its own plays upstream; that day is here, because a
+    // Navidrome or Airsonic box can be configured to scrobble to Last.fm and ListenBrainz on its own. The
+    // issue's requirement is "a single clear setting rather than two that silently conflict", so this reads
+    // that ONE setting, and the whole of the rest of the feature is unchanged: Scrobble::verdictFor already
+    // decides what it means, and verdictForDestination decides who it applies to.
+    p.serverForwards = Settings::scrobbleServerForwards();
     return p;
 }
 
@@ -110,13 +111,42 @@ void Scrobbler::trackStarted(const Scrobble::Track& track)
 
     const Scrobble::Policy p = policy();
     Scrobble::begin(watch_, track, QDateTime::currentSecsSinceEpoch(), p);
+
+    // THE ONE ARM OF THE VERDICT THAT IS ABOUT THE DESTINATION, latched here for the whole of this track
+    // (issue #193, increment 6). Scrobble::verdictForDestination sets out the argument; the short version is
+    // that a server which forwards its own plays upstream only KNOWS about a play because this app reported
+    // it, so suppressing the report to the server as well as to the upstream services counts the listen zero
+    // times instead of once.
+    //
+    // Latched rather than re-read at queue time on purpose: everything else about this listen was settled
+    // when it began, and a user who flips a setting during the last minute of a track they have already
+    // listened to is not asking for that listen to be thrown away.
+    watchServerOnly_ = Scrobble::verdictFor(track, p) == Scrobble::Verdict::SkipServerForwards;
+    if (watchServerOnly_)
+        // ...and the watch counts at all only if SOMEBODY would still take it. With no provider that owns
+        // this play, the exclusion is total and there is nothing to accumulate.
+        for (Slot* s : slots_)
+            if (s->provider->configured() && s->provider->accepts(track) && s->provider->ownsSource(track))
+                { watch_.counts = true; break; }
     if (!watch_.counts) return;
 
     // "Now playing" is EPHEMERAL: sent on the way past, never queued, never retried. If it does not arrive,
-    // nothing is owed — the listen itself is a separate, durable thing. Announced to EVERY configured
-    // service, because the listener is listening to it on all of them.
+    // nothing is owed — the listen itself is a separate, durable thing. Announced to every service that
+    // would be told about the listen, because the listener is listening to it on all of them.
     for (Slot* s : slots_)
-        if (s->provider->configured()) s->provider->nowPlaying(track);
+        if (owes(s, track)) s->provider->nowPlaying(track);
+}
+
+// WHICH DESTINATIONS THIS TRACK IS OWED TO. Three questions, and each of them is a different way for a
+// listen to be undeliverable: the service has no credential (`configured`), the service cannot be told about
+// this track at all (`accepts` — a music server has no way to name a file on this disk), and the
+// double-count coordination excludes this destination for this play (`watchServerOnly_`, above).
+bool Scrobbler::owes(Slot* s, const Scrobble::Track& track) const
+{
+    if (!s || !s->provider || !s->provider->configured()) return false;
+    if (!s->provider->accepts(track)) return false;
+    if (watchServerOnly_ && !s->provider->ownsSource(track)) return false;
+    return true;
 }
 
 void Scrobbler::positionTick(double positionSec)
@@ -134,7 +164,7 @@ void Scrobbler::positionTick(double positionSec)
     // timestamp — which is what makes the two histories agree rather than differ by the length of an outage.
     bool queued = false;
     for (Slot* s : slots_)
-        if (s->provider->configured()) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
+        if (owes(s, watch_.track)) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
     if (queued) { emit statusChanged(); pump(); }
 }
 
@@ -152,7 +182,7 @@ void Scrobbler::finishCurrent()
     play.listenedAt = watch_.startedAt;
     bool queued = false;
     for (Slot* s : slots_)
-        if (s->provider->configured()) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
+        if (owes(s, watch_.track)) { ScrobbleQueue::append(s->provider->id(), play); queued = true; }
     if (queued) { emit statusChanged(); pump(); }
 }
 
@@ -285,18 +315,31 @@ QString Scrobbler::statusLine() const
 void Scrobbler::noteFavorite(const Scrobble::Track& track, bool loved)
 {
     const Scrobble::Policy p = policy();
-    // The SAME gate a listen passes. A user who has scrobbling switched off has not asked this app to tell
-    // anybody what they like either, and an untagged file has nothing to love.
-    if (!Scrobble::eligible(track, p)) return;
     for (Slot* s : slots_)
     {
         ScrobbleProvider* pr = s->provider;
-        if (!pr->supportsLove() || !pr->configured()) continue;
+        if (!pr->supportsLove() || !pr->configured() || !pr->accepts(track)) continue;
+        // THE GATE A LOVE PASSES, WHICH IS NOT ALWAYS THE GATE A LISTEN PASSES (issue #193, increment 6).
+        // For a service that PUBLISHES a love it is the same gate, and for the same reason increment 1 gave:
+        // a user who has scrobbling switched off has not asked this app to tell anybody what they like. For a
+        // destination whose love is an edit to the user's OWN library — starring a track on the very server
+        // that is holding it — two of those arms are about something else entirely, and Scrobble.h says which
+        // and why. The untagged and spoken arms still apply either way.
+        if (Scrobble::loveVerdictFor(track, p, pr->loveIsLibraryEdit()) != Scrobble::Verdict::Submit)
+            continue;
         const QString pid = pr->id();
-        pr->love(track, loved, [this, pid](ScrobbleResult r) {
+        const bool libraryEdit = pr->loveIsLibraryEdit();
+        pr->love(track, loved, [this, pid, libraryEdit](ScrobbleResult r) {
             // A love is not queued (see the header), so the only thing to do with a failure is SAY so.
             // Silence here is the exact failure the confidence indicator exists to prevent.
-            if (r.outcome != ScrobbleResult::Outcome::Ok) ScrobbleQueue::setLastError(pid, r.message);
+            if (r.outcome != ScrobbleResult::Outcome::Ok)
+            {
+                ScrobbleQueue::setLastError(pid, r.message);
+                // ...and for a LIBRARY EDIT, say it where the user is rather than only in a settings panel
+                // they are not looking at. They pressed a button and it half worked: the favourite is
+                // recorded here and did not reach the server. Once, with the server's own words.
+                if (libraryEdit && !r.message.isEmpty()) emit loveFailed(r.message);
+            }
             emit statusChanged();
         });
     }

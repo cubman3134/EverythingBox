@@ -117,10 +117,23 @@ static void save(const QVector<FavoriteItem>& items)
     store().sync();
 }
 
-void FavoritesStore::add(const FavoriteItem& item)
+static void addInternal(const FavoriteItem& item, bool notifyLove);
+
+void FavoritesStore::add(const FavoriteItem& item) { addInternal(item, /*notifyLove=*/true); }
+
+// ...and the ONE caller that must not fire the love hook (issue #193, increment 6): the import of a music
+// server's own starred list. Those tracks are starred ON THAT SERVER ALREADY - that is where this list came
+// from - so re-telling it is one request per track that changes nothing, and on a library with a few hundred
+// starred tracks it is a few hundred requests for the act of opening a level.
+//
+// It is deliberately NOT a general "quiet add". Every other star a user presses must reach every destination
+// that wants to know, which is the whole reason the hook is on the STORE rather than on any one button.
+void FavoritesStore::addFromSource(const FavoriteItem& item) { addInternal(item, /*notifyLove=*/false); }
+
+static void addInternal(const FavoriteItem& item, bool notifyLove)
 {
     if (item.itemId.isEmpty()) return;
-    QVector<FavoriteItem> items = list();
+    QVector<FavoriteItem> items = FavoritesStore::list();
     for (int i = items.size() - 1; i >= 0; --i)
         if (items[i].itemId == item.itemId) items.remove(i); // de-dup
     // Stamp at the mutation site: a genuine star is dated NOW (a fresh add re-dates a re-star). save() then
@@ -130,7 +143,7 @@ void FavoritesStore::add(const FavoriteItem& item)
     items.prepend(stamped);                                  // newest first
     save(items);
     fireChanged();
-    fireLove(stamped, true);
+    if (notifyLove) fireLove(stamped, true);
 }
 
 void FavoritesStore::remove(const QString& itemId)

@@ -651,6 +651,24 @@ private:
     void openMusicServerLevel(const QString& serverId);
     void populateMusicServer(const QString& serverId);
     void renderMusicServer(const QString& serverId);
+    // ---- The three levels the server already has an answer for (issue #193, increment 6) ---------------
+    // ONE open/populate/render TRIO for all three, rather than three of them. Every one is the same three
+    // steps - decide the title, ask the client for the one fetch it needs, render musicSectionCatalog over
+    // what the client already has - and three copies of those steps is three places for the Back path and
+    // the fetch-landed path to disagree. `type` is one of the three door types; `serverId` says which
+    // server, which is what keeps two servers' sections apart.
+    //
+    // BY VALUE, AND THAT IS NOT A STYLE CHOICE. `type` arrives as `it.type` - a reference INTO the browse
+    // model's own item vector - and the very first thing this level does is call showMusicLoading(), which
+    // replaces that vector. A const& parameter is dangling from that line onwards, and the symptom is not a
+    // crash: the string reads as empty, every `type ==` test below falls through to its last branch, and the
+    // Playlists door quietly opens the Recently-added level. Found on the live drive, in exactly that shape.
+    void openMusicSectionLevel(QString type, QString serverId);
+    void populateMusicSection(QString type, QString serverId);
+    void renderMusicSection(QString type, QString serverId);
+    // The STARRED read's one side effect, and it only ever ADDS (Subsonic::starredAdditions enforces that by
+    // having no other return value): tracks this server already holds a star for become favourites here.
+    void adoptStarredFavourites(const QString& serverId);
     void renderMusicArtist(const QString& artistKey);
     void renderMusicAlbum(const QString& albumKey);
     void showMusicServerError(const QString& title, const QString& why);

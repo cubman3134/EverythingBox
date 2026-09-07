@@ -519,6 +519,17 @@ bool Settings::scrobbleSpokenAudio()
 void Settings::setScrobbleSpokenAudio(bool on)
 { store().setValue(scrobbleKey(QStringLiteral("spoken")), on); store().sync(); }
 
+// OFF by default, and that default is the one that CANNOT lose a listen. Off, every play is reported to the
+// server and to the listening services, so a server that also forwards would double-count - visible, and
+// correctable in one press. On by default would have meant a listen silently missing for everyone whose
+// server forwards nothing, which is the ordinary setup and the failure nobody would ever notice.
+// It lives under the same "scrobble/" prefix as the rest, so the sync carve-out and the settings
+// transaction's scope cover it without either of them naming it.
+bool Settings::scrobbleServerForwards()
+{ return store().value(scrobbleKey(QStringLiteral("serverforwards")), false).toBool(); }
+void Settings::setScrobbleServerForwards(bool on)
+{ store().setValue(scrobbleKey(QStringLiteral("serverforwards")), on); store().sync(); }
+
 // ---- DISCORD RICH PRESENCE -------------------------------------------------------------------------
 // One prefix, so CloudSync's carve-out is a single startsWith and cannot drift from the key names.
 static QString discordKey(const QString& leaf) { return QStringLiteral("discord/") + leaf; }

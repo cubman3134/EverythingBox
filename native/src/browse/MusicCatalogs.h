@@ -106,6 +106,24 @@ namespace browse
     inline const char* kMusicServerPrefix    = "musicserver:";
     inline const char* kMusicAddServerPrefix = "musicaddserver:";
 
+    // ---- What the server already knows (issue #193, increment 6) ----------------------------------------
+    // Three doors, sitting at the top of a SERVER's own level - Playlists, Starred, Recently added. They are
+    // the shape of the Composers door and the Music Servers door for the third time, and for the third time
+    // the reason is that a "_"-prefixed row is D-pad reachable on all four layouts by construction while a
+    // tab, a toggle or a container menu is not.
+    //
+    // They appear ONLY inside a server (their key is a server id), never at the Music root: the local
+    // library has no playlists to read and nothing to star on a server, so the root catalog is byte-for-byte
+    // what it was. Everything BEHIND them is drawn by musicSectionCatalog below, in the row types this file
+    // already had - a playlist is an album row, a starred artist is an artist row, a starred track is a
+    // track row. Nothing here is a second browse tree.
+    inline const char* kMusicPlaylistsType = "_musicplaylists";
+    inline const char* kMusicStarredType   = "_musicstarred";
+    inline const char* kMusicNewestType    = "_musicnewest";
+    inline const char* kMusicPlaylistsPrefix = "musicplaylists:";
+    inline const char* kMusicStarredPrefix   = "musicstarred:";
+    inline const char* kMusicNewestPrefix    = "musicnewest:";
+
     // ---- ONE LIBRARY ACROSS SOURCES (issue #194) --------------------------------------------------------
     // Three more "_"-prefixed action rows, for the same reason every other verb in this file is a row: four
     // layouts, and a row is D-pad reachable in all of them by construction. They appear on an album level ONLY
@@ -169,8 +187,38 @@ namespace browse
     // "Music Servers" door — and only when it is above zero, so the default of 0 reproduces this catalog
     // exactly as it was for every install that has no servers. It is a COUNT rather than a bool because the
     // row's subtitle says how many, and a bool would make the surface compute that a second time.
+    // `serverDoorsFor` is the SERVER whose level this is (#193 increment 6), or empty for the Music root.
+    // When it is set, the three doors above lead the catalog. Empty is the default, so the local library's
+    // Music root is exactly the catalog it was - the same compatibility discipline musicServerCount follows,
+    // and the same reason: this builder draws BOTH the local library and every server, and a change that did
+    // not default to "off" would appear on a shelf that has nothing to put behind it.
     MediaCatalog musicArtistsCatalog(const MusicLibrary::Index& idx, const MusicEmptyNote& note,
-                                     const MusicCoverFn& cover = {}, int musicServerCount = 0);
+                                     const MusicCoverFn& cover = {}, int musicServerCount = 0,
+                                     const QString& serverDoorsFor = QString());
+
+    // ---- One SECTION of a server: playlists, starred, or recently added (#193 increment 6) ---------------
+    //
+    // ONE builder for three levels, because the three are the same thing with different contents: a flat,
+    // already-decided list of records the server picked. Every row it emits is a row type this file already
+    // had - an artist row that opens the artist level, an album row that opens the album level, a track row
+    // carrying the key of whatever it is queued behind - so a starred album and an album under its artist
+    // are the same row reached two ways, and pressing either does the same thing.
+    //
+    // WHAT IT DELIBERATELY DOES NOT DO is offer "Play all" or "Shuffle all". At this level the tracks behind
+    // an album row have not been fetched (the count has - Album::trackCount), so a queue built from them
+    // would be empty, and the rule this file already states is that offering a verb which can only no-op is
+    // worse than not offering it. The loose TRACK rows are individually playable, which is the thing a
+    // starred list is for.
+    //
+    // `note` explains an empty section rather than leaving a blank shelf, exactly as it does at the root:
+    // "you have not starred anything on this server yet" is a different sentence from "this server is
+    // empty", and only the caller can tell them apart.
+    MediaCatalog musicSectionCatalog(const QString& title,
+                                     const QVector<MusicLibrary::Artist>& artists,
+                                     const QVector<MusicLibrary::Album>& albums,
+                                     const QVector<MusicLibrary::IndexTrack>& tracks,
+                                     const MusicEmptyNote& note,
+                                     const MusicCoverFn& cover = {});
 
     // ---- The Music Servers level -------------------------------------------------------------------------
     // One row per saved server, then a trailing "Add a music server…" row — the Book Servers shape (#146),

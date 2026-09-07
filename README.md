@@ -50,7 +50,8 @@ Everything lives under [`native/`](native/):
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
-library.
+library, and [**Music servers**](docs/music-servers.md) for playing a Navidrome,
+Airsonic or Gonic library (browsing, starring, and reporting plays back).
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status, and

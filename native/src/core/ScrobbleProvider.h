@@ -83,6 +83,35 @@ public:
     virtual void submit(const QVector<Scrobble::Play>& plays,
                         std::function<void(ScrobbleResult)> cb) = 0;
 
+    // CAN THIS SERVICE BE TOLD ABOUT THIS LISTEN AT ALL (issue #193, increment 6)? Default TRUE, which is
+    // every service that scrobbles a track by artist and title: Last.fm and ListenBrainz will take a listen
+    // from any source there is.
+    //
+    // A MUSIC SERVER WILL NOT. `scrobble.view` takes the server's OWN id for the track and has no other way
+    // of naming one, so a play of a local file, or of a track on a different server, is something this
+    // destination can never be told. Without this gate the orchestrator would file every such listen in this
+    // provider's queue, where it could only ever be rejected - and a queue full of rows that can never be
+    // delivered is the offline queue's one failure mode, because the rows behind them are lost too.
+    virtual bool accepts(const Scrobble::Track& track) const { (void)track; return true; }
+
+    // IS THIS SERVICE THE SOURCE OF THE PLAY IT IS BEING TOLD ABOUT (issue #193, increment 6)? Answered per
+    // provider because only the provider can tell: a Subsonic provider reads the play's `sourceId` and sees
+    // one of its own servers' ids in it, and Last.fm and ListenBrainz are never the source of anything.
+    //
+    // It exists for exactly ONE decision — the serverForwards coordination — and Scrobble.h states the whole
+    // argument at verdictForDestination(): reporting a play back to the server that served it is the FIRST
+    // count of that play, not a second one, and suppressing it along with the upstream ones counts the listen
+    // zero times instead of once. Default false, so every existing provider behaves precisely as it did.
+    virtual bool ownsSource(const Scrobble::Track& track) const { (void)track; return false; }
+
+    // IS THIS SERVICE'S `love` A BROADCAST, OR AN EDIT TO THE USER'S OWN LIBRARY (issue #193, increment 6)?
+    // Default false: loving a track on Last.fm or ListenBrainz tells a third party what somebody likes, so it
+    // is gated exactly as a listen is. Starring a track on the Subsonic server that is already holding it is
+    // the same act the favourite button visibly performed, in the same place, and gating it on the
+    // listening-history switch would make "favourite this track" silently stop reaching the server the moment
+    // an unrelated setting moved. Scrobble::loveVerdictFor is where the two gates differ.
+    virtual bool loveIsLibraryEdit() const { return false; }
+
     // Can this service be told a track is loved? Answered per provider because it genuinely differs: Last.fm's
     // track.love takes an artist and a title, while ListenBrainz's feedback is keyed on a MusicBrainz recording
     // and has to resolve one first. A `false` here is what lets the favourite path stay silent rather than

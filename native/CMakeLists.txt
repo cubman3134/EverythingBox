@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.199 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.200 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -682,6 +682,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        src/core/SubsonicTransport.h     # the ONE sentence table a failed request may produce (no url, ever)
+        # ...and increment 6: the server as a SCROBBLE DESTINATION - #192's seam, one provider per server.
+        src/core/SubsonicScrobbleProvider.cpp src/core/SubsonicScrobbleProvider.h
         # ONE MUSIC LIBRARY ACROSS EVERY SOURCE (#194 increment 3): a Jellyfin server's music, and the
         # EverythingBox server's music shelf, as two more SUPPLIERS of those same browse shapes. Each has a
         # pure half (payload readers, ids, the conversion onto MusicLibrary::Index) that probe_musicsources
@@ -883,6 +886,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # gestures does not collide with every other branch's hunks.
         src/ui/MainWindowGestures.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowMusicServerScrobble.cpp           # one scrobble provider per music server (#193 inc 6)
         src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
         src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
@@ -2203,7 +2207,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h
         src/core/TraktRead.cpp     src/core/TraktRead.h
         src/core/TraktSync.cpp     src/core/TraktSync.h
-        src/core/SettingsTxn.cpp   src/core/SettingsTxn.h)
+        src/core/SettingsTxn.cpp   src/core/SettingsTxn.h
+        # ...and the THIRD implementation of the same seam (#193 increment 6): a music server as a scrobble
+        # destination. It is here rather than in probe_subsonic because what is under test is the SEAM -
+        # the three verbs, the per-destination coordination, and the offline queue carrying a supplier's own
+        # id through a restart - and probe_scrobble is where the fake-endpoint harness already lives.
+        # Subsonic.cpp comes along for the protocol (ids, auth, the envelope) and drags MusicLibrary +
+        # AudioTags with it, which is why taglib is linked below; nothing here scans a file.
+        src/core/SubsonicScrobbleProvider.cpp src/core/SubsonicScrobbleProvider.h
+        src/core/SubsonicTransport.h
+        src/core/Subsonic.cpp            src/core/Subsonic.h
+        src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h
+        src/media/AudioTags.cpp    src/media/AudioTags.h
+        src/media/CueSheet.cpp     src/media/CueSheet.h
+        src/core/MusicLibrary.cpp  src/core/MusicLibrary.h)
     # tools/fixtures/lastfm holds a FIXTURE BuiltinSecrets.h, and it is deliberately the ONLY place this
     # target looks for that header - ${EB_SECRETS_GEN_DIR} is NOT on the list. The generated one is built from
     # the git-ignored native/secrets/lastfm.secrets, which is absent in every clone and on CI, so a probe
@@ -2211,8 +2228,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # build". The fixture's arrays carry an obviously-fake key + secret through the REAL de-obfuscation, which
     # is the one part of the mechanism no compiler can check (it mirrors GenerateSecrets.cmake, in CMake, in
     # another file). See the header for the whole argument.
-    target_include_directories(probe_scrobble PRIVATE src src/core src/theme2 tools/fixtures/lastfm)
-    target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network)
+    target_include_directories(probe_scrobble PRIVATE src src/core src/media src/theme2 tools/fixtures/lastfm)
+    target_link_libraries(probe_scrobble PRIVATE Qt6::Core Qt6::Network tag)
 
     # Headless test for DISCORD RICH PRESENCE. Pure rules only - no socket, no Discord, no clock:
     # Presence.cpp takes `nowUnix` as a parameter precisely so this probe never has to wait for anything.
