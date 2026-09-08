@@ -13,6 +13,14 @@ standalone tier, so both tiers agree on what a given pad is. A device this file 
 map is reported to the user by name at launch rather than configured by guesswork; see
 `native/docs/controllers-in-standalone-emulators.md`.
 
+HOW IT REACHES THE APPLICATION DIRECTORY. A POST_BUILD rule on the `everythingbox` target in
+`native/CMakeLists.txt` copies it beside the built binary (into Contents/Resources on macOS, which is
+what SDL_GetBasePath() returns for a bundle), and the release workflow puts it in the Windows zip and
+the AppImage. It is checked by `probe_paddb` in the headless suite. Until issue #317 there was no such
+rule: the file was in the repository, refreshed and recorded here, and reached no build at all, so both
+loaders got -1 in silence and SDL ran on its built-in mappings. An install that already exists does not
+gain it from a build-time rule — the file has to arrive with the next package.
+
 IT IS NOT FETCHED AT RUNTIME. The app never downloads it. It ships with the build, and the build is what pins
 which mappings a release has. A runtime fetch would make two machines on the same version behave differently
 and would put a network dependency on the path between "press a button" and "the game responds".
