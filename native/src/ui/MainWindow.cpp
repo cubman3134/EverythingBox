@@ -840,9 +840,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         retro_->showLeaderboardNotice(title, ra::attemptNotice(ra::EventKind::AttemptSubmitted, lb, willSubmit));
     });
     connect(ach_, &Achievements::leaderboardSubmitResult, this,
-            [this](unsigned, const QString& submitted, const QString& best, unsigned rank, unsigned entries) {
+            [this](unsigned, const QString& title, const QString& submitted, const QString& best,
+                   unsigned rank, unsigned entries) {
         ra::Scoreboard sb; sb.submitted = submitted; sb.best = best; sb.newRank = rank; sb.numEntries = entries;
-        retro_->showLeaderboardNotice(QString(), ra::scoreboardNotice(sb));
+        // #312: the card's title line NAMES THE BOARD. Empty when the lookup found nothing, and
+        // showLeaderboardNotice already falls back to its generic heading for exactly that - which is what
+        // this notice always said before, so the worst case is unchanged rather than worse.
+        retro_->showLeaderboardNotice(title, ra::scoreboardNotice(sb));
     });
     connect(ach_, &Achievements::leaderboardTrackerChanged, this, [this](bool visible, const QString& display) {
         retro_->setLeaderboardTracker(visible, display);
@@ -5559,7 +5563,17 @@ void MainWindow::openBrowseContextMenu()
     const bool hasJfDownload = jfSurfaceOk
         && home_->browseJellyfinDownload(jfThemedIdx, &jfKind, &jfRef, &jfSeasonRef, &jfTitle, &jfThumb);
 
-    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl };
+    // #308: the channel guide's jump-to-now, offered ONLY while standing in the guide. Start is the spare
+    // button the issue asks about: it already means "the menu for what I am looking at" on both layouts, it
+    // is already a nav-kit NavMenu, and it costs no new key, no new host property and no QML - so the verb
+    // exists on the themed and the classic guide alike without inventing a control for either.
+    //
+    // Surface-gated the way the Jellyfin verb below is, and for its reason: the classic cursor survives the
+    // page being swapped away, so an ungated question would offer the verb over the player page.
+    const bool atGuide = home_ && home_->atChannelGuideLevel()
+                         && (themedBrowseIndex() >= 0 || stack_->currentWidget() == home_);
+
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5576,6 +5590,8 @@ void MainWindow::openBrowseContextMenu()
         offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
         offer(StopMusic, tr("Stop the music"));
     }
+    // FIRST while it is offered at all: standing in the guide, "what is on now" is the thing you came for.
+    if (atGuide) offer(GuideNow, tr("Jump to what's on now"));
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
@@ -5594,6 +5610,9 @@ void MainWindow::openBrowseContextMenu()
     {
         case NowPlaying:  resumeNowPlayingPage(); break;
         case StopMusic:   stopMusicPlayback(); break;
+        // Re-cuts the guide from the current clock and re-lands on now - the same thing opening it does, so
+        // the two cannot drift apart and a guide left up for an hour is corrected rather than re-selected.
+        case GuideNow:    if (home_) home_->jumpChannelGuideToNow(); break;
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
@@ -10912,7 +10931,10 @@ void MainWindow::openThemedDetail(int browseIndex)
     // stale), so "I" is inert there.
     if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return;
     const int bi = (browseIndex >= 0) ? browseIndex : r->property("currentIndex").toInt();
-    const QVariantMap data = home_->themedDetailData(bi);
+    // DetailOpened: the one build that is allowed to ask a request service for this title's status (#315).
+    // Every other call into themedDetailData is a re-push of a card that is already up, or the themed
+    // metadata path re-deriving the verbs for a HOVERED row, and neither is a reason to touch the network.
+    const QVariantMap data = home_->themedDetailData(bi, requests::StatusTrigger::DetailOpened);
     if (data.isEmpty()) return; // a divider / synthetic / non-media row: nothing to detail
 
     themedDetailIndex_ = bi;

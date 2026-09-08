@@ -303,4 +303,12 @@ QString libraryRefFor(const QString& serverItemId, const QStringList& configured
     return Jellyfin::qualify(configuredServerIds.first(), serverItemId.trimmed());
 }
 
+// Issue #315. One line, and the reason it is a function rather than an `if` at the call site is that the
+// call site is a 400-line builder shared by a hover and an open: written there, the rule would be a
+// condition somebody edits while thinking about something else. Here it is the thing being decided.
+bool fetchesStatus(StatusTrigger trigger)
+{
+    return trigger == StatusTrigger::DetailOpened;
+}
+
 } // namespace requests

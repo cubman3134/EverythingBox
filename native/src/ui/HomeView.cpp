@@ -5619,9 +5619,63 @@ void HomeView::populateChannelGuide()
         if (!art.isEmpty()) logos.insert(c.id, art);
     }
     const QDateTime dayStart = QDateTime::fromSecsSinceEpoch(dayUtc, Qt::UTC);
-    showSyntheticCatalog(browse::channelGuideCatalog(chans, days, logos,
-                                                     QDateTime::fromSecsSinceEpoch(nowSec, Qt::UTC),
-                                                     dayStart, dayStart.addSecs(86400)));
+    const MediaCatalog cat = browse::channelGuideCatalog(chans, days, logos,
+                                                         QDateTime::fromSecsSinceEpoch(nowSec, Qt::UTC),
+                                                         dayStart, dayStart.addSecs(86400));
+
+    // OPEN ON NOW (issue #308). The grid is the whole day per channel, so opening it at 21:00 landed the
+    // cursor on 00:00 and left twenty-one hours of scrolling between the user and what is actually on. Which
+    // row "now" is is browse::guideNowIndex's decision, not this file's — including what to do while a
+    // BUMPER is airing and no cell carries the mark, which is to land on the next programme due to start.
+    //
+    // Only on a FRESH OPEN. childRow < 0 means nothing was drilled into from this level, which is exactly
+    // what distinguishes opening the guide from coming Back to it after tuning a cell — and coming back to
+    // the cell you pressed is right, so it is left alone. The jump-to-now verb clears childRow and calls
+    // straight back in here, which is why it needs no second code path.
+    const bool freshOpen = !stack_.isEmpty() && stack_.last().childRow < 0;
+    const int  nowRow    = freshOpen ? browse::guideNowIndex(cat, QDateTime::fromSecsSinceEpoch(nowSec, Qt::UTC))
+                                     : -1;
+    const QString nowId  = (nowRow >= 0) ? cat.items.at(nowRow).id : QString();
+    // BY ROW ID, not by the catalog index: populate() filters hidden items and can prepend rows of its own,
+    // so an index into cat.items is not an index into items_. The themed surfaces read this through
+    // browseRestoreIndex when browseItemsChanged fires (synchronously, inside showSyntheticCatalog); the
+    // classic grid is moved afterwards, once its rows exist.
+    browseSelectKey_ = nowId;
+    showSyntheticCatalog(cat);
+    browseSelectKey_.clear();     // cleared AFTER the re-sync read it (the favourite idiom)
+    selectBrowseRowById(nowId);
+}
+
+// Land the CLASSIC grid on a row by its id. The themed surfaces select through browseRestoreIndex on the
+// re-sync, so this is deliberately a no-op there rather than a second, competing opinion about the cursor.
+void HomeView::selectBrowseRowById(const QString& id)
+{
+    if (id.isEmpty() || carouselMode_ || xmbMode_ || !grid_) return;
+    for (int i = 0; i < items_.size() && i < grid_->count(); ++i)
+        if (items_.at(i).id == id)
+        {
+            grid_->setCurrentRow(i);
+            grid_->scrollToItem(grid_->item(i), QAbstractItemView::PositionAtCenter);
+            return;
+        }
+}
+
+// Is the guide the level being shown? The jump-to-now verb is offered on this and nothing else, so the
+// question is asked here rather than by MainWindow reaching into the stack.
+bool HomeView::atChannelGuideLevel() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.type == QStringLiteral("_channelguidegrid");
+}
+
+// THE JUMP-TO-NOW VERB (issue #308), for when the user has scrolled away. It re-cuts the guide from the
+// current clock and re-lands on now, which is the same thing opening it does — so "jump to now" and "open the
+// guide" cannot drift apart, and a guide left up for an hour is corrected rather than merely re-selected.
+void HomeView::jumpChannelGuideToNow()
+{
+    if (!atChannelGuideLevel()) return;
+    stack_.last().childRow = -1;   // -> populateChannelGuide treats this as a fresh open
+    populateChannelGuide();
 }
 
 // THE SOURCE PICKER. Increment 1 offers the two source kinds it can actually ENUMERATE — a saved video
@@ -10935,7 +10989,7 @@ QString HomeView::currentLevelSystemId() const
     return QString();
 }
 
-QVariantMap HomeView::themedDetailData(int idx)
+QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
 {
     QVariantMap out;
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return out;
@@ -11065,10 +11119,16 @@ QVariantMap HomeView::themedDetailData(int idx)
             verbs << QStringLiteral("request");
             out.insert(QStringLiteral("requestLabel"), rq.label);
             out.insert(QStringLiteral("requestState"), rq.token);
-            // FETCHED ON VIEW, NEVER POLLED. themedDetailData is rebuilt whenever the card is re-pushed, so
-            // this can fire several times for one page — MainWindow's handler asks the service AT MOST ONCE
-            // per title per session, which is what makes "on view" cheap rather than a request per redraw.
-            emit requestStatusNeeded(it);
+            // FETCHED WHEN THE DETAIL VIEW IS OPENED, NEVER ON A HOVER AND NEVER POLLED (issues #109, #315).
+            // requestStateFor above has ALREADY drawn the pill from whatever has landed, so a hover is fully
+            // served from cache and asks nobody; this builder also runs for a HOVERED row (the themed
+            // metadata path re-derives the action row when a stream id bridges in), and firing the fetch
+            // there meant scrolling a shelf of requestable titles issued one GET per row. The rule itself is
+            // requests::fetchesStatus, so it is one decision in one place rather than a condition inside a
+            // long builder. On the open path this can still fire several times for one page — the card is
+            // re-pushed on every correction and every late answer — and MainWindow's handler asks the
+            // service AT MOST ONCE per title per session, which is what keeps that cheap.
+            if (requests::fetchesStatus(trigger)) emit requestStatusNeeded(it);
         }
     }
     verbs << QStringLiteral("playlist");

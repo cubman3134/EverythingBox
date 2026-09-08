@@ -181,8 +181,15 @@ void ensureCache()
             auto it = mCache.find(h);
             if (it == mCache.end()) { mCache.insert(h, e); continue; }
             Entry& c = it.value();
-            c.mediaSeconds += e.mediaSeconds;   // union total across devices
-            c.pagesRead    += e.pagesRead;
+            // THE ROLLUP RULE IS PER FIELD, NOT PER STORE (issue #295). Both counters live in one blob, so it
+            // is tempting to fold them the same way — and that is exactly the bug. mediaSeconds is a LIFETIME
+            // TOTAL: thirty minutes on the box plus thirty on the handheld is an hour watched, so it sums.
+            // pagesRead is a HIGH-WATER MARK — addPagesRead stores "the furthest page ever reached", never a
+            // count of turns — so the cross-device answer is the FURTHEST EITHER DEVICE GOT, which is the
+            // maximum. Summed, forty pages of a hundred-page book read on two devices read as eighty per cent
+            // and tipped #134's reading progress into Finished on a book nobody finished.
+            c.mediaSeconds += e.mediaSeconds;                     // lifetime total: union across devices
+            c.pagesRead     = qMax(c.pagesRead, e.pagesRead);     // high-water mark: the furthest, not the sum
             if (e.lastActivity >= c.lastActivity) // newest device's activity owns title/category for display
             {
                 c.lastActivity = e.lastActivity;

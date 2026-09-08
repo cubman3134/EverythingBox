@@ -45,6 +45,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -938,6 +939,64 @@ int main(int argc, char** argv)
         CHECK(waitFor([&] { return done; }));
         CHECK(!l.ok && l.failure == Failure::NotConfigured);
         JellyseerrStore::save(cfg);
+    }
+
+    // ======================================================================================================
+    // 8b. A HOVER ASKS NOBODY (issue #315)
+    // ======================================================================================================
+    // #109 fetched the status "on view", and the themed surface builds a title's detail data for two quite
+    // different reasons: a detail view being OPENED, and a row being HOVERED (the metadata path re-derives
+    // the action row when a stream id bridges in). Both read as "view", so scrolling a shelf of requestable
+    // titles issued one GET per row — bounded and read-only, and still somebody's server answering to cursor
+    // movement.
+    //
+    // Driven here through the SAME two gates the surface applies, over the real backend and the fixture
+    // service: requests::fetchesStatus(trigger), then the once-per-title-per-session set. Counted at the
+    // stub, so what is asserted is requests that were or were not MADE, not a predicate agreeing with
+    // itself.
+    {
+        // The rule, first and alone.
+        CHECK(requests::fetchesStatus(requests::StatusTrigger::Hover) == false);
+        CHECK(requests::fetchesStatus(requests::StatusTrigger::DetailOpened) == true);
+
+        QSet<QString> asked;   // MainWindow::requestAsked_ — the second gate, unchanged by this issue
+        auto onDetailBuild = [&](const QString& id, requests::StatusTrigger trigger) {
+            // requestStateFor's cache-only half runs whatever the trigger is: the pill is always drawn.
+            const MediaRef ref = requests::refFor(id, QString(), QStringLiteral("movie"));
+            if (!ref.ok()) return;
+            if (!requests::fetchesStatus(trigger)) return;      // a hover stops HERE
+            if (asked.contains(ref.key())) return;
+            asked.insert(ref.key());
+            bool done = false;
+            requests::configuredBackend()->lookup(ref, 6000, [&](const RequestLookup&) { done = true; });
+            CHECK(waitFor([&] { return done; }));
+        };
+
+        const int before = stub.seen.size();
+        // A SHELF SCROLLED PAST: twelve requestable rows under the cursor, one after another, and one of
+        // them hovered repeatedly the way a cursor that wanders back does.
+        QStringList shelf;
+        for (int i = 0; i < 12; ++i) shelf << QStringLiteral("tmdb:movie:%1").arg(600 + i);
+        for (const QString& id : shelf) onDetailBuild(id, requests::StatusTrigger::Hover);
+        for (int again = 0; again < 3; ++again)
+            onDetailBuild(shelf.value(4), requests::StatusTrigger::Hover);
+        CHECK(stub.seen.size() == before);          // THE ASSERTION: not one request left the box
+        CHECK(asked.isEmpty());                     // ...and nothing was recorded as asked, either
+
+        // ...and then one of them is actually OPENED. Now, and only now, the service is asked — once.
+        const int beforeOpen = stub.countOf(QStringLiteral("GET"), QStringLiteral("/api/v1/movie"));
+        onDetailBuild(shelf.value(4), requests::StatusTrigger::DetailOpened);
+        CHECK(stub.countOf(QStringLiteral("GET"), QStringLiteral("/api/v1/movie")) == beforeOpen + 1);
+        // The card is re-pushed several times for one open page (a correction, a late answer); the
+        // once-per-session gate is what keeps that free, and it still holds.
+        onDetailBuild(shelf.value(4), requests::StatusTrigger::DetailOpened);
+        onDetailBuild(shelf.value(4), requests::StatusTrigger::DetailOpened);
+        CHECK(stub.countOf(QStringLiteral("GET"), QStringLiteral("/api/v1/movie")) == beforeOpen + 1);
+        // Backing out to the shelf and hovering the OPENED title again is still not a reason to ask.
+        const int afterOpen = stub.seen.size();
+        onDetailBuild(shelf.value(4), requests::StatusTrigger::Hover);
+        onDetailBuild(shelf.value(7), requests::StatusTrigger::Hover);
+        CHECK(stub.seen.size() == afterOpen);
     }
 
     // ======================================================================================================

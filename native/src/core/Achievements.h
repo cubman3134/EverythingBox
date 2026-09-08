@@ -48,6 +48,9 @@ public:
     // pause menu reads, in rc_client's own order.
     bool hasLeaderboards() const;
     QVector<ra::Leaderboard> leaderboards() const;
+    // ONE board's name, by id, from the already-fetched game data (no network call). Empty when no game is
+    // loaded or rc_client does not know the id — which is the fallback arm of #312, not an error.
+    QString leaderboardTitle(unsigned id) const;
     // RetroAchievements' rule, not ours: an attempt is only sent from a hardcore session, by a signed-in
     // player. Softcore boards stay visible and readable and are MARKED as not submitting (ra::submissionNote).
     bool leaderboardsSubmit() const;
@@ -85,8 +88,11 @@ signals:
     void leaderboardAttemptStarted(unsigned id, const QString& title, const QString& description, bool willSubmit);
     void leaderboardAttemptFailed(unsigned id, const QString& title);
     void leaderboardAttemptSubmitted(unsigned id, const QString& title, const QString& value, bool willSubmit);
-    void leaderboardSubmitResult(unsigned id, const QString& submitted, const QString& best,
-                                 unsigned newRank, unsigned numEntries);
+    // `title` is the board's name, looked up by id when the event was decoded (#312) — the scoreboard event
+    // itself carries no leaderboard. Empty when the lookup found nothing, and the notice then falls back to
+    // its generic heading; it never guesses.
+    void leaderboardSubmitResult(unsigned id, const QString& title, const QString& submitted,
+                                 const QString& best, unsigned newRank, unsigned numEntries);
     // The tracker overlay's whole contract: is anything showing, and what does it read. show / update / hide
     // all arrive here, so the overlay has one thing to draw and no lifecycle of its own to get wrong.
     void leaderboardTrackerChanged(bool visible, const QString& display);

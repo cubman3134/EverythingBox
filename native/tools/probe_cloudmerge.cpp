@@ -960,6 +960,16 @@ int main(int argc, char** argv)
         // with a different service (or none) could never refresh it.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("requests/profileA/list")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("requests/profileA/list")) == false);
+        // previews/* (issue #85, carved out by #301): the seek-preview cache BOUND. Not a credential — it is
+        // a number of megabytes — but device-local because the thing it bounds is: sprite sheets generated
+        // here, in this machine's cache directory, never shared. A handheld and a desktop want different
+        // answers, and riding the bundle meant setting it on one moved it on the other.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("previews/cacheMb")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("previews/anythingLater")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("previews/cacheMb")) == false);
+        // ...and a NEIGHBOUR that must keep syncing, so the prefix cannot have been widened into a sweep
+        // over every key that merely begins with those letters.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("previewsomethingelse")) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's

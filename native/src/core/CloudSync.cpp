@@ -335,6 +335,15 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // to the synced zip for a number the other device works out for itself the first time it plays
         // anything. MediaDurations keys everything under this prefix.
         || key.startsWith(QStringLiteral("mediadur/"))
+        // previews/* (issue #85, carved out by #301): how much disk the seek-preview sprite sheets may
+        // occupy on THIS machine. Not a credential and not churn - it is one number a user sets once - but
+        // the wrong SHAPE for the bundle all the same, for emugfx's reason rather than downloads/'s: it
+        // bounds a device-local thing. The sheets are generated here, live in this machine's cache directory
+        // and are never shared, so the right bound is a function of this disk. A handheld with 32 GB and a
+        // desktop with 4 TB do not want the same answer, and synced, setting it on one moved it on the
+        // other. The whole prefix carves out cleanly: Settings keys only "previews/cacheMb" under it and
+        // there is no syncing sibling to catch. probe_cloudmerge pins the classification.
+        || key.startsWith(QStringLiteral("previews/"))
         // iptv/* (issue #75, increment 2): saved Live-TV playlist sources. The URL routinely embeds provider
         // credentials (…/get.php?username=X&password=Y), and it is not carved out anywhere else, so left in the
         // heavy settings bundle it would SILENTLY sync those credentials to every device. Device-local by

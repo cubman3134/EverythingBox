@@ -29,6 +29,8 @@
 //   15 INTERSTITIALS: every programme start byte-identical with and without them, bumpers only inside gaps,
 //      never the same one twice in a row, the run and count caps, a gap too short for the shortest bumper,
 //      an empty pool, a back-to-back channel, determinism, idempotence, and that the guide prints none
+//      (and, issue #308, WHERE THE GUIDE OPENS: the row the grid itself marks as on air, on the first
+//      channel section that answers, with the bumper case landing on the next programme due to start)
 //   16 the BUMPER FOLDER against a real directory: unset and empty are not errors, a missing folder and a
 //      file are refused with a sentence, the same duration gate applies, per-channel beats global
 //   17 THE GUIDE GRID and GRID-AND-TUNE AGREEMENT - the strongest assertion here: for every cell of every
@@ -1066,6 +1068,101 @@ static void testGuideGrid()
         // disagreement: the guide is a contract about programmes.
         if (air.valid && !air.current.interstitial) { CHECK(marked == 1); CHECK(markedId == chans.at(i).id); }
         else CHECK(marked == 0);
+    }
+
+    // ---- WHERE THE GUIDE OPENS (issue #308) ---------------------------------------------------------------
+    // The grid is a flat day per channel, so opening it at 21:00 landed on 00:00. guideNowIndex answers which
+    // row is "now", and the assertion is that its answer is the row the grid ITSELF marks - not a row this
+    // probe recomputed and hoped agreed.
+    {
+        const int idx = browse::guideNowIndex(cat, QDateTime::fromSecsSinceEpoch(now, Qt::UTC));
+        CHECK(idx > 0);                                   // never the header, never the top of the day
+        CHECK(idx < cat.items.size());
+        const MediaItem& landed = cat.items.at(idx);
+        CHECK(landed.type == QStringLiteral("_guidetune"));
+        CHECK(landed.title.startsWith(browse::guideOnAirMarker()));   // THE marked cell, by the grid's own mark
+        // ...and it is the programme the TUNER resolves at that second, which is the agreement this whole
+        // section exists to keep: opening on now cannot land on something that is not on.
+        QString cid; qint64 st = 0;
+        CHECK(browse::parseChannelGuideCell(landed.mime, cid, st));
+        int which = -1;
+        for (int i = 0; i < chans.size(); ++i) if (chans.at(i).id == cid) which = i;
+        CHECK(which >= 0);
+        if (which >= 0)
+        {
+            const Airing air = whatsOn(days.at(which), now);
+            CHECK(air.valid && air.current.startUtc == st);
+        }
+        // It is a row of the FIRST channel section that has an answer: the cursor stays at the top of the
+        // guide rather than jumping down past a whole day to some other channel's live cell.
+        int hdrsBefore = 0;
+        for (int k = 0; k < idx; ++k)
+            if (cat.items.at(k).type == QStringLiteral("_livetvheader")) ++hdrsBefore;
+        CHECK(hdrsBefore == 1);
+
+        // AT THE TOP OF THE DAY the answer is the day's first programme, which is where the guide opened
+        // before - so nothing regresses for somebody who opens it at midnight. Driven from a grid CUT AT
+        // MIDNIGHT, because rule 1 reads the mark the grid printed: the clock argument only decides what is
+        // next up, and the "is it on" half is the grid's own answer by construction (which is the property
+        // that makes it impossible to land on something the guide does not say is on).
+        {
+            const MediaCatalog atMidnight = browse::channelGuideCatalog(
+                chans, days, QHash<QString, QString>(), QDateTime::fromSecsSinceEpoch(day, Qt::UTC),
+                dayStart, dayStart.addSecs(86400));
+            CHECK(browse::guideNowIndex(atMidnight, QDateTime::fromSecsSinceEpoch(day, Qt::UTC)) == 1);
+        }
+
+        // A BUMPER IS AIRING: no cell carries the mark (correct - the guide is a contract about programmes),
+        // and the decision is to land on the NEXT PROGRAMME DUE TO START. That is a real row, it is what the
+        // bumper is leading into, and it never claims something is on when it is not.
+        {
+            // The gridded channel (index 1) is the one whose day is full of interstitials; find a second
+            // that lands inside one, and drive the guide for a single channel so the answer must come from
+            // it rather than from a neighbour that happens to be airing something.
+            qint64 bumperAt = -1;
+            for (const Slot& sl : days.at(1).programmes)
+                if (sl.interstitial) { bumperAt = sl.startUtc; break; }
+            CHECK(bumperAt > 0);
+            QVector<Channel> one; one << chans.at(1);
+            QVector<Schedule> oneDay; oneDay << days.at(1);
+            const MediaCatalog solo = browse::channelGuideCatalog(
+                one, oneDay, QHash<QString, QString>(), QDateTime::fromSecsSinceEpoch(bumperAt, Qt::UTC),
+                dayStart, dayStart.addSecs(86400));
+            // Nothing is marked while a bumper airs...
+            int marked = 0;
+            for (const MediaItem& it : solo.items)
+                if (it.title.startsWith(browse::guideOnAirMarker())) ++marked;
+            CHECK(marked == 0);
+            // ...and the guide still opens somewhere sensible: the next programme, in the future, unmarked.
+            const int b = browse::guideNowIndex(solo, QDateTime::fromSecsSinceEpoch(bumperAt, Qt::UTC));
+            CHECK(b > 0);
+            if (b > 0)
+            {
+                QString bid; qint64 bst = 0;
+                CHECK(browse::parseChannelGuideCell(solo.items.at(b).id, bid, bst));
+                CHECK(bst >= bumperAt);                       // it has not started yet
+                CHECK(!solo.items.at(b).title.startsWith(browse::guideOnAirMarker()));
+                // ...and it is the FIRST such row: the next one up, not merely some future one.
+                for (int k = 1; k < b; ++k)
+                {
+                    QString kid; qint64 kst = 0;
+                    if (browse::parseChannelGuideCell(solo.items.at(k).id, kid, kst)) CHECK(kst < bumperAt);
+                }
+            }
+        }
+
+        // A DAY ENTIRELY IN THE PAST: nothing is on and nothing is due, so there is no honest answer and the
+        // caller is told so rather than being handed the top of a day that has finished. Cut at that clock
+        // too, so no cell is marked and no cell is still to come.
+        {
+            const qint64 later = day + 30 * 86400;
+            const MediaCatalog stale = browse::channelGuideCatalog(
+                chans, days, QHash<QString, QString>(), QDateTime::fromSecsSinceEpoch(later, Qt::UTC),
+                dayStart, dayStart.addSecs(86400));
+            CHECK(browse::guideNowIndex(stale, QDateTime::fromSecsSinceEpoch(later, Qt::UTC)) == -1);
+        }
+        // An empty grid answers the same way rather than pointing at a header.
+        CHECK(browse::guideNowIndex(MediaCatalog(), QDateTime::fromSecsSinceEpoch(now, Qt::UTC)) == -1);
     }
 
     // A row id that is not a cell, and a LIVE TV cell (its key is a url, not "channel:<id>"), are refused.
