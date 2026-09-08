@@ -470,11 +470,17 @@ drive the rest:
 
 ## Trackers (anime and manga)
 
-**AniList** keeps your anime and manga progress in step with the app: finish a chapter or an episode here
-and the chapter/episode count on your AniList list moves with it. Trakt (above) keeps film and general TV;
-these two never write to each other.
+**AniList** and **MyAnimeList** keep your anime and manga progress in step with the app: finish a chapter
+or an episode here and the chapter/episode count on your list moves with it. Trakt (above) keeps film and
+general TV; these never write to each other.
 
-**Setting it up.** The app ships no AniList client of its own yet, so you register a free one:
+**Both at once is the normal case.** Connect one or connect both. Each tracker holds its own link for a
+series (the same show is a different id on each), its own queue of things still to send, and its own rate
+limit, so a finished chapter goes to every tracker you have connected, independently. One of them being
+signed out, rate-limited or simply not knowing about a series does not stop the other receiving it, and
+nothing is ever counted twice.
+
+**Setting up AniList.** The app ships no AniList client of its own yet, so you register a free one:
 
 1. Sign in at [anilist.co](https://anilist.co) and open **Settings -> Developer -> Create New Client**.
 2. Give it any name, and set its **redirect URL** to the loopback address `127.0.0.1` (the app opens a
@@ -483,30 +489,56 @@ these two never write to each other.
 3. Copy the **Client ID** and **Client Secret** into **Settings -> General -> AniList** and press
    **Connect to AniList**. A browser opens; approve, and the tab tells you when you can close it.
 
-Your client id, secret and tokens are stored **on this device only** and are deliberately excluded from
-cloud sync, so you enter them once per machine. (They are also excluded from a settings *Discard*: linking
-an account from inside the settings screen is not something backing out of it should undo.)
+**Setting up MyAnimeList.** The same shape, with MyAnimeList's own registration:
+
+1. Sign in at [myanimelist.net](https://myanimelist.net) and open **Account Settings -> API -> Create ID**.
+2. Give it any name, and set its **redirect URL** to the loopback address `http://127.0.0.1`.
+3. Copy the **Client ID** into **Settings -> General -> MyAnimeList** and press **Connect to
+   MyAnimeList**. A browser opens; approve, and the tab tells you when you can close it.
+
+MyAnimeList issues *public* clients that have no secret at all, so the Client ID on its own is enough — the
+secret box is there for a client that does have one and can be left empty otherwise. The sign-in uses PKCE:
+a one-time value is generated for each attempt, kept in memory only, and is what proves the reply belongs
+to the request the app sent.
+
+Your client ids, secrets and tokens — for either tracker — are stored **on this device only** and are
+deliberately excluded from cloud sync, so you enter them once per machine. (They are also excluded from a
+settings *Discard*: linking an account from inside the settings screen is not something backing out of it
+should undo.)
 
 **Linking a series.** The first time you finish a chapter or an episode of something that is not linked
-yet, the app searches AniList by title and offers the matches. Pick one and it is remembered; that link
-*does* sync, so linking a series on the TV means the phone never asks. If the thing is not on AniList,
-answer **This is not on AniList - stop asking** and you will not be asked again. Either answer can be
-changed later from the item's detail page: **Track...** offers *Refresh from AniList*, *Link to a different
-entry...* and *Unlink*.
+yet, the app searches the tracker by title and offers the matches. Pick one and it is remembered; that link
+*does* sync, so linking a series on the TV means the phone never asks. If the thing is not there, answer
+**This is not on <tracker> - stop asking** and you will not be asked again. Nothing is ever linked for you:
+a wrong link would write your progress onto the wrong series in a list you curate by hand, so a match you
+did not choose is never written, and results that share nothing with what you searched for are not even
+offered.
 
-**What is sent, and when.** One update per series per 30 seconds, so a fast reader does not spend the
-account's rate limit; anything that cannot be sent is written to disk and delivered on the next launch, so
-an offline session is not lost. The last chapter/episode of a series sets its status to **Completed** -
-but only when AniList's own count agrees that it *was* the last one. A **score** is sent only if you have
-actually rated the item here: AniList reads a zero as "rated zero", not as "unrated", so an unrated item
-sends no score at all rather than wiping one you set by hand.
+With two trackers connected you are asked about **one of them per finished chapter**, not both at once —
+the next one is offered on the next chapter, or straight away from the item's detail page. **Track...**
+there asks which tracker first (when more than one is connected) and then offers *Refresh from <tracker>*,
+*Link to a different entry...* and *Unlink*.
 
-**Refreshing.** *Refresh from AniList* reconciles both ways, **furthest wins**: if AniList is ahead
-(you read three chapters in another app), the app catches up; if the app is ahead, AniList is pushed to.
-Neither side is ever moved backwards.
+**What is sent, and when.** One update per series per 30 seconds *per tracker*, so a fast reader does not
+spend an account's rate limit; anything that cannot be sent is written to disk and delivered on the next
+launch, so an offline session is not lost. The last chapter/episode of a series sets its status to
+**Completed** - but only when the tracker's own count agrees that it *was* the last one. A **score** is
+sent only if you have actually rated the item here: both services read a zero as an answer rather than as
+"unrated", so an unrated item sends no score at all rather than wiping one you set by hand. (Scores are
+0-100 here and 0-10 on MyAnimeList; the app converts, rounding rather than truncating.)
 
-**Not there yet:** MyAnimeList and Kitsu (the seam is built for them and the ids are reserved), a
-zero-config built-in client so no registration is needed, list browsing, and recommendations.
+**When a tracker pushes back.** If MyAnimeList rate-limits us, the app waits — a minute at first, doubling
+up to half an hour, and longer still if MyAnimeList asks for longer — rather than retrying tightly, which
+is what gets an application banned. An update it will *never* accept (a list entry that no longer exists)
+is dropped and said so in the settings line, rather than left at the front of the queue blocking every
+chapter behind it.
+
+**Refreshing.** *Refresh from <tracker>* reconciles both ways, **furthest wins**: if the tracker is ahead
+(you read three chapters in another app), the app catches up; if the app is ahead, the tracker is pushed
+to. Neither side is ever moved backwards, and each tracker is reconciled on its own.
+
+**Not there yet:** Kitsu (the seam is built for it and the id is reserved), a zero-config built-in client
+so no registration is needed, list browsing, and recommendations.
 
 ## Gestures
 

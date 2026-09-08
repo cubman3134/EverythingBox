@@ -91,6 +91,193 @@ namespace tracker
         Status  statusFromToken(const QString& token);
     }
 
+    // ================= the MyAnimeList wire (issue #156, increment 2) ====================================
+    //
+    // A SECOND provider behind the SAME seam. Nothing in Tracker.h changed to admit it — see the report —
+    // and nothing above this namespace changed either: AniList's bodies, keys and decisions are byte-for-byte
+    // what increment 1 shipped, which §16 of probe_tracker asserts directly.
+    //
+    // MAL IS NOT ANILIST, and the four differences below are the whole of why this namespace exists rather
+    // than a parameter on the AniList one:
+    //   1. REST, not GraphQL. Three different URLs (search / read / write) instead of one endpoint, and the
+    //      URL is therefore a wire format: it is built here, where a probe can read it.
+    //   2. The token endpoint and the write both take **application/x-www-form-urlencoded**, not JSON.
+    //   3. Its vocabulary is KIND-DEPENDENT. `watching` vs `reading`; `num_episodes` vs `num_chapters`;
+    //      and — MAL's own asymmetry, not ours — it REPORTS `num_episodes_watched` but ACCEPTS
+    //      `num_watched_episodes`. Getting that pair the wrong way round is a silent no-op write: MAL
+    //      answers 200 and stores nothing.
+    //   4. Its score is 0..10, while the seam (and AniList) carry 0..100. The conversion is here, in one
+    //      place, and both directions are pinned — an unconverted 85 is refused by MAL as out of range, and
+    //      a truncating conversion loses half a point in one direction and not the other.
+    //
+    // FIXTURES, NOT AN ACCOUNT. Every shape here is written from MyAnimeList's published API v2 reference.
+    // No MyAnimeList account was created, no API client was registered and nothing in this work contacted
+    // MyAnimeList — the probe and the live drive were both answered by a local fixture server.
+    namespace mal
+    {
+        // The API host and the OAuth host are DIFFERENT hosts on MAL (unlike AniList, where both are
+        // anilist.co). Overridable at RUN TIME through EB_MAL_ENDPOINT / EB_MAL_AUTH so a fixture stub can
+        // stand in for the real service in a live drive — read in MyAnimeListTracker.cpp, not here, so a
+        // probe asserting the DEFAULT cannot be satisfied by an environment variable.
+        inline QString defaultApiUrl()   { return QStringLiteral("https://api.myanimelist.net/v2"); }
+        inline QString defaultAuthBase() { return QStringLiteral("https://myanimelist.net/v1/oauth2"); }
+
+        // ---- PKCE ----------------------------------------------------------------------------------
+        // MAL's authorization-code flow REQUIRES PKCE and accepts only the `plain` method, so the challenge
+        // IS the verifier and the verifier is the only thing standing between a stolen redirect and a token.
+        // It is generated per attempt from the system CSPRNG, held in memory for the length of one sign-in,
+        // and never written to disk.
+        constexpr int kVerifierMinChars = 43;    // RFC 7636's floor
+        constexpr int kVerifierMaxChars = 128;   // ...and its ceiling
+        // Length AND alphabet. RFC 7636's unreserved set is [A-Za-z0-9-._~]; a verifier outside it is
+        // rejected by MAL as a whole request, which presents to the user as "sign-in failed" with no clue.
+        bool isValidCodeVerifier(const QString& v);
+        // A fresh verifier. The ONE non-deterministic function in this layer; it is here rather than in the
+        // socket because what MAL accepts is a wire format, and a probe can then assert that what we
+        // generate is what we would accept.
+        QString makeCodeVerifier();
+
+        // The browser URL. `state` is carried and MUST be compared on the way back: without it, anything
+        // that can reach the loopback listener can feed us an authorization code of its choosing.
+        QString authorizeUrl(const QString& authBase, const QString& clientId, const QString& redirectUri,
+                             const QString& codeVerifier, const QString& state);
+
+        // The two grants. FORM-ENCODED, not JSON — MAL's token endpoint rejects a JSON body outright.
+        QByteArray tokenExchangeBody(const QString& clientId, const QString& clientSecret,
+                                     const QString& redirectUri, const QString& code,
+                                     const QString& codeVerifier);
+        QByteArray tokenRefreshBody(const QString& clientId, const QString& clientSecret,
+                                    const QString& refreshToken);
+
+        // What MAL's token endpoint hands back. Deliberately its OWN struct rather than a reuse of
+        // anilist::TokenReply: the two services are free to diverge (MAL rotates the refresh token on every
+        // refresh, AniList does not), and sharing the type would make the day one of them adds a field a
+        // change to the other one's parser.
+        struct TokenReply
+        {
+            bool    ok = false;
+            QString accessToken;
+            QString refreshToken;
+            qint64  expiresInSec = 0;
+        };
+        // TOTAL, and gated on a NON-EMPTY access token for the reason anilist::parseTokenReply is: MAL
+        // answers a refused grant with {"error":"invalid_request","message":"…"} — a 200-shaped object that
+        // a caller would otherwise store over the live tokens, permanently unlinking the account.
+        TokenReply parseTokenReply(const QByteArray& json);
+
+        // ---- search --------------------------------------------------------------------------------
+        // MAL's `q` must be at least three characters; anything shorter is a 400. It is refused HERE rather
+        // than sent, because a two-character query is also not a query anybody could be confident about —
+        // see the low-confidence rule below.
+        constexpr int kMinQueryChars = 3;
+        bool searchable(const QString& title);
+
+        // GET .../anime?q=…&limit=…&fields=… (or …/manga). The field list is part of the wire: MAL returns
+        // ONLY the fields asked for, so a missing `num_episodes` here is a missing COMPLETED rule later.
+        // Returns "" when `title` is not searchable, so "we did not ask" and "MAL said nothing" are the
+        // same empty result to the caller and neither is an error.
+        QString searchUrl(const QString& apiBase, const QString& title, Kind kind, int limit);
+        // TOTAL. `asked` is the kind the caller searched for, and is what a row carrying no count at all is
+        // filed under. A row with no id, or no title, is skipped without costing the rest.
+        QVector<Match> parseSearch(const QByteArray& json, Kind asked);
+        // MAL paginates with an ABSOLUTE next URL in `paging.next`. It is followed only when it is on the
+        // SAME ORIGIN as `apiBase` — an absolute URL in a response body is attacker-controlled input, and
+        // following one blindly would send the account's bearer token to whatever host it named. Returns ""
+        // for absent, malformed, or off-origin.
+        QString nextPageUrl(const QByteArray& json, const QString& apiBase);
+
+        // ---- the account's entry ---------------------------------------------------------------------
+        // GET .../anime/{id}?fields=num_episodes,my_list_status. KIND-DEPENDENT in both the path and the
+        // fields, which is why the seam passes Kind to fetchEntry at all (AniList ignores it; MAL cannot).
+        QString entryUrl(const QString& apiBase, const QString& mediaId, Kind kind);
+        // ok=false = "this body was not an entry reply". exists=false = "it was, and the account has no row".
+        bool parseEntry(const QByteArray& json, const QString& mediaId, Kind kind, Entry& out);
+
+        // ---- the push --------------------------------------------------------------------------------
+        // PATCH .../anime/{id}/my_list_status (or …/manga/…).
+        QString saveUrl(const QString& apiBase, const QString& mediaId, Kind kind);
+        // The form body, and THE SAME THREE SAFETY RULES anilist::saveBody carries, restated against MAL's
+        // spellings because they are decisions about content and not about syntax:
+        //   * `score` is present ONLY when u.hasScore. MAL reads 0 as "no score", so sending it would clear
+        //     a rating the user set by hand — the same damage, arrived at from the opposite convention.
+        //   * `status` is `completed` only when u.completes AND the unit really is the last one by
+        //     `totalUnits`. Otherwise `watching`/`reading`.
+        //   * the progress field is never below 1, and it is the WRITE spelling (`num_watched_episodes`),
+        //     not the one a read answers with.
+        QByteArray saveBody(const Update& u, int totalUnits);
+
+        // MAL's list statuses. KIND-DEPENDENT: `watching`/`plan_to_watch` for anime, `reading`/`plan_to_read`
+        // for manga; `completed`, `on_hold` and `dropped` are shared. An unknown token reads back as
+        // Current, for the reason AniList's does.
+        QString statusToken(Status s, Kind kind);
+        Status  statusFromToken(const QString& token);
+
+        // ---- the score conversion --------------------------------------------------------------------
+        // The seam carries 0..100 (AniList's POINT_100 raw). MAL's is an integer 0..10. Both directions, in
+        // one place, ROUNDING rather than truncating: 85 is a 9 (not an 8), and a 9 read back is 90. 0 is
+        // "unrated" on both sides and maps to 0 either way, which is why neither direction is ever called
+        // for an update that has no score.
+        int scoreToMal(int hundred);
+        int scoreFromMal(int ten);
+
+        // ---- rate limits ------------------------------------------------------------------------------
+        // MAL publishes a rate limit and answers a breach with 429; an outage answers 5xx; an expired token
+        // answers 401; and a request it will never accept answers 400/403/404. Those four families need four
+        // different responses, and getting them wrong is how an integration gets its client banned.
+        //
+        // BASE is a full minute, not a second: every failure this can see is answered by waiting, and a
+        // tight retry against a rate limit is the one behaviour that turns a throttle into a ban.
+        constexpr qint64 kBackoffBaseMs = 60000;      // 1 minute
+        constexpr qint64 kBackoffMaxMs  = 1800000;    // 30 minutes — the ceiling on the doubling
+        struct Backoff
+        {
+            bool   retry = false;      // leave the row queued and try again after delayMs
+            bool   reauth = false;     // the token is the problem: refresh before the next attempt
+            bool   permanent = false;  // MAL will never accept this row; DROP it (see below)
+            qint64 delayMs = 0;
+        };
+        // `retryAfterSec` is the Retry-After header's value, or 0 when it was absent. MAL's own number wins
+        // over ours whenever it is LARGER; a header asking for less than our base is not honoured downward,
+        // because the base exists to protect the account and not to be the smallest legal wait.
+        //
+        // `consecutiveFailures` is 1 for the first failure. The delay doubles per failure and is capped.
+        //
+        // WHY `permanent` DROPS THE ROW. A 400 (a media id the account cannot write) or a 404 (a deleted
+        // entry) never becomes acceptable by waiting. Leaving it queued wedges the head of the queue
+        // FOREVER, and every later chapter behind it is lost — a worse outcome than losing the one row that
+        // could not be delivered. It is recorded in the last-error line rather than dropped silently.
+        Backoff backoffFor(int httpStatus, qint64 retryAfterSec, int consecutiveFailures);
+    }
+
+    // ================= how sure we are of a match (issue #156's conservatism rule) =======================
+    //
+    // "A match we are not sure of is not written." A wrong link writes somebody's progress onto the wrong
+    // series in a list they curate by hand, which is worse than no sync at all — so nothing here ever links
+    // anything; it only decides what is worth OFFERING and whether an offer is unambiguous.
+    //
+    // Provider-agnostic on purpose (it works off tracker::Match), but applied on the MAL path only. AniList
+    // is asked for SEARCH_MATCH-sorted results and already answers in relevance order; MAL's `q=` is a fuzzy
+    // full-text search that will happily return five loosely-related shows for a title it does not have, and
+    // a controller user scrolling that list is one press away from linking the wrong one.
+
+    // How well `m` answers `query`, 0..100, over BOTH of the match's titles. Normalised (case, punctuation,
+    // whitespace) so "My Hero Academia!" and "my hero academia" are one string. 100 = an exact normalised
+    // hit on either title; 0 = not one word in common, which is the threshold for "this row is noise".
+    int titleConfidence(const QString& query, const Match& m);
+
+    // `ms` sorted best-first, with the pure-noise rows removed. STABLE, so equally-confident rows keep the
+    // provider's own order. A list where EVERY row scores 0 is returned UNCHANGED rather than emptied: a
+    // title in a different script legitimately shares no word with its English name, and answering "nothing
+    // found" there would make those series permanently unlinkable.
+    QVector<Match> rankMatches(const QString& query, const QVector<Match>& ms);
+
+    // The index of the ONE match we would be willing to link without asking, or -1. Requires an exact
+    // normalised hit AND no other candidate that is even close, so an ambiguous field always falls through
+    // to the user. Nothing in this increment auto-links: this exists so that the "are we sure?" question has
+    // one answer, in one place, that a probe can hold — and so a later increment cannot invent a looser one
+    // somewhere else.
+    int confidentMatchIndex(const QString& query, const QVector<Match>& ms);
+
     // ================= the push machinery ================================================================
 
     // One mutation per item per 30 seconds. A binge-read turns pages fast enough to fire several completion

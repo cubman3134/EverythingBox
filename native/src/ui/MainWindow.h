@@ -1923,9 +1923,15 @@ private:
     std::function<void()> requestsStatusUpdate_;
 
     // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
-    // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
-    // the same seam in later increments, and nothing below names AniList except the construction.
+    // TWO tracker::Tracker implementations as of increment 2; Kitsu slots in behind the same seam in
+    // increment 3. Nothing below names either service except the construction and the settings rows: every
+    // decision the glue makes is made through the seam, over trackerList().
     class AniListTracker* anilist_ = nullptr;
+    class MyAnimeListTracker* mal_ = nullptr;
+    // The trackers this window owns, in a STABLE order (AniList first, because it shipped first). Nulls are
+    // tolerated - TrackerFanout::active drops them - so an early path that runs before construction is safe.
+    QVector<tracker::Tracker*> trackerList() const;
+    tracker::Tracker* trackerById(tracker::Id id) const;
 
     // THE ONE ENTRY POINT from the app's own completion paths - a comic chapter reaching its last page,
     // a video stopping past the watched threshold. It decides, in this order: tracker off -> nothing;
@@ -1942,19 +1948,27 @@ private:
     // The match prompt. BY VALUE throughout and run past the deferral, for themedDetailPickStatus's
     // reason: it re-enters NavMenu::pick after an async search, by which time no index or member is safe.
     // `pending` is the progress event that triggered it, replayed once a match is chosen.
-    void trackerPromptLink(QString itemKey, QString title, int year, tracker::Kind kind,
+    // `id` is WHICH tracker is being asked about: a progress event prompts for at most ONE of them, and
+    // the detail verb lets the user pick. It is passed as a value rather than a pointer for the reason
+    // everything else here is - this runs a turn late, past a nested event loop.
+    void trackerPromptLink(tracker::Id id, QString itemKey, QString title, int year, tracker::Kind kind,
                            tracker::Update pending);
     // The detail-view verb, both layouts. Linked -> a small menu (what it is linked to / Refresh from
     // AniList / Unlink); unlinked -> the same match prompt with no pending progress to replay.
     void trackerLinkVerb(QString itemKey, QString title, int year, tracker::Kind kind);
     // Pull and reconcile ONE item, furthest wins (#136's rule): a tracker that is ahead advances the
     // local completion mark, one that is behind is pushed to, and neither side is ever regressed.
-    void trackerRefreshItem(QString itemKey);
+    void trackerRefreshItem(tracker::Id id, QString itemKey);
     // The AniList status line, shared by BOTH settings builders so the two cannot tell the user different
     // things about the same state - the traktStatusLine posture. Static: everything in it is on disk.
     static QString anilistStatusLine();
-    // Re-read that line into whichever settings surface is on screen; unset when neither is.
+    // ...and MyAnimeList's, which is the same builder with MAL's three facts in it (increment 2). Two
+    // functions rather than one taking an Id because the settings surfaces have no instance to ask and the
+    // per-service statics are what they can reach.
+    static QString malStatusLine();
+    // Re-read those lines into whichever settings surface is on screen; unset when neither is.
     std::function<void()> anilistStatusUpdate_;
+    std::function<void()> malStatusUpdate_;
 
     // ---- MUSIC scrobbling (issue #192) ------------------------------------------------------------
     // The counterpart to the Trakt block above, and deliberately NOT an extension of it: film and TV go to

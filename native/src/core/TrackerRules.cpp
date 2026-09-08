@@ -5,9 +5,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QUrl>
 #include <QUrlQuery>
+
+#include <algorithm>
 
 using namespace tracker;
 
@@ -212,6 +215,460 @@ Status anilist::statusFromToken(const QString& token)
     if (t == QLatin1String("PAUSED"))    return Status::Paused;
     if (t == QLatin1String("REPEATING")) return Status::Repeating;
     return Status::Current;
+}
+
+// ================= the MyAnimeList wire ==================================================================
+//
+// Written from MyAnimeList's published API v2 reference. NOTHING IN THIS WORK CONTACTED MYANIMELIST: no
+// account was created, no API client was registered, and every byte the probe and the live drive saw came
+// from a fixture server stood up locally.
+
+// One form field, percent-encoded by hand rather than through QUrlQuery. QUrlQuery leaves '+' alone, and a
+// '+' inside an authorization code or a refresh token decodes on the far side as a SPACE — which presents as
+// "invalid_grant" on a credential that is perfectly good.
+static QByteArray formField(const char* key, const QString& value)
+{
+    return QByteArray(key) + '=' + QUrl::toPercentEncoding(value);
+}
+
+static QByteArray joinForm(const QVector<QByteArray>& fields)
+{
+    QByteArray out;
+    for (const QByteArray& f : fields)
+    {
+        if (!out.isEmpty()) out += '&';
+        out += f;
+    }
+    return out;
+}
+
+// RFC 7636's unreserved set, which is exactly what MAL accepts in a code verifier.
+static const char kVerifierAlphabet[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+bool mal::isValidCodeVerifier(const QString& v)
+{
+    if (v.size() < kVerifierMinChars || v.size() > kVerifierMaxChars) return false;
+    for (const QChar c : v)
+    {
+        const char16_t u = c.unicode();
+        const bool unreserved = (u >= u'A' && u <= u'Z') || (u >= u'a' && u <= u'z')
+                             || (u >= u'0' && u <= u'9')
+                             || u == u'-' || u == u'.' || u == u'_' || u == u'~';
+        if (!unreserved) return false;
+    }
+    return true;
+}
+
+QString mal::makeCodeVerifier()
+{
+    // 64 characters: comfortably inside 43..128, and 64 draws from a 66-symbol alphabet is ~387 bits, well
+    // past what this has to resist. The SYSTEM generator, not the default one — this is the only secret in
+    // the sign-in and a seeded PRNG would make it predictable.
+    const int alphabetSize = int(sizeof(kVerifierAlphabet)) - 1;
+    QString out;
+    out.reserve(64);
+    for (int i = 0; i < 64; ++i)
+        out.append(QLatin1Char(kVerifierAlphabet[QRandomGenerator::system()->bounded(alphabetSize)]));
+    return out;
+}
+
+QString mal::authorizeUrl(const QString& authBase, const QString& clientId, const QString& redirectUri,
+                          const QString& codeVerifier, const QString& state)
+{
+    QUrl u(authBase + QStringLiteral("/authorize"));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("response_type"), QStringLiteral("code"));
+    q.addQueryItem(QStringLiteral("client_id"), clientId);
+    // PLAIN is the only method MAL accepts, so the challenge IS the verifier. It is in the browser URL by
+    // construction; that is what PKCE-plain is, and it is why the verifier is single-use, per-attempt and
+    // never written to disk.
+    q.addQueryItem(QStringLiteral("code_challenge"), codeVerifier);
+    q.addQueryItem(QStringLiteral("code_challenge_method"), QStringLiteral("plain"));
+    if (!redirectUri.isEmpty()) q.addQueryItem(QStringLiteral("redirect_uri"), redirectUri);
+    // CSRF. Compared on the way back; a callback that does not carry it back is refused, because anything
+    // able to reach the loopback listener could otherwise feed us an authorization code of its choosing.
+    if (!state.isEmpty()) q.addQueryItem(QStringLiteral("state"), state);
+    u.setQuery(q);
+    return u.toString();
+}
+
+QByteArray mal::tokenExchangeBody(const QString& clientId, const QString& clientSecret,
+                                  const QString& redirectUri, const QString& code,
+                                  const QString& codeVerifier)
+{
+    QVector<QByteArray> f;
+    f << formField("client_id", clientId);
+    // MAL issues both confidential clients (with a secret) and public ones (without). An empty secret is
+    // OMITTED rather than sent empty: a present-but-blank client_secret is a different request to MAL than
+    // an absent one, and it is the one it refuses.
+    if (!clientSecret.isEmpty()) f << formField("client_secret", clientSecret);
+    f << formField("grant_type", QStringLiteral("authorization_code"));
+    f << formField("code", code);
+    f << formField("code_verifier", codeVerifier);
+    if (!redirectUri.isEmpty()) f << formField("redirect_uri", redirectUri);
+    return joinForm(f);
+}
+
+QByteArray mal::tokenRefreshBody(const QString& clientId, const QString& clientSecret,
+                                 const QString& refreshToken)
+{
+    QVector<QByteArray> f;
+    f << formField("client_id", clientId);
+    if (!clientSecret.isEmpty()) f << formField("client_secret", clientSecret);
+    f << formField("grant_type", QStringLiteral("refresh_token"));
+    f << formField("refresh_token", refreshToken);
+    return joinForm(f);
+}
+
+mal::TokenReply mal::parseTokenReply(const QByteArray& json)
+{
+    TokenReply r;
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return r;
+    const QJsonObject o = d.object();
+    const QString access = o.value(QStringLiteral("access_token")).toString();
+    // THE ONE GATE. {"error":"invalid_request","message":"…"} parses as an object and would otherwise be
+    // stored over the live tokens, unlinking the account permanently on a transient failure.
+    if (access.isEmpty()) return r;
+    r.ok = true;
+    r.accessToken = access;
+    r.refreshToken = o.value(QStringLiteral("refresh_token")).toString();
+    const QJsonValue exp = o.value(QStringLiteral("expires_in"));
+    r.expiresInSec = exp.isString() ? exp.toString().toLongLong() : static_cast<qint64>(exp.toDouble());
+    return r;
+}
+
+bool mal::searchable(const QString& title)
+{
+    return title.trimmed().size() >= kMinQueryChars;
+}
+
+// The path segment and the field list for one kind, spelled once each so a search, a read and a write
+// cannot disagree about what an anime is.
+static QString malSegment(Kind kind)
+{
+    return kind == Kind::Manga ? QStringLiteral("manga") : QStringLiteral("anime");
+}
+
+static QString malCountField(Kind kind)
+{
+    return kind == Kind::Manga ? QStringLiteral("num_chapters") : QStringLiteral("num_episodes");
+}
+
+// Pre-encoded, because these URLs are read back with QUrl::FullyEncoded: a raw space in a title would
+// otherwise reach the request as a raw space and truncate the query at the first word.
+static QString pctEnc(const QString& s)
+{
+    return QString::fromLatin1(QUrl::toPercentEncoding(s));
+}
+
+QString mal::searchUrl(const QString& apiBase, const QString& title, Kind kind, int limit)
+{
+    if (!searchable(title)) return QString();   // shorter than MAL will answer — see kMinQueryChars
+    QUrl u(apiBase + QLatin1Char('/') + malSegment(kind));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("q"), pctEnc(title.trimmed()));
+    q.addQueryItem(QStringLiteral("limit"), QString::number(qBound(1, limit, 100)));
+    // MAL returns ONLY the fields asked for. A missing count here is a missing COMPLETED rule later, so the
+    // count for this kind is always requested.
+    q.addQueryItem(QStringLiteral("fields"),
+                   pctEnc(QStringLiteral("alternative_titles,start_date,main_picture,")
+                          + malCountField(kind)));
+    u.setQuery(q);
+    return u.toString(QUrl::FullyEncoded);
+}
+
+QVector<Match> mal::parseSearch(const QByteArray& json, Kind asked)
+{
+    QVector<Match> out;
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return out;
+    // An error envelope has no `data` array, so the chain below simply comes back empty and no special case
+    // can be forgotten.
+    const QJsonArray data = d.object().value(QStringLiteral("data")).toArray();
+    for (const QJsonValue& rv : data)
+    {
+        const QJsonObject node = rv.toObject().value(QStringLiteral("node")).toObject();
+        const int id = node.value(QStringLiteral("id")).toInt();
+        if (id <= 0) continue;                 // a row with no id names nothing linkable
+        Match x;
+        x.mediaId = QString::number(id);
+        // MAL's `title` is the official (usually romaji) one; the English name, when it has one, is under
+        // alternative_titles.en. Preferred the same way round AniList's are, so the picker reads the same
+        // on both trackers.
+        const QString main = node.value(QStringLiteral("title")).toString();
+        const QString en = node.value(QStringLiteral("alternative_titles")).toObject()
+                               .value(QStringLiteral("en")).toString();
+        x.title = !en.isEmpty() ? en : main;
+        x.altTitle = (!en.isEmpty() && !main.isEmpty() && en != main) ? main : QString();
+        if (x.title.isEmpty()) continue;       // nor does one with no title
+        // "2016-04-03", or sometimes just "2016". The leading four digits either way; a row with no
+        // start_date reads 0, which is what Match::year means by "the tracker gave no year".
+        x.year = node.value(QStringLiteral("start_date")).toString().left(4).toInt();
+        const int eps = node.value(QStringLiteral("num_episodes")).toInt();
+        const int chs = node.value(QStringLiteral("num_chapters")).toInt();
+        // WHICH COUNT the row carries is the media type, exactly as it is on AniList. A row carrying
+        // neither (an unaired series MAL has no count for) is filed under what the caller ASKED for rather
+        // than guessed at, because the search endpoint itself is per-kind.
+        x.kind = (chs > 0 && eps <= 0) ? Kind::Manga : (eps > 0 ? Kind::Anime : asked);
+        x.totalUnits = (x.kind == Kind::Manga) ? chs : eps;
+        const QJsonObject pic = node.value(QStringLiteral("main_picture")).toObject();
+        x.coverUrl = pic.value(QStringLiteral("large")).toString();
+        if (x.coverUrl.isEmpty()) x.coverUrl = pic.value(QStringLiteral("medium")).toString();
+        out.push_back(x);
+    }
+    return out;
+}
+
+QString mal::nextPageUrl(const QByteArray& json, const QString& apiBase)
+{
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return QString();
+    const QString next = d.object().value(QStringLiteral("paging")).toObject()
+                          .value(QStringLiteral("next")).toString();
+    if (next.isEmpty()) return QString();
+    const QUrl n(next);
+    const QUrl base(apiBase);
+    if (!n.isValid() || n.isRelative() || !base.isValid()) return QString();
+    // SAME ORIGIN ONLY. `paging.next` is an absolute URL out of a response body — attacker-controlled input
+    // by definition — and the request that follows it carries the account's bearer token. Scheme, host AND
+    // port, because "https://api.myanimelist.net.evil.test" and ":8080" are both different origins.
+    if (n.scheme() != base.scheme() || n.host() != base.host() || n.port(-1) != base.port(-1))
+        return QString();
+    return n.toString(QUrl::FullyEncoded);
+}
+
+QString mal::entryUrl(const QString& apiBase, const QString& mediaId, Kind kind)
+{
+    if (mediaId.isEmpty()) return QString();
+    QUrl u(apiBase + QLatin1Char('/') + malSegment(kind) + QLatin1Char('/') + pctEnc(mediaId));
+    QUrlQuery q;
+    q.addQueryItem(QStringLiteral("fields"),
+                   pctEnc(malCountField(kind) + QStringLiteral(",my_list_status")));
+    u.setQuery(q);
+    return u.toString(QUrl::FullyEncoded);
+}
+
+bool mal::parseEntry(const QByteArray& json, const QString& mediaId, Kind kind, Entry& out)
+{
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return false;
+    const QJsonObject o = d.object();
+    if (o.contains(QStringLiteral("error"))) return false;   // MAL's error envelope, at any status
+    if (o.value(QStringLiteral("id")).toInt() <= 0) return false;   // not an entry reply at all
+    out = Entry{};
+    out.mediaId = mediaId;
+    out.totalUnits = o.value(malCountField(kind)).toInt();
+    const QJsonValue sv = o.value(QStringLiteral("my_list_status"));
+    if (!sv.isObject()) return true;    // asked, answered: the account has no row for this media
+    const QJsonObject s = sv.toObject();
+    out.exists = true;
+    // THE ASYMMETRY, read side. MAL REPORTS `num_episodes_watched`; it ACCEPTS `num_watched_episodes` (see
+    // saveBody). Reading the write spelling here would report every account as being on episode 0, which
+    // reconcile() would then answer by pushing our progress over a list that was already ahead.
+    out.progress = (kind == Kind::Manga) ? s.value(QStringLiteral("num_chapters_read")).toInt()
+                                         : s.value(QStringLiteral("num_episodes_watched")).toInt();
+    out.status = statusFromToken(s.value(QStringLiteral("status")).toString());
+    out.score = scoreFromMal(s.value(QStringLiteral("score")).toInt());
+    return true;
+}
+
+QString mal::saveUrl(const QString& apiBase, const QString& mediaId, Kind kind)
+{
+    if (mediaId.isEmpty()) return QString();
+    return apiBase + QLatin1Char('/') + malSegment(kind) + QLatin1Char('/') + pctEnc(mediaId)
+         + QStringLiteral("/my_list_status");
+}
+
+QByteArray mal::saveBody(const Update& u, int totalUnits)
+{
+    const bool manga = u.kind == Kind::Manga;
+    // COMPLETED needs BOTH the caller's claim and MAL's own count, exactly as it does on AniList: a
+    // provider listing missing its final chapters would otherwise mark a running series finished, which is
+    // the one push that cannot be undone by simply pushing again.
+    const bool completed = u.completes && (totalUnits <= 0 || u.unit >= totalUnits);
+    QVector<QByteArray> f;
+    f << formField("status", statusToken(completed ? Status::Completed : Status::Current, u.kind));
+    // THE ASYMMETRY, write side. `num_watched_episodes` is what MAL ACCEPTS; sending the read spelling is a
+    // 200 that stores nothing, which looks from here like a perfect sync that never happened.
+    // Never below 1: a 0 tells the account you have watched nothing, which is a regression dressed as an
+    // update.
+    f << formField(manga ? "num_chapters_read" : "num_watched_episodes", QString::number(qMax(1, u.unit)));
+    // ABSENT unless the app really has a rating. MAL reads 0 as "no score" and WOULD clear one the user set
+    // by hand — the same damage AniList's scoreRaw does, arrived at from the opposite convention.
+    if (u.hasScore) f << formField("score", QString::number(scoreToMal(u.score)));
+    return joinForm(f);
+}
+
+QString mal::statusToken(Status s, Kind kind)
+{
+    const bool manga = kind == Kind::Manga;
+    switch (s)
+    {
+        case Status::Current:   return manga ? QStringLiteral("reading") : QStringLiteral("watching");
+        case Status::Planning:  return manga ? QStringLiteral("plan_to_read")
+                                             : QStringLiteral("plan_to_watch");
+        case Status::Completed: return QStringLiteral("completed");
+        case Status::Dropped:   return QStringLiteral("dropped");
+        case Status::Paused:    return QStringLiteral("on_hold");
+        // MAL has NO "repeating" status — a rewatch is a boolean (is_rewatching) beside an otherwise
+        // ordinary `watching`. The seam never writes Repeating, and mapping it to `completed` would be a
+        // status change nobody asked for, so it maps to the in-progress token, which is what a rewatch's
+        // list status actually is on MAL.
+        case Status::Repeating: return manga ? QStringLiteral("reading") : QStringLiteral("watching");
+    }
+    return manga ? QStringLiteral("reading") : QStringLiteral("watching");
+}
+
+Status mal::statusFromToken(const QString& token)
+{
+    const QString t = token.trimmed().toLower();
+    if (t == QLatin1String("completed")) return Status::Completed;
+    if (t == QLatin1String("dropped"))   return Status::Dropped;
+    if (t == QLatin1String("on_hold"))   return Status::Paused;
+    if (t == QLatin1String("plan_to_watch") || t == QLatin1String("plan_to_read")) return Status::Planning;
+    // "watching" / "reading" / anything MAL adds later. Current is the safest wrong answer, being the one
+    // status a push overwrites with the same value.
+    return Status::Current;
+}
+
+int mal::scoreToMal(int hundred)
+{
+    // ROUNDED, not truncated: 85 is a 9. Truncating would silently demote every half-point rating, and it
+    // would do it in one direction only, so a value would not survive a push/pull round trip.
+    return qBound(0, (qBound(0, hundred, 100) + 5) / 10, 10);
+}
+
+int mal::scoreFromMal(int ten)
+{
+    return qBound(0, ten, 10) * 10;
+}
+
+mal::Backoff mal::backoffFor(int httpStatus, qint64 retryAfterSec, int consecutiveFailures)
+{
+    Backoff b;
+    const int n = qMax(1, consecutiveFailures);
+    // Doubling from the base, capped. The shift is CLAMPED before it is applied: a long outage would
+    // otherwise run the exponent past 63 and produce a negative delay, which qBound would then read as
+    // "wait the minimum" — a tight retry loop arrived at by arithmetic.
+    const qint64 grown = kBackoffBaseMs << qMin(n - 1, 20);
+    const qint64 base = qBound<qint64>(kBackoffBaseMs, grown, kBackoffMaxMs);
+    const qint64 asked = qMax<qint64>(0, retryAfterSec) * 1000;
+
+    if (httpStatus >= 200 && httpStatus < 300) return b;   // not a failure; nothing to decide
+
+    switch (httpStatus)
+    {
+        case 401:
+            // The TOKEN, not the request. Refresh and try again; the row stays queued.
+            b.retry = true; b.reauth = true; b.delayMs = base; return b;
+        case 429:
+            // Rate limited. MAL's own Retry-After wins whenever it asks for LONGER than we would wait; a
+            // header asking for less is not honoured downward, because the base is there to protect the
+            // account rather than to be the smallest legal wait.
+            b.retry = true; b.delayMs = qMax(base, asked); return b;
+        case 400: case 404: case 422:
+            // A media id the account cannot write, or an entry that no longer exists. NEVER acceptable by
+            // waiting, so the row is dropped rather than left to wedge the head of the queue forever.
+            b.permanent = true; return b;
+        default:
+            break;
+    }
+    // 403 is deliberately NOT permanent. MAL answers a suspended account and a temporarily-refused client
+    // with the same status, and dropping every queued chapter for the second of those is the worse mistake.
+    // 5xx, and 0 for "no reply at all", are the same waiting problem.
+    b.retry = true;
+    b.delayMs = qMax(base, asked);
+    return b;
+}
+
+// ================= how sure we are of a match ============================================================
+
+// Case, punctuation and whitespace folded away, so "My Hero Academia!" and "my  hero-academia" are one
+// string. Deliberately keeps letters and digits of EVERY script: folding a Japanese title to nothing would
+// score every one of them 0 and make them all look like noise.
+static QString normTitle(const QString& s)
+{
+    QString out;
+    out.reserve(s.size());
+    for (const QChar c : s)
+    {
+        if (c.isLetterOrNumber()) out.append(c.toLower());
+        else if (!out.isEmpty() && !out.endsWith(QLatin1Char(' '))) out.append(QLatin1Char(' '));
+    }
+    while (out.endsWith(QLatin1Char(' '))) out.chop(1);
+    return out;
+}
+
+static int confidenceAgainst(const QString& qn, const QString& tn)
+{
+    if (qn.isEmpty() || tn.isEmpty()) return 0;
+    if (qn == tn) return 100;
+    // One wholly inside the other ("Berserk" against "Berserk 1997"): strong, but NOT certain — a season or
+    // a year is exactly the difference that makes two list entries two list entries.
+    if (tn.contains(qn) || qn.contains(tn)) return 70;
+    const QStringList a = qn.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    QStringList pool = tn.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (a.isEmpty() || pool.isEmpty()) return 0;
+    int shared = 0;
+    for (const QString& w : a)
+    {
+        const int i = pool.indexOf(w);
+        if (i >= 0) { pool.removeAt(i); ++shared; }
+    }
+    if (shared == 0) return 0;   // not one word in common: this row is noise
+    // Scaled by the LONGER side, so a one-word query matching one word of a six-word title does not score
+    // as though it had answered the whole question.
+    const int longer = qMax(a.size(), tn.split(QLatin1Char(' '), Qt::SkipEmptyParts).size());
+    return int(60.0 * shared / longer);
+}
+
+int tracker::titleConfidence(const QString& query, const Match& m)
+{
+    const QString qn = normTitle(query);
+    return qMax(confidenceAgainst(qn, normTitle(m.title)), confidenceAgainst(qn, normTitle(m.altTitle)));
+}
+
+QVector<Match> tracker::rankMatches(const QString& query, const QVector<Match>& ms)
+{
+    if (ms.isEmpty()) return ms;
+    QVector<QPair<int, int>> scored;   // (confidence, the provider's own position)
+    scored.reserve(ms.size());
+    bool any = false;
+    for (int i = 0; i < ms.size(); ++i)
+    {
+        const int c = titleConfidence(query, ms[i]);
+        scored.push_back(qMakePair(c, i));
+        if (c > 0) any = true;
+    }
+    // EVERY row noise: hand them back UNCHANGED rather than emptied. A title in a script the query is not
+    // written in shares no word with it, and answering "nothing found" there would make exactly those
+    // series permanently unlinkable — the opposite of what the conservatism rule is for.
+    if (!any) return ms;
+    std::stable_sort(scored.begin(), scored.end(),
+                     [](const QPair<int, int>& a, const QPair<int, int>& b) { return a.first > b.first; });
+    QVector<Match> out;
+    out.reserve(scored.size());
+    for (const QPair<int, int>& p : scored)
+        if (p.first > 0) out.push_back(ms[p.second]);
+    return out;
+}
+
+int tracker::confidentMatchIndex(const QString& query, const QVector<Match>& ms)
+{
+    int best = -1, bestScore = 0, runnerUp = 0;
+    for (int i = 0; i < ms.size(); ++i)
+    {
+        const int c = titleConfidence(query, ms[i]);
+        if (c > bestScore) { runnerUp = bestScore; bestScore = c; best = i; }
+        else if (c > runnerUp) { runnerUp = c; }
+    }
+    // EXACT, AND ALONE. Anything less is a guess, and a guess writes somebody's progress onto the wrong
+    // series in a list they curate by hand. Two rows that both match exactly are an ambiguous field, not a
+    // certainty, so they fall through to the user as well.
+    if (bestScore < 100 || runnerUp >= 70) return -1;
+    return best;
 }
 
 // ================= the push machinery ===================================================================
