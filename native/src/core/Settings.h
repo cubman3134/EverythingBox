@@ -613,6 +613,9 @@ namespace Settings
     // writes to their disk, and two controls that can disagree ("on, 0 MB") would be two ways to say no.
     // Default 512 MB, which at the shipped 10 s / 320x180 sheet is roughly a hundred feature films.
     // The bound is enforced by LRU eviction on the generator's own thread (Trickplay::planEviction).
+    // DEVICE-LOCAL (issue #301): the whole "previews/" prefix is in CloudSync's carve-out, because the thing
+    // this number bounds is device-local by nature - sheets generated here, in this machine's cache
+    // directory, never shared. A handheld and a desktop want different answers, so it must not sync.
     int  previewCacheMb();
     void setPreviewCacheMb(int mb);
 
