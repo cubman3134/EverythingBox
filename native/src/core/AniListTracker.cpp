@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "TrackerLinks.h"
+#include "TrackerQueue.h"   // the ONE offline queue, now shared with MyAnimeList (increment 2)
 
 #include <QDateTime>
 #include <QDesktopServices>
@@ -194,10 +195,9 @@ void AniListTracker::disconnectAccount()
     store().remove(accessKey(Id::AniList));
     store().remove(refreshKey(Id::AniList));
     store().remove(expiryKey(Id::AniList));
-    // The pending queue is this account's progress; the next account has not agreed to receive it.
-    store().remove(queueKey(ProfileStore::currentId(), Id::AniList));
-    store().remove(lastErrorKey(ProfileStore::currentId(), Id::AniList));
     store().sync();
+    // The pending queue is this account's progress; the next account has not agreed to receive it.
+    TrackerQueue::forgetAccount(Id::AniList);
     emit connectedChanged(false);
     emit queueChanged();
 }
@@ -268,30 +268,20 @@ void AniListTracker::fetchEntry(const QString& mediaId, Kind, std::function<void
 
 // ---- the queue --------------------------------------------------------------------------------------
 
-QVector<Update> AniListTracker::loadQueue()
-{
-    return decodeQueue(store().value(queueKey(ProfileStore::currentId(), Id::AniList)).toString().toUtf8());
-}
+// The queue plumbing moved to TrackerQueue in increment 2 and is now SHARED with MyAnimeList - the same
+// keys, the same rules, one implementation. These five stayed as thin forwarders so nothing else in this
+// file (or in the settings surfaces, which call queuedCount/lastError) had to learn a new name.
+QVector<Update> AniListTracker::loadQueue() { return TrackerQueue::load(Id::AniList); }
 
-void AniListTracker::saveQueue(const QVector<Update>& q)
-{
-    store().setValue(queueKey(ProfileStore::currentId(), Id::AniList),
-                     QString::fromUtf8(encodeQueue(q)));
-    store().sync();
-}
+void AniListTracker::saveQueue(const QVector<Update>& q) { TrackerQueue::save(Id::AniList, q); }
 
-int AniListTracker::queuedCount() { return loadQueue().size(); }
+int AniListTracker::queuedCount() { return TrackerQueue::count(Id::AniList); }
 
-QString AniListTracker::lastError()
-{
-    return store().value(lastErrorKey(ProfileStore::currentId(), Id::AniList)).toString();
-}
+QString AniListTracker::lastError() { return TrackerQueue::lastError(Id::AniList); }
 
 void AniListTracker::setLastError(const QString& message)
 {
-    const QString key = lastErrorKey(ProfileStore::currentId(), Id::AniList);
-    if (message.isEmpty()) store().remove(key); else store().setValue(key, message);
-    store().sync();
+    TrackerQueue::setLastError(Id::AniList, message);
 }
 
 void AniListTracker::pushProgress(const Update& in)
@@ -299,10 +289,8 @@ void AniListTracker::pushProgress(const Update& in)
     if (in.mediaId.isEmpty() || in.itemKey.isEmpty()) return;   // no link, no push (issue's rule)
     Update u = in;
     if (u.atMs <= 0) u.atMs = QDateTime::currentMSecsSinceEpoch();
-    QVector<Update> q = loadQueue();
-    if (!coalesce(q, u)) return;   // an earlier unit arriving late changes nothing and writes nothing
-    applyQueueCap(q);
-    saveQueue(q);
+    // an earlier unit arriving late changes nothing and writes nothing
+    if (!TrackerQueue::enqueue(Id::AniList, u)) return;
     emit queueChanged();
     drain();
 }
@@ -316,16 +304,8 @@ void AniListTracker::drain()
     if (q.isEmpty()) { retry_->stop(); return; }
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const QString profile = ProfileStore::currentId();
-    int idx = -1;
     qint64 soonest = -1;
-    for (int i = 0; i < q.size(); ++i)
-    {
-        const qint64 last = store().value(lastSentKey(profile, Id::AniList, q[i].itemKey), 0).toLongLong();
-        if (debounceAllows(last, now)) { idx = i; break; }
-        const qint64 waitMs = kDebounceMs - (now - last);
-        if (soonest < 0 || waitMs < soonest) soonest = waitMs;
-    }
+    const int idx = TrackerQueue::nextSendable(q, Id::AniList, now, &soonest);
     if (idx < 0)
     {
         // Everything queued is inside its item's debounce window. Wake exactly when the earliest one opens,
@@ -353,16 +333,9 @@ void AniListTracker::drain()
             emit queueChanged();
             return;
         }
-        QVector<Update> q2 = loadQueue();
-        // Remove by IDENTITY, not by index: the queue is re-read here and a page turn during the request may
-        // have coalesced a FURTHER update onto this item. Dropping index 0 would then throw that away.
-        for (int i = 0; i < q2.size(); ++i)
-            if (q2[i].itemKey == u.itemKey && q2[i].mediaId == u.mediaId && q2[i].unit <= u.unit)
-            { q2.remove(i); break; }
-        saveQueue(q2);
-        store().setValue(lastSentKey(ProfileStore::currentId(), Id::AniList, u.itemKey),
-                         QDateTime::currentMSecsSinceEpoch());
-        store().sync();
+        // Removed by IDENTITY, not by index - see TrackerQueue::removeDelivered.
+        TrackerQueue::removeDelivered(Id::AniList, u);
+        TrackerQueue::noteSent(Id::AniList, u.itemKey, QDateTime::currentMSecsSinceEpoch());
         setLastError(QString());
         emit progressPushed(u.itemKey, u.unit);
         emit queueChanged();

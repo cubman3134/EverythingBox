@@ -1,4 +1,15 @@
-// Headless check of the tracker seam and the AniList rules layer (issue #156, increment 1).
+// Headless check of the tracker seam and BOTH provider rules layers (issue #156, increments 1 and 2).
+//
+// INCREMENT 2 ADDED MYANIMELIST behind the same seam, and sections 12-18 are its half: the OAuth+PKCE
+// exchange, the REST wire (search, pagination, the entry read, the list write), the rate-limit backoff,
+// the "a match we are not sure of is not written" rule, several trackers configured at once with one of
+// them failing, the ONE offline queue both of them share, the MyAnimeList credential byte-scan, and
+// ANILIST BEING UNCHANGED - the last of those pins increment 1's bytes and state exactly, because a
+// second provider can break either without touching a line of the first one's code.
+//
+// NO MYANIMELIST ACCOUNT WAS CREATED and no API client was registered for this work. Every MAL fixture
+// below is written from MyAnimeList's published API v2 reference, and nothing here or in the live drive
+// that accompanies it contacted MyAnimeList.
 //
 // Everything that decides anything in this feature is pure — the OAuth bodies, the three GraphQL documents,
 // the debounce, the offline queue, the furthest-wins reconciliation and the per-item link store — so all of
@@ -24,7 +35,9 @@
 //
 // Prints TRACKER-OK on success; any failure prints TRACKER-FAIL <cond> and exits non-zero.
 #include "Tracker.h"
+#include "TrackerFanout.h"
 #include "TrackerLinks.h"
+#include "TrackerQueue.h"
 #include "TrackerRules.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -35,8 +48,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSettings>
 #include <QString>
+#include <QUrl>
 #include <cstdio>
 
 using namespace tracker;
@@ -83,6 +98,97 @@ static const char* kEntryUnlisted = R"({
 static const char* kGraphQlError = R"({
   "errors": [ { "message": "Invalid token", "status": 401 } ], "data": null
 })";
+
+// ---- MyAnimeList fixtures (issue #156, increment 2) -----------------------------------------------------
+//
+// Written from MyAnimeList's published API v2 reference. NO MYANIMELIST ACCOUNT WAS CREATED, no API client
+// was registered, and neither this probe nor the live drive that accompanies it contacted MyAnimeList: a
+// local fixture server answered both.
+static const char* kMalClientId = "fixture-mal-27310";
+static const char* kMalSecret   = "FIXTURE-MAL-SECRET-Q4W8R";
+
+// A search reply in MAL's shape: rows are wrapped in `node`, and the page carries an absolute `paging.next`.
+// The first row is anime with both titles and a large cover; the second is manga with one title and only a
+// medium cover; the third is MALFORMED (no id) and must be skipped without costing the other two.
+static const char* kMalSearchReply = R"({
+  "data": [
+    { "node": { "id": 31964, "title": "Boku no Hero Academia",
+                "main_picture": { "medium": "https://cdn/1m.jpg", "large": "https://cdn/1l.jpg" },
+                "alternative_titles": { "en": "My Hero Academia", "ja": "僕のヒーロー" },
+                "start_date": "2016-04-03", "num_episodes": 13 } },
+    { "node": { "id": 2, "title": "Berserk",
+                "main_picture": { "medium": "https://cdn/2m.jpg" },
+                "alternative_titles": { "en": "" },
+                "start_date": "1989-08-25", "num_chapters": 364 } },
+    { "node": { "title": "No Id At All", "start_date": "2020" } }
+  ],
+  "paging": { "next": "https://api.myanimelist.net/v2/anime?offset=4&q=My%20Hero" }
+})";
+
+// A row MAL has no count and no date for — an unannounced series. It is filed under the kind the caller
+// ASKED for, because the search endpoint itself is per kind.
+static const char* kMalUnairedReply = R"({
+  "data": [ { "node": { "id": 99999, "title": "Something Unannounced" } } ]
+})";
+
+// The account HAS a row for this manga: 12 chapters in, reading, rated 9 (which is 90 at the seam).
+static const char* kMalEntryReply = R"({
+  "id": 2, "title": "Berserk", "num_chapters": 364,
+  "my_list_status": { "status": "reading", "score": 9, "num_chapters_read": 12,
+                      "num_volumes_read": 2, "is_rereading": false, "updated_at": "2024-01-01T00:00:00+00:00" }
+})";
+
+// ...and the anime side, which is where MAL's asymmetry lives: it REPORTS `num_episodes_watched` here and
+// ACCEPTS `num_watched_episodes` on the write.
+static const char* kMalEntryAnimeReply = R"({
+  "id": 31964, "title": "Boku no Hero Academia", "num_episodes": 13,
+  "my_list_status": { "status": "completed", "score": 0, "num_episodes_watched": 7,
+                      "is_rewatching": false }
+})";
+
+// The account does NOT have a row: `my_list_status` is absent entirely, which is how MAL says it.
+static const char* kMalEntryUnlisted = R"({
+  "id": 2, "title": "Berserk", "num_chapters": 364
+})";
+
+// MAL's error envelope. It arrives at several statuses and must be "not that payload" to every parser.
+static const char* kMalErrorReply = R"({
+  "error": "invalid_token", "message": "The access token is invalid"
+})";
+
+// ---- a tracker that is not a tracker --------------------------------------------------------------------
+// The several-trackers-at-once rule is about what happens when one of them is off, unlinked or refusing,
+// and none of those states is reachable through a real socket in a probe. tracker::Tracker is a pure
+// abstract seam with no QObject in it precisely so this is possible.
+namespace
+{
+    struct FakeTracker : public tracker::Tracker
+    {
+        explicit FakeTracker(tracker::Id i) : id_(i) {}
+
+        tracker::Id id_;
+        bool on_ = true;         // configured AND connected
+        bool refuse = false;     // "connected, and failing" — the case that must not stop the others
+        int  refusals = 0;
+        QVector<tracker::Update> got;
+
+        tracker::Id id() const override { return id_; }
+        QString displayName() const override { return tracker::idToken(id_); }
+        bool configured() const override { return on_; }
+        bool connected() const override { return on_; }
+        void search(const QString&, int, tracker::Kind,
+                    std::function<void(QVector<tracker::Match>)> cb) override { if (cb) cb({}); }
+        void fetchEntry(const QString&, tracker::Kind,
+                        std::function<void(bool, tracker::Entry)> cb) override
+        { if (cb) cb(false, tracker::Entry{}); }
+        void pushProgress(const tracker::Update& u) override
+        {
+            if (refuse) { ++refusals; return; }   // accepted the call, delivered nothing — a live failure
+            got.push_back(u);
+        }
+        void flushQueue() override {}
+    };
+}
 
 static QJsonObject varsOf(const QByteArray& body)
 {
@@ -649,6 +755,812 @@ int main(int argc, char** argv)
         CHECK(!TrackerLinks::decode(QString()).linked());
 
         TrackerLinks::setChangeHook(nullptr);
+    }
+
+    // ===== §12  MyAnimeList: OAuth, PKCE and the two grant bodies ======================================
+    // MAL's flow is NOT AniList's: PKCE is required, the only challenge method it accepts is `plain`, and
+    // both grants are FORM-encoded rather than JSON. Everything below is fixture-driven — no MyAnimeList
+    // account was created, no API client was registered, and nothing here or in the live drive contacted
+    // MyAnimeList.
+    {
+        CHECK(mal::defaultApiUrl() == QLatin1String("https://api.myanimelist.net/v2"));
+        CHECK(mal::defaultAuthBase() == QLatin1String("https://myanimelist.net/v1/oauth2"));
+
+        // ---- the verifier. Length AND alphabet; MAL refuses the whole request for either.
+        CHECK(mal::kVerifierMinChars == 43);
+        CHECK(mal::kVerifierMaxChars == 128);
+        CHECK(!mal::isValidCodeVerifier(QString()));
+        CHECK(!mal::isValidCodeVerifier(QString(42, QLatin1Char('a'))));   // one short of the floor
+        CHECK(mal::isValidCodeVerifier(QString(43, QLatin1Char('a'))));
+        CHECK(mal::isValidCodeVerifier(QString(128, QLatin1Char('a'))));
+        CHECK(!mal::isValidCodeVerifier(QString(129, QLatin1Char('a'))));  // one past the ceiling
+        // Outside RFC 7636's unreserved set. A '+' or a '/' here is what a naive base64 verifier produces,
+        // and it is refused by MAL as a malformed request rather than as a bad verifier — which presents to
+        // the user as "sign-in failed" with nothing to go on.
+        CHECK(!mal::isValidCodeVerifier(QString(43, QLatin1Char('a')) + QLatin1Char('+')));
+        CHECK(!mal::isValidCodeVerifier(QString(43, QLatin1Char('a')) + QLatin1Char('/')));
+        CHECK(!mal::isValidCodeVerifier(QString(43, QLatin1Char('a')) + QLatin1Char('=')));
+        CHECK(!mal::isValidCodeVerifier(QString(43, QLatin1Char('a')) + QLatin1Char(' ')));
+        // ...and every verifier we GENERATE is one we would accept, and no two are the same. 200 draws is
+        // enough to catch a generator that had been reduced to a constant or to a short alphabet.
+        QSet<QString> seen;
+        for (int i = 0; i < 200; ++i)
+        {
+            const QString v = mal::makeCodeVerifier();
+            CHECK(mal::isValidCodeVerifier(v));
+            seen.insert(v);
+        }
+        CHECK(seen.size() == 200);
+
+        // ---- the browser URL.
+        const QString redirect = QStringLiteral("http://127.0.0.1:51423");
+        const QString verifier = QStringLiteral("VERIFIER-0123456789012345678901234567890123456789");
+        const QString url = mal::authorizeUrl(mal::defaultAuthBase(),
+                                              QString::fromLatin1(kMalClientId), redirect,
+                                              verifier, QStringLiteral("STATE42"));
+        CHECK(url.startsWith(QLatin1String("https://myanimelist.net/v1/oauth2/authorize?")));
+        CHECK(url.contains(QLatin1String("response_type=code")));
+        CHECK(url.contains(QLatin1String("client_id=fixture-mal-27310")));
+        // PLAIN is the only method MAL accepts, and in plain the challenge IS the verifier.
+        CHECK(url.contains(QLatin1String("code_challenge_method=plain")));
+        CHECK(url.contains(QLatin1String("code_challenge=") + verifier));
+        // The CSRF value has to be IN the URL, or there is nothing to compare on the way back.
+        CHECK(url.contains(QLatin1String("state=STATE42")));
+        CHECK(QUrl::fromPercentEncoding(url.toUtf8()).contains(redirect));
+        // No secret is ever in a browser URL.
+        CHECK(!url.contains(QString::fromLatin1(kMalSecret)));
+
+        // ---- the two grants. FORM, not JSON: a JSON body here is refused outright by MAL.
+        const QByteArray ex = mal::tokenExchangeBody(QString::fromLatin1(kMalClientId),
+                                                     QString::fromLatin1(kMalSecret),
+                                                     redirect, QStringLiteral("THE-CODE"), verifier);
+        CHECK(!ex.startsWith('{'));                       // NOT JSON
+        CHECK(ex.contains("grant_type=authorization_code"));
+        CHECK(ex.contains("code=THE-CODE"));
+        CHECK(ex.contains("code_verifier=" + verifier.toUtf8()));   // PKCE, or MAL refuses the exchange
+        CHECK(ex.contains("client_id=fixture-mal-27310"));
+        // The redirect is percent-encoded into the body rather than sent raw — a bare "://" in a form field
+        // is what makes a server read the value as truncated.
+        CHECK(ex.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A51423"));
+        // The secret is in the POST BODY (over TLS) and in no other artefact this feature produces.
+        CHECK(ex.contains(QByteArray("client_secret=") + kMalSecret));
+
+        // A PUBLIC client has no secret at all, and MAL refuses a present-but-blank client_secret. Absent,
+        // not empty.
+        const QByteArray pub = mal::tokenExchangeBody(QString::fromLatin1(kMalClientId), QString(),
+                                                      redirect, QStringLiteral("THE-CODE"), verifier);
+        CHECK(!pub.contains("client_secret"));
+        CHECK(pub.contains("client_id=fixture-mal-27310"));
+
+        const QByteArray rf = mal::tokenRefreshBody(QString::fromLatin1(kMalClientId),
+                                                    QString::fromLatin1(kMalSecret),
+                                                    QStringLiteral("RTOKEN"));
+        CHECK(rf.contains("grant_type=refresh_token"));
+        CHECK(rf.contains("refresh_token=RTOKEN"));
+        CHECK(!rf.contains("code="));            // a refresh carries no authorization code...
+        CHECK(!rf.contains("code_verifier"));    // ...and no verifier
+
+        // ---- the token reply.
+        mal::TokenReply t = mal::parseTokenReply(
+            R"({"token_type":"Bearer","expires_in":2678400,"access_token":"MAL-AAA","refresh_token":"MAL-BBB"})");
+        CHECK(t.ok);
+        CHECK(t.accessToken == QLatin1String("MAL-AAA"));
+        CHECK(t.refreshToken == QLatin1String("MAL-BBB"));
+        CHECK(t.expiresInSec == 2678400);
+
+        // THE ONE THAT PERMANENTLY UNLINKS AN ACCOUNT, in MAL's spelling. Each of these is a body that is
+        // not a token reply, and each must come back ok=false so the caller stores nothing over the live
+        // tokens.
+        CHECK(!mal::parseTokenReply(R"({"error":"invalid_request","message":"code is invalid"})").ok);
+        CHECK(!mal::parseTokenReply(R"({"access_token":""})").ok);
+        CHECK(!mal::parseTokenReply("<html>captive portal</html>").ok);
+        CHECK(!mal::parseTokenReply("[]").ok);
+        CHECK(!mal::parseTokenReply(QByteArray()).ok);
+        CHECK(mal::parseTokenReply(R"({"error":"x"})").accessToken.isEmpty());
+        // MAL rotates the refresh token, but a reply that omits it is still a good reply — the caller keeps
+        // the old one rather than blanking it.
+        t = mal::parseTokenReply(R"({"access_token":"MAL-CCC","expires_in":"3600"})");
+        CHECK(t.ok);
+        CHECK(t.refreshToken.isEmpty());
+        CHECK(t.expiresInSec == 3600);
+    }
+
+    // ===== §13  MyAnimeList: search, pagination, the entry, and the push ===============================
+    {
+        const QString api = QStringLiteral("https://api.myanimelist.net/v2");
+
+        // ---- search. The URL IS a wire format on a REST API: it is built where a probe can read it.
+        CHECK(mal::kMinQueryChars == 3);
+        CHECK(!mal::searchable(QStringLiteral("ab")));
+        CHECK(!mal::searchable(QStringLiteral("  a  ")));
+        CHECK(mal::searchable(QStringLiteral("abc")));
+        // Too short to ask: an EMPTY url, so the caller answers "no matches" rather than sending MAL a
+        // request it answers 400. A two-character query is also not one anybody could be confident about.
+        CHECK(mal::searchUrl(api, QStringLiteral("ab"), Kind::Anime, 8).isEmpty());
+
+        const QString su = mal::searchUrl(api, QStringLiteral("  My Hero  "), Kind::Anime, 8);
+        CHECK(su.startsWith(QLatin1String("https://api.myanimelist.net/v2/anime?")));
+        CHECK(su.contains(QLatin1String("q=My%20Hero")));   // trimmed AND encoded; a raw space truncates it
+        CHECK(su.contains(QLatin1String("limit=8")));
+        // MAL returns ONLY the fields asked for, so a missing count here is a missing COMPLETED rule later.
+        CHECK(su.contains(QLatin1String("num_episodes")));
+        CHECK(!su.contains(QLatin1Char(' ')));
+        const QString sm = mal::searchUrl(api, QStringLiteral("Berserk"), Kind::Manga, 8);
+        CHECK(sm.startsWith(QLatin1String("https://api.myanimelist.net/v2/manga?")));
+        CHECK(sm.contains(QLatin1String("num_chapters")));
+
+        const QVector<Match> ms = mal::parseSearch(kMalSearchReply, Kind::Anime);
+        CHECK(ms.size() == 2);   // the id-less third row is skipped, and does not cost the other two
+        if (ms.size() == 2)
+        {
+            CHECK(ms[0].mediaId == QLatin1String("31964"));
+            CHECK(ms[0].title == QLatin1String("My Hero Academia"));      // alternative_titles.en preferred
+            CHECK(ms[0].altTitle == QLatin1String("Boku no Hero Academia"));
+            CHECK(ms[0].year == 2016);                                    // "2016-04-03" -> 2016
+            CHECK(ms[0].kind == Kind::Anime);
+            CHECK(ms[0].totalUnits == 13);
+            CHECK(ms[0].coverUrl == QLatin1String("https://cdn/1l.jpg")); // large preferred over medium
+            // Only one title: it becomes THE title and there is no second line to show.
+            CHECK(ms[1].mediaId == QLatin1String("2"));
+            CHECK(ms[1].title == QLatin1String("Berserk"));
+            CHECK(ms[1].altTitle.isEmpty());
+            // WHICH COUNT the row carries is the media type, not what we asked for.
+            CHECK(ms[1].kind == Kind::Manga);
+            CHECK(ms[1].totalUnits == 364);
+            CHECK(ms[1].coverUrl == QLatin1String("https://cdn/2m.jpg")); // medium, when there is no large
+        }
+        // A row carrying NO count at all (an unaired series) is filed under what the caller asked for
+        // rather than guessed at — the endpoint itself is per-kind, so that is the better answer.
+        const QVector<Match> unaired = mal::parseSearch(kMalUnairedReply, Kind::Manga);
+        CHECK(unaired.size() == 1);
+        if (unaired.size() == 1)
+        {
+            CHECK(unaired[0].kind == Kind::Manga);
+            CHECK(unaired[0].totalUnits == 0);
+            CHECK(unaired[0].year == 0);      // no start_date at all
+        }
+        // Totality, and the EMPTY LIST — which is a legitimate answer and not an error.
+        CHECK(mal::parseSearch(R"({"data":[],"paging":{}})", Kind::Anime).isEmpty());
+        CHECK(mal::parseSearch(kMalErrorReply, Kind::Anime).isEmpty());
+        CHECK(mal::parseSearch("<html>nope</html>", Kind::Anime).isEmpty());
+        CHECK(mal::parseSearch(QByteArray(), Kind::Anime).isEmpty());
+
+        // ---- pagination, and the reason it is not just "follow the URL".
+        CHECK(mal::nextPageUrl(kMalSearchReply, api)
+              == QLatin1String("https://api.myanimelist.net/v2/anime?offset=4&q=My%20Hero"));
+        CHECK(mal::nextPageUrl(R"({"data":[],"paging":{}})", api).isEmpty());
+        CHECK(mal::nextPageUrl(R"({"data":[]})", api).isEmpty());
+        CHECK(mal::nextPageUrl("<html>", api).isEmpty());
+        // OFF-ORIGIN IS REFUSED. `paging.next` is an absolute URL out of a response body, and the request
+        // that follows it carries the account's bearer token. Each of these is a different origin, and the
+        // first two are the ones that look right at a glance.
+        CHECK(mal::nextPageUrl(R"({"paging":{"next":"https://api.myanimelist.net.evil.test/v2/anime"}})",
+                               api).isEmpty());
+        CHECK(mal::nextPageUrl(R"({"paging":{"next":"http://api.myanimelist.net/v2/anime"}})",
+                               api).isEmpty());
+        CHECK(mal::nextPageUrl(R"({"paging":{"next":"https://api.myanimelist.net:8443/v2/anime"}})",
+                               api).isEmpty());
+        CHECK(mal::nextPageUrl(R"({"paging":{"next":"/v2/anime?offset=4"}})", api).isEmpty());
+
+        // ---- the account's entry. KIND-DEPENDENT in the path AND the fields, which is why the seam
+        // carries a Kind here at all: AniList ignores it, MAL answers 404 without it.
+        const QString ea = mal::entryUrl(api, QStringLiteral("31964"), Kind::Anime);
+        CHECK(ea.startsWith(QLatin1String("https://api.myanimelist.net/v2/anime/31964?")));
+        CHECK(ea.contains(QLatin1String("num_episodes")));
+        CHECK(ea.contains(QLatin1String("my_list_status")));
+        const QString em = mal::entryUrl(api, QStringLiteral("2"), Kind::Manga);
+        CHECK(em.startsWith(QLatin1String("https://api.myanimelist.net/v2/manga/2?")));
+        CHECK(em.contains(QLatin1String("num_chapters")));
+        CHECK(mal::entryUrl(api, QString(), Kind::Anime).isEmpty());
+
+        Entry e;
+        CHECK(mal::parseEntry(kMalEntryReply, QStringLiteral("2"), Kind::Manga, e));
+        CHECK(e.exists);
+        CHECK(e.mediaId == QLatin1String("2"));
+        CHECK(e.progress == 12);         // num_chapters_read
+        CHECK(e.status == Status::Current);
+        CHECK(e.totalUnits == 364);
+        // THE SCORE CONVERSION, read side: MAL's 9 is the seam's 90.
+        CHECK(e.score == 90);
+
+        // THE ASYMMETRY. MAL REPORTS num_episodes_watched and ACCEPTS num_watched_episodes. Reading the
+        // WRITE spelling would report every account as being on episode 0, and reconcile() would answer
+        // that by pushing our progress over a list that was already ahead.
+        Entry ea2;
+        CHECK(mal::parseEntry(kMalEntryAnimeReply, QStringLiteral("31964"), Kind::Anime, ea2));
+        CHECK(ea2.exists);
+        CHECK(ea2.progress == 7);
+        CHECK(ea2.totalUnits == 13);
+        CHECK(ea2.status == Status::Completed);
+
+        // "Asked, and the account has no row" — TRUE (the ask worked), exists FALSE. A caller that
+        // collapsed these two would treat a failed request as "you have watched nothing" and push over it.
+        Entry e2;
+        CHECK(mal::parseEntry(kMalEntryUnlisted, QStringLiteral("2"), Kind::Manga, e2));
+        CHECK(!e2.exists);
+        CHECK(e2.progress == 0);
+        CHECK(e2.totalUnits == 364);
+
+        Entry e3;
+        CHECK(!mal::parseEntry(kMalErrorReply, QStringLiteral("2"), Kind::Manga, e3));
+        CHECK(!mal::parseEntry("<html>", QStringLiteral("2"), Kind::Manga, e3));
+        CHECK(!mal::parseEntry(R"({})", QStringLiteral("2"), Kind::Manga, e3));
+        CHECK(!mal::parseEntry(R"([])", QStringLiteral("2"), Kind::Manga, e3));
+
+        // ---- the statuses. KIND-DEPENDENT, and a token MAL adds later reads back as Current.
+        CHECK(mal::statusToken(Status::Current, Kind::Anime) == QLatin1String("watching"));
+        CHECK(mal::statusToken(Status::Current, Kind::Manga) == QLatin1String("reading"));
+        CHECK(mal::statusToken(Status::Planning, Kind::Anime) == QLatin1String("plan_to_watch"));
+        CHECK(mal::statusToken(Status::Planning, Kind::Manga) == QLatin1String("plan_to_read"));
+        CHECK(mal::statusToken(Status::Paused, Kind::Anime) == QLatin1String("on_hold"));
+        CHECK(mal::statusToken(Status::Dropped, Kind::Manga) == QLatin1String("dropped"));
+        CHECK(mal::statusToken(Status::Completed, Kind::Anime) == QLatin1String("completed"));
+        // MAL has no "repeating" status at all — it is a boolean beside an otherwise ordinary `watching`.
+        // Mapping it onto `completed` would be a status change nobody asked for.
+        CHECK(mal::statusToken(Status::Repeating, Kind::Anime) == QLatin1String("watching"));
+        CHECK(mal::statusFromToken(QStringLiteral("on_hold")) == Status::Paused);
+        CHECK(mal::statusFromToken(QStringLiteral("plan_to_read")) == Status::Planning);
+        CHECK(mal::statusFromToken(QStringLiteral("plan_to_watch")) == Status::Planning);
+        CHECK(mal::statusFromToken(QStringLiteral("reading")) == Status::Current);
+        CHECK(mal::statusFromToken(QStringLiteral("WATCHING")) == Status::Current);   // case-insensitive
+        CHECK(mal::statusFromToken(QStringLiteral("something_new")) == Status::Current);
+        CHECK(mal::statusFromToken(QString()) == Status::Current);
+
+        // ---- the score conversion, both ways. ROUNDED, not truncated.
+        CHECK(mal::scoreToMal(0) == 0);
+        CHECK(mal::scoreToMal(85) == 9);     // 8.5 rounds UP; truncating would silently demote it
+        CHECK(mal::scoreToMal(84) == 8);
+        CHECK(mal::scoreToMal(100) == 10);
+        CHECK(mal::scoreToMal(500) == 10);   // clamped rather than sent out of range
+        CHECK(mal::scoreToMal(-3) == 0);
+        CHECK(mal::scoreFromMal(0) == 0);
+        CHECK(mal::scoreFromMal(9) == 90);
+        CHECK(mal::scoreFromMal(10) == 100);
+        CHECK(mal::scoreFromMal(37) == 100); // clamped: a value MAL cannot mean is not carried into the app
+
+        // ---- the push. The three account-damaging rules, in MAL's spellings.
+        CHECK(mal::saveUrl(api, QStringLiteral("2"), Kind::Manga)
+              == QLatin1String("https://api.myanimelist.net/v2/manga/2/my_list_status"));
+        CHECK(mal::saveUrl(api, QStringLiteral("31964"), Kind::Anime)
+              == QLatin1String("https://api.myanimelist.net/v2/anime/31964/my_list_status"));
+        CHECK(mal::saveUrl(api, QString(), Kind::Anime).isEmpty());
+
+        Update u;
+        u.itemKey = QStringLiteral("marks:series:berserk");
+        u.mediaId = QStringLiteral("2");
+        u.kind = Kind::Manga;
+        u.unit = 12;
+
+        QByteArray body = mal::saveBody(u, 364);
+        CHECK(!body.startsWith('{'));                       // FORM, not JSON
+        CHECK(body.contains("status=reading"));             // manga, in progress
+        CHECK(body.contains("num_chapters_read=12"));
+        // RULE 1: no rating, no score. MAL reads 0 as "no score" and WOULD clear one the user set by hand.
+        CHECK(!body.contains("score="));
+
+        u.hasScore = true;
+        u.score = 85;
+        body = mal::saveBody(u, 364);
+        CHECK(body.contains("score=9"));                    // 85/100 -> 9/10
+        u.score = 0;
+        CHECK(mal::saveBody(u, 364).contains("score=0"));   // an explicit "rated zero" IS sent
+        u.hasScore = false;
+
+        // RULE 2: COMPLETED needs BOTH the caller's claim and MAL's own count.
+        u.completes = true;
+        u.unit = 12;
+        CHECK(mal::saveBody(u, 364).contains("status=reading"));      // 12 of 364 is not finished
+        u.unit = 364;
+        CHECK(mal::saveBody(u, 364).contains("status=completed"));
+        // A series MAL has no count for (an ongoing one) defers to the caller, or nothing ongoing could
+        // ever be completed.
+        u.unit = 40;
+        CHECK(mal::saveBody(u, 0).contains("status=completed"));
+        // ...and a caller that does NOT claim completion never gets `completed`, however the counts line up.
+        u.completes = false;
+        u.unit = 364;
+        CHECK(mal::saveBody(u, 364).contains("status=reading"));
+
+        // RULE 3: progress is never 0 or negative. A 0 tells the account you have read nothing.
+        u.unit = 0;
+        CHECK(mal::saveBody(u, 364).contains("num_chapters_read=1"));
+        u.unit = -5;
+        CHECK(mal::saveBody(u, 364).contains("num_chapters_read=1"));
+
+        // THE ASYMMETRY, write side. `num_watched_episodes` is what MAL ACCEPTS; sending the READ spelling
+        // is a 200 that stores nothing, which looks from here like a perfect sync that never happened.
+        Update a;
+        a.itemKey = QStringLiteral("tt1234567");
+        a.mediaId = QStringLiteral("31964");
+        a.kind = Kind::Anime;
+        a.unit = 7;
+        const QByteArray abody = mal::saveBody(a, 13);
+        CHECK(abody.contains("num_watched_episodes=7"));
+        CHECK(!abody.contains("num_episodes_watched"));     // the READ spelling must NOT be the write one
+        CHECK(abody.contains("status=watching"));
+        CHECK(!abody.contains("num_chapters_read"));
+    }
+
+    // ===== §14  the rate limit: back off, do not race =================================================
+    // MAL publishes a limit and answers a breach with 429. Four families of answer need four different
+    // responses, and a tight retry against a throttle is how an integration gets its client banned.
+    {
+        CHECK(mal::kBackoffBaseMs == 60000);
+        CHECK(mal::kBackoffMaxMs == 1800000);
+
+        // A success is not a failure and decides nothing.
+        CHECK(!mal::backoffFor(200, 0, 1).retry);
+        CHECK(!mal::backoffFor(200, 0, 1).permanent);
+        CHECK(!mal::backoffFor(204, 0, 1).retry);
+
+        // 429: wait, and wait a MINUTE at least — not a second.
+        mal::Backoff b = mal::backoffFor(429, 0, 1);
+        CHECK(b.retry);
+        CHECK(!b.permanent);
+        CHECK(!b.reauth);
+        CHECK(b.delayMs == mal::kBackoffBaseMs);
+        // Retry-After wins when it asks for LONGER than we would wait...
+        CHECK(mal::backoffFor(429, 300, 1).delayMs == 300000);
+        // ...and is NOT honoured downward: the base is there to protect the account, not to be the smallest
+        // legal wait. A server asking us to come back in one second while rate-limiting us is exactly the
+        // case where obeying it is the wrong move.
+        CHECK(mal::backoffFor(429, 1, 1).delayMs == mal::kBackoffBaseMs);
+        // Doubling per consecutive failure, capped. Nothing here can produce a delay below the base.
+        CHECK(mal::backoffFor(429, 0, 2).delayMs == 120000);
+        CHECK(mal::backoffFor(429, 0, 3).delayMs == 240000);
+        CHECK(mal::backoffFor(429, 0, 30).delayMs == mal::kBackoffMaxMs);
+        // A long outage must not overflow the exponent into a negative delay — which would read back as
+        // "wait the minimum" and be a tight retry loop arrived at by arithmetic.
+        CHECK(mal::backoffFor(429, 0, 1000).delayMs == mal::kBackoffMaxMs);
+        CHECK(mal::backoffFor(429, 0, 0).delayMs >= mal::kBackoffBaseMs);
+        CHECK(mal::backoffFor(429, -5, 1).delayMs == mal::kBackoffBaseMs);
+
+        // 401 is the TOKEN, not the request: refresh and keep the row.
+        b = mal::backoffFor(401, 0, 1);
+        CHECK(b.retry);
+        CHECK(b.reauth);
+        CHECK(!b.permanent);
+
+        // 5xx and "no reply at all" are the same waiting problem.
+        CHECK(mal::backoffFor(500, 0, 1).retry);
+        CHECK(mal::backoffFor(503, 0, 1).retry);
+        CHECK(!mal::backoffFor(503, 0, 1).permanent);
+        CHECK(mal::backoffFor(0, 0, 1).retry);
+        CHECK(mal::backoffFor(0, 0, 1).delayMs == mal::kBackoffBaseMs);
+
+        // PERMANENT: a media id the account cannot write, or an entry that no longer exists. Never
+        // acceptable by waiting, so the row is dropped rather than left to wedge the head of the queue for
+        // ever — every later chapter behind it would be lost too.
+        for (int code : { 400, 404, 422 })
+        {
+            const mal::Backoff p = mal::backoffFor(code, 0, 1);
+            CHECK(p.permanent);
+            CHECK(!p.retry);
+        }
+        // 403 is deliberately NOT permanent: MAL answers a suspended account and a temporarily-refused
+        // client with the same status, and dropping every queued chapter for the second is the worse
+        // mistake.
+        CHECK(!mal::backoffFor(403, 0, 1).permanent);
+        CHECK(mal::backoffFor(403, 0, 1).retry);
+        // A 4xx we have no rule for is retried rather than dropped: nobody's progress is thrown away on a
+        // status nobody has thought about.
+        CHECK(!mal::backoffFor(418, 0, 1).permanent);
+        CHECK(mal::backoffFor(418, 0, 1).retry);
+    }
+
+    // ===== §15  a match we are not sure of is not written ==============================================
+    // The conservatism rule, made into a function. Nothing here links anything; it decides what is worth
+    // OFFERING and whether an offer is unambiguous.
+    {
+        auto mk = [](const char* title, const char* alt = "") {
+            Match m;
+            m.mediaId = QStringLiteral("1");
+            m.title = QString::fromUtf8(title);
+            m.altTitle = QString::fromUtf8(alt);
+            return m;
+        };
+
+        // Exact, once normalised for case and punctuation.
+        CHECK(titleConfidence(QStringLiteral("My Hero Academia"), mk("my hero academia")) == 100);
+        CHECK(titleConfidence(QStringLiteral("My Hero Academia!"), mk("My  Hero-Academia")) == 100);
+        // ...or exact on the SECOND title, which is the whole reason a match carries two.
+        CHECK(titleConfidence(QStringLiteral("Boku no Hero Academia"),
+                              mk("My Hero Academia", "Boku no Hero Academia")) == 100);
+        // One wholly inside the other: strong, but not certain — a season or a year is exactly the
+        // difference that makes two list entries two list entries.
+        CHECK(titleConfidence(QStringLiteral("Berserk"), mk("Berserk 1997")) == 70);
+        // Some words in common but neither inside the other: a partial answer, scaled by the LONGER side so
+        // two words of three do not score as though they had answered the whole question.
+        const int part = titleConfidence(QStringLiteral("Hero Academia Vigilantes"), mk("My Hero Academia"));
+        CHECK(part > 0);
+        CHECK(part < 70);
+        // ...while a title that merely CONTAINS the query is the stronger "close, but a season or a year
+        // apart" case, and scores as that rather than as a word overlap.
+        CHECK(titleConfidence(QStringLiteral("Hero Academia"), mk("My Hero Academia Season 4")) == 70);
+        // NOT ONE WORD IN COMMON is noise, and noise is what the picker must not be full of.
+        CHECK(titleConfidence(QStringLiteral("Berserk"), mk("Sailor Moon")) == 0);
+        CHECK(titleConfidence(QString(), mk("Berserk")) == 0);
+        CHECK(titleConfidence(QStringLiteral("Berserk"), mk("")) == 0);
+
+        // Ranking: best first, noise dropped, and STABLE among equals.
+        QVector<Match> ms;
+        ms << mk("Sailor Moon") << mk("Berserk 1997") << mk("Berserk") << mk("Cowboy Bebop");
+        const QVector<Match> ranked = rankMatches(QStringLiteral("Berserk"), ms);
+        CHECK(ranked.size() == 2);
+        if (ranked.size() == 2)
+        {
+            CHECK(ranked[0].title == QLatin1String("Berserk"));        // exact beats contains
+            CHECK(ranked[1].title == QLatin1String("Berserk 1997"));
+        }
+        // EVERY row noise: handed back UNCHANGED rather than emptied. A title in a script the query is not
+        // written in shares no word with it, and answering "nothing found" there would make exactly those
+        // series permanently unlinkable — the opposite of what this rule is for.
+        QVector<Match> foreign;
+        foreign << mk("Kimetsu no Yaiba") << mk("Shingeki no Kyojin");
+        const QVector<Match> keptAll = rankMatches(QStringLiteral("Demon Slayer"), foreign);
+        CHECK(keptAll.size() == 2);
+        CHECK(keptAll[0].title == QLatin1String("Kimetsu no Yaiba"));   // and in the provider's own order
+        CHECK(rankMatches(QStringLiteral("Berserk"), QVector<Match>{}).isEmpty());
+
+        // "Sure" means EXACT AND ALONE. Everything else falls through to the user, because a wrong link
+        // writes somebody's progress onto the wrong series in a list they curate by hand.
+        QVector<Match> one;
+        one << mk("Berserk") << mk("Sailor Moon");
+        CHECK(confidentMatchIndex(QStringLiteral("Berserk"), one) == 0);
+        // An exact hit with a near neighbour is AMBIGUOUS, not certain.
+        QVector<Match> ambiguous;
+        ambiguous << mk("Berserk") << mk("Berserk 1997");
+        CHECK(confidentMatchIndex(QStringLiteral("Berserk"), ambiguous) == -1);
+        // Two exact hits are an ambiguous field, not two certainties.
+        QVector<Match> twins;
+        twins << mk("Berserk") << mk("berserk");
+        CHECK(confidentMatchIndex(QStringLiteral("Berserk"), twins) == -1);
+        // Nothing exact at all: never sure.
+        QVector<Match> loose;
+        loose << mk("Berserk 1997") << mk("Berserk Golden Age");
+        CHECK(confidentMatchIndex(QStringLiteral("Berserk"), loose) == -1);
+        CHECK(confidentMatchIndex(QStringLiteral("Berserk"), QVector<Match>{}) == -1);
+    }
+
+    // ===== §16  several trackers at once ================================================================
+    // The issue's rule: push to both and let each own its own state. Driven with fake tracker::Tracker
+    // implementations — no socket, no account, no network — which is the only way "one failing and the
+    // other still landing" is reachable at all.
+    {
+        const QString key = QStringLiteral("tt77777");
+        // Two links for the SAME item, with DIFFERENT media ids: the same series under two ids on two
+        // accounts, which is exactly what the link store's (Id, itemKey) keying is for.
+        TrackerLinks::clear(Id::AniList, key);
+        TrackerLinks::clear(Id::MyAnimeList, key);
+        TrackerLinks::set(Id::AniList, key, QStringLiteral("20605"), Kind::Anime,
+                          QStringLiteral("My Hero Academia"), 13);
+        TrackerLinks::set(Id::MyAnimeList, key, QStringLiteral("31964"), Kind::Anime,
+                          QStringLiteral("My Hero Academia"), 13);
+
+        FakeTracker a(Id::AniList), m(Id::MyAnimeList);
+        const QVector<Tracker*> both{ &a, &m };
+
+        // BOTH get it, each with ITS OWN media id. Nothing here ever hands one tracker another's.
+        TrackerFanout::Result r = TrackerFanout::push(both, key, Kind::Anime, 5, false);
+        CHECK(r.pushed == 2);
+        CHECK(r.unlinked == 0);
+        CHECK(r.needLink.isEmpty());
+        CHECK(a.got.size() == 1);
+        CHECK(m.got.size() == 1);
+        if (a.got.size() == 1 && m.got.size() == 1)
+        {
+            CHECK(a.got[0].mediaId == QLatin1String("20605"));
+            CHECK(m.got[0].mediaId == QLatin1String("31964"));
+            CHECK(a.got[0].unit == 5);
+            CHECK(m.got[0].unit == 5);
+        }
+        // Each tracker's own side of the reconciliation moved, independently.
+        CHECK(TrackerLinks::get(Id::AniList, key).localUnits == 5);
+        CHECK(TrackerLinks::get(Id::MyAnimeList, key).localUnits == 5);
+
+        // ONE FAILING MUST NOT BLOCK THE OTHER — with the failing one FIRST...
+        a.refuse = true;
+        r = TrackerFanout::push(both, key, Kind::Anime, 6, false);
+        CHECK(r.pushed == 2);          // both were VISITED; what one did with it is its own business
+        CHECK(a.refusals == 1);
+        CHECK(m.got.size() == 2);      // ...and the healthy one still landed
+        // ...and with the failing one LAST, because "it worked" can be an artefact of the order.
+        const QVector<Tracker*> reversed{ &m, &a };
+        r = TrackerFanout::push(reversed, key, Kind::Anime, 7, false);
+        CHECK(r.pushed == 2);
+        CHECK(a.refusals == 2);
+        CHECK(m.got.size() == 3);
+        a.refuse = false;
+
+        // A tracker that is OFF is skipped, and says nothing about the other. "Off" is not a failure.
+        a.on_ = false;
+        r = TrackerFanout::push(both, key, Kind::Anime, 8, false);
+        CHECK(r.pushed == 1);
+        CHECK(m.got.size() == 4);
+        CHECK(TrackerFanout::active(both).size() == 1);
+        a.on_ = true;
+
+        // A null in the list is skipped rather than dereferenced.
+        const QVector<Tracker*> withNull{ nullptr, &a, nullptr, &m };
+        CHECK(TrackerFanout::active(withNull).size() == 2);
+        CHECK(TrackerFanout::active(QVector<Tracker*>{ nullptr }).isEmpty());
+
+        // UNLINKED on one tracker only: that one is not pushed to, it is offered a prompt, and the other is
+        // pushed to as normal.
+        TrackerLinks::clear(Id::MyAnimeList, key);
+        const int mBefore = m.got.size();
+        r = TrackerFanout::push(both, key, Kind::Anime, 9, false);
+        CHECK(r.pushed == 1);
+        CHECK(r.unlinked == 1);
+        CHECK(r.declined == 0);
+        CHECK(r.needLink.size() == 1);
+        if (r.needLink.size() == 1) CHECK(r.needLink[0]->id() == Id::MyAnimeList);
+        CHECK(m.got.size() == mBefore);   // not pushed to: there is no link for a media id to come from
+        // ...AND THE UNLINKED ONE FIRST, which is the ordering that catches a loop that RETURNS on the
+        // first tracker it can do nothing for instead of moving on to the next. With the list the other way
+        // round the linked tracker is visited first and the bug is invisible.
+        const int aBeforeUnlinkedFirst = a.got.size();
+        r = TrackerFanout::push(reversed, key, Kind::Anime, 12, false);   // { MyAnimeList (unlinked), AniList }
+        CHECK(r.pushed == 1);
+        CHECK(r.unlinked == 1);
+        CHECK(a.got.size() == aBeforeUnlinkedFirst + 1);
+        if (!a.got.isEmpty()) CHECK(a.got.last().unit == 12);
+        // ...and DECLINED means not even offered, for ever, until the user asks.
+        TrackerLinks::decline(Id::MyAnimeList, key);
+        r = TrackerFanout::push(both, key, Kind::Anime, 10, false);
+        CHECK(r.unlinked == 1);
+        CHECK(r.declined == 1);
+        CHECK(r.needLink.isEmpty());
+
+        // Nothing at all happens for an item with no identity, or for a unit that is not progress.
+        const int aBefore = a.got.size();
+        CHECK(TrackerFanout::push(both, QString(), Kind::Anime, 3, false).pushed == 0);
+        CHECK(TrackerFanout::push(both, key, Kind::Anime, 0, false).pushed == 0);
+        CHECK(TrackerFanout::push(both, key, Kind::Anime, -1, false).pushed == 0);
+        CHECK(a.got.size() == aBefore);
+
+        // THE LINK'S KIND, not the caller's. A series linked as manga on one tracker and anime on the other
+        // must be pushed to each as what it IS there, or the write goes to the wrong endpoint.
+        TrackerLinks::clear(Id::MyAnimeList, key);
+        TrackerLinks::set(Id::MyAnimeList, key, QStringLiteral("2"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        a.got.clear();
+        m.got.clear();
+        TrackerFanout::push(both, key, Kind::Anime, 11, false);
+        CHECK(a.got.size() == 1);
+        CHECK(m.got.size() == 1);
+        if (a.got.size() == 1 && m.got.size() == 1)
+        {
+            CHECK(a.got[0].kind == Kind::Anime);
+            CHECK(m.got[0].kind == Kind::Manga);
+        }
+    }
+
+    // ===== §17  the ONE queue, per tracker ==============================================================
+    // Tracker.h forbids a second queue, so increment 2 moved the persistence out of AniListTracker into
+    // TrackerQueue rather than writing MyAnimeList a queue of its own. Same rules, same keys, one
+    // implementation — and keyed by Id, so two accounts do not share a rate limit either.
+    {
+        TrackerQueue::forgetAccount(Id::AniList);
+        TrackerQueue::forgetAccount(Id::MyAnimeList);
+        CHECK(TrackerQueue::count(Id::AniList) == 0);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 0);
+
+        Update u;
+        u.itemKey = QStringLiteral("marks:series:berserk");
+        u.mediaId = QStringLiteral("30002");
+        u.kind = Kind::Manga;
+        u.unit = 3;
+        u.atMs = 1'700'000'000'000LL;
+
+        CHECK(TrackerQueue::enqueue(Id::AniList, u));
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        // SEPARATE. A chapter queued for one account is not queued for the other.
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 0);
+
+        Update um = u;
+        um.mediaId = QStringLiteral("2");
+        CHECK(TrackerQueue::enqueue(Id::MyAnimeList, um));
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 1);
+        // ...and each holds ITS OWN media id after a round trip through the ini.
+        CHECK(TrackerQueue::load(Id::AniList).first().mediaId == QLatin1String("30002"));
+        CHECK(TrackerQueue::load(Id::MyAnimeList).first().mediaId == QLatin1String("2"));
+
+        // The shared rules are the increment-1 ones, unchanged: furthest wins, and an earlier unit arriving
+        // late writes nothing.
+        Update later = u;
+        later.unit = 9;
+        CHECK(TrackerQueue::enqueue(Id::AniList, later));
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        CHECK(TrackerQueue::load(Id::AniList).first().unit == 9);
+        Update earlier = u;
+        earlier.unit = 4;
+        CHECK(!TrackerQueue::enqueue(Id::AniList, earlier));
+        CHECK(TrackerQueue::load(Id::AniList).first().unit == 9);
+
+        // TWO ACCOUNTS DO NOT SHARE A RATE LIMIT. A send on one starts that one's debounce and nothing
+        // else's — the pin for "a progress update goes to every configured tracker independently".
+        const qint64 now = 1'700'000'100'000LL;
+        TrackerQueue::noteSent(Id::AniList, u.itemKey, now);
+        qint64 wait = -1;
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::AniList), Id::AniList, now, &wait) == -1);
+        CHECK(wait > 0);
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::MyAnimeList), Id::MyAnimeList, now, &wait)
+              == 0);
+        // ...and the window opens on the shared 30-second rule, not on a second one.
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::AniList), Id::AniList,
+                                         now + kDebounceMs, &wait) == 0);
+
+        // Delivery drops the row BY IDENTITY, and only on the tracker it was delivered to.
+        TrackerQueue::removeDelivered(Id::MyAnimeList, um);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 0);
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        // A FURTHER update coalesced onto the item during the request survives a delivery of the older one.
+        Update far = um;
+        far.unit = 40;
+        CHECK(TrackerQueue::enqueue(Id::MyAnimeList, far));
+        TrackerQueue::removeDelivered(Id::MyAnimeList, um);   // the OLD row, unit 3
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 1);
+        CHECK(TrackerQueue::load(Id::MyAnimeList).first().unit == 40);
+
+        // The last-error line is per tracker too, and clearing one does not clear the other.
+        TrackerQueue::setLastError(Id::AniList, QStringLiteral("A failed"));
+        TrackerQueue::setLastError(Id::MyAnimeList, QStringLiteral("M failed"));
+        CHECK(TrackerQueue::lastError(Id::AniList) == QLatin1String("A failed"));
+        CHECK(TrackerQueue::lastError(Id::MyAnimeList) == QLatin1String("M failed"));
+        TrackerQueue::setLastError(Id::AniList, QString());
+        CHECK(TrackerQueue::lastError(Id::AniList).isEmpty());
+        CHECK(TrackerQueue::lastError(Id::MyAnimeList) == QLatin1String("M failed"));
+
+        // Disconnecting ONE account drops that account's pending progress and nothing else's.
+        TrackerQueue::forgetAccount(Id::MyAnimeList);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 0);
+        CHECK(TrackerQueue::lastError(Id::MyAnimeList).isEmpty());
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        TrackerQueue::forgetAccount(Id::AniList);
+    }
+
+    // ===== §18  ANILIST IS UNCHANGED ====================================================================
+    // The floor this increment stands on: with MyAnimeList not configured, AniList behaves exactly as it
+    // did. Two halves — the BYTES it puts on the wire, and the STATE it keeps — because a second tracker
+    // could break either one without touching a line of AniList's code.
+    {
+        // ---- the wire. Exact bodies, not shapes: a shared helper "cleaned up" later must not be able to
+        // move a byte of what AniList sends.
+        CHECK(anilist::defaultApiUrl() == QLatin1String("https://graphql.anilist.co"));
+        CHECK(anilist::defaultAuthBase() == QLatin1String("https://anilist.co/api/v2/oauth"));
+        CHECK(anilist::tokenExchangeBody(QStringLiteral("cid"), QStringLiteral("sec"),
+                                         QStringLiteral("http://127.0.0.1:1"), QStringLiteral("code"))
+              == QByteArray(R"({"client_id":"cid","client_secret":"sec","code":"code",)"
+                            R"("grant_type":"authorization_code","redirect_uri":"http://127.0.0.1:1"})"));
+        CHECK(anilist::tokenRefreshBody(QStringLiteral("cid"), QStringLiteral("sec"),
+                                        QStringLiteral("rt"))
+              == QByteArray(R"({"client_id":"cid","client_secret":"sec",)"
+                            R"("grant_type":"refresh_token","refresh_token":"rt"})"));
+        // AniList's push is still GraphQL JSON with AniList's variable names — nothing about MAL's form
+        // encoding or its num_watched_episodes leaked into it.
+        Update au;
+        au.itemKey = QStringLiteral("k");
+        au.mediaId = QStringLiteral("30002");
+        au.kind = Kind::Manga;
+        au.unit = 12;
+        const QByteArray asave = anilist::saveBody(au, 364);
+        CHECK(asave.startsWith('{'));
+        CHECK(asave.contains(R"("variables":{"mediaId":30002,"progress":12,"status":"CURRENT"})"));
+        CHECK(!asave.contains("num_chapters_read"));
+        CHECK(!asave.contains("status=reading"));
+        CHECK(anilist::statusToken(Status::Current) == QLatin1String("CURRENT"));   // not "watching"
+        CHECK(anilist::searchBody(QStringLiteral("Berserk"), 0, Kind::Manga)
+                  .contains(R"("variables":{"search":"Berserk","type":"MANGA"})"));
+        CHECK(anilist::entryBody(QStringLiteral("30002"))
+                  .contains(R"("variables":{"mediaId":30002})"));
+
+        // ---- the state. Every key AniList uses is distinct from MyAnimeList's, so nothing MAL stores can
+        // be read back as AniList's — the reason Tracker.h RESERVED the id rather than adding it later.
+        CHECK(queueKey(QString(), Id::AniList) != queueKey(QString(), Id::MyAnimeList));
+        CHECK(queueKey(QString(), Id::AniList).contains(QLatin1String("/anilist/")));
+        CHECK(queueKey(QString(), Id::MyAnimeList).contains(QLatin1String("/mal/")));
+        CHECK(lastErrorKey(QString(), Id::AniList) != lastErrorKey(QString(), Id::MyAnimeList));
+        CHECK(lastSentKey(QString(), Id::AniList, QStringLiteral("k"))
+              != lastSentKey(QString(), Id::MyAnimeList, QStringLiteral("k")));
+        CHECK(clientIdKey(Id::AniList) != clientIdKey(Id::MyAnimeList));
+        CHECK(accessKey(Id::MyAnimeList) == QLatin1String("tracker/mal/access"));
+        // MAL's credentials are in the SAME carve-outs AniList's are — device-local, never synced, and the
+        // tokens (but not the typed id/secret) out of scope for a settings Discard.
+        CHECK(isDeviceLocalKey(clientIdKey(Id::MyAnimeList)));
+        CHECK(isDeviceLocalKey(clientSecretKey(Id::MyAnimeList)));
+        CHECK(isDeviceLocalKey(accessKey(Id::MyAnimeList)));
+        CHECK(isDeviceLocalKey(refreshKey(Id::MyAnimeList)));
+        CHECK(isDeviceLocalKey(queueKey(QString(), Id::MyAnimeList)));
+        CHECK(isBackgroundStateKey(accessKey(Id::MyAnimeList)));
+        CHECK(isBackgroundStateKey(queueKey(QString(), Id::MyAnimeList)));
+        CHECK(!isBackgroundStateKey(clientIdKey(Id::MyAnimeList)));
+        CHECK(!isBackgroundStateKey(clientSecretKey(Id::MyAnimeList)));
+
+        // ---- and the proof by construction: write EVERYTHING MyAnimeList owns, then read AniList's back.
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                    QSettings::IniFormat);
+        s.setValue(clientIdKey(Id::AniList), QString::fromLatin1(kFixtureClientId));
+        s.setValue(accessKey(Id::AniList), QStringLiteral("ACCESS-TOKEN-FIXTURE"));
+        const QString aKey = QStringLiteral("tt-unchanged");
+        TrackerLinks::clear(Id::AniList, aKey);
+        TrackerLinks::clear(Id::MyAnimeList, aKey);
+        TrackerLinks::set(Id::AniList, aKey, QStringLiteral("30002"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        TrackerQueue::forgetAccount(Id::AniList);
+        Update qu;
+        qu.itemKey = aKey;
+        qu.mediaId = QStringLiteral("30002");
+        qu.kind = Kind::Manga;
+        qu.unit = 6;
+        qu.atMs = 1'700'000'000'000LL;
+        TrackerQueue::enqueue(Id::AniList, qu);
+        s.sync();
+        const QString aLinkBefore = TrackerLinks::encode(TrackerLinks::get(Id::AniList, aKey));
+        const QByteArray aQueueBefore = encodeQueue(TrackerQueue::load(Id::AniList));
+
+        // Now MyAnimeList arrives, in full: credentials, a token, a link on the SAME item and a queue.
+        s.setValue(clientIdKey(Id::MyAnimeList), QString::fromLatin1(kMalClientId));
+        s.setValue(clientSecretKey(Id::MyAnimeList), QString::fromLatin1(kMalSecret));
+        s.setValue(accessKey(Id::MyAnimeList), QStringLiteral("MAL-ACCESS-TOKEN-FIXTURE"));
+        TrackerLinks::set(Id::MyAnimeList, aKey, QStringLiteral("2"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        Update mu = qu;
+        mu.mediaId = QStringLiteral("2");
+        mu.unit = 99;
+        TrackerQueue::enqueue(Id::MyAnimeList, mu);
+        TrackerQueue::setLastError(Id::MyAnimeList, QStringLiteral("MyAnimeList is unhappy"));
+        s.sync();
+
+        // ...and AniList's side is byte-for-byte what it was.
+        CHECK(TrackerLinks::encode(TrackerLinks::get(Id::AniList, aKey)) == aLinkBefore);
+        CHECK(encodeQueue(TrackerQueue::load(Id::AniList)) == aQueueBefore);
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        CHECK(TrackerQueue::lastError(Id::AniList).isEmpty());
+        CHECK(s.value(accessKey(Id::AniList)).toString() == QLatin1String("ACCESS-TOKEN-FIXTURE"));
+        CHECK(s.value(clientIdKey(Id::AniList)).toString() == QString::fromLatin1(kFixtureClientId));
+
+        // ===== the MyAnimeList credential byte-scan =====================================================
+        // The same rule §3 holds for AniList, held for MAL: the secret is on disk in EXACTLY ONE place, and
+        // that place is inside the device-local carve-out. Nothing this probe prints contains it.
+        QFile f(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile));
+        CHECK(f.open(QIODevice::ReadOnly));
+        const QByteArray ini = f.readAll();
+        f.close();
+        CHECK(!ini.isEmpty());   // a scan of nothing passes trivially; assert the corpus first
+
+        int occurrences = 0;
+        for (int at = 0; (at = ini.indexOf(kMalSecret, at)) >= 0; ++at) ++occurrences;
+        CHECK(occurrences == 1);
+        const int at = ini.indexOf(kMalSecret);
+        const int lineStart = ini.lastIndexOf('\n', at) + 1;
+        CHECK(ini.mid(lineStart, at - lineStart).contains("clientSecret"));
+        // The token, likewise: exactly once, on the access key.
+        int tokenHits = 0;
+        for (int p = 0; (p = ini.indexOf("MAL-ACCESS-TOKEN-FIXTURE", p)) >= 0; ++p) ++tokenHits;
+        CHECK(tokenHits == 1);
+        // The three artefacts that DO travel or get shown carry neither.
+        const QByteArray mq = encodeQueue(TrackerQueue::load(Id::MyAnimeList));
+        CHECK(!mq.contains(kMalSecret));
+        CHECK(!mq.contains("MAL-ACCESS-TOKEN-FIXTURE"));
+        const QByteArray mblob = TrackerLinks::encode(TrackerLinks::get(Id::MyAnimeList, aKey)).toUtf8();
+        CHECK(!mblob.contains(kMalSecret));
+        CHECK(!mblob.contains("MAL-ACCESS-TOKEN-FIXTURE"));
+        CHECK(!TrackerQueue::lastError(Id::MyAnimeList).contains(QString::fromLatin1(kMalSecret)));
+        // The REQUESTS carry no credential at all: MAL authenticates with a header, by construction, and
+        // the URLs are built from ids and field lists only.
+        CHECK(!mal::searchUrl(QStringLiteral("https://api.myanimelist.net/v2"),
+                              QStringLiteral("Berserk"), Kind::Manga, 8).contains(QLatin1String(kMalSecret)));
+        CHECK(!mal::entryUrl(QStringLiteral("https://api.myanimelist.net/v2"),
+                             QStringLiteral("2"), Kind::Manga).contains(QLatin1String(kMalSecret)));
+        CHECK(!mal::saveUrl(QStringLiteral("https://api.myanimelist.net/v2"),
+                            QStringLiteral("2"), Kind::Manga).contains(QLatin1String(kMalSecret)));
+        CHECK(!mal::saveBody(mu, 364).contains(kMalSecret));
+        CHECK(!mal::saveBody(mu, 364).contains("MAL-ACCESS-TOKEN-FIXTURE"));
+
+        TrackerQueue::forgetAccount(Id::AniList);
+        TrackerQueue::forgetAccount(Id::MyAnimeList);
     }
 
     if (failures == 0) { std::puts("TRACKER-OK"); return 0; }

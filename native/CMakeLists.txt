@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.224 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.225 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -677,6 +677,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TrackerRules.cpp  src/core/TrackerRules.h        # the AniList wire + push/pull rules (pure)
         src/core/TrackerLinks.cpp  src/core/TrackerLinks.h        # which tracker entry an item is (per-item-synced)
         src/core/AniListTracker.cpp src/core/AniListTracker.h     # OAuth loopback + the queued push
+        # ...and increment 2's second implementation of the same seam. TrackerQueue is the ONE offline
+        # queue (Id-parameterised, shared by both trackers) and TrackerFanout is what "several trackers
+        # at once" means; both are pure and both are pinned by probe_tracker.
+        src/core/TrackerQueue.cpp  src/core/TrackerQueue.h        # the shared offline queue, per tracker
+        src/core/TrackerFanout.cpp src/core/TrackerFanout.h       # push to every configured tracker
+        src/core/MyAnimeListTracker.cpp src/core/MyAnimeListTracker.h  # OAuth+PKCE loopback, REST, backoff
         # MUSIC SCROBBLING (#192). Scrobble.h / ScrobbleProvider.h are header-only (the pure rules and the
         # seam) and are listed so they show up in an IDE beside the two units that need a TU.
         src/core/Scrobble.h              # the threshold, what counts, the accumulator - pure (probe_scrobble)
@@ -929,6 +935,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowTrackers.cpp                      # anime/manga tracker MainWindow members, same rule (#156)
         src/ui/MainWindowCustomCores.cpp                   # custom-core settings surface, same reason (#98)
         src/ui/MainWindowChannelGuide.cpp                  # the channel guide + interstitial MainWindow members (#179 inc 2)
         src/ui/MainWindowMusicServerScrobble.cpp           # one scrobble provider per music server (#193 inc 6)
@@ -2597,6 +2604,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tracker.h
         src/core/TrackerRules.cpp src/core/TrackerRules.h
         src/core/TrackerLinks.cpp src/core/TrackerLinks.h
+        # Increment 2. TrackerQueue is the one offline queue both trackers share (so it needs ProfileStore,
+        # which is QtCore-only) and TrackerFanout is the several-trackers-at-once rule, driven here with
+        # fake tracker::Tracker implementations and no socket. Neither MyAnimeListTracker nor AniListTracker
+        # is linked: they are QObjects that own sockets, and everything they decide is in the files above.
+        src/core/TrackerQueue.cpp  src/core/TrackerQueue.h
+        src/core/TrackerFanout.cpp src/core/TrackerFanout.h
+        src/core/ProfileStore.cpp  src/core/ProfileStore.h
         src/core/AppPaths.h src/core/AppBrand.h)
     target_include_directories(probe_tracker PRIVATE src src/core)
     target_link_libraries(probe_tracker PRIVATE Qt6::Core)
