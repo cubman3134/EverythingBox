@@ -113,7 +113,7 @@ struct Recorder
     unsigned startedId = 0, failedId = 0, submittedId = 0, resultId = 0;
     QString startedTitle, startedDesc, failedTitle, submittedTitle, submittedValue;
     bool startedWillSubmit = true, submittedWillSubmit = true;
-    QString resultSubmitted, resultBest;
+    QString resultTitle, resultSubmitted, resultBest;
     unsigned resultRank = 0, resultEntries = 0;
     bool trackerVisible = false;
     QString trackerDisplay;
@@ -131,8 +131,10 @@ static void wire(Achievements& ach, Recorder& r)
                      [&r](unsigned id, const QString& t, const QString& v, bool sub) {
         ++r.submittedCount; r.submittedId = id; r.submittedTitle = t; r.submittedValue = v; r.submittedWillSubmit = sub; });
     QObject::connect(&ach, &Achievements::leaderboardSubmitResult,
-                     [&r](unsigned id, const QString& s, const QString& b, unsigned rank, unsigned n) {
-        ++r.resultCount; r.resultId = id; r.resultSubmitted = s; r.resultBest = b; r.resultRank = rank; r.resultEntries = n; });
+                     [&r](unsigned id, const QString& t, const QString& s, const QString& b,
+                          unsigned rank, unsigned n) {
+        ++r.resultCount; r.resultId = id; r.resultTitle = t; r.resultSubmitted = s; r.resultBest = b;
+        r.resultRank = rank; r.resultEntries = n; });
     QObject::connect(&ach, &Achievements::leaderboardTrackerChanged,
                      [&r](bool vis, const QString& d) { ++r.trackerCount; r.trackerVisible = vis; r.trackerDisplay = d; });
 }
@@ -183,6 +185,37 @@ static void testAttemptSignals(Achievements& ach)
     CHECK(r.resultBest == QString::fromUtf8(kBest));
     CHECK(r.resultRank == 7u);
     CHECK(r.resultEntries == 913u);
+    // ...AND THE BOARD IT IS FOR (issue #312). rcheevos' scoreboard event carries the leaderboard's id and
+    // its values and leaves event->leaderboard null, so the notice that tells you where you placed used to
+    // not say on what. The name is looked up by id where the notice's data is assembled; with NO GAME LOADED
+    // (this probe has no account and never will) the lookup finds nothing and the title comes back EMPTY --
+    // which is the fallback arm, and RetroView::showLeaderboardNotice then draws its generic "Leaderboard"
+    // heading exactly as it always did. Never a guess, and never the wrong board's name.
+    CHECK(r.resultTitle.isEmpty());
+
+    // ...and the arm a real submission takes: a scoreboard whose board name IS known reaches the signal
+    // carrying it, so the notice can be titled with it. Driven by supplying the name the lookup would have
+    // returned, which is the same field on the same struct the rc_client path fills -- the lookup itself is
+    // one call into already-fetched game data and needs an account this probe deliberately does not have.
+    {
+        ra::Event named;
+        named.kind = ra::EventKind::SubmitResult;
+        named.scoreboard.id = 4003;
+        named.scoreboard.title = QString::fromUtf8(kLbTitle);
+        named.scoreboard.submitted = QString::fromUtf8(kSubmitted);
+        named.scoreboard.best = QString::fromUtf8(kBest);
+        named.scoreboard.newRank = 2;
+        named.scoreboard.numEntries = 913;
+        ach.handleLeaderboardEvent(named);
+        CHECK(r.resultCount == 2);
+        CHECK(r.resultTitle == QString::fromUtf8(kLbTitle));   // the board is NAMED
+        CHECK(r.resultRank == 2u);
+        // A known name is never overwritten by an empty lookup: the fill is only for a title that is absent.
+        CHECK(!r.resultTitle.isEmpty());
+    }
+    // ...and the accessor itself, with no game loaded: empty, not a fabricated name and not a crash.
+    CHECK(ach.leaderboardTitle(4003).isEmpty());
+    CHECK(ach.leaderboardTitle(0).isEmpty());
 
     // None of the four attempt events touches the tracker overlay.
     CHECK(r.trackerCount == 0);

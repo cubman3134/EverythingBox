@@ -840,9 +840,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         retro_->showLeaderboardNotice(title, ra::attemptNotice(ra::EventKind::AttemptSubmitted, lb, willSubmit));
     });
     connect(ach_, &Achievements::leaderboardSubmitResult, this,
-            [this](unsigned, const QString& submitted, const QString& best, unsigned rank, unsigned entries) {
+            [this](unsigned, const QString& title, const QString& submitted, const QString& best,
+                   unsigned rank, unsigned entries) {
         ra::Scoreboard sb; sb.submitted = submitted; sb.best = best; sb.newRank = rank; sb.numEntries = entries;
-        retro_->showLeaderboardNotice(QString(), ra::scoreboardNotice(sb));
+        // #312: the card's title line NAMES THE BOARD. Empty when the lookup found nothing, and
+        // showLeaderboardNotice already falls back to its generic heading for exactly that - which is what
+        // this notice always said before, so the worst case is unchanged rather than worse.
+        retro_->showLeaderboardNotice(title, ra::scoreboardNotice(sb));
     });
     connect(ach_, &Achievements::leaderboardTrackerChanged, this, [this](bool visible, const QString& display) {
         retro_->setLeaderboardTracker(visible, display);

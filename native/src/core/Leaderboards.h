@@ -64,9 +64,17 @@ namespace ra
     };
 
     // The server's answer to a submitted attempt (RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD).
+    //
+    // `title` is the BOARD'S NAME, and it does not come from the scoreboard event: rcheevos' scoreboard
+    // carries the leaderboard's ID and its values, and leaves event->leaderboard null (issue #312). It is
+    // looked up by id at the point the notice is built (Achievements::leaderboardTitle ->
+    // rc_client_get_leaderboard_info) and is EMPTY when the lookup finds nothing — no game loaded, or a board
+    // rc_client does not know — in which case the notice falls back to its generic heading rather than
+    // inventing a name. Nothing here is logged: a board's name says what is being played and how well.
     struct Scoreboard
     {
         unsigned id = 0;
+        QString  title;       // the board this result is FOR; empty -> the notice's generic heading
         QString  submitted;   // the value that was sent
         QString  best;        // the player's best value on this board
         unsigned newRank = 0;

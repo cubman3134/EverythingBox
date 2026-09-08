@@ -231,7 +231,7 @@ struct SignalSink : ra::Sink
     void attemptSubmitted(const ra::Leaderboard& lb) override
     { emit ach->leaderboardAttemptSubmitted(lb.id, lb.title, lb.trackerValue, submits); }
     void submitResult(const ra::Scoreboard& sb) override
-    { emit ach->leaderboardSubmitResult(sb.id, sb.submitted, sb.best, sb.newRank, sb.numEntries); }
+    { emit ach->leaderboardSubmitResult(sb.id, sb.title, sb.submitted, sb.best, sb.newRank, sb.numEntries); }
     void trackerChanged(bool visible, const QString& display) override
     { emit ach->leaderboardTrackerChanged(visible, display); }
 };
@@ -422,10 +422,23 @@ bool Achievements::hardcoreActive() const
 
 void Achievements::handleLeaderboardEvent(const ra::Event& e)
 {
+    // THE BOARD'S NAME, LOOKED UP BY ID (issue #312). rcheevos' scoreboard event carries the leaderboard's
+    // id and its values and leaves event->leaderboard null, so the one notice that most deserves a name -
+    // "you placed 7th of 913" - had none, and with several boards on one game that is a real ambiguity.
+    // Resolved HERE, at the point the notice's data is assembled, rather than in the rc_client trampoline:
+    // this is the seam a probe drives, so both arms of the rule are reachable without an account.
+    //
+    // An empty answer is left empty. rc_client not knowing the id (no game loaded, a board outside the
+    // session) means the UI falls back to its generic heading, which is the honest thing - never a guess.
+    // A title the caller already supplied is kept, so this can never overwrite a known name with nothing.
+    ra::Event ev = e;
+    if (ev.kind == ra::EventKind::SubmitResult && ev.scoreboard.title.isEmpty())
+        ev.scoreboard.title = leaderboardTitle(ev.scoreboard.id);
+
     // The submission verdict is read ONCE per event and carried into the signals, so a start and its submit
     // cannot disagree about whether the run counts.
     SignalSink sink(this, leaderboardsSubmit());
-    ra::dispatch(e, tracker_, sink);
+    ra::dispatch(ev, tracker_, sink);
 }
 
 void Achievements::clearLeaderboardTracker()
@@ -462,6 +475,17 @@ QVector<ra::Leaderboard> Achievements::leaderboards() const
                 out.push_back(toLeaderboard(lb));
     rc_client_destroy_leaderboard_list(list);
     return out;
+}
+
+// ONE board's name, by id. Reads the game data rc_client already fetched with the achievement set, so it
+// makes no network call and costs nothing worth caching. Empty for an unknown id or with no game loaded -
+// the caller's fallback, not an error (#312). NOTHING is logged: a board's name says what is being played.
+QString Achievements::leaderboardTitle(unsigned id) const
+{
+    auto* st = static_cast<RAState*>(impl_);
+    if (!st || !st->client) return QString();
+    const rc_client_leaderboard_t* lb = rc_client_get_leaderboard_info(st->client, uint32_t(id));
+    return (lb && lb->title) ? QString::fromUtf8(lb->title) : QString();
 }
 
 // ---- Rich presence (#94 increment 2) ---------------------------------------------------------------------
