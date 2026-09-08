@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.208 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.209 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -722,6 +722,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         # are what probe_jfdownload drives.
         src/core/JellyfinDownload.cpp    src/core/JellyfinDownload.h
         src/core/OfflineProgress.cpp     src/core/OfflineProgress.h
+        # ASKING FOR SOMETHING YOU DO NOT HAVE (#109). Requests.h/.cpp is the BACKEND-NEUTRAL pure half
+        # (the TMDB/IMDB id path, the state vocabulary, the failure sentences, the anti-duplicate rule and
+        # the shelf's grouping) and RequestBackend.h is the seam over it - EverythingBoxServer#16 grows a
+        # second implementation and must extend this surface rather than grow a parallel one. Jellyseerr.h
+        # is the only file that knows one service's wire format; the store holds the API key device-local
+        # ("jellyseerr/" is carved out of the synced bundle) and RequestStore holds the profile's own rows.
+        # probe_requests drives all of it against fixtures and a loopback stub.
+        src/core/Requests.cpp            src/core/Requests.h
+        src/core/RequestBackend.h
+        src/core/Jellyseerr.cpp          src/core/Jellyseerr.h
+        src/core/JellyseerrStore.cpp     src/core/JellyseerrStore.h
+        src/core/JellyseerrClient.cpp    src/core/JellyseerrClient.h
+        src/core/RequestStore.cpp        src/core/RequestStore.h
         # AUDIOBOOKSHELF CLIENT (#197 increment 1): an Audiobookshelf server as a supplier of the audiobook
         # shapes #139's local library uses, plus its podcasts. Audiobookshelf.h/.cpp is the pure half (the
         # id scheme, the URL rules, the payload readers, the chapter arithmetic, the reporting throttle) and
@@ -922,6 +935,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # one above it: nothing here is about how an item is played FROM a server, and #83's file is already
         # a complete thought.
         src/ui/MainWindowJellyfinDownload.cpp
+        # #109: the Request action, the Requests shelf and the request-service settings. Its OWN TU (the
+        # #186 direction) - and every submission in this feature happens at exactly one call site in it.
+        src/ui/MainWindowRequests.cpp
         # ...and the browse levels' half of the same feature, out of HomeView.cpp for the same reason.
         src/ui/HomeViewJellyfin.cpp
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
@@ -3105,6 +3121,36 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/StreamHeaders.h)
     target_include_directories(probe_absclient PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
     target_link_libraries(probe_absclient PRIVATE Qt6::Core Qt6::Network)
+
+    # ASKING FOR SOMETHING YOU DO NOT HAVE (issue #109), driven against recorded fixture payloads and a
+    # loopback HTTP stub. NEVER a real Jellyseerr and never a real account - the key in it is a literal
+    # "probe-fixture-..." string, and the last test in the file is a byte scan for it across everything the
+    # feature writes.
+    #
+    # The REAL client and the REAL stores, not fakes: half of what is under test is not a function of a
+    # payload - that the key rides a header rather than a query, that an IMDB item costs two round trips and
+    # a TMDB one costs one, that a submission with nothing sendable posts NOTHING, and that no failure path
+    # retries a POST. None of those can be asserted against a hand-built struct. The fake in this probe is a
+    # two-line RequestBackend, and it exists to assert the opposite thing: that the surface's own decision
+    # takes no backend identity at all.
+    #
+    # Jellyfin.cpp + JellyfinServerStore.cpp are linked because the "In your library" deep link mints a
+    # QUALIFIED id through #160's one minter, and refusing to guess between two servers is one of the
+    # assertions. Both TEST SEAMS are defined so every store writes to the probe's own temp ini - a probe
+    # that ran against the app's ini would put a fixture credential in the user's settings file.
+    add_executable(probe_requests tools/probe_requests.cpp
+        src/core/Requests.cpp            src/core/Requests.h
+        src/core/RequestBackend.h
+        src/core/Jellyseerr.cpp          src/core/Jellyseerr.h
+        src/core/JellyseerrStore.cpp     src/core/JellyseerrStore.h
+        src/core/JellyseerrClient.cpp    src/core/JellyseerrClient.h
+        src/core/RequestStore.cpp        src/core/RequestStore.h
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+    target_compile_definitions(probe_requests PRIVATE EB_REQUESTS_TEST_SEAM EB_JELLYFIN_TEST_SEAM)
+    target_include_directories(probe_requests PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    target_link_libraries(probe_requests PRIVATE Qt6::Core Qt6::Network)
 
     # The local READING library (issue #134, increment 1): the container reader (EpubMeta/BookMeta), the
     # comic filename rule (ComicName), the scan and grouping (BookLibrary) and the browse builders over it
