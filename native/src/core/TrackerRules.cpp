@@ -14,6 +14,96 @@
 
 using namespace tracker;
 
+// ================= the one send policy (issue #326) ======================================================
+
+// THE WHOLE OF WHAT A FAILED PUSH MEANS, for every tracker. This is increment 2's mal::backoffFor body,
+// MOVED rather than rewritten: the doubling, the clamp on the exponent, the "Retry-After only wins upward"
+// rule and the retry-by-default fallthrough are the same lines, with the four status FAMILIES lifted out
+// into the policy the caller hands in. mal::backoffFor is now a forwarder onto this, so every increment-2
+// assertion about MAL's numbers is an assertion about these ones.
+tracker::SendVerdict tracker::classifySend(const SendPolicy& p, int httpStatus, qint64 retryAfterSec,
+                                           int consecutiveFailures)
+{
+    SendVerdict v;
+    const int n = qMax(1, consecutiveFailures);
+    const qint64 baseMs = p.baseMs > 0 ? p.baseMs : 1;
+    const qint64 maxMs  = qMax(baseMs, p.maxMs);
+    // Doubling from the base, capped. The shift is CLAMPED before it is applied: a long outage would
+    // otherwise run the exponent past 63 and produce a negative delay, which qBound would then read as
+    // "wait the minimum" — a tight retry loop arrived at by arithmetic.
+    const qint64 grown = baseMs << qMin(n - 1, 20);
+    const qint64 base = qBound<qint64>(baseMs, grown, maxMs);
+    const qint64 asked = qMax<qint64>(0, retryAfterSec) * 1000;
+
+    if (httpStatus >= 200 && httpStatus < 300) return v;   // not a failure; nothing to decide
+
+    // The three named families are DISJOINT by construction, so the order they are asked in cannot matter.
+    if (p.permanent.contains(httpStatus))
+    {
+        // Never acceptable by waiting, so the row is dropped rather than left to wedge the head of the
+        // queue for ever — every later chapter behind it would be lost too.
+        v.permanent = true;
+        return v;
+    }
+    if (p.reauth.contains(httpStatus))
+    {
+        // The TOKEN, not the request. Refresh and try again; the row stays queued. Deliberately NOT
+        // lengthened by a Retry-After: the wait here is ours, and the header is about the rate limit.
+        v.retry = true; v.reauth = true; v.delayMs = base;
+        return v;
+    }
+    if (p.throttle.contains(httpStatus))
+    {
+        // Rate limited. The service's own Retry-After wins whenever it asks for LONGER than we would wait;
+        // a header asking for less is not honoured downward, because the base is there to protect the
+        // account rather than to be the smallest legal wait.
+        v.retry = true; v.delayMs = qMax(base, asked);
+        return v;
+    }
+    // EVERYTHING ELSE IS RETRYABLE, and that is the safe default rather than an oversight: 5xx and 0 ("no
+    // reply at all") are a waiting problem, and a 4xx nobody has thought about must not cost somebody
+    // their queue. A status a provider really will never accept is named in its policy, not guessed here.
+    v.retry = true;
+    v.delayMs = qMax(base, asked);
+    return v;
+}
+
+// ================= the OAuth loopback callback (issue #326) ==============================================
+
+tracker::LoopbackCallback tracker::parseLoopbackRequest(const QByteArray& httpRequest)
+{
+    LoopbackCallback out;
+    // The REQUEST LINE only. Everything we want is in the target, and reading no further means a header a
+    // browser invented can never reach the query parser.
+    const QByteArray line = httpRequest.left(httpRequest.indexOf('\r'));
+    const int sp1 = line.indexOf(' ');
+    const int sp2 = line.indexOf(' ', sp1 + 1);
+    if (sp1 < 0 || sp2 <= sp1) return out;   // not a request line; nothing to read out of it
+    const QString target = QString::fromUtf8(line.mid(sp1 + 1, sp2 - sp1 - 1));
+    const QUrlQuery q(QUrl::fromEncoded(("http://localhost" + target.toUtf8())).query());
+    out.error = q.queryItemValue(QStringLiteral("error"));
+    out.code  = q.queryItemValue(QStringLiteral("code"));
+    out.state = q.queryItemValue(QStringLiteral("state"));
+    return out;
+}
+
+qint64 tracker::retryAfterSeconds(const QByteArray& headerValue)
+{
+    bool ok = false;
+    const qint64 secs = QString::fromLatin1(headerValue).trimmed().toLongLong(&ok);
+    return (ok && secs > 0) ? secs : 0;
+}
+
+QByteArray tracker::loopbackResponse(bool signedIn)
+{
+    const QByteArray page = signedIn
+        ? QByteArray("Signed in. You can close this tab and go back to the app.")
+        : QByteArray("Sign-in was not completed. You can close this tab.");
+    return "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+           "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n"
+           "Content-Length: " + QByteArray::number(page.size()) + "\r\n\r\n" + page;
+}
+
 // ================= the AniList wire =====================================================================
 
 QString anilist::authorizeUrl(const QString& authBase, const QString& clientId, const QString& redirectUri)
@@ -545,42 +635,76 @@ int mal::scoreFromMal(int ten)
     return qBound(0, ten, 10) * 10;
 }
 
+tracker::SendPolicy mal::sendPolicy()
+{
+    SendPolicy p;
+    // A media id the account cannot write (400), an entry that no longer exists (404), or a field MAL's own
+    // validation refuses (422). None of the three becomes acceptable by waiting.
+    //
+    // 403 is deliberately NOT here. MAL answers a suspended account and a temporarily-refused client with
+    // the same status, and dropping every queued chapter for the second of those is the worse mistake.
+    p.permanent = { 400, 404, 422 };
+    p.reauth    = { 401 };
+    p.throttle  = { 429 };
+    p.baseMs    = kBackoffBaseMs;
+    p.maxMs     = kBackoffMaxMs;
+    return p;
+}
+
+// THE FORWARDER (#326). Every line that used to be here is now tracker::classifySend, asked with the policy
+// above; what MAL answers to any (status, Retry-After, failure count) is unchanged to the millisecond.
 mal::Backoff mal::backoffFor(int httpStatus, qint64 retryAfterSec, int consecutiveFailures)
 {
+    const SendVerdict v = classifySend(sendPolicy(), httpStatus, retryAfterSec, consecutiveFailures);
     Backoff b;
-    const int n = qMax(1, consecutiveFailures);
-    // Doubling from the base, capped. The shift is CLAMPED before it is applied: a long outage would
-    // otherwise run the exponent past 63 and produce a negative delay, which qBound would then read as
-    // "wait the minimum" — a tight retry loop arrived at by arithmetic.
-    const qint64 grown = kBackoffBaseMs << qMin(n - 1, 20);
-    const qint64 base = qBound<qint64>(kBackoffBaseMs, grown, kBackoffMaxMs);
-    const qint64 asked = qMax<qint64>(0, retryAfterSec) * 1000;
-
-    if (httpStatus >= 200 && httpStatus < 300) return b;   // not a failure; nothing to decide
-
-    switch (httpStatus)
-    {
-        case 401:
-            // The TOKEN, not the request. Refresh and try again; the row stays queued.
-            b.retry = true; b.reauth = true; b.delayMs = base; return b;
-        case 429:
-            // Rate limited. MAL's own Retry-After wins whenever it asks for LONGER than we would wait; a
-            // header asking for less is not honoured downward, because the base is there to protect the
-            // account rather than to be the smallest legal wait.
-            b.retry = true; b.delayMs = qMax(base, asked); return b;
-        case 400: case 404: case 422:
-            // A media id the account cannot write, or an entry that no longer exists. NEVER acceptable by
-            // waiting, so the row is dropped rather than left to wedge the head of the queue forever.
-            b.permanent = true; return b;
-        default:
-            break;
-    }
-    // 403 is deliberately NOT permanent. MAL answers a suspended account and a temporarily-refused client
-    // with the same status, and dropping every queued chapter for the second of those is the worse mistake.
-    // 5xx, and 0 for "no reply at all", are the same waiting problem.
-    b.retry = true;
-    b.delayMs = qMax(base, asked);
+    b.retry     = v.retry;
+    b.reauth    = v.reauth;
+    b.permanent = v.permanent;
+    b.delayMs   = v.delayMs;
     return b;
+}
+
+// ================= what an AniList push RESPONSE means (issue #326) ======================================
+
+bool anilist::saveAccepted(int httpStatus, const QByteArray& body)
+{
+    // INCREMENT 1'S TEST, UNCHANGED. A GraphQL error arrives as HTTP 200 with an `errors` array and no
+    // `data`, so transport success is not acceptance: anything that is not a SaveMediaListEntry payload
+    // leaves the row queued.
+    return httpStatus >= 200 && httpStatus < 300 && body.contains("SaveMediaListEntry");
+}
+
+int anilist::effectiveStatus(int httpStatus, const QByteArray& body)
+{
+    if (httpStatus < 200 || httpStatus >= 300) return httpStatus;
+    // A 2xx that was not an acceptance is a GraphQL error payload, and AniList puts the status it WOULD
+    // have answered with inside the error object. The FIRST one that carries a status wins — a mutation
+    // refused for two reasons is still refused for the first of them.
+    const QJsonArray errs = QJsonDocument::fromJson(body).object()
+                                .value(QStringLiteral("errors")).toArray();
+    for (const QJsonValue& e : errs)
+    {
+        const int s = e.toObject().value(QStringLiteral("status")).toInt();
+        if (s > 0) return s;
+    }
+    // 0 — which classifySend treats as RETRYABLE, exactly as increment 1 treated every failure it could
+    // not read. An error shape we do not recognise must never cost somebody their queue.
+    return 0;
+}
+
+tracker::SendPolicy anilist::sendPolicy()
+{
+    SendPolicy p;
+    // 400: a mutation AniList's schema refuses — a retry sends the identical bytes and gets the identical
+    // answer. 404: the media, or the account's list entry for it, is gone. Neither can become a success.
+    // 422 is absent because this GraphQL endpoint does not emit it (see the header), and 403 is absent for
+    // the reason MAL's is.
+    p.permanent = { 400, 404 };
+    p.reauth    = { 401 };
+    p.throttle  = { 429 };
+    p.baseMs    = kBackoffBaseMs;
+    p.maxMs     = kBackoffMaxMs;
+    return p;
 }
 
 // ================= how sure we are of a match ============================================================
