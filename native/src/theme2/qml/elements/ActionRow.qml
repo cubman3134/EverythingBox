@@ -46,6 +46,12 @@ Item {
     // the sentence the toast showed, kept verbatim so the page and the toast cannot say different things.
     readonly property string failure: (sel && sel.failure) ? sel.failure : ""
     readonly property string failureWhen: (sel && sel.failureWhen) ? sel.failureWhen : ""
+    // The Request pill's state (issue #109), supplied by themedDetailData only for a movie/series row that
+    // carries a TMDB or IMDB id AND has a request service to ask. `requestLabel` IS the state made visible —
+    // "Request", "In your library", "Waiting for approval", "Request (status unknown)" — because a pill that
+    // said "Request" over a title the server already has would be a button that creates a duplicate.
+    readonly property string requestLabel: (sel && sel.requestLabel) ? sel.requestLabel : "Request"
+    readonly property string requestState: (sel && sel.requestState) ? sel.requestState : ""
     readonly property bool followed: !!(sel && sel.followed)
     readonly property int  newCount: (sel && sel.newCount) ? sel.newCount : 0
     readonly property bool zoneFocused: !!(host && host.detailZone === "actions")
@@ -90,6 +96,17 @@ Item {
                                                            : "\uff0b  Follow"),
                                           color: (followed ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         if (verb === "markseen") return { label: "\u2713\u2713  Mark all seen", color: "#E7EBF2", textColor: "#33405A" }
+        // Asking an acquisition pipeline for something this library does not have (issue #109). Three
+        // looks, one per outcome: green once it is in the library (this pill then OPENS it and can never
+        // create a duplicate), grey while it is somebody else's to approve or fetch, amber when pressing
+        // it would actually ask for something.
+        if (verb === "request")  return { label: "🙋  " + requestLabel,
+                                          color: (requestState === "available" ? "#CFE3D2"
+                                                : (requestState === "pending" || requestState === "approved"
+                                                   || requestState === "processing") ? "#E7EBF2" : "#FFE9D6"),
+                                          textColor: (requestState === "available" ? "#1E5B33"
+                                                    : (requestState === "pending" || requestState === "approved"
+                                                       || requestState === "processing") ? "#33405A" : "#7A4300") }
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "external") return { label: "🔗  Open in external player",         color: "#7C5CFF", textColor: "#FFFFFF" }
         if (verb === "builtin")  return { label: "🖥  Play with built-in player",       color: "#E7EBF2", textColor: "#33405A" }

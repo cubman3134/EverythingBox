@@ -18,6 +18,7 @@
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 #include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
 #include "../core/Channels.h"        // #179: the channel model the editor edits
+#include "../core/Requests.h"        // #109: requests::UiState — the Request action's drawable state
 #include "../core/IptvSourceStore.h" // IptvSource — the Live TV source passed to fetchLiveTvChannels (#75)
 #include "../core/XmltvGuide.h"      // xmltv::Guide — the parsed EPG held per open source (#75 inc 3)
 #include "../media/StreamResolver.h" // M3uEntry — the in-session channel cache member's element type (#75)
@@ -98,6 +99,17 @@ public:
     // "Choose source…" on the themed detail row for the browse-item at `browseIndex`: emits
     // chooseSourceRequested with that item, which MainWindow turns into the picker.
     void requestChooseSource(int browseIndex);
+    // ---- Requests (issue #109) -------------------------------------------------------------------------
+    // What a request service has said about one title, pushed here by MainWindow (which owns the network
+    // object) and read by BOTH detail surfaces. The view never asks anybody anything: it draws what it has
+    // been told and emits requestStatusNeeded when a detail page appears. The struct itself is
+    // requests::UiState — it is not view-shaped and both layouts plus MainWindow pass it between them.
+    using RequestUiState = requests::UiState;
+    void setRequestState(const QString& key, const RequestUiState& state);
+    // Resolve a themed browse index to the item a Request would be about NOW, while the index is still
+    // valid — the romhackTargetAt discipline, and for the same reason (crash #28).
+    bool requestTargetAt(int browseIndex, MediaItem* itemOut) const;
+
     // Resolve a themed browse index to the romhack target NOW, while the index is still valid. The caller
     // then DEFERS the overlay a turn (crash #28): opening one from inside a QML activated handler runs a
     // nested loop under the delegate that is still emitting, and browseRowMap_ can be rebuilt in that window.
@@ -480,6 +492,17 @@ signals:
     // catalogs one; the two container kinds take the batch verbs and the leaf takes the single one.
     void jellyfinDownloadRequested(int kind, const QString& ref, const QString& seasonRef,
                                    const QString& title, const QString& thumb);
+    // #109: a detail page has appeared for an item that CAN be requested — fetch its status. READ-ONLY on
+    // the other end, and emitted on view rather than polled: the issue asks for exactly that. It is not a
+    // request for anything and MainWindow's handler cannot submit.
+    void requestStatusNeeded(const MediaItem& item);
+    // #109: the Request verb was PRESSED, on the classic button or the themed pill. MainWindow owns the
+    // confirmation, the season picker and the one call that submits — this view only says WHICH item, and
+    // only ever in response to a press.
+    void requestRequested(const MediaItem& item);
+    // #109: "In your library" was pressed. The qualified id was resolved when the status landed, so the
+    // deep link cannot drift onto another row; MainWindow opens it through the #83 path.
+    void requestLibraryOpen(const QString& qualifiedId, const QString& title, const QString& thumb);
     // A game leaf that a NATIVE PORT is bound to, asking to run on it (issue #233). MainWindow owns the
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.
@@ -1173,6 +1196,16 @@ private:
     // themed action row's "tracker" pill. Hidden entirely until an AniList client is configured, so a
     // user who does not use a tracker never sees it.
     QPushButton* trackBtn_ = nullptr;
+    // "Request" / "In your library" — the classic twin of the themed action row's "request" pill (#109).
+    // Hidden entirely for an item carrying no TMDB/IMDB id and for a profile with no request service, so
+    // most pages never grow it. Its LABEL is the state: pressing it is only ever a submission when it says
+    // so, and the anti-duplicate branch relabels it rather than leaving a button that would fetch a second
+    // copy of something already on the shelf.
+    QPushButton* requestBtn_ = nullptr;
+    // Per-title request state, keyed by requests::MediaRef::key(). Filled by setRequestState from
+    // MainWindow's on-view lookup; read by both detail builders. Session-lived on purpose — the status is
+    // fetched on view and never cached across runs, so a stale badge cannot outlive the fact.
+    QHash<QString, RequestUiState> requestState_;
     QPushButton* manualBtn_ = nullptr;   // 📖 "Manual" — open the scraped game manual (issue #89), on demand
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
@@ -1197,6 +1230,13 @@ private:
     // Apply this item's recorded failure (if any) to the classic detail page: the banner's text and
     // visibility, and whether the two verbs above are offered.
     void applyOpenFailureToDetail(const MediaItem& it);
+    // #109's counterpart: the Request button's visibility and label for the item the classic detail page is
+    // showing, plus the ONE on-view status fetch it arms. Called on every detail build, so an item with no
+    // ids clears what the previous item showed.
+    void applyRequestStateToDetail(const MediaItem& it);
+    // The Request pill's state for one item, as both detail builders read it. Returns ActionKind::None
+    // (spelled as an empty token) when there is no action to offer at all.
+    RequestUiState requestStateFor(const MediaItem& it) const;
     // The classic grid row's text — title, the followed-series unread count, the #239 marker, the subtitle.
     // A function rather than a block inside fillGrid because refreshOpenFailureMarks re-derives it in place.
     QString browseRowLabel(const MediaItem& it) const;
