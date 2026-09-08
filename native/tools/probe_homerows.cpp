@@ -88,6 +88,8 @@ static void testDefaultIsToday()
     {
         QStringList woServer = defaultShelfOrder();
         woServer.removeAll(QStringLiteral("jellyfin:continue"));
+        // ...and #109's, which is LAST and is likewise a producer an untouched profile cannot produce.
+        woServer.removeAll(QStringLiteral("requests"));
         CHECK(woServer == classicToday);
     }
 
@@ -106,7 +108,9 @@ static void testDefaultIsToday()
     // built-in list is classicToday with "jellyfin:continue" inserted after the local recently-played shelf.
     const QStringList builtIn{ QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
                                QStringLiteral("new"), QStringLiteral("trakt:calendar"),
-                               QStringLiteral("favorites") };
+                               QStringLiteral("favorites"),
+                               // #109: the Requests shelf, last, and empty until somebody presses Request.
+                               QStringLiteral("requests") };
     CHECK(defaultShelfOrder() == builtIn);
     // Every one of `classicToday` is still there, in its old relative order — the property that matters, and
     // one an equality check on the whole list would leave implicit.
@@ -123,9 +127,11 @@ static void testDefaultIsToday()
     }
     // ...and when the server DOES produce rows, the shelf lands where the order says.
     CHECK(spell(plan(avail(builtIn), {}))
-          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites"));
+          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites requests"));
     // A built-in shelf, not an opt-in one: it does not need a row in the list to appear.
     CHECK(!isOptInShelf(QStringLiteral("jellyfin:continue")));
+    CHECK(!isOptInShelf(QStringLiteral("requests")));
+    CHECK(isKnownRowId(QStringLiteral("requests")));
 
     // ...and it still holds when the home has fewer rows than the full set (no Trakt account configured),
     // which is the shape most installs actually have.
@@ -263,7 +269,7 @@ static void testStore()
     CHECK(HomeRowStore::list().isEmpty());
     CHECK(!HomeRowStore::isCustomised());
     CHECK(spell(plan(avail(defaultShelfOrder()), HomeRowStore::list()))
-          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites"));
+          == QStringLiteral("continue jellyfin:continue new trakt:calendar favorites requests"));
 
     // A negative cap never reaches a caller.
     HomeRowStore::save({ row(QStringLiteral("continue"), true, -3) });

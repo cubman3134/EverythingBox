@@ -53,6 +53,9 @@
 #include "../core/FilterPresetStore.h" // per-profile saved filter presets (#63)
 #include "../core/TraktClient.h"   // calendarAvailable()/cachedCalendar() — the Trakt shelf's only gate (#23)
 #include "../core/HomeRows.h"   // issue #161: the per-profile home row list + the pure planner
+#include "../core/Requests.h"        // #109: the id path, the vocabulary, the anti-duplicate rule
+#include "../core/RequestBackend.h"  // #109: the seam — and the chooser that says whether ANY backend is set up
+#include "../core/RequestStore.h"    // #109: this profile's own request rows (the Requests shelf)
 #include "CarouselView.h"
 #include "XmbView.h"
 #include <QHash>
@@ -881,6 +884,44 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     romhackBtn_->installEventFilter(this);
     arl->addWidget(romhackBtn_);
+
+    // "Request" / "In your library": ask an acquisition pipeline for a film or series this library does not
+    // have (issue #109). Shown on ANY movie/series page carrying a TMDB or IMDB id — not only on rows that
+    // came from a media server, because a catalogue title you cannot stream is exactly the thing somebody
+    // wants to request.
+    //
+    // ITS LABEL IS ITS STATE, and that is the anti-duplicate rule made visible: when the service says the
+    // title is already on the linked server the button reads "In your library" and OPENS it, so there is no
+    // press on this page that could ever create a second copy of something you already have. A press only
+    // submits when the button says "Request", and MainWindow asks once more before anything leaves.
+    requestBtn_ = new QPushButton(tr("🙋  Request"), actionRow_);
+    requestBtn_->setCursor(Qt::PointingHandCursor);
+    requestBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#FFE9D6;border:2px solid #D98A3B;border-radius:6px;"
+        "padding:6px 14px;color:#7A4300;font-weight:bold;}"
+        "QPushButton:hover{background:#FBD9BC;}"
+        "QPushButton:focus{background:#F5C79C;border-color:#B26A20;}"));
+    requestBtn_->setVisible(false);
+    connect(requestBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem it = stack_.last().item;
+        const requests::MediaRef ref = requests::refFor(it.id, it.imdbStreamId, it.type);
+        if (!ref.ok()) return;                       // the gate below should have hidden the button already
+        const RequestUiState st = requestState_.value(ref.key());
+        // The already-available branch never submits: it goes where the copy is. An empty libraryRef means
+        // we could not say WHICH server holds it (several are configured), so the press does nothing rather
+        // than open the wrong one — the badge has already told the user it is there.
+        if (st.token == requests::statusToken(requests::Availability::Available))
+        {
+            if (!st.libraryRef.isEmpty())
+                emit requestLibraryOpen(st.libraryRef, it.title, it.thumbnailUrl);
+            return;
+        }
+        if (!st.press) return;                       // in flight: a badge, not a button
+        emit requestRequested(it);
+    });
+    requestBtn_->installEventFilter(this);
+    arl->addWidget(requestBtn_);
 
     // "Fix this entry…": the PC-game merge override (issue #44), on the page of the entry it is about. A
     // wrongly merged tile is only identifiable while you are looking at it — one "Prey" with two Steam
@@ -1731,6 +1772,79 @@ void HomeView::applyOpenFailureToDetail(const MediaItem& it)
     if (dismissBtn_) dismissBtn_->setVisible(show);
 }
 
+// ==========================================================================================================
+// REQUESTS (issue #109) — the view's half
+// ==========================================================================================================
+// This view never asks a service anything. It works out whether there is an action to offer at all (which is
+// a pure question — requests::refFor plus "is any backend configured"), draws whatever MainWindow has told it,
+// and emits requestStatusNeeded when a detail page appears. Every submission is MainWindow's, from a press.
+
+// What the pill/button says for this item, before or after a status has landed.
+HomeView::RequestUiState HomeView::requestStateFor(const MediaItem& it) const
+{
+    RequestUiState st;
+    const requests::MediaRef ref = requests::refFor(it.id, it.imdbStreamId, it.type);
+    // No id, or nothing set up to ask: NO ACTION AT ALL. The issue is explicit that an item carrying neither
+    // id shows no Request action rather than a broken one, and the same is true of a profile with no service.
+    if (!ref.ok() || requests::configuredBackend() == nullptr) return st;
+
+    const auto cached = requestState_.constFind(ref.key());
+    if (cached != requestState_.constEnd() && !cached->token.isEmpty()) return *cached;
+
+    // Nothing has landed yet. The button appears immediately — waiting for a round trip before drawing it
+    // would make the page visibly rearrange itself a second after it opened — and it says what it is: a
+    // Request whose status we have not been told. It is NEVER drawn as "pending".
+    st.token = requests::statusToken(requests::Availability::Unknown);
+    st.label = requests::actionLabel(requests::ActionKind::Unknown, requests::Availability::Unknown);
+    st.press = true;
+    return st;
+}
+
+void HomeView::setRequestState(const QString& key, const RequestUiState& state)
+{
+    if (key.isEmpty()) return;
+    requestState_.insert(key, state);
+    // Repaint the page if it is the one this answer is about. Cheap and local: no reload, no re-resolve.
+    if (!stack_.isEmpty() && stack_.last().detail)
+    {
+        const MediaItem& cur = stack_.last().item;
+        if (requests::refFor(cur.id, cur.imdbStreamId, cur.type).key() == key)
+        {
+            if (requestBtn_)
+            {
+                const RequestUiState st = requestStateFor(cur);
+                requestBtn_->setVisible(!st.token.isEmpty());
+                if (!st.label.isEmpty()) requestBtn_->setText(QStringLiteral("🙋  ") + st.label);
+            }
+        }
+    }
+    // The THEMED card is re-pushed by MainWindow (it owns the QML root and the detail index) — see
+    // MainWindow::applyRequestState. Nothing here reaches the themed scene, which is why this half only
+    // touches the classic button.
+}
+
+void HomeView::applyRequestStateToDetail(const MediaItem& it)
+{
+    const RequestUiState st = requestStateFor(it);
+    if (requestBtn_)
+    {
+        requestBtn_->setVisible(!st.token.isEmpty());
+        if (!st.label.isEmpty()) requestBtn_->setText(QStringLiteral("🙋  ") + st.label);
+    }
+    // FETCHED ON VIEW, NEVER POLLED — and only when there is an action to fetch a status for. A read-only
+    // call: it changes nothing on the service, and MainWindow's handler for it cannot submit.
+    if (!st.token.isEmpty()) emit requestStatusNeeded(it);
+}
+
+bool HomeView::requestTargetAt(int browseIndex, MediaItem* itemOut) const
+{
+    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return false;
+    const MediaItem& it = items_[browseRowMap_[browseIndex]];
+    if (requestStateFor(it).token.isEmpty()) return false;
+    if (itemOut) *itemOut = it;
+    return true;
+}
+
 // The classic grid row's text. Lifted out of fillGrid so refreshOpenFailureMarks can re-derive it in place:
 // the failure usually happens WITH THE SHELF ON SCREEN, so waiting for the next model rebuild would mean the
 // marker appeared only after the user navigated away and back — which is the fading toast's problem again.
@@ -1924,6 +2038,8 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
     out.push_back({ QStringLiteral("new"), tr("New"), true });
     out.push_back({ QStringLiteral("trakt:calendar"), tr("Airing Soon"), true });
     out.push_back({ QStringLiteral("favorites"), tr("★ Favorites"), true });
+    // #109: what this profile has asked for. Built-in, so the editor can move or hide it like any other.
+    out.push_back({ QStringLiteral("requests"), tr("🙋 Requested"), true });
     // ...and the opt-in ones, offered whether or not they currently hold anything: this is the ADD list, and a
     // producer that is empty today is exactly the row a user wants to place before it fills up.
     out.push_back({ QStringLiteral("downloads"), tr("⬇ Downloaded"), true });
@@ -7809,6 +7925,53 @@ void HomeView::renderRecents()
         return out;
     };
 
+    // "requests" — what this profile has ASKED for and does not have yet (issue #109), grouped by status
+    // through the one pure rule both layouts share (requests::shelfGroups). It draws the LOCAL store and
+    // never fetches: renderRecents runs on every Back and on every store change, and a fetch here would be a
+    // request per navigation. MainWindow refreshes the statuses and the store's change hook re-renders.
+    //
+    // A built-in shelf, and the #161 promise survives it: pushShelf drops an empty producer, so a profile
+    // that has never pressed Request gets no row, no header and no change of order whatsoever.
+    //
+    // WHAT THE ROWS ARE. A request row names a title this profile asked for; the status is its subtitle and
+    // the group it sits in. Opening one is the ordinary open for a catalogue row of that id — there is no
+    // special playback route here, and inventing one would be claiming a source we have not resolved. The
+    // deep link into the library lives where the check that establishes it does: on the detail page's
+    // "In your library" action.
+    //
+    // The shelf NAMES ITSELF in every group header. requests::shelfGroups owns the grouping vocabulary
+    // (both layouts and any second backend share it); the "Requested" part is this surface's, because a
+    // bare "On the way" floating on the home screen says nothing about what is on the way.
+    auto buildRequests = [this]() {
+        QVector<Group> out;
+        for (const requests::ShelfGroup& sg : requests::shelfGroups(RequestStore::list()))
+        {
+            Group g;
+            g.header = tr("🙋 Requested — %1").arg(sg.header);
+            for (const requests::StoredRequest& r : sg.items)
+            {
+                MediaItem it;
+                it.id = r.tmdb.isEmpty() ? r.imdb
+                                         : (QStringLiteral("tmdb:")
+                                            + (r.mediaType == requests::kTv() ? QStringLiteral("tv")
+                                                                              : QStringLiteral("movie"))
+                                            + QLatin1Char(':') + r.tmdb);
+                it.title = r.title.isEmpty() ? tr("(untitled request)") : r.title;
+                // The STATUS is the subtitle, because a request's whole point is that you are waiting for
+                // it and the shelf has to say what it is waiting on. Never "pending" by default: an
+                // unrefreshed row says so in its own words.
+                it.subtitle = requests::availabilityLabel(requests::availabilityFromToken(r.status));
+                it.type = (r.mediaType == requests::kTv()) ? QStringLiteral("series")
+                                                           : QStringLiteral("movie");
+                it.thumbnailUrl = r.thumb;
+                if (isHiddenItem(it)) continue;
+                g.items.push_back(correctedRow(it));
+            }
+            if (!g.items.isEmpty()) out.push_back(g);
+        }
+        return out;
+    };
+
     const QVector<homerows::Row> rowList = HomeRowStore::list();
 
     // The built-in shelves, in the order the home has always produced them. The order comes from
@@ -7822,6 +7985,7 @@ void HomeView::renderRecents()
         else if (id == QStringLiteral("new"))            pushShelf(id, StyleWhen,   buildNew());
         else if (id == QStringLiteral("trakt:calendar")) pushShelf(id, StyleWhen,   buildTraktCalendar());
         else if (id == QStringLiteral("favorites"))      pushShelf(id, StylePlain,  buildFavorites());
+        else if (id == QStringLiteral("requests"))       pushShelf(id, StylePlain,  buildRequests());
     }
     // The opt-in shelves — built ONLY for a row the list actually names (see homerows::isOptInShelf). Their
     // position on screen comes from the list, not from the order they are built in here.
@@ -10885,6 +11049,23 @@ QVariantMap HomeView::themedDetailData(int idx)
         if (followed && unread > 0) verbs << QStringLiteral("markseen");
     }
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
+    // "Request" / "In your library" (issue #109), the themed twin of the classic requestBtn_. Offered on any
+    // movie/series row carrying a TMDB or IMDB id when a request service is set up, and on nothing else — an
+    // item with neither id gets no pill rather than a broken one. The LABEL carries the state, so the
+    // already-available branch reads "In your library" and cannot create a duplicate.
+    {
+        const RequestUiState rq = requestStateFor(it);
+        if (!rq.token.isEmpty())
+        {
+            verbs << QStringLiteral("request");
+            out.insert(QStringLiteral("requestLabel"), rq.label);
+            out.insert(QStringLiteral("requestState"), rq.token);
+            // FETCHED ON VIEW, NEVER POLLED. themedDetailData is rebuilt whenever the card is re-pushed, so
+            // this can fire several times for one page — MainWindow's handler asks the service AT MOST ONCE
+            // per title per session, which is what makes "on view" cheap rather than a request per redraw.
+            emit requestStatusNeeded(it);
+        }
+    }
     verbs << QStringLiteral("playlist");
     // External-player one-off actions, only on leaves that resolve to VIDEO playback (audio/readers/games stay
     // built-in per spec) and only when the profile isn't restricted. The two pills have DISTINCT gates:
@@ -11453,6 +11634,9 @@ void HomeView::requestMeta(const MediaItem& item)
     // "Fix this entry…" only on a merged PC game — the only kind of row whose identity is a heuristic guess
     // the user may need to overrule (issue #44).
     if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));
+    // "Request" (issue #109). Applied on every detail build, so an item with no ids clears the button the
+    // PREVIOUS item may have shown it for, and the on-view status fetch is armed for the item now on screen.
+    applyRequestStateToDetail(item);
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
     // The failed-open banner and its two verbs (issue #239). Applied on every detail build, so an item with
     // no record clears the widgets the PREVIOUS item may have shown them for.

@@ -369,6 +369,21 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // keys everything under this prefix. probe_cloudmerge pins the carve-out; probe_absclient byte-scans
         // a fixture token against everything the feature writes.
         || key.startsWith(QStringLiteral("audiobookshelf/"))
+        // jellyseerr/* (issue #109): the request service's address and API KEY. The strongest credential in
+        // this family and the one with the widest blast radius — a Jellyseerr key is a standing grant over a
+        // household's whole acquisition pipeline, and it can queue downloads on somebody else's disk. Left
+        // in the heavy settings bundle it would put that key in a zip in a third party's Drive folder. The
+        // address rides with it for the same reason the OPDS and IPTV ones do: it is routinely a private LAN
+        // name that means nothing on another machine, and it is half of what identifies the credential.
+        // JellyseerrStore keys everything under this prefix; probe_requests byte-scans it.
+        || key.startsWith(QStringLiteral("jellyseerr/"))
+        // requests/* (issue #109): the rows on this profile's Requested shelf. NOT a credential — a row
+        // names a title, its ids and a status token, and probe_requests asserts the key is absent from it —
+        // but device-local for the followsnap/ and openfail/ reason: a row is a fact about the request
+        // service THIS device is linked to. A peer with a different service, or none, would show rows it can
+        // never refresh (complete with a "Ready to watch" badge for something not in its library), and the
+        // device that could correct them is not the device showing them.
+        || key.startsWith(QStringLiteral("requests/"))
         // followsnap/* (issue #155): what THIS device has already seen of each followed series, and which
         // children it has not shown you yet. The DEVICE-LOCAL half of the follow feature, and the inverse of
         // the "follow/" carve-out above. Same family and the same argument as #23's backfill watermark: it is

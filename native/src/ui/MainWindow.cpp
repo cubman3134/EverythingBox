@@ -95,6 +95,8 @@
 #include "../core/MediaDurations.h"  // #179: the duration index the lineup is gated on
 #include "../core/JellyfinDownload.h"     // issue #110: the offline-download cap + the remove-after-watched toggle
 #include "../core/JellyfinServerStore.h"  // issue #160: the connected Jellyfin servers (tokens device-local)
+#include "../core/JellyseerrStore.h"      // issue #109: the request service's status line (both builders)
+#include "../core/RequestStore.h"         // issue #109: this profile's own request rows
 #include "../core/ServerMusicClient.h"    // issue #194 inc 3: the connected servers that serve music
 #include "../core/JellyfinMigrate.h"      // issue #160: legacy bare ids -> jf:<serverId>:<itemId>, idempotent
 #include "../core/AbsClient.h"              // issue #197: the Audiobookshelf client + AbsSupply key routing
@@ -920,6 +922,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // session queued while offline. Immediately after the manager's own wiring, because the minter has to be
     // installed before any restored job can start.
     initJellyfinDownloads();
+    // #109: the request stores' change hooks (the Requests shelf and the settings status line). No network
+    // and no submission — see MainWindowRequests.cpp.
+    initRequests();
     PerfTrace::end(QStringLiteral("startup.addons"));
 
     home_ = new HomeView(addons_.get(), this);
@@ -943,6 +948,22 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         deferPastQmlEmission([this, kind, ref, seasonRef, title, thumb] {
             if (kind == int(Kind::Item)) downloadJellyfinItem(ref, title, thumb);
             else                         downloadJellyfinBatch(ref, seasonRef, title);
+        });
+    });
+    // #109: the Requests trio. The STATUS fetch is read-only and runs inline — it opens no overlay, so it
+    // needs no deferral and must not cost a turn on every detail draw. The PRESS and the library deep-link
+    // are deferred a turn for the reason every other verb that opens a NavMenu is: both arrive inside a
+    // clicked()/QML delivery and both spin a nested loop, which is the #28/#211 family. The item is carried
+    // BY VALUE across the boundary, so the grid moving under the overlay cannot make a press submit a
+    // request for a different title — the one mistake in this feature nobody can undo.
+    connect(home_, &HomeView::requestStatusNeeded, this, &MainWindow::fetchRequestStatus);
+    connect(home_, &HomeView::requestRequested, this, [this](const MediaItem& item) {
+        deferPastQmlEmission([this, item] { requestItemInteractive(item); });
+    });
+    connect(home_, &HomeView::requestLibraryOpen, this,
+            [this](const QString& qualifiedId, const QString& title, const QString& thumb) {
+        deferPastQmlEmission([this, qualifiedId, title, thumb] {
+            openJellyfinItem(qualifiedId, title, thumb);
         });
     });
     connect(home_, &HomeView::nativePortRequested, this, &MainWindow::showNativePort);   // issue #233
@@ -11101,6 +11122,18 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // Deferred for the same reason as pcfix below: showRomhacks opens NavMenu/NavConfirm, and running a
     // nested loop inside a themed activated handler is exactly crash #28. The index is resolved to the item
     // SYNCHRONOUSLY here, while browseRowMap_ still means what it meant when the row was pressed.
+    // "Request" / "In your library" (issue #109). The item is resolved to a VALUE here, synchronously, while
+    // browseRowMap_ still means what it meant when the pill was pressed — the romhack discipline below, and
+    // it bites hardest here: a stale index would submit a request for a different title on somebody else's
+    // server, which is the one act in this app that another press cannot undo. Deferred a turn because
+    // requestItemInteractive opens NavConfirm/NavMenu and a nested loop inside a themed activated handler is
+    // crash #28.
+    else if (verb == QStringLiteral("request"))
+    {
+        MediaItem target;
+        if (!home_->requestTargetAt(idx, &target)) return;
+        deferPastQmlEmission([this, target] { requestItemInteractive(target); });
+    }
     else if (verb == QStringLiteral("romhack"))
     {
         MediaItem target;
@@ -22316,6 +22349,14 @@ void MainWindow::openGeneralSettings()
         sep(tr("Jellyfin"));
         action(QStringLiteral("jellyfin.servers"), tr("Jellyfin servers…"));
         info(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine());
+        // --- Requests (#109): the service that goes and gets things you do not have. ONE row, because set
+        // up / replace the key / forget it are three verbs about one credential. The classic twin is in the
+        // QWidget builder below; a setting in one builder only is unreachable in the other mode. The info
+        // line under it is the ONE place that says whether anything is set up at all, and — see
+        // JellyseerrStore::statusLine — it names no address, no account and no key.
+        sep(tr("Requests"));
+        action(QStringLiteral("requests.service"), tr("Request service…"));
+        info(QStringLiteral("requests.status"), tr("Requests"), JellyseerrStore::statusLine());
         // --- Downloads (#110): the offline-viewing hygiene pair. Both DEVICE-LOCAL by nature — they are
         // about the files on THIS disk — and both under the "downloads" prefix CloudSync::isDeviceLocalKey
         // already carves out of the synced bundle. Twins live in the QWidget builder below.
@@ -23114,6 +23155,22 @@ void MainWindow::openGeneralSettings()
                         home_->manageJellyfinServersInteractive();
                         setInfo(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"),
                                 jellyfinServerStatusLine());
+                    }, Qt::QueuedConnection);
+                }
+                else if (id == QStringLiteral("requests.service")) {
+                    // #109. Deferred a turn for the same reason the row above it is: the manager spins
+                    // Osk / NavMenu / NavConfirm nested loops inside the themed panel's own activation.
+                    // The status line is refreshed on the way back out AND from the store's change hook,
+                    // because the verify step is asynchronous and the click alone would leave the line a
+                    // service behind.
+                    requestsStatusUpdate_ = [this, setInfo] {
+                        setInfo(QStringLiteral("requests.status"), tr("Requests"),
+                                JellyseerrStore::statusLine());
+                    };
+                    QMetaObject::invokeMethod(this, [this, setInfo] {
+                        manageRequestServiceInteractive();
+                        setInfo(QStringLiteral("requests.status"), tr("Requests"),
+                                JellyseerrStore::statusLine());
                     }, Qt::QueuedConnection);
                 }
                 else if (id == QStringLiteral("music.addserver")) {
@@ -24395,6 +24452,37 @@ void MainWindow::openGeneralSettings()
             if (!home_) return;
             home_->manageJellyfinServersInteractive();
             jfSrvStatus->setText(jellyfinServerStatusLine());
+        });
+        v->addSpacing(10);
+
+        // --- Requests (#109): the classic twin of the themed requests.service row. Same manager, same
+        // store, same status sentence, so the two surfaces cannot tell the user different things. ---
+        auto* rqHeading = new QLabel(tr("Requests"));
+        rqHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(rqHeading);
+        auto* rqNote = new QLabel(tr("Point this at the request service your household already runs and a "
+            "“Request” button appears on films and series you do not have. Asking is always an explicit "
+            "press — nothing is ever requested for you. The API key is kept on this device only and is "
+            "never included in anything this app syncs."));
+        rqNote->setWordWrap(true); rqNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(rqNote);
+        auto* rqStatus = new QLabel(JellyseerrStore::statusLine());
+        rqStatus->setWordWrap(true);
+        rqStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        auto* rqSrv = new QPushButton(tr("Request service…"));
+        v->addWidget(rqSrv);
+        v->addWidget(rqStatus);
+        // While THIS panel is up it owns the refresh hook — the jellyfinStatusUpdate_ idiom, QPointer-guarded
+        // so a store change after the panel is gone touches nothing. The verify step is asynchronous, so the
+        // click handler alone would leave the line a service behind.
+        {
+            QPointer<QLabel> guard(rqStatus);
+            requestsStatusUpdate_ = [guard] {
+                if (guard) guard->setText(JellyseerrStore::statusLine()); };
+        }
+        connect(rqSrv, &QPushButton::clicked, this, [this, rqStatus] {
+            manageRequestServiceInteractive();
+            rqStatus->setText(JellyseerrStore::statusLine());
         });
         v->addSpacing(10);
 

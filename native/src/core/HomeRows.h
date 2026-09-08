@@ -26,6 +26,8 @@
 //   favorites           the ★ Favorites shelf
 //   downloads           the fully-downloaded items shelf
 //   new                 "New"           (#155): followed series' unseen children, UNIONED with #25's rows
+//   requests            "Requested"     (#109): what this profile has asked a request service for, grouped
+//                       by status. Empty — and therefore invisible — until somebody presses Request.
 //   trakt:calendar      "Airing Soon"   (#23)
 //   playlist:<id>       one saved playlist's items (#playlists)
 //   preset:<id>         one #63 saved filter, evaluated over the rows the home already holds

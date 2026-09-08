@@ -20,6 +20,7 @@
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/Jellyfin.h"        // #110: Jellyfin::UnionItem / ProgressEvent in the download decls
 #include "../core/LifecyclePolicy.h"
+#include "../core/Requests.h"        // #109: requests::MediaRef is a by-value parameter in the request decls
 #include "../core/MediaSegments.h"
 #include "../core/LibraryBundle.h"    // LibraryBundle::Receipt / Progress are by-value members (issue #127)
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
@@ -1871,6 +1872,52 @@ private:
     // Ids the user has answered "Keep" for. In memory and for this run only: it exists so a decline is not
     // re-asked, not to be a preference — a fact about one conversation does not belong in a settings file.
     QSet<QString> jellyfinRemoveDeclined_;
+
+    // ==========================================================================================================
+    // REQUESTS (issue #109) — ALL DEFINED IN MainWindowRequests.cpp, the feature-TU rule (#186)
+    // ==========================================================================================================
+    // THE CONTRACT, IN ONE PARAGRAPH. A Request submission makes somebody else's server go and acquire
+    // content, so it happens at exactly ONE call site (submitRequest) and only from an explicit press, with
+    // a confirmation card in front of it. Nothing in this feature retries, nothing polls, and viewing an
+    // item never asks anybody for anything but a status. The backend is reached only through
+    // requests::configuredBackend(), so nothing here names a service.
+
+    // Wire the stores' change hooks and the shelf refresh. Called once, from the constructor.
+    void initRequests();
+    // The settings surface's manager: set up a request service, replace its key, or forget it. Nav-kit only
+    // (NavMenu / NavConfirm / Osk), and the key is entered with QLineEdit::Password and never echoed back.
+    void manageRequestServiceInteractive();
+    // The second half of that flow: check the address and the key actually work, and store them ONLY if
+    // they do. A credential that cannot work is not written down — it would leave the surface offering a
+    // Request action that can only fail on press.
+    void verifyAndSaveRequestService(const struct JellyseerrConfig& cfg);
+    // A detail page appeared for a requestable item — fetch its status. READ-ONLY, at most once per title
+    // per session (requestAsked_), which is what makes "on view" cheap rather than a request per redraw.
+    void fetchRequestStatus(const MediaItem& item);
+    // The press. Confirms, asks whole-series-or-a-season where that is a real question, and then — and only
+    // then — calls submitRequest.
+    void requestItemInteractive(const MediaItem& item);
+    // THE ONE PLACE ANYTHING IS SUBMITTED. Nothing else in the tree calls RequestBackend::submit.
+    void submitRequest(const MediaItem& item, const requests::MediaRef& ref, const QString& resolvedId,
+                       const QVector<int>& seasons);
+    // Refresh the stored rows' statuses so the Requests shelf is current. Called when the home is built and
+    // after a submission — never on a timer.
+    void refreshRequestShelfStatuses();
+    // Push one title's answer into BOTH detail surfaces. The classic button is HomeView's own; the themed
+    // pill needs `detailData` re-pushed onto the QML root, which only this window can do — the
+    // refreshAfterMetaEdit idiom. Without it a lookup that lands after the page opened leaves the pill
+    // frozen on "Request (status unknown)", which is the state it was drawn in before any answer existed.
+    void applyRequestState(const QString& key, const requests::UiState& state);
+    // Titles whose status has been fetched this session, and those in flight. In memory for this run only:
+    // it exists so one page does not ask five times, not to be a cache of somebody else's server state.
+    QSet<QString> requestAsked_;
+    // What the last lookup resolved each title to in the backend's own key space, so the press does not
+    // have to resolve it a second time (JellyseerrClient::submit deliberately refuses to resolve).
+    QHash<QString, QString> requestResolved_;
+    // The classic settings panel's status line, refreshed while that panel is up. The jellyfinStatusUpdate_
+    // idiom, QPointer-guarded on the other side.
+    std::function<void()> requestsStatusUpdate_;
+
     // ---- ANIME / MANGA TRACKERS (issue #156) -----------------------------------------------------
     // The AniList link. One tracker::Tracker implementation so far; MyAnimeList and Kitsu slot in behind
     // the same seam in later increments, and nothing below names AniList except the construction.

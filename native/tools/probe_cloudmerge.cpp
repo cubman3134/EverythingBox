@@ -949,6 +949,17 @@ int main(int argc, char** argv)
         // front of it. Uncarved, it would ride the heavy settings bundle into somebody's Drive folder.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("audiobookshelf/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("audiobookshelf/profileA/servers")) == false);
+        // jellyseerr/* (issue #109): the request service's address and API KEY — a standing grant over a
+        // household's whole acquisition pipeline, which can queue downloads on somebody else's disk.
+        // Uncarved, it would ride the heavy settings bundle into a third party's Drive folder.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyseerr/profileA/apiKey")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyseerr/profileA/url")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyseerr/profileA/apiKey")) == false);
+        // requests/* (issue #109): the Requested shelf's own rows. Not a credential, but device-local for
+        // the followsnap/ reason — a row is a fact about the service THIS device is linked to, and a peer
+        // with a different service (or none) could never refresh it.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("requests/profileA/list")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("requests/profileA/list")) == false);
         // scrobble/* and scrobblestate/* (issue #192): music scrobbling, BOTH key families, and the first one
         // is the reason the carve-out exists at all — scrobble/<profile>/lb/token is the user's ListenBrainz
         // credential, and a synced bundle is a zip on somebody's Drive. The state family is this DEVICE's

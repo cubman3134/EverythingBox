@@ -33,7 +33,7 @@ std::function<void()> g_changeHook;
 void fireChanged() { if (g_changeHook) g_changeHook(); }
 
 // The prefixed families. A rowId is either one of the bare ids below or "<family>:<value>".
-const char* const kBareIds[] = { "continue", "favorites", "downloads", "recents", "new" };
+const char* const kBareIds[] = { "continue", "favorites", "downloads", "recents", "new", "requests" };
 const char* const kFamilies[] = { "trakt", "playlist", "preset", "category", "source" };
 } // namespace
 
@@ -72,9 +72,17 @@ const QStringList& defaultShelfOrder()
     // the followed-series children), so the position and the content are the ones that were already there
     // and only the header changed. "trakt:missed" stays accepted vocabulary with no producer in this build,
     // which the open-vocabulary rule above already covers: a stored list naming it keeps it and skips it.
+    //
+    // #109 ADDS ONE MORE, AND THE PROMISE ABOVE SURVIVES IT FOR THE SAME REASON. "requests" is what this
+    // profile has ASKED for and does not have yet. Built-in rather than opt-in because a shelf you have to
+    // go and add is one nobody finds the minute after they pressed Request — and it costs an untouched
+    // profile NOTHING: the producer is empty until somebody makes a request, and HomeView drops an empty
+    // producer before it becomes an available row. It sits LAST because it is the only shelf that is not
+    // about something you can watch right now.
     static const QStringList kOrder{ QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
                                      QStringLiteral("new"),
-                                     QStringLiteral("trakt:calendar"), QStringLiteral("favorites") };
+                                     QStringLiteral("trakt:calendar"), QStringLiteral("favorites"),
+                                     QStringLiteral("requests") };
     return kOrder;
 }
 

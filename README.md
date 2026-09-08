@@ -52,8 +52,11 @@ Everything lives under [`native/`](native/):
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf
-library, and [**Music servers**](docs/music-servers.md) for playing a Navidrome,
-Airsonic or Gonic library (browsing, starring, and reporting plays back).
+library, [**Music servers**](docs/music-servers.md) for playing a Navidrome,
+Airsonic or Gonic library (browsing, starring, and reporting plays back), and
+[**Requests**](docs/requests.md) for asking a Jellyseerr-style service to go and
+fetch a film or series you do not have (what it sends, and what it deliberately
+does not do).
 
 See **[`native/README.md`](native/README.md)** for the toolchain, build commands,
 and current status, and
