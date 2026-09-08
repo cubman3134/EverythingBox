@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.227 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.228 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1711,9 +1711,18 @@ if(EVERYTHINGBOX_BUILD_APP)
     # per-profile row list behind it and the two-device merge of that list (src/core/HomeRows). QtCore-only
     # — plain vectors in, a render plan out, and a QSettings wrapper — so the probe links lean and runs
     # under offscreen QPA. Needs ProfileStore.cpp (the list is namespaced by the active profile id).
+    # SettingsTxn comes along for issue #322's section 7, and it has to be the REAL predicate rather than a
+    # restatement of it: the assertion is that the key HomeRowStore actually writes is one the settings
+    # transaction does not own, so both halves must be the shipping code. It is built WITHOUT
+    # EB_SETTINGSTXN_TEST_SEAM here on purpose - the seam would point SettingsTxn at a different ini from the
+    # one the store writes, and the whole point of the case is that the two share a file. SettingsTxn pulls
+    # TraktSync (backfillKeyPrefix) which pulls TraktRead, the same trio probe_settingstxn links.
     add_executable(probe_homerows tools/probe_homerows.cpp
         src/core/HomeRows.cpp     src/core/HomeRows.h
-        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/SettingsTxn.cpp  src/core/SettingsTxn.h
+        src/core/TraktSync.cpp    src/core/TraktSync.h
+        src/core/TraktRead.cpp    src/core/TraktRead.h)
     target_include_directories(probe_homerows PRIVATE src src/core)
     target_link_libraries(probe_homerows PRIVATE Qt6::Core)
 

@@ -31,13 +31,17 @@
 // Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
 // the store reads/writes starts empty and is removed at exit. The probe seeds a profile id via
 // ProfileStore::setCurrent, because currentId() otherwise resolves to "default" rather than a named profile.
+#include "AppBrand.h"
+#include "AppPaths.h"
 #include "HomeRows.h"
 #include "ProfileStore.h"
+#include "SettingsTxn.h"   // issue #322: the settings transaction this store's keys must sit outside of
 
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <QSettings>
 #include <QStringList>
 #include <cstdio>
 
@@ -461,6 +465,152 @@ static void testMerge()
     CHECK(spellRows(merge(once, once)) == spellRows(once));
 }
 
+// ---- 7. a row edit survives the settings transaction's Discard (issue #322) --------------------------------
+// THE SENTENCE UNDER TEST: Discard reverts exactly what the user changed IN THE SETTINGS SURFACE, and
+// nothing that was committed elsewhere. The home-row editor is reached from inside that surface (both
+// builders), and it commits on its own terms — so a visit that edits a row AND flips a setting must, on
+// Discard, keep the row and lose the setting.
+//
+// BOTH DIRECTIONS ARE ASSERTED, because getting this wrong the other way is just as bad: a Discard that
+// silently kept the settings change the user meant to abandon would pass any test that only looked at the
+// rows. Every case below therefore checks the settings key too.
+//
+// This is the one place the two ends meet, so it runs against the REAL files: HomeRowStore's own store and
+// SettingsTxn's own store are both AppPaths::dataDir()/everythingbox.ini (the probe's per-process scratch
+// copy, issue #42), which is exactly the sharing that made #322 possible. probe_settingstxn pins the scope
+// predicate key by key; what this pins is that the key HomeRowStore ACTUALLY WRITES is the one excluded —
+// a rename of rowsKey() that missed SettingsTxn would re-arm the bug and leave that probe green.
+static QString sharedIniPath()
+{
+    return AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+}
+
+static void putIni(const QString& k, const QString& v)
+{
+    QSettings s(sharedIniPath(), QSettings::IniFormat);
+    s.setValue(k, v);
+    s.sync();
+}
+
+static QString getIni(const QString& k)
+{
+    QSettings s(sharedIniPath(), QSettings::IniFormat);
+    return s.value(k).toString();
+}
+
+// Every key in the shared ini this profile's row list occupies. Used to prove the store wrote exactly ONE
+// key, and to hand the REAL key to inScope() rather than a literal that could drift away from the writer.
+// Scoped to the profile because the earlier cases in this file wrote lists for "alice" and "keepskip" into
+// the same scratch ini.
+static QStringList homeRowKeys(const QString& profile)
+{
+    QSettings s(sharedIniPath(), QSettings::IniFormat);
+    QStringList out;
+    for (const QString& k : s.allKeys())
+        if (k.startsWith(QStringLiteral("homerows/") + profile + QStringLiteral("/"))) out << k;
+    return out;
+}
+
+static void testEditSurvivesSettingsDiscard()
+{
+    ProfileStore::setCurrent(QStringLiteral("txn322"));
+    CHECK(HomeRowStore::list().isEmpty());   // a profile that has never edited: the key does not exist yet
+
+    // How many times the store committed. A save that wrote twice, or a rollback that put an older copy
+    // back through the store, would show up here rather than as a value that happens to look right.
+    int commits = 0;
+    HomeRowStore::setChangeHook([&commits] { ++commits; });
+
+    // ---- 7a. THE ISSUE: the FIRST edit of a profile's rows, made inside a settings visit -------------
+    // The harsh half. save() CREATES the key during the transaction, and rollback()'s job is to remove
+    // in-scope keys created since begin() — so before the fix the row edit did not merely revert, it
+    // vanished, and the profile went back to having no list at all.
+    putIni(QStringLiteral("subs/language"), QStringLiteral("en"));
+    SettingsTxn::begin();
+    const QVector<Row> edited{ row(QStringLiteral("favorites")), row(QStringLiteral("continue"), true, 6) };
+    HomeRowStore::save(edited);                                    // the editor's own commit
+    CHECK(commits == 1);
+    putIni(QStringLiteral("subs/language"), QStringLiteral("fr"));  // ...and a setting changed in the same visit
+
+    // The prompt counts the SETTINGS the visit changed. The row edit is not one of them, so a user who only
+    // rearranged their home must not be asked whether to save "1 setting".
+    CHECK(SettingsTxn::dirtyCount() == 1);
+
+    SettingsTxn::rollback();                                       // Discard
+    const QVector<Row> afterDiscard = HomeRowStore::list();
+    CHECK(afterDiscard.size() == 2);                                                   // SURVIVES
+    CHECK(afterDiscard.size() == 2 && afterDiscard[0].rowId == QStringLiteral("favorites"));
+    CHECK(afterDiscard.size() == 2 && afterDiscard[1].rowId == QStringLiteral("continue")
+          && afterDiscard[1].cap == 6);
+    CHECK(getIni(QStringLiteral("subs/language")) == QStringLiteral("en"));             // REVERTED
+    CHECK(commits == 1);                                            // and no second write happened
+
+    // The two ends, pinned against each other: the key the store actually wrote is the key the transaction
+    // must not own. One key, and out of scope.
+    const QStringList keys = homeRowKeys(QStringLiteral("txn322"));
+    CHECK(keys.size() == 1);
+    if (keys.size() == 1) CHECK(SettingsTxn::inScope(keys.first()) == false);
+
+    // ---- 7b. a LATER edit, over a list that already existed at begin() -------------------------------
+    // The other half of rollback(): a key present in the snapshot is restored to its snapshotted VALUE.
+    // 7a would still pass if only the create-and-remove branch had been fixed.
+    SettingsTxn::begin();
+    HomeRowStore::save({ row(QStringLiteral("new")) });
+    putIni(QStringLiteral("subs/language"), QStringLiteral("de"));
+    CHECK(SettingsTxn::dirtyCount() == 1);
+    SettingsTxn::rollback();
+    CHECK(HomeRowStore::list().size() == 1);                                           // SURVIVES
+    CHECK(HomeRowStore::list().size() == 1
+          && HomeRowStore::list()[0].rowId == QStringLiteral("new"));
+    CHECK(getIni(QStringLiteral("subs/language")) == QStringLiteral("en"));             // REVERTED
+    CHECK(commits == 2);
+
+    // ---- 7c. RESET is an edit too ------------------------------------------------------------------
+    // reset() writes a DATED EMPTY document rather than removing the key, so the reset can travel. Discard
+    // must not resurrect the list the user just reset — that would be #322 in the other direction, and it is
+    // the case a "restore the key if it looks empty" fix would get wrong.
+    SettingsTxn::begin();
+    HomeRowStore::reset();
+    putIni(QStringLiteral("subs/language"), QStringLiteral("es"));
+    SettingsTxn::rollback();
+    CHECK(HomeRowStore::list().isEmpty());                                             // STAYS reset
+    CHECK(!HomeRowStore::isCustomised());
+    CHECK(getIni(QStringLiteral("subs/language")) == QStringLiteral("en"));             // REVERTED
+    CHECK(homeRowKeys(QStringLiteral("txn322")).size() == 1);   // the husk is still there, not removed
+
+    // ---- 7d. SAVE still saves everything, exactly once ----------------------------------------------
+    // The other answer to the prompt. Nothing about the fix may make Save skip the row edit, write it twice,
+    // or land it in a different order than the settings change.
+    const int before = commits;
+    SettingsTxn::begin();
+    const QVector<Row> saved{ row(QStringLiteral("requests")), row(QStringLiteral("favorites"), false) };
+    HomeRowStore::save(saved);
+    putIni(QStringLiteral("subs/language"), QStringLiteral("it"));
+    SettingsTxn::commit();                                         // Save
+    CHECK(HomeRowStore::list().size() == 2);
+    CHECK(HomeRowStore::list().size() == 2
+          && HomeRowStore::list()[1].rowId == QStringLiteral("favorites")
+          && !HomeRowStore::list()[1].visible);
+    CHECK(getIni(QStringLiteral("subs/language")) == QStringLiteral("it"));
+    CHECK(commits == before + 1);              // one commit for one save: no double-write
+    CHECK(homeRowKeys(QStringLiteral("txn322")).size() == 1);   // and still exactly one key for this profile
+
+    // ---- 7e. a row edit made with NO transaction open is untouched by a later one -------------------
+    // The editor is also reachable when no settings visit is open at all (it is a settings row on both
+    // builders, but the classic Add-ons / theme-picker doors mean the area can be entered later). A visit
+    // that starts AFTER the edit must snapshot nothing of it.
+    HomeRowStore::save({ row(QStringLiteral("downloads")) });
+    SettingsTxn::begin();                          // ...snapshotting "it", the value 7d SAVED
+    putIni(QStringLiteral("subs/language"), QStringLiteral("pt"));
+    SettingsTxn::rollback();
+    CHECK(HomeRowStore::list().size() == 1
+          && HomeRowStore::list()[0].rowId == QStringLiteral("downloads"));
+    CHECK(getIni(QStringLiteral("subs/language")) == QStringLiteral("it"));
+
+    HomeRowStore::setChangeHook(nullptr);      // leave no capture of `commits` behind
+    HomeRowStore::reset();
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -474,6 +624,7 @@ int main(int argc, char** argv)
     testStore();
     testJson();
     testMerge();
+    testEditSurvivesSettingsDiscard();
 
     if (failures) { std::fprintf(stderr, "HOMEROWS-FAIL %d assertion(s)\n", failures); return 1; }
     std::printf("HOMEROWS-OK\n");

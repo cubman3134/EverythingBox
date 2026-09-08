@@ -70,11 +70,56 @@ void SettingsTxn::setIniPathForTesting(const QString& path)
 bool SettingsTxn::inScope(const QString& key)
 {
     // The CloudMerge-owned per-item stores. Written continuously by playback, marking and stats accrual
-    // while a panel is open — rolling these back is data loss. Matches CloudSync::isPerItemStoreKey.
+    // while a panel is open — rolling these back is data loss. This is the same family
+    // CloudSync::isPerItemStoreKey names, and issue #322 is what it cost to keep the two lists by hand: the
+    // set there had grown to twenty-one prefixes while this one still held ten, so eleven per-item stores
+    // sat inside the settings transaction that the comment already claimed were outside it. The two lists
+    // are still separate — SettingsTxn is QtCore-only so probe_settingstxn links lean, and CloudSync is a
+    // QObject over a network backend — but they are now the same set (plus homerows/ below, which
+    // isPerItemStoreKey has never carried), and probe_settingstxn pins every entry.
+    //
+    // WHY A PER-ITEM STORE MUST BE OUT OF SCOPE, in the two shapes #322 showed up in:
+    //   * ITS EDITOR COMMITS ON ITS OWN TERMS. The home-row editor, the looked-up-word list and "Reset my
+    //     metadata edits" are all reached from INSIDE Settings, and each writes immediately behind its own
+    //     confirm step — that is right for a store whose editor is a screen of its own. Discard then undid
+    //     an edit that had already been committed by rules it never joined, which is issue #322 exactly.
+    //   * A CLOUD MERGE CAN LAND MID-VISIT. pullAndMergeProgress() is fired 1.5 s after launch and on every
+    //     profile switch, and CloudMerge::mergeAll writes this whole family when the reply arrives — at an
+    //     arbitrary later moment, including while a settings panel is open. In scope that is the
+    //     addon.remote.* hazard again: a phantom dirty count in the exit prompt for rows the user never
+    //     touched, and a Discard reverting a merge the home had already been rebuilt from.
+    // Neither shape can be answered by a carve-out per surface, because both are about who OWNS the key.
+    //
+    // None of these prefixes is a settings row: no key Settings.cpp writes begins with any of them (and the
+    // paired in-scope neighbours in probe_settingstxn §1c are what keeps that true), so excluding them
+    // cannot make anything the user typed into a panel undiscardable.
     static const char* kExcludedPrefixes[] = {
         "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
         "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
         "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
+        // ---- issue #322: the rest of the CloudMerge-owned family, in isPerItemStoreKey's own order ----
+        // The three marked REACHABLE are the ones a user can edit from inside an open settings transaction
+        // today; the others are here because they are the same kind of key with the same owner, and leaving
+        // half a family in scope is what produced #322 in the first place.
+        "filterpresets/",    // saved filter presets (#184)
+        "channels/",         // personal TV channels (#179) — NOT "iptv/", which IS a settings row
+        "metaoverrides/",    // REACHABLE: Settings ▸ "Reset my metadata edits", both layouts (#24)
+        "launchopts/",       // per-game launch overrides (#51)
+        "speed/",            // per-item playback speed (#140)
+        "lyricoffset/",      // per-item lyric offset (#142)
+        "bookmarks/",        // per-book bookmarks (#136)
+        "highlights/",       // per-book highlights (#136)
+        "vocabulary/",       // REACHABLE: Settings ▸ Reading ▸ "Words I looked up" ▸ Remove (#137)
+        "audiobookmarks/",   // per-item audio bookmarks (#140) — distinct from the "audiobooks/" settings group
+        "pad2key/",          // per-game pad2key profiles (#105)
+        // ...and the one the issue was filed for. HomeRowStore::save() writes "homerows/<profile>/list"
+        // immediately and fires the sync hook, because its editor is a standalone screen with its own Done —
+        // and that editor is reached from BOTH settings builders (GS_TWINS: themed "home.rows" / classic
+        // "Choose home rows…"), i.e. from inside the transaction. In scope, answering Discard on the way out
+        // reverted a row edit the user had already finished and watched take effect. It is the same
+        // CloudMerge document section as the rows above (CloudMerge::mergeHomeRows), so it is filed with
+        // them, even though CloudSync::isPerItemStoreKey does not name it (see the report for #322).
+        "homerows/",
         // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
         // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
         // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings

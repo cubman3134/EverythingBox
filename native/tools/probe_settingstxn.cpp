@@ -156,6 +156,52 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::inScope(QStringLiteral("traktUi/lastTab")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("raBrowse/sort")) == true);
 
+    // ---- 1c. inScope: the rest of the CloudMerge-owned per-item family (issue #322) ----------------
+    // §1 above pins the ten prefixes this predicate has always carried. These are the eleven it did NOT,
+    // while its comment claimed the family was covered — the drift issue #322 was filed for. Three of them
+    // are editable from INSIDE an open settings transaction, and those three are the bug: an edit committed
+    // by a store with its own confirm step, undone by a transaction it never joined. The rest are the same
+    // kind of key with the same owner (CloudMerge), and a cloud merge landing mid-visit writes any of them.
+    //
+    // Each is paired with an in-scope neighbour, for the reason §1b gives: without the second half, a future
+    // "just exclude speed/ as speed" or "audiobookmarks as audiobook" would look correct here while silently
+    // making a real settings row undiscardable.
+
+    // REACHABLE — Settings ▸ (both builders) ▸ home-row editor. The issue's own case: HomeRowStore::save()
+    // writes this key immediately, and Discard used to take the row edit with it.
+    CHECK(SettingsTxn::inScope(QStringLiteral("homerows/p1/list")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("homerowsPanel/lastTab")) == true);
+    // REACHABLE — Settings ▸ Reading ▸ "Words I looked up" ▸ Remove (#137). Each Remove is its own confirmed,
+    // immediate write; Discard on the way out used to resurrect every word removed in that visit.
+    CHECK(SettingsTxn::inScope(QStringLiteral("vocabulary/p1/items")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("vocabularyPanel/sort")) == true);
+    // REACHABLE — Settings ▸ "Reset my metadata edits (N items)" (#24), on both layouts, behind a confirm
+    // that says "This can't be undone". Discard used to undo it anyway.
+    CHECK(SettingsTxn::inScope(QStringLiteral("metaoverrides/items")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("metaoverridesPanel/x")) == true);
+
+    // The rest of the family. Not reachable from a settings panel today — their editors are the library
+    // filter bar, the home's channel editor, the reader, the player and the Start-menu emulation panel —
+    // but owned by the same document and written by the same mid-visit merge.
+    for (const char* k : { "filterpresets/p1/items", "channels/p1/items", "launchopts/items",
+                           "speed/abc", "lyricoffset/abc", "bookmarks/p1/items",
+                           "highlights/p1/items", "audiobookmarks/p1/items", "pad2key/items" })
+        CHECK(SettingsTxn::inScope(QString::fromLatin1(k)) == false);
+
+    // ...and the neighbours each of those prefixes must NOT swallow. Four of these are real settings groups
+    // rather than invented ones, which is what makes them worth asserting: "iptv/" is the Live TV source
+    // list a user adds to in Settings and it must stay discardable even though "channels/" beside it does
+    // not; "audiobooks/" is a settings group one character short of "audiobookmarks/"; "pad/" and "padgame/"
+    // are the on-screen and per-game pad rows sitting next to "pad2key/".
+    CHECK(SettingsTxn::inScope(QStringLiteral("iptv/default/sources")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("audiobooks/speed")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("pad/left")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("padgame/abc/a")) == true);
+    for (const char* k : { "filterpresetsPanel/x", "channelsPanel/x", "launchoptsPanel/x", "speedrun/x",
+                           "lyricoffsetPanel/x", "bookmarksPanel/x", "highlightsPanel/x",
+                           "pad2keyPanel/x" })
+        CHECK(SettingsTxn::inScope(QString::fromLatin1(k)) == true);
+
     // ---- 2. inScope: DEVICE-LOCAL BUT IN SCOPE ----------------------------------------------------
     // These are the cases a naive "exclude everything CloudSync::isDeviceLocalKey covers" implementation
     // gets WRONG. They are per-device AND they are settings rows a user must be able to discard.

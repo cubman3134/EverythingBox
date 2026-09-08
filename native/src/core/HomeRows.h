@@ -136,7 +136,17 @@ namespace homerows
 
     // Is `id` a rowId this build knows how to render? Purely informational — plan() does NOT gate on it (an
     // unknown id is skipped because no surface offers it, which is the same answer without a second list to
-    // keep in step). The editor uses it to label a stale entry.
+    // keep in step).
+    //
+    // IT HAS NO PRODUCTION CALLER, and the sentence that used to be here ("the editor uses it to label a
+    // stale entry") was wrong rather than aspirational — corrected in #322 rather than wired, deliberately.
+    // The editor's stale-entry label comes from a catalogue lookup that MISSES (openHomeRowsEditor's
+    // labelFor -> "not on this device"), refined by #314's layoutNote for the narrower case of a row this
+    // device can produce but on the other layout's home. Routing the miss through this predicate would only
+    // let the editor split "not on this device" into two phrasings, and both halves are the same true
+    // sentence: a preset the user deleted and a rowId invented by a newer build are equally absent here.
+    // What the function still is, and why it stays, is the ONE written-down answer to "what is the row
+    // vocabulary" — the list the #83/jellyfin omission was found against — pinned by probe_homerows.
     bool isKnownRowId(const QString& id);
 
     // ---- which home draws a row (issue #314) ----------------------------------------------------------------
@@ -159,6 +169,16 @@ namespace homerows
 }
 
 // The per-profile store. Empty list == the default layout; the key is absent until the user edits.
+//
+// IT COMMITS IMMEDIATELY, AND THAT IS THE MODEL (issue #322). Every save() writes "homerows/<profile>/list"
+// and syncs, because the editor above it is a standalone screen whose own actions ARE the confirm step —
+// there is no Save button to batch behind, and the home has to re-render as you move a row. That editor is
+// reached from inside the settings surface, which is TRANSACTIONAL (SettingsTxn: snapshot on entry, restore
+// on Discard), so for a while answering Discard on the way out also reverted a row edit the user had already
+// finished. The fix keeps BOTH models and moves the boundary instead: "homerows/" is out of the settings
+// transaction's scope (SettingsTxn::inScope), so this store's keys are neither snapshotted nor restored, and
+// Discard reverts exactly the settings rows the visit changed. Renaming the key here without moving that
+// prefix re-arms the bug — probe_homerows §7 asserts the two ends against each other for that reason.
 namespace HomeRowStore
 {
     QVector<homerows::Row> list();                       // active profile; {} = default layout
