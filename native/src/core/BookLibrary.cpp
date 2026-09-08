@@ -17,6 +17,8 @@
 #include <QObject>
 #include <QPair>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 
@@ -736,12 +738,62 @@ bool titleCorroborates(const QString& bookTitle, const QString& answerTitle)
     return a.size() < b.size() ? prefixAtWordBoundary(a, b) : prefixAtWordBoundary(b, a);
 }
 
+int fillConfidence(const Book& b, const Fill& f)
+{
+    // THE #134 GATE, KEPT, and kept FIRST: an answer whose title does not corroborate the book's is not
+    // evidence about it at any score. Every invention that live run caught fails here and scores 0.
+    if (!titleCorroborates(b.title, f.title)) return 0;
+
+    const QString mine = matchFold(b.title), theirs = matchFold(f.title);
+    int score = (mine == theirs) ? 50 : 35;    // exact, else one is a whole-word prefix of the other
+
+    // A DISTINCTIVE TITLE IS ITS OWN CORROBORATION. A catalogue answers "Alpha Chronicle" with a book called
+    // something else; what it does not do is produce an exact five-word match for a title it does not hold.
+    // Two words or fewer earns nothing — "The Gift" is the case this issue is named after.
+    if (mine.split(QLatin1Char(' '), Qt::SkipEmptyParts).size() >= 3) score += 15;
+
+    // THE AUTHOR, when BOTH sides state one. This is the term that separates two real books sharing a name,
+    // so a disagreement is disqualifying by itself rather than merely discouraging. A book whose file names
+    // no author says nothing here — an untagged library is the population this feature serves.
+    const QString mineAuthor = b.author.trimmed(), theirAuthor = f.author.trimmed();
+    if (!mineAuthor.isEmpty() && !theirAuthor.isEmpty())
+    {
+        const QString a = matchFold(mineAuthor), c = matchFold(theirAuthor);
+        const bool agrees = !a.isEmpty() && !c.isEmpty()
+                            && (a == c || (a.size() < c.size() ? prefixAtWordBoundary(a, c)
+                                                               : prefixAtWordBoundary(c, a)));
+        score += agrees ? 35 : -60;
+    }
+
+    // THE YEAR, when both sides state one. A year of slack, because an EPUB stamps the edition it was made
+    // from and a catalogue answers with first publication; beyond that they are two different books far more
+    // often than they are two printings.
+    if (b.year > 0 && f.year > 0)
+    {
+        const int drift = std::abs(b.year - f.year);
+        score += drift == 0 ? 25 : (drift <= 1 ? 10 : -25);
+    }
+
+    // THE PAGE COUNT: a nudge when it agrees, NOTHING when it does not. Our count is chapters for an EPUB
+    // and page images for a comic, so a disagreement usually means two units rather than two books — and a
+    // term that can only be evidence in one direction is honest only if it never subtracts.
+    if (b.pageCount >= kComparablePages && f.pageCount >= kComparablePages)
+    {
+        const int slack = std::max(1, b.pageCount / 10);
+        if (std::abs(b.pageCount - f.pageCount) <= slack) score += 10;
+    }
+
+    return std::max(0, std::min(100, score));
+}
+
 Fill acceptedFill(const Book& b, bool hasCover, const Fill& f)
 {
     Fill out;
     // GATE 1: is this answer even about this book? All or nothing — half of a wrong answer is a wrong
     // answer, and a cover from one book over the title of another is the most confusing form it can take.
-    if (!titleCorroborates(b.title, f.title)) return out;
+    // A SCORE rather than a title comparison since #294: a title alone cannot separate two real books that
+    // share a name, and below the threshold nothing at all is applied.
+    if (fillConfidence(b, f) < kFillAcceptThreshold) return out;
     // GATE 2: only a blank is ever filled.
     if (b.author.trimmed().isEmpty())  out.author      = f.author.trimmed();
     if (!hasCover)                     out.coverUrl    = f.coverUrl.trimmed();

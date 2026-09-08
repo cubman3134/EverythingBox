@@ -30,6 +30,7 @@
 #include "HomeView.h"
 
 #include "../addons/AddonManager.h"
+#include "../core/AudiobookMeta.h"   // labelsFor/parseYear: the SAME providers, read the same way (#294)
 #include "../core/BookLibrary.h"
 #include "../core/MetaCache.h"
 #include "../core/MusicArt.h"
@@ -58,6 +59,28 @@ bool bookHasCover(const BookLibrary::Book& b)
     if (b.hasCover) return true;
     static const QString dir = MusicArt::cacheDir();
     return !MusicArt::keyedCover(b.key, b.folder, dir).isEmpty();
+}
+
+// THE TWO CORROBORATING FACTS (issue #294), read off the reply's LABELLED FACTS exactly as #198 reads a
+// narrator — there is no year or page field on MediaDetail, and inventing one for this would be a second
+// spelling of a thing addons already publish. Neither is ever FILLED IN anywhere: they are handed to
+// BookLibrary::fillConfidence as evidence and then thrown away.
+QString factValue(const MediaDetail& d, const QStringList& labels)
+{
+    for (const QString& want : labels)
+        for (const MediaFact& f : d.facts)
+            if (f.label.compare(want, Qt::CaseInsensitive) == 0 && !f.value.trimmed().isEmpty())
+                return f.value.trimmed();
+    return QString();
+}
+
+// "352", "352 pages", "352 pp." -> 352. Anything with no leading number at all -> 0, which scores nothing
+// rather than a guess — the rule every parser in AudiobookMeta follows.
+int parsePageCount(const QString& v)
+{
+    QString digits;
+    for (const QChar& c : v) { if (c.isDigit()) digits.append(c); else if (!digits.isEmpty()) break; }
+    return digits.isEmpty() ? 0 : digits.toInt();
 }
 } // namespace
 
@@ -133,6 +156,17 @@ void MainWindow::onBookMetaReady(int requestId, const MediaDetail& detail)
     offered.author      = detail.subtitle.trimmed();   // the addons put a book's author here
     offered.coverUrl    = detail.imageUrl.trimmed();
     offered.description = detail.overview.trimmed();
+    // ...AND THE TWO OTHER PIECES OF EVIDENCE (#294). A title alone cannot separate two real books that
+    // share a name, so the year and the page count are carried in for the score and are never stored.
+    // A provider that publishes neither simply contributes neither, and the title must then be a
+    // distinctive one or the answer is refused.
+    if (offered.author.isEmpty())
+        offered.author = factValue(detail, AudiobookMeta::labelsFor(QStringLiteral("author")));
+    offered.year      = AudiobookMeta::parseYear(
+                            factValue(detail, AudiobookMeta::labelsFor(QStringLiteral("year"))));
+    offered.pageCount = parsePageCount(factValue(detail, { QStringLiteral("Pages"),
+                                                           QStringLiteral("Page count"),
+                                                           QStringLiteral("Number of pages") }));
     if (!detail.art.image(QStringLiteral("poster")).isEmpty() && offered.coverUrl.isEmpty())
         offered.coverUrl = detail.art.image(QStringLiteral("poster"));
 

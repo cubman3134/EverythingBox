@@ -8,6 +8,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
+#include <QSet>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -31,6 +32,23 @@ QString envelopeMessage(const Subsonic::Envelope& env)
 QString SubsonicScrobbleProvider::idPrefix() { return QStringLiteral("subsonic:"); }
 
 QString SubsonicScrobbleProvider::idFor(const QString& serverId) { return idPrefix() + serverId; }
+
+QStringList SubsonicScrobbleProvider::staleIds(const QStringList& installedProviderIds,
+                                               const QStringList& serverIds)
+{
+    QSet<QString> live;
+    for (const QString& sid : serverIds)
+        if (!sid.isEmpty()) live.insert(idFor(sid));
+    QStringList out;
+    for (const QString& pid : installedProviderIds)
+    {
+        // ONLY OUR OWN. Last.fm and ListenBrainz have ids in a different namespace and are not this
+        // function's business at any time - see the header.
+        if (!pid.startsWith(idPrefix())) continue;
+        if (!live.contains(pid) && !out.contains(pid)) out.push_back(pid);
+    }
+    return out;
+}
 
 SubsonicScrobbleProvider::SubsonicScrobbleProvider(const QString& serverId, QObject* parent)
     : QObject(parent), serverId_(serverId)

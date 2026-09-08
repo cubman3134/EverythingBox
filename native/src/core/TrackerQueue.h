@@ -71,6 +71,37 @@ namespace TrackerQueue
     QString lastError(tracker::Id id);
     void    setLastError(tracker::Id id, const QString& message);
 
+    // ---- THE DROPPED-UPDATE NOTICES (issue #328) -------------------------------------------------------
+    //
+    // #326 gave both trackers the right rule: an update a service refuses PERMANENTLY is dropped, so the
+    // ordered queue keeps moving rather than wedging behind it for ever. It is a small amount of data loss,
+    // correctly chosen over a stopped queue - and it was announced only in the trackers' settings status
+    // line, which is the one place somebody with a working background sync never looks. The whole point of a
+    // background sync is that you do not open its settings panel.
+    //
+    // So the news WAITS instead of expiring. Each dropped update's sentence is kept here until a settings
+    // panel has shown it, and then cleared. Persistent, because the drop usually happens while nobody is
+    // looking and a restart must not swallow it.
+    //
+    // WHAT THIS IS DELIBERATELY NOT: a modal, a notification over playback, or anything that interrupts. The
+    // reason a drop is quiet in the first place is that nothing about it is urgent.
+    //
+    // BOUNDED, oldest first out. A service refusing everything must not grow an unbounded list in the ini,
+    // and the twentieth sentence tells the user nothing the first one did not.
+    inline constexpr int kDroppedMax = 20;
+
+    // Append one notice. An empty message is not a notice and is ignored; the same sentence twice in a row
+    // is kept once, because a queue re-draining the same refused row says one thing, not two.
+    void        noteDropped(tracker::Id id, const QString& message);
+    QStringList dropped(tracker::Id id);          // oldest first
+    void        clearDropped(tracker::Id id);     // the user has seen them
+
+    // The sentence a settings panel shows for a list of them, or "" for none. One builder, so the themed and
+    // the QWidget surface cannot tell the user different things about the same drops. The NEWEST few are
+    // spelled out (they name the update, which is the only part anybody can act on) and the rest are
+    // counted - a panel is not a log.
+    QString     droppedNotice(const QStringList& messages);
+
     // Disconnecting an account drops that account's pending progress and its error line. The next account
     // has not agreed to receive what this one queued. The per-item LINKS are deliberately kept — they
     // describe the media, not the account.

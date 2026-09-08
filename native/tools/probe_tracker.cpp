@@ -1960,6 +1960,102 @@ int main(int argc, char** argv)
             CHECK(!line.contains(QLatin1String("http")));
         }
 
+        // ---- ...AND IT WAITS FOR THE USER (issue #328) -------------------------------------------------
+        // The drop above is announced in the trackers' settings status line, which is the one place somebody
+        // with a working background sync never looks - the whole point of a background sync is that you do
+        // not open its settings panel. So the same sentence is KEPT until a panel has shown it: the news
+        // waits for the user instead of expiring into an empty room.
+        {
+            // The store is under the state prefix, so it is device-local and never rides a sync bundle -
+            // the same carve-out the queue and the debounce stamps already sit behind.
+            CHECK(tracker::isDeviceLocalKey(tracker::droppedKey(QStringLiteral("p1"), Id::AniList)));
+            CHECK(tracker::isBackgroundStateKey(tracker::droppedKey(QString(), Id::AniList)));
+            CHECK(tracker::droppedKey(QString(), Id::AniList)
+                  != tracker::droppedKey(QString(), Id::MyAnimeList));
+
+            const QString sentence = QStringLiteral("AniList refused the update for %1 and it has been "
+                                                    "dropped; the rest are still queued.");
+            seedQueue(Id::AniList, { { QStringLiteral("326:a"), 3 } }, T - 1000);
+            CHECK(TrackerQueue::dropped(Id::AniList).isEmpty());   // seedQueue forgets the account first
+            {
+                QStringList sent, pushed;
+                QVector<qint64> waits;
+                int at = 0;
+                senderDrain(Id::AniList, al, { { 400, 0, false } }, at, sent, pushed, T, waits, sentence);
+            }
+            const QStringList waiting = TrackerQueue::dropped(Id::AniList);
+            CHECK(waiting.size() == 1);
+            CHECK(waiting.value(0) == TrackerQueue::lastError(Id::AniList));
+            CHECK(waiting.value(0).contains(QLatin1String("A Deleted Series")));   // WHICH update was lost
+            // The same credential rule the status line is held to: this is a sentence of ours, persisted.
+            CHECK(!waiting.value(0).contains(QString::fromLatin1(kFixtureSecret)));
+            CHECK(!waiting.value(0).contains(QLatin1String("Bearer")));
+            CHECK(!waiting.value(0).contains(QLatin1String("http")));
+            // PER TRACKER. One service refusing an update says nothing about another's queue.
+            CHECK(TrackerQueue::dropped(Id::MyAnimeList).isEmpty());
+
+            // A SUCCESSFUL DRAIN NOTES NOTHING - the list is about loss, not about traffic.
+            TrackerQueue::clearDropped(Id::AniList);
+            seedQueue(Id::AniList, { { QStringLiteral("326:b"), 4 } }, T - 1000);
+            {
+                QStringList sent, pushed;
+                QVector<qint64> waits;
+                int at = 0;
+                senderDrain(Id::AniList, al, { { 200, 0, true } }, at, sent, pushed, T, waits, sentence);
+            }
+            CHECK(TrackerQueue::dropped(Id::AniList).isEmpty());
+            // ...nor does a RETRYABLE failure: nothing was lost, so there is nothing to be told about.
+            seedQueue(Id::AniList, { { QStringLiteral("326:c"), 4 } }, T - 1000);
+            {
+                QStringList sent, pushed;
+                QVector<qint64> waits;
+                int at = 0;
+                senderDrain(Id::AniList, al, { { 500, 0, false } }, at, sent, pushed, T, waits, sentence);
+            }
+            CHECK(TrackerQueue::dropped(Id::AniList).isEmpty());
+
+            // BOUNDED, oldest first out. A service refusing everything must not grow the ini without limit,
+            // and the twenty-first sentence tells nobody anything the first one did not.
+            TrackerQueue::clearDropped(Id::AniList);
+            for (int i = 0; i < TrackerQueue::kDroppedMax + 5; ++i)
+                TrackerQueue::noteDropped(Id::AniList, QStringLiteral("drop %1").arg(i));
+            const QStringList capped = TrackerQueue::dropped(Id::AniList);
+            CHECK(capped.size() == TrackerQueue::kDroppedMax);
+            CHECK(capped.constLast() == QStringLiteral("drop %1").arg(TrackerQueue::kDroppedMax + 4));
+            CHECK(capped.constFirst() == QStringLiteral("drop 5"));      // the oldest five fell off the front
+            // The same refusal twice in a row is one piece of news, not two; an empty one is not news at all.
+            TrackerQueue::clearDropped(Id::AniList);
+            TrackerQueue::noteDropped(Id::AniList, QStringLiteral("same"));
+            TrackerQueue::noteDropped(Id::AniList, QStringLiteral("same"));
+            TrackerQueue::noteDropped(Id::AniList, QString());
+            TrackerQueue::noteDropped(Id::AniList, QStringLiteral("   "));
+            CHECK(TrackerQueue::dropped(Id::AniList).size() == 1);
+
+            // WHAT THE PANEL SAYS. The newest few spelled out - each names the update, which is the only
+            // part anybody can act on - and the rest counted, because a panel is not a log.
+            CHECK(TrackerQueue::droppedNotice({}).isEmpty());
+            CHECK(TrackerQueue::droppedNotice({ QStringLiteral("one") }) == QStringLiteral("one"));
+            const QString many = TrackerQueue::droppedNotice({ QStringLiteral("a"), QStringLiteral("b"),
+                                                               QStringLiteral("c"), QStringLiteral("d"),
+                                                               QStringLiteral("e") });
+            CHECK(many.contains(QLatin1String("c")) && many.contains(QLatin1String("d"))
+                  && many.contains(QLatin1String("e")));
+            CHECK(many.contains(QLatin1String("2")));   // ...and the two earlier ones are COUNTED
+
+            // SEEN IS SEEN: a panel takes them and clears the store, so the next open shows nothing. That is
+            // the whole difference between news that waits and news that nags.
+            TrackerQueue::clearDropped(Id::AniList);
+            TrackerQueue::noteDropped(Id::AniList, QStringLiteral("waiting"));
+            CHECK(TrackerQueue::dropped(Id::AniList).size() == 1);
+            TrackerQueue::clearDropped(Id::AniList);
+            CHECK(TrackerQueue::dropped(Id::AniList).isEmpty());
+
+            // Disconnecting the account forgets them with the queue they were about.
+            TrackerQueue::noteDropped(Id::AniList, QStringLiteral("about a queue that is going away"));
+            TrackerQueue::forgetAccount(Id::AniList);
+            CHECK(TrackerQueue::dropped(Id::AniList).isEmpty());
+        }
+
         // ---- every other arm, driven through the loop, on BOTH trackers --------------------------------
         // 422 is the arm that separates them: MAL drops it, AniList keeps it.
         struct Arm { Id id; SendPolicy p; int status; qint64 retryAfter; bool drops; qint64 wait; };

@@ -396,12 +396,17 @@ namespace BookLibrary
     // on trust puts a stranger's name under somebody's untagged scan. This repository has been bitten by
     // exactly that (a romhack search answering "Advance Wars" with "Guild Wars"), and the lesson written
     // down there is that the safety is a MATCH GATE. acceptedFill is where it is applied.
+    // `year` and `pageCount` are EVIDENCE TOO (issue #294) and are never filled in anywhere: nothing on a
+    // shelf reads them off an answer, they exist so that a second and a third field can agree or disagree
+    // with the file. 0 means the provider did not say, which scores nothing rather than counting against.
     struct Fill
     {
         QString title;
         QString author;
         QString coverUrl;
         QString description;
+        int     year = 0;
+        int     pageCount = 0;
         bool isEmpty() const { return author.isEmpty() && coverUrl.isEmpty() && description.isEmpty(); }
     };
 
@@ -411,6 +416,43 @@ namespace BookLibrary
     // outright: a reply that will not say what it is about is not evidence about anything.
     bool titleCorroborates(const QString& bookTitle, const QString& answerTitle);
 
+    // ---- HOW SURE ARE WE THAT THIS ANSWER IS THIS BOOK (issue #294) ------------------------------------
+    //
+    // 0..100, and the SAME SHAPE #198 gave audiobook metadata rather than a second scheme: several fields
+    // scored, one threshold, and nothing at all applied below it. The reason it had to stop being a title
+    // comparison is that a title comparison cannot separate two real books that share a name — "Foundation",
+    // "Bluebird", "The Gift" each name several unrelated books and the catalogue's first answer wins.
+    //
+    // THE TERMS, and why each is worth what it is:
+    //   * titleCorroborates SURVIVES AS A PRECONDITION and scores 0 when it fails, so every invention #134's
+    //     live run caught is refused by exactly the gate that caught it. It is necessary and never
+    //     sufficient.
+    //   * An EXACT title (folded) is worth more than one being a whole-word prefix of the other: a prefix is
+    //     as likely to be a different book in the same series as the same book with a subtitle.
+    //   * A DISTINCTIVE title — three or more words — is corroboration in itself. Open Library answered
+    //     "Alpha Chronicle" with a book called something else entirely; it does not invent an exact
+    //     five-word match. A one- or two-word title earns nothing here and needs a second field.
+    //   * The AUTHOR either agrees or it does not, and a disagreement is disqualifying on its own: that is
+    //     the "two Foundations" case, and it is the only term strong enough to settle it.
+    //   * The YEAR the same way, with a year's slack for the edition/printing drift between what an EPUB
+    //     stamps and what a catalogue calls first publication.
+    //   * The PAGE COUNT is a NUDGE AND NEVER A PENALTY, because this app's count is chapters for an EPUB
+    //     and page images for a comic — agreement is evidence, disagreement is usually two different units.
+    //     Only counted above kComparablePages, below which our number is certainly not a publisher's pages.
+    //
+    // A book whose file says nothing but a short name, matched to a catalogue's first guess, now scores
+    // BELOW the threshold and nothing is applied. That is deliberate: half-applying a half-match is the
+    // failure #294 exists to stop, and a wrong author under somebody's scan is worse than a blank.
+    int fillConfidence(const Book& b, const Fill& f);
+
+    // Below this nothing is filled — acceptedFill returns an empty Fill and the blanks stay blank, which is
+    // exactly what a failed lookup already looks like. Named and inline so a probe asserts against the same
+    // number the code uses.
+    inline constexpr int kFillAcceptThreshold = 60;
+    // Below this many pages, our count is a chapter list or a handful of page images rather than anything a
+    // publisher would call a page count, and the two sides are not comparable.
+    inline constexpr int kComparablePages = 40;
+
     // WHICH BOOKS MAY BE ASKED ABOUT AT ALL. Empty when `enabled` is false — that is the "zero requests with
     // the setting off" guarantee, as a value a probe can assert over a whole library rather than as a
     // comment above a network call. A book is a target only when it is missing an author or missing a
@@ -418,8 +460,10 @@ namespace BookLibrary
     QVector<Book> enrichmentTargets(const Index& idx, const HasCoverFn& hasCover, bool enabled);
 
     // WHAT OF `f` MAY ACTUALLY BE USED for `b`. Two gates, in this order:
-    //   1. THE MATCH GATE — an answer whose title does not corroborate the book's is dropped ENTIRELY, not
-    //      field by field. Half of a wrong answer is still a wrong answer.
+    //   1. THE MATCH GATE — fillConfidence(b, f) must reach kFillAcceptThreshold, or the answer is dropped
+    //      ENTIRELY, not field by field. Half of a wrong answer is still a wrong answer. (Issue #294 turned
+    //      this from a title comparison into a score over several fields; a non-corroborating title still
+    //      scores 0, so nothing that was refused before is admitted now.)
     //   2. Every field the book already has is DROPPED. This is "local metadata always wins" as a function
     //      rather than as a merge order somewhere downstream.
     // An all-empty result means the answer added nothing and nothing should be stored; a failed lookup is

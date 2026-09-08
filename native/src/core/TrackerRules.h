@@ -633,6 +633,10 @@ namespace tracker
     QString queueKey(const QString& profileId, Id id);
     QString lastSentKey(const QString& profileId, Id id, const QString& itemKey);
     QString lastErrorKey(const QString& profileId, Id id);
+    // The DROPPED-UPDATE NOTICES (issue #328): a small, bounded, per-tracker list of what a service refused
+    // permanently, kept until the user has been shown it. Under the same state prefix as the queue, so the
+    // sync carve-out and the profile slot both already cover it without knowing it exists.
+    QString droppedKey(const QString& profileId, Id id);
     // An empty profile id means "no profile chosen yet" and maps to "default", exactly as Scrobble's and the
     // Trakt backfill cursor's slots do.
     QString profileSlot(const QString& profileId);

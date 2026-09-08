@@ -1053,6 +1053,58 @@ static void testScrobbleAndStarParams()
     CHECK(Subsonic::starParams(Subsonic::Kind::Track, QString()).isEmpty());
 }
 
+// ---- RECENTLY ADDED IS PAGED (issue #298) -----------------------------------------------------------
+// getAlbumList2 answers with a WINDOW and says nothing about what is behind it. One window rendered as the
+// whole level truncated a library with more than 100 albums in it, silently - and a silent truncation is
+// indistinguishable from a complete answer, which is the one thing this client is otherwise careful about.
+static void testNewestPaging()
+{
+    // THE PARAMETER THAT WAS MISSING. Without `offset` every request is the first window and the level can
+    // never grow, however far the user scrolls.
+    const auto first = Subsonic::albumListParams(QStringLiteral("newest"), 100, 0);
+    CHECK(paramValue(first, QStringLiteral("type")) == QStringLiteral("newest"));
+    CHECK(paramValue(first, QStringLiteral("size")) == QStringLiteral("100"));
+    CHECK(paramValue(first, QStringLiteral("offset")) == QStringLiteral("0"));
+    const auto second = Subsonic::albumListParams(QStringLiteral("newest"), 100, 100);
+    CHECK(paramValue(second, QStringLiteral("offset")) == QStringLiteral("100"));
+    // ...sent even at zero, so a server that reads it and a server that ignores it are the same server, and
+    // there is one request shape rather than two.
+    CHECK(first.size() == second.size());
+    // A negative offset is a bug upstream, not a request: it is clamped rather than sent.
+    CHECK(paramValue(Subsonic::albumListParams(QStringLiteral("newest"), 100, -5),
+                     QStringLiteral("offset")) == QStringLiteral("0"));
+    // NOTHING TO ASK FOR produces no parameters at all, so the caller cannot make a meaningless request.
+    CHECK(Subsonic::albumListParams(QString(), 100, 0).isEmpty());
+    CHECK(Subsonic::albumListParams(QStringLiteral("newest"), 0, 0).isEmpty());
+
+    // IS THERE MORE? A FULL window means there may be; a short one is the end of the list, which is all this
+    // protocol ever says about it.
+    CHECK(Subsonic::morePagesLikely(/*returned*/ 100, /*window*/ 100, /*addedNew*/ 100));
+    CHECK(!Subsonic::morePagesLikely(99, 100, 99));
+    CHECK(!Subsonic::morePagesLikely(0, 100, 0));
+    // ...AND THE DEFENSIVE ARM. A server that ignores `offset` answers the second window with the first one:
+    // a full window that added nothing new. Paging on would grow the same albums for ever while the user
+    // scrolled, so the list ends here instead.
+    CHECK(!Subsonic::morePagesLikely(100, 100, 0));
+    CHECK(Subsonic::morePagesLikely(100, 100, 1));
+    CHECK(!Subsonic::morePagesLikely(100, 0, 100));
+
+    // AND THE ROWS OF A LATER WINDOW ARE ORDINARY ALBUM ROWS. A page is not a different kind of thing: the
+    // level appends them with the builder it drew the first window with, so an album that arrived fourth
+    // opens exactly as one that arrived first.
+    const QString A = mkServerId();
+    const QVector<MusicLibrary::Album> rows = Subsonic::albumRows(A, Subsonic::readAlbums(parsedOk(kNewestXml)));
+    CHECK(rows.size() == 1);
+    if (rows.isEmpty()) return;
+    CHECK(!rows.at(0).key.isEmpty());
+    CHECK(Subsonic::parse(rows.at(0).key).kind == Subsonic::Kind::Album);
+    // The duplicate guard the client pages with is the album KEY, which is server-qualified - so the same
+    // remote id from two servers is two rows and never one deduped away.
+    const QString B = mkServerId();
+    const QVector<MusicLibrary::Album> other = Subsonic::albumRows(B, Subsonic::readAlbums(parsedOk(kNewestXml)));
+    CHECK(!other.isEmpty() && other.at(0).key != rows.at(0).key);
+}
+
 static void testFate()
 {
     using F = Subsonic::Fate;
@@ -1276,6 +1328,7 @@ int main(int argc, char** argv)
     testPlaylistTracksKeepTheirOrder();
     testStarredPayload();
     testNewestPayload();
+    testNewestPaging();
     testTwoServersCollidingSectionIds();
     testStarredUnionNeverReplaces();
     testScrobbleAndStarParams();

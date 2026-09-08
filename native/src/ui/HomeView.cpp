@@ -2334,7 +2334,13 @@ bool HomeView::browseBack()
     return false; // at the catalog root -> the host returns to the themed home
 }
 
-bool HomeView::browseHasMore() const { return hasMore_ && !loading_; }
+bool HomeView::browseHasMore() const
+{
+    // ...OR the one synthetic level that pages (issue #298). The themed column asks this before it
+    // will call browseLoadMore at all, so a Recently-added level that had more to fetch and said no
+    // here would page on the classic grid and truncate on the themed one - two layouts, one answer.
+    return (hasMore_ || musicNewestHasMore()) && !loading_;
+}
 
 // After a Back, the current level's childRow is the item we drilled into. Map it to the (filtered) browse
 // index so the themed column re-selects it instead of jumping to the top. browseItems() must be called first
@@ -4154,6 +4160,75 @@ void HomeView::renderMusicSection(QString type, QString serverId)
     }
     prefetchAlbumCovers(albums);
     showSyntheticCatalog(browse::musicSectionCatalog(title, artists, albums, tracks, note, musicCover()));
+}
+
+// ==================================================================================================
+// RECENTLY ADDED IS A WINDOW, NOT THE WHOLE LIST (issue #298)
+// ==================================================================================================
+// getAlbumList2 is a paged query and the other two section levels are not: the server returns playlists and
+// starred whole, and it returns the newest N. Rendering one window as the level silently truncated a library
+// with more than a window's worth in it - and a silent truncation is indistinguishable from a complete
+// answer, which is the class of thing this client is otherwise careful about.
+//
+// The paging is the LAZY shape the addon browse already uses (loadMore off the scroll position / the XMB
+// cursor / the themed column's browseLoadMore), and it hangs off the same two functions, so all three
+// layouts page without any of them knowing that this level is not an addon's.
+
+// The server whose Recently-added level is on top, or "" for any other level. ONE reader, for the reason
+// isMusicSectionType exists: four callers must not answer "is this that level" differently.
+QString HomeView::musicNewestServerId() const
+{
+    if (stack_.isEmpty()) return QString();
+    const Level& top = stack_.last();
+    if (top.item.type != QString::fromLatin1(browse::kMusicNewestType)) return QString();
+    const QString prefix = QString::fromLatin1(browse::kMusicNewestPrefix);
+    return top.item.mime.startsWith(prefix) ? top.item.mime.mid(prefix.size()) : QString();
+}
+
+bool HomeView::musicNewestHasMore() const
+{
+    if (musicNewestFetching_) return false;      // a page is already on its way; asking again fetches nothing
+    const QString serverId = musicNewestServerId();
+    return !serverId.isEmpty() && SubsonicClient::instance().newestHasMore(serverId);
+}
+
+bool HomeView::loadMoreMusicNewest()
+{
+    const QString serverId = musicNewestServerId();
+    if (serverId.isEmpty()) return false;        // not this level: the addon path owns it
+    // CLAIMED FROM HERE ON, even when there is nothing to fetch. A synthetic level has no addon behind it, so
+    // falling through to issueRequest would put "This source is unavailable." under a screen of good rows.
+    if (musicNewestFetching_ || !SubsonicClient::instance().newestHasMore(serverId)) return true;
+
+    SubsonicClient& c = SubsonicClient::instance();
+    const int before = c.newest(serverId).size();
+    const int gen = ++musicFetchGen_;            // the SAME latch every other music fetch uses
+    musicNewestFetching_ = true;
+    c.fetchMoreNewest(serverId, [this, serverId, gen, before](const SubsonicClient::Result& r) {
+        musicNewestFetching_ = false;
+        if (gen != musicFetchGen_) return;       // superseded: the user navigated away mid-page
+        // A FAILED PAGE SAYS NOTHING. The rows already on screen are correct and still usable, and replacing
+        // them with an error row because page four did not arrive is the worse of the two wrong answers.
+        if (!r.ok) return;
+        appendMusicNewestPage(serverId, before);
+    });
+    return true;
+}
+
+// APPEND, never repopulate. A rebuild would drop the user's cursor back to the top of a list they had just
+// scrolled to the bottom of - which is exactly where they are standing when this runs.
+void HomeView::appendMusicNewestPage(const QString& serverId, int from)
+{
+    const QVector<MusicLibrary::Album>& all = SubsonicClient::instance().newest(serverId);
+    if (from < 0 || from >= all.size()) return;              // the page added nothing new
+    const QVector<MusicLibrary::Album> page = all.mid(from);
+    prefetchAlbumCovers(page);
+    // The SAME row builder the level itself used, given only the new albums: one album row is one album row
+    // whether it arrived in the first window or the fourth. No empty note - a page that arrived is not empty,
+    // and the level below it already answered that question.
+    const MediaCatalog cat = browse::musicSectionCatalog(QString(), {}, page, {},
+                                                         browse::MusicEmptyNote{}, musicCover());
+    populate(cat, /*append*/ true);
 }
 
 void HomeView::adoptStarredFavourites(const QString& serverId)
@@ -12276,6 +12351,11 @@ void HomeView::styleMetaPanel(bool dark)
 
 void HomeView::loadMore()
 {
+    // THE ONE SYNTHETIC LEVEL THAT PAGES (issue #298). Every other music level is a whole answer the
+    // server returned in one reply; Recently added is a window onto a bigger list. It is claimed here,
+    // before the addon path, because a synthetic level has no addon to ask - issueRequest would answer
+    // "This source is unavailable" over rows that are perfectly fine.
+    if (loadMoreMusicNewest()) return;
     if (loading_ || !hasMore_ || stack_.isEmpty()) return;
     issueRequest(/*append*/ true);
 }

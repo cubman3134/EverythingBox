@@ -18,12 +18,26 @@ void MainWindow::syncSubsonicScrobbleProviders()
 {
     if (!scrobbler_) return;
 
-    // ADD-ONLY, and that is deliberate rather than lazy. Rebuilding the whole set would destroy and recreate
-    // the ListenBrainz and Last.fm providers alongside these — and LastFmClient carries signal connections
-    // made once at startup (connectedChanged, authUrl) plus an authorisation poll that a recreation would
-    // silently abandon mid-flight. A server the user REMOVES needs no removal here anyway: its provider's
-    // configured() reads the store, so it answers false the moment the row is gone, and an unconfigured
-    // provider is offered no listens, pumps nothing and drops out of the status line on its own.
+    // NEVER A REBUILD, and that is deliberate rather than lazy. Rebuilding the whole set would destroy and
+    // recreate the ListenBrainz and Last.fm providers alongside these — and LastFmClient carries signal
+    // connections made once at startup (connectedChanged, authUrl) plus an authorisation poll that a
+    // recreation would silently abandon mid-flight, which a user half way through linking Last.fm would
+    // experience as it simply never finishing.
+    //
+    // SO THE SET IS RECONCILED IN BOTH DIRECTIONS, ONE PROVIDER AT A TIME (issue #299). It used to be
+    // add-only, on the argument that a removed server's provider answers configured() == false and so
+    // accepts nothing, queues nothing and posts nothing. True, and it is still installed: counted by
+    // providers(), walked by every pump, and there until the next launch. It is removed here by ID — the
+    // one whose server went away and nothing else, so no other destination's backoff, in-flight submission
+    // or authorisation poll is touched.
+    QStringList installed;
+    for (const ScrobbleProvider* p : scrobbler_->providers()) installed.push_back(p->id());
+    QStringList serverIds;
+    for (const SubsonicServer& s : SubsonicServerStore::list())
+        if (!s.id.isEmpty()) serverIds.push_back(s.id);
+    for (const QString& stale : SubsonicScrobbleProvider::staleIds(installed, serverIds))
+        scrobbler_->removeProvider(stale);
+
     QSet<QString> have;
     for (const ScrobbleProvider* p : scrobbler_->providers()) have.insert(p->id());
 

@@ -1328,6 +1328,12 @@ QString tracker::lastErrorKey(const QString& profileId, Id id)
          + QStringLiteral("/lastError");
 }
 
+QString tracker::droppedKey(const QString& profileId, Id id)
+{
+    return stateKeyPrefix() + profileSlot(profileId) + QLatin1Char('/') + idToken(id)
+         + QStringLiteral("/dropped");
+}
+
 QString tracker::lastSentKey(const QString& profileId, Id id, const QString& itemKey)
 {
     // Hashed for the reason every per-item ini key is: an item key is a url or a title and can hold '/',

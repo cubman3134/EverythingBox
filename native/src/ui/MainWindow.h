@@ -1996,6 +1996,11 @@ private:
     void trackerRefreshItem(tracker::Id id, QString itemKey);
     // The AniList status line, shared by BOTH settings builders so the two cannot tell the user different
     // things about the same state - the traktStatusLine posture. Static: everything in it is on disk.
+    // A SETTINGS PANEL IS OPENING (issue #328). Takes the dropped-update notices out of the store and holds
+    // them for as long as this panel is up, so they are shown once, in the line, and do not expire unseen.
+    // Called by BOTH settings builders before the first status line is read - a notice shown on one layout
+    // and not the other is the twin-surface bug the GS_TWINS table exists to prevent.
+    static void trackerPanelOpened();
     static QString anilistStatusLine();
     // ...and MyAnimeList's, which is the same builder with MAL's three facts in it (increment 2). Two
     // functions rather than one taking an Id because the settings surfaces have no instance to ask and the

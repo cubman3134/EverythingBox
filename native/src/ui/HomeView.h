@@ -715,6 +715,14 @@ private:
     void openMusicSectionLevel(QString type, QString serverId);
     void populateMusicSection(QString type, QString serverId);
     void renderMusicSection(QString type, QString serverId);
+    // RECENTLY ADDED PAGES (issue #298) and the other two sections do not: the server returns playlists
+    // and starred whole, and it returns the newest N. loadMoreMusicNewest CLAIMS the level whenever it is
+    // on top - returning true even with nothing left to fetch - so loadMore() never falls through to the
+    // addon path for a level that has no addon behind it.
+    QString musicNewestServerId() const;
+    bool    musicNewestHasMore() const;
+    bool    loadMoreMusicNewest();
+    void    appendMusicNewestPage(const QString& serverId, int from);
     // The STARRED read's one side effect, and it only ever ADDS (Subsonic::starredAdditions enforces that by
     // having no other return value): tracks this server already holds a star for become favourites here.
     void adoptStarredFavourites(const QString& serverId);
@@ -1324,6 +1332,9 @@ private:
     // flag that keeps a level from being rebuilt once per cover that lands.
     int               musicFetchGen_ = 0;
     bool              musicArtRefreshPending_ = false;
+    // #298: one Recently-added page in flight at a time. Not `loading_`, which raises the spinner and
+    // blocks the level: the rows already on screen stay usable while the next window is fetched.
+    bool              musicNewestFetching_ = false;
     // #197: the same two, for the Audiobookshelf levels. Its OWN generation counter and not musicFetchGen_,
     // because the two features navigate independently and a music fetch landing must not cancel a book
     // level's — which is exactly what one shared counter would do.

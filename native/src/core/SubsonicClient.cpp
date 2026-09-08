@@ -13,6 +13,8 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include <utility>   // std::move: the Done callbacks are forwarded, never copied twice
+
 namespace {
 
 // The `c` parameter. Servers log it and show it in their own "now playing" surfaces, so it is the app's
@@ -446,6 +448,31 @@ void SubsonicClient::fetchStarred(const QString& serverId, Done done)
 
 void SubsonicClient::fetchNewest(const QString& serverId, Done done)
 {
+    fetchNewestPage(serverId, /*append*/ false, std::move(done));
+}
+
+void SubsonicClient::fetchMoreNewest(const QString& serverId, Done done)
+{
+    // NOT AN ERROR TO ASK when there is nothing more: the level calls this every time the cursor reaches
+    // the end, which happens repeatedly on a short list. Answering ok-and-nothing is what makes it safe to
+    // wire straight to a scroll position.
+    const auto it = caches_.constFind(serverId);
+    if (it == caches_.constEnd() || !it->newestLoaded || !it->newestMore)
+    {
+        if (done) done(Result{ true, false, QString() });
+        return;
+    }
+    fetchNewestPage(serverId, /*append*/ true, std::move(done));
+}
+
+bool SubsonicClient::newestHasMore(const QString& serverId) const
+{
+    const auto it = caches_.constFind(serverId);
+    return it != caches_.constEnd() && it->newestLoaded && it->newestMore;
+}
+
+void SubsonicClient::fetchNewestPage(const QString& serverId, bool append, Done done)
+{
     SubsonicServer srv;
     if (!SubsonicServerStore::get(serverId, srv))
     {
@@ -457,18 +484,36 @@ void SubsonicClient::fetchNewest(const QString& serverId, Done done)
     if (inflight_.contains(tag)) return;
     inflight_.insert(tag);
 
-    // A BOUNDED page. getAlbumList2 defaults to 10 and tops out at 500; "recently added" is a glance at what
-    // has arrived, not a second copy of the library, and asking for the maximum would make the level slow to
-    // draw for a list nobody scrolls to the end of.
+    // A BOUNDED page, AND ONLY A PAGE (issue #298). getAlbumList2 defaults to 10 and tops out at 500;
+    // "recently added" is a glance at what has arrived, not a second copy of the library, so the window
+    // stays modest and the next one is asked for only when somebody reaches the end of this one. What is
+    // NOT acceptable is rendering one window as the whole level: a silent truncation is indistinguishable
+    // from a complete answer.
+    const int offset = append ? cacheFor(serverId).newestOffset : 0;
     request(srv, QStringLiteral("getAlbumList2"),
-            { { QStringLiteral("type"), QStringLiteral("newest") },
-              { QStringLiteral("size"), QStringLiteral("100") } },
-            [this, serverId, tag](const Subsonic::Node& root, const Result& res) {
+            Subsonic::albumListParams(QStringLiteral("newest"), kNewestPageSize, offset),
+            [this, serverId, tag, append, offset](const Subsonic::Node& root, const Result& res) {
         if (res.ok)
         {
             Cache& c = cacheFor(serverId);
             const QVector<Subsonic::RemoteAlbum> albums = Subsonic::readAlbums(root);
-            c.newestAlbums = Subsonic::albumRows(serverId, albums);
+            const QVector<MusicLibrary::Album> rows = Subsonic::albumRows(serverId, albums);
+            if (!append) { c.newestAlbums.clear(); c.newestKeys.clear(); c.newestOffset = 0; }
+            // DEDUPED BY KEY. A server that ignores `offset` answers the second window with the first one,
+            // and appending it would grow the same albums for ever while the user scrolled — so a page that
+            // adds nothing new ends the paging rather than repeating it.
+            int added = 0;
+            for (const MusicLibrary::Album& b : rows)
+            {
+                if (b.key.isEmpty() || c.newestKeys.contains(b.key)) continue;
+                c.newestKeys.insert(b.key);
+                c.newestAlbums.push_back(b);
+                ++added;
+            }
+            c.newestOffset = offset + int(rows.size());
+            // A SHORT WINDOW IS THE END OF THE LIST — the only thing this protocol says about how much more
+            // there is. A full one means there may be more, and only then is another page ever asked for.
+            c.newestMore   = Subsonic::morePagesLikely(int(rows.size()), kNewestPageSize, added);
             c.newestLoaded = true;
             for (const Subsonic::RemoteAlbum& b : albums)
             {

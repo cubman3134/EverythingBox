@@ -451,6 +451,25 @@ namespace Subsonic
     // starred (a cover, a virtual container), so a caller can hand it anything.
     QList<QPair<QString, QString>> starParams(Kind kind, const QString& remoteId);
 
+    // ---- A PAGED LIST (issue #298) ---------------------------------------------------------------------
+    // `getAlbumList2` is a WINDOW onto a list, not the list: it takes a `size` and an `offset` and the reply
+    // says nothing about how much is behind it. One window rendered as a whole level silently truncates a
+    // large library, and a silent truncation is indistinguishable from a complete answer.
+    //
+    // The parameters for one window. `offset` is what was missing: without it every request is the FIRST
+    // window and the level can never grow. Sent even at zero, because a server that reads it at zero and a
+    // server that ignores it are then the same server, and one request shape is easier to reason about than
+    // two.
+    QList<QPair<QString, QString>> albumListParams(const QString& type, int size, int offset);
+
+    // IS THERE ANOTHER WINDOW BEHIND THIS ONE? Two conditions, and the second is the defensive one:
+    //   * a SHORT window is the end of the list - the only thing this protocol says about how much more
+    //     there is;
+    //   * a window that added NOTHING THE CACHE DID NOT ALREADY HOLD is a server that ignored `offset` and
+    //     answered with the first window again. Paging on would grow the same albums for ever while the
+    //     user scrolled, so it ends here instead.
+    bool morePagesLikely(int returned, int windowSize, int addedNew);
+
     // How one answer ends, in the four fates the scrobble orchestrator acts on. Pure over the envelope, so
     // every arm is drivable from a recorded body with no socket:
     //   Ok         the server took it
