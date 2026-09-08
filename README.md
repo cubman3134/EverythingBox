@@ -69,6 +69,9 @@ and current status, and
 **[`native/docs/play-on-device.md`](native/docs/play-on-device.md)** for handing playback
 between two EverythingBoxes on the same network — and for sending one box's artwork cache to
 another so it does not re-scrape a library you already have.
+**[`native/docs/watch-together.md`](native/docs/watch-together.md)** covers the other direction:
+a room code, two installs and one film kept at the same point, where the room shares *what* to
+play and each of you resolves your own stream.
 
 ## Quick build
 

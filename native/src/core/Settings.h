@@ -640,6 +640,16 @@ namespace Settings
     QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
     void setNetplayRelay(const QString& hostPort);
 
+    // Watch together (issue #86): what a HOST's room does when a guest stalls. "wait" (the default) pauses
+    // everyone until they catch up; "keepgoing" carries on and just shows who is behind. Stored as the id
+    // WatchTogether::policyId spells, under the "watchtogether/" group named in WatchTogether.h; a hand-edited
+    // or absent value degrades to "wait". Deliberately a SETTING and not a rule: which of the two a watch
+    // party wants is a social answer, not a technical one. Watch-together rooms use netplayRelay() above --
+    // one relay, one address to set, because a user reading a code off a TV cannot be asked to know which
+    // kind of room it belongs to.
+    QString watchTogetherPolicy();
+    void setWatchTogetherPolicy(const QString& policyId);
+
     // One-shot: this install has already swept core-written save files that were left loose in the app
     // directory into saves/ (SaveMeta::sweepStrays). Stored under "device/" so it does NOT sync — the flag
     // describes THIS machine's directory, and another device's strays still need their own pass.

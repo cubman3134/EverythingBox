@@ -794,6 +794,37 @@ private:
     void playOnAddCastMenuRows(class QMenu* menu);             // the #143 section of the ONE output picker
     void showPlayOnMenu();                                     // reachable from Settings on BOTH layouts
 
+    // ---- "Watch together" (issue #86). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowWatchTogether.cpp,
+    // for the same reason the #143 block above is. The feature reaches the rest of this class only through
+    // members that already existed (player_, lastPos_, syncKey_, notify, and #143's own reference/open pair),
+    // so it costs MainWindow.cpp two settings rows and nothing else.
+    class WatchTogetherSession* watchSession_ = nullptr;
+    class QTimer* wtTimer_ = nullptr;   // 1 Hz: the guest's drift correction and BOTH sides' stall detection
+    bool   wtNudging_ = false;          // the player's rate is currently off 1.0 (the drift hysteresis's state)
+    bool   wtApplying_ = false;         // applying the room's transport: our own pausedChanged is not a request
+    qint64 wtQuietUntilMs_ = 0;         // ...and mpv reports it LATE, so the guard is a window, not an instant
+    bool   wtBuffering_ = false;        // we have told the room we are stalled
+    double wtSeenPos_ = -1.0;           // last position sample, for the stall detector
+    int    wtStalledTicks_ = 0;
+    double wtSentPos_ = -1.0;           // host: the position last broadcast, for seek detection
+
+    void showWatchTogetherMenu();                              // reachable from Settings on BOTH layouts
+    void watchTogetherHost();
+    void watchTogetherJoin();
+    void watchTogetherLeave();
+    void watchTogetherShowRoom();                              // who is watching, and what each is doing
+    void watchTogetherWire();                                  // one-time: session signals + player signals
+    void watchTogetherApplyTransport(bool paused, double positionSec);
+    void watchTogetherOnItem(const PlayOn::ItemRef& ref, double positionSec, bool paused);
+    void watchTogetherOpenRoomItem();                          // guest with nothing loaded: adopt the room's item
+    qint64 wtReopenAtMs_ = 0;                                  // ...throttled, so a burst is one open
+    void watchTogetherTick();
+    void watchTogetherNotice(const QString& text, int ms);    // player notice while a film is up, else the window's
+    // Host: put what is playing into the room. `automatic` = fired by a file load rather than by the menu
+    // row, which only changes whether an unshareable item is reported.
+    void watchTogetherShareCurrent(bool automatic = false);
+    void applyWatchTogetherPolicy();                           // push the stored stall policy into a LIVE room
+
     // ---- "Send library to device" (issue #127). EVERY MEMBER BELOW IS DEFINED IN
     // src/ui/MainWindowSendLibrary.cpp, for the same reason the #143 block above is.
     //
