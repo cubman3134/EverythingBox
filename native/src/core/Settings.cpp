@@ -715,6 +715,15 @@ void Settings::setNetplayRelay(const QString& hostPort)
     store().setValue(QStringLiteral("netplay/relay"), hostPort.trimmed()); store().sync();
 }
 
+QString Settings::watchTogetherPolicy()
+{
+    return store().value(QStringLiteral("watchtogether/policy"), QStringLiteral("wait")).toString();
+}
+void Settings::setWatchTogetherPolicy(const QString& policyId)
+{
+    store().setValue(QStringLiteral("watchtogether/policy"), policyId.trimmed()); store().sync();
+}
+
 QString Settings::externalPlayer() { return store().value(QStringLiteral("player/external"), QStringLiteral("builtin")).toString(); }
 void Settings::setExternalPlayer(const QString& id)
 {

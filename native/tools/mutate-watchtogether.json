@@ -1,0 +1,193 @@
+{
+  "build": [
+    "cmake",
+    "--build",
+    "build",
+    "--config",
+    "Release",
+    "--target",
+    "probe_watchtogether",
+    "--parallel"
+  ],
+  "test": [
+    "build/Release/probe_watchtogether.exe"
+  ],
+  "artifact": "build/Release/probe_watchtogether.exe",
+  "sentinel": "WATCHTOGETHER-OK",
+  "env": {
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "mutants": [
+    {
+      "name": "the-encoder-stops-scrubbing",
+      "//": "#86. THE mutation this probe exists for: with the scrub gone, a resolved stream url handed in as a reference goes straight out on the wire. If the byte-scan does not go red here it is scanning nothing.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "QString scrubForWire(const QString& s) { return looksLikeCredential(s) ? QString() : s; }",
+      "replace": "QString scrubForWire(const QString& s) { return s; }",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-credential-predicate-stops-seeing-urls",
+      "//": "#86. The other half of the same rule: the predicate itself. A url is the shape a resolved stream always has.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (s.contains(QLatin1String(\"://\"))) return true;",
+      "replace": "    if (false) return true;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-long-token-is-no-longer-a-credential",
+      "//": "#86. A bare debrid token or infohash carries no scheme and no query key; the hex-run rule is the only thing that catches one.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    return hasLongHexRun(s);",
+      "replace": "    return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "one-drift-threshold-instead-of-two",
+      "//": "#86. Collapsing the hysteresis to a single threshold is exactly the bug that makes a rate controller oscillate: a drift sitting on the deadband arms and disarms on alternate beacons for ever.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    const double threshold = nudging ? cfg.releaseSec : cfg.deadbandSec;",
+      "replace": "    const double threshold = cfg.deadbandSec;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-deadband-boundary-belongs-to-the-loud-side",
+      "//": "#86. Exactly AT the threshold must be 'do nothing'. Flipping the comparison is the classic off-by-a-boundary that only an equality case catches.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (mag <= threshold) return d;",
+      "replace": "    if (mag < threshold) return d;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-hard-seek-boundary-moves",
+      "//": "#86. The other boundary, in the other direction.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (mag >= cfg.hardSeekSec)",
+      "replace": "    if (mag > cfg.hardSeekSec)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-nudge-clamp-is-removed",
+      "//": "#86. Without the clamp a two-second drift asks for a 6.7% rate change, which is audible even pitch-corrected.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    d.speed  = clampd(1.0 - d.drift / cfg.correctionSec, 1.0 - cfg.maxNudge, 1.0 + cfg.maxNudge);",
+      "replace": "    d.speed  = 1.0 - d.drift / cfg.correctionSec;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-hostile-clock-is-trusted",
+      "//": "#86. Drop the beacon-age sanity guard and one bad clock reading hard-seeks the whole room.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (!(beaconAgeSec >= 0.0) || beaconAgeSec > cfg.maxBeaconAgeSec) return d;",
+      "replace": "    if (false) return d;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-paused-host-is-extrapolated-anyway",
+      "//": "#86. A paused host does not advance; treating a stale beacon from one as stale position data seeks the guest away from a stopped picture.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    const double target = hostPaused ? hostPos : hostPos + beaconAgeSec;",
+      "replace": "    const double target = hostPos + beaconAgeSec;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "someone-who-could-not-get-the-film-may-still-pause-it",
+      "//": "#86. The arbitration rule: an unresolved participant stays in the room but does not steer it.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "            if (!p || !p->resolved) return out;",
+      "replace": "            if (!p) return out;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-buffering-hold-outlives-a-user-pause",
+      "//": "#86. setHostTransport clearing the hold is what stops a guest recovering from a stall resuming a film the user paused on purpose.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    held_ = false;   // a human decision replaces the automatic hold",
+      "replace": "    // a human decision replaces the automatic hold",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "keep-going-still-waits",
+      "//": "#86. Both buffering policies are the user's answer; collapsing them to one is the guess the issue forbids.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (anyoneBuffering && hostPlaying && !heldForBuffering) return BufferAction::HoldForBuffering;",
+      "replace": "    if (anyoneBuffering && hostPlaying) return BufferAction::HoldForBuffering;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "an-unresolved-participant-holds-the-room-up",
+      "//": "#86. Someone who never got the film cannot be buffering it; letting their stale flag count pauses everyone else indefinitely.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "        if (p.buffering && p.resolved) return true;",
+      "replace": "        if (p.buffering) return true;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-rejoin-becomes-a-second-participant",
+      "//": "#86. The same id arriving again is a rejoin, not a new person.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "            if (Participant* p = findMut(in.participantId))",
+      "replace": "            if (Participant* p = nullptr)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "join-in-progress-sends-where-before-what",
+      "//": "#86. A guest told the position before the item seeks a player still holding the previous one.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "            out << rosterMessage() << itemMessage() << transportMessage();",
+      "replace": "            out << rosterMessage() << transportMessage() << itemMessage();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-seek-request-is-not-clamped",
+      "//": "#86. The host arbitrates, which includes refusing a nonsensical position rather than relaying it.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "            else                                  setHostTransport(hostPaused_, in.positionSec < 0.0 ? 0.0 : in.positionSec);",
+      "replace": "            else                                  setHostTransport(hostPaused_, in.positionSec);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-malformed-line-ends-the-party",
+      "//": "#86. One bad control message must not be fatal; the next beacon repairs anything its loss cost.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "        if (decode(line, m, err)) out << m;",
+      "replace": "        out << m; (void)decode(line, m, err);",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-item-is-not-scrubbed-on-the-way-in",
+      "//": "#86. Scrubbing at setItem() means a resolved url is never even HELD, so it cannot reach a log, a record or a later message by some other path.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    item_ = shareableRef(ref);   // scrubbed on the way IN as well, so nothing unsafe is ever even held",
+      "replace": "    item_ = ref;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-resolved-report-is-always-news",
+      "//": "#86. The guard that stops a message loop: a resolved report is a hello, the host answers a hello with the room's item, and the item is what made the guest report. Unconditional, this re-opened the film for ever on live hardware.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (!me || me->resolved) return false;    // already resolved: saying so again is the loop, not the news",
+      "replace": "    if (!me) return false;",
+      "count": 1,
+      "expect": "killed"
+    }
+  ]
+}

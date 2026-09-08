@@ -5813,6 +5813,10 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             if (skipChip_ && skipChip_->isVisible()) activateSkipChip();
             return;
         case Qt::Key_I: showSegmentMarksMenu(); return;
+        // Watch together (#86): the room from INSIDE playback — who is in it, who is stalled, who could not
+        // play this, and the way out of it. Settings is the other way in, but during a film Settings is not
+        // reachable without ending the film, which is the one moment the participant list is worth having.
+        case Qt::Key_W: revealMediaControls(); showWatchTogetherMenu(); return;
         default: break; // Backspace/Escape exit via the unified Back above (stop + return home)
         }
     }
@@ -21814,6 +21818,19 @@ void MainWindow::openGeneralSettings()
         QStringList xfOpts;
         for (const auto& p : xfPairs) xfOpts << p.first;
 
+        // Watch together (issue #86): what a HOST's room does when a guest's stream stalls. Two answers, and
+        // WHICH one is right is a social question, not a technical one -- so it is asked, not guessed. The
+        // ids are WatchTogether::policyId's, so the setting, the wire and the room state machine all spell
+        // the same two words. The classic twin below builds the same list and the same setter.
+        const QList<QPair<QString, QString>> wtPairs = {
+            qMakePair(tr("Pause for everyone until they catch up"), QStringLiteral("wait")),
+            qMakePair(tr("Keep going and show who's behind"),       QStringLiteral("keepgoing")),
+        };
+        QString curWtDisp = wtPairs.at(0).first;
+        for (const auto& p : wtPairs) if (p.second == Settings::watchTogetherPolicy()) { curWtDisp = p.first; break; }
+        QStringList wtOpts;
+        for (const auto& p : wtPairs) wtOpts << p.first;
+
         // Attract-mode idle timeout (issue #54). The contract has no numeric spinner, so the minutes become a
         // Choice; the same minute values back the classic builder's QComboBox. The handler maps the picked
         // display back to minutes through this same list, so nothing but a listed value is ever written.
@@ -22157,6 +22174,17 @@ void MainWindow::openGeneralSettings()
              tr("Other EverythingBoxes on your network appear beside Chromecast and DLNA in the cast picker. "
                 "A hand-off sends what to play and where you are in it — never the video itself — so the other "
                 "device fetches its own stream. Needs remote control on at BOTH ends."),
+             QString());
+        // --- Watch together (issue #86). Twins in the QWidget builder below (GS_TWINS). ---
+        sep(tr("Watch together"));
+        action(QStringLiteral("wt.open"), tr("Watch together…"));
+        choice(QStringLiteral("wt.buffering"), tr("When someone's stream stalls"), wtOpts, curWtDisp);
+        info(QStringLiteral("wt.hint"),
+             tr("Host a room, give someone the code, and the two of you watch the same thing at the same "
+                "point — play, pause and seek stay in step. The room shares WHAT to play, never the video "
+                "and never your account: each of you fetches your own stream with your own addons. Somebody "
+                "who can't get it says so and stays in the room. Over the internet it uses the same relay "
+                "as online netplay."),
              QString());
         // --- Live TV. The home shelf hides itself until a source exists, so this is the way in for the first
         // one (and the only way in when the last one is removed). ---
@@ -22865,6 +22893,7 @@ void MainWindow::openGeneralSettings()
              followIntervalPairs,      // Following (#155): the handler maps the picked display back through them
              rgPairs, rgPreampPairs,   // ReplayGain (#141): the handler maps the picked display back through them
              xfPairs,                  // Crossfade (#141): same, for the seconds row
+             wtPairs,                  // Watch together (#86): same, for the stall-policy row
              musicSrcPairs,            // Preferred music source (#194): same, for the "Play music from" row
              shaderPresetPairs,
              runaheadPairs,            // Runahead (#100): the handler maps the picked display back to N
@@ -23014,6 +23043,17 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("playon.pick")) {
                     showPlayOnMenu();
+                }
+                // Watch together (issue #86). The policy is applied to a LIVE room as well as stored: a host
+                // that switches to "keep going" while the room is waiting for a stalled guest expects it to
+                // start moving, and the next stall report -- which is what would otherwise carry the change --
+                // never comes if everyone has already recovered.
+                else if (id == QStringLiteral("wt.open")) {
+                    showWatchTogetherMenu();
+                }
+                else if (id == QStringLiteral("wt.buffering")) {
+                    for (const auto& p : wtPairs) if (p.first == val) { Settings::setWatchTogetherPolicy(p.second); break; }
+                    applyWatchTogetherPolicy();
                 }
                 else if (id == QStringLiteral("playon.sendlib")) {
                     showSendLibraryMenu();
@@ -24046,6 +24086,31 @@ void MainWindow::openGeneralSettings()
         auto* poPick = panelRow(tr("Play on Another Device…"));
         connect(poPick, &QPushButton::clicked, this, [this] { showPlayOnMenu(); });
         v->addWidget(poPick);
+        // Watch together (issue #86): the classic twins of the themed wt.open / wt.buffering rows. Same menu,
+        // same Settings key and the same live re-apply -- one code path each, no drift (GS_TWINS).
+        auto* wtOpen = panelRow(tr("Watch Together…"));
+        connect(wtOpen, &QPushButton::clicked, this, [this] { showWatchTogetherMenu(); });
+        v->addWidget(wtOpen);
+        auto* wtRow = new QHBoxLayout();
+        auto* wtLbl = new QLabel(tr("When someone's stream stalls"));
+        wtLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* wtStall = new QComboBox();
+        wtStall->addItem(tr("Pause for everyone until they catch up"), QStringLiteral("wait"));
+        wtStall->addItem(tr("Keep going and show who's behind"), QStringLiteral("keepgoing"));
+        wtStall->setCurrentIndex(qMax(0, wtStall->findData(Settings::watchTogetherPolicy())));
+        connect(wtStall, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this, wtStall](int) {
+                    Settings::setWatchTogetherPolicy(wtStall->currentData().toString());
+                    applyWatchTogetherPolicy();
+                });
+        wtRow->addWidget(wtLbl); wtRow->addWidget(wtStall); wtRow->addStretch(1);
+        v->addLayout(wtRow);
+        auto* wtNote = new QLabel(tr("Host a room, give someone the code, and the two of you watch the same "
+            "thing at the same point. The room shares WHAT to play, never the video and never your account: "
+            "each of you fetches your own stream. Over the internet it uses the same relay as online netplay."));
+        wtNote->setWordWrap(true);
+        wtNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(wtNote);
         // #127: the classic twin of the themed builder's playon.sendlib row — same menu, one code path
         // (GS_TWINS).
         auto* poSendNote = new QLabel(tr("Warms another box's artwork cache from this one so it doesn't "

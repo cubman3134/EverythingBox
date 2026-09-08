@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.231 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.232 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -940,6 +940,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowWatchTogether.cpp                 # "Watch together" MainWindow members, same rule (#86)
         src/ui/MainWindowTrackers.cpp                      # anime/manga tracker MainWindow members, same rule (#156)
         src/ui/MainWindowCustomCores.cpp                   # custom-core settings surface, same reason (#98)
         src/ui/MainWindowChannelGuide.cpp                  # the channel guide + interstitial MainWindow members (#179 inc 2)
@@ -973,6 +974,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/Notifier.cpp       src/ui/Notifier.h
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        # Watch together (#86): the pure room/message/drift core, and the one socket that carries it. The
+        # split is the same one #143 made -- every decision in a QtCore-only unit a probe can drive, and a
+        # thin QTcpSocket around it.
+        src/media/WatchTogether.cpp        src/media/WatchTogether.h
+        src/media/WatchTogetherSession.cpp src/media/WatchTogetherSession.h
         src/media/AudioTags.cpp   src/media/AudioTags.h    # issue #74: the one place an audio tag is parsed
         src/media/CueSheet.cpp    src/media/CueSheet.h     # #196 part 3: the one place a .cue is parsed
         src/launch/GameLauncher.cpp src/launch/GameLauncher.h
@@ -3455,6 +3461,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RemoteApi.cpp    src/core/RemoteApi.h)
     target_include_directories(probe_playon PRIVATE src src/core)
     target_link_libraries(probe_playon PRIVATE Qt6::Core)
+
+    # Headless test for "Watch together" (#86): the room code, the credential predicate, the message set and
+    # its encoding, the drift function across its whole range (both thresholds exactly, the +-3% clamp, a
+    # paused host, a hostile clock, and a 400-beacon non-oscillation simulation), the Room over a FAKE
+    # transport -- join-in-progress, arbitration, both buffering policies, leave/rejoin -- and THE assertion
+    # the feature exists for: a byte-scan of the whole wire transcript and of the persisted room record for a
+    # token, after a drive in which the host was deliberately handed a resolved stream url to share. Pure
+    # QtCore, so it needs no socket, no relay, no player and no window.
+    add_executable(probe_watchtogether tools/probe_watchtogether.cpp
+        src/media/WatchTogether.cpp src/media/WatchTogether.h)
+    target_include_directories(probe_watchtogether PRIVATE src src/media src/core)
+    target_link_libraries(probe_watchtogether PRIVATE Qt6::Core)
 
     # Headless test for "Send library to device" (#127): the content stamp (stable, and what changes it), the
     # inventory diff, the payload's safety rules (a 40-character MetaCache id and an art-only extension
