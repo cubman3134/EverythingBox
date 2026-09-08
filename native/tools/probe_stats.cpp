@@ -4,7 +4,9 @@
 // QPA in CI and pins the contract the panel + the two accrual seams lean on:
 //
 //   * forward-only media accrual — the STORE floors a non-positive Δ to a no-op (the seam clamps to [0,30]);
-//   * high-water pages — a revisit doesn't accrue, a backward turn doesn't decrement;
+//   * high-water pages — a revisit doesn't accrue, a backward turn doesn't decrement, and (issue #295) the
+//     CROSS-DEVICE rollup takes the MAXIMUM rather than the sum, because a high-water mark is a position and
+//     not a total;
 //   * rollup coherence — the per-category rollup equals the sum of per-title metrics after N accruals;
 //   * per-profile isolation — profile A's stats are invisible to profile B;
 //   * invalidate — an external ini write is not seen until invalidate() (hot cache), then re-read;
@@ -287,6 +289,42 @@ int main(int argc, char** argv)
         CHECK(top[0].second.mediaSeconds == 35);                                           // summed in topTitles
         // The newest device's activity (B @300) owns the display title/category.
         CHECK(ConsumptionStats::get(QStringLiteral("vid:X")).lastActivity == 300);
+    }
+
+    // ---- 10b. pagesRead is a HIGH-WATER MARK, so it takes the MAX across devices (issue #295) --------------
+    // The rollup rule is per FIELD, not per store: the two counters share one blob and must NOT share one
+    // rule. Read forty pages of a hundred-page book on two devices and the honest answer is "forty pages in",
+    // not "eighty" — summed, #134's reading fraction called Finished on a book nobody finished. Driven with
+    // the seconds in the SAME blobs, so this also pins that fixing the pages did not stop the seconds summing.
+    {
+        const QString hy = hash(QStringLiteral("book:Y"));
+        setRaw(QStringLiteral("stats/pages/A/items/") + hy, statsBlob(11, 40, 100, QStringLiteral("Y"), QStringLiteral("reading")));
+        setRaw(QStringLiteral("stats/pages/B/items/") + hy, statsBlob(22, 40, 300, QStringLiteral("Y"), QStringLiteral("reading")));
+        setRaw(QStringLiteral("stats/pages/C/items/") + hy, statsBlob(33, 12, 200, QStringLiteral("Y"), QStringLiteral("reading")));
+        // Each device also accrued its own NEW GROUND into the reading rollup; that counter is a lifetime
+        // count of pages turned rather than a position, so it keeps summing (and is asserted to, below).
+        setRaw(QStringLiteral("stats/pages/A/cat/reading/pages"), QStringLiteral("40"));
+        setRaw(QStringLiteral("stats/pages/B/cat/reading/pages"), QStringLiteral("40"));
+        setRaw(QStringLiteral("stats/pages/C/cat/reading/pages"), QStringLiteral("12"));
+
+        ProfileStore::setCurrent(QStringLiteral("pages"));
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("book:Y")).pagesRead == 40);   // MAX(40, 40, 12) — never 92
+        CHECK(ConsumptionStats::get(QStringLiteral("book:Y")).mediaSeconds == 66); // 11 + 22 + 33 — still summed
+        // ...and the same maximum through topTitles, which is what the Stats panel's reading list reads.
+        const auto tops = ConsumptionStats::topTitles(QStringLiteral("reading"), 10);
+        CHECK(tops.size() == 1 && tops[0].first == hy);
+        CHECK(tops[0].second.pagesRead == 40);
+        // The CATEGORY rollup is the deliberate exception and still sums: it never answers "how far into this
+        // book", so it cannot produce an early Finished.
+        CHECK(ConsumptionStats::categoryPages() == 92);
+        // A device that has read FURTHER moves the mark; one that has read less never drags it back.
+        setRaw(QStringLiteral("stats/pages/D/items/") + hy, statsBlob(0, 71, 400, QStringLiteral("Y"), QStringLiteral("reading")));
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("book:Y")).pagesRead == 71);
+        setRaw(QStringLiteral("stats/pages/E/items/") + hy, statsBlob(0, 3, 500, QStringLiteral("Y"), QStringLiteral("reading")));
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("book:Y")).pagesRead == 71);   // unchanged by the laggard
     }
 
     // ---- 11. PlayStats migration + aggregate readers (sum totals/sessions, MAX last-played) -----------------
