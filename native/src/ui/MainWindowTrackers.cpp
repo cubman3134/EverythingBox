@@ -37,6 +37,8 @@
 
 #include "nav/NavOverlay.h"   // NavMenu::pick
 
+#include <QHash>
+
 // The trackers this window owns, in a STABLE order — the order they shipped in, so a user with all three
 // connected is asked about them in the same order every time rather than in whatever order a hash
 // happened to produce. Nulls are tolerated: on an early path a member may not be constructed yet, and
@@ -59,10 +61,41 @@ tracker::Tracker* MainWindow::trackerById(tracker::Id id) const
     return nullptr;
 }
 
+// ---- A DROPPED UPDATE WAITS FOR THE USER (issue #328) ---------------------------------------------------
+//
+// #326 drops an update a service refuses permanently, so the ordered queue keeps moving rather than wedging
+// behind it for ever, and says so in the status line below. That is the one place somebody with a working
+// background sync never looks: the whole point of a background sync is that you do not open its settings
+// panel, so the news was being read out to an empty room and then expiring.
+//
+// So it WAITS. TrackerQueue keeps a small bounded persistent list; a settings panel takes it on OPEN, shows
+// it in the line, and the store is cleared at the same moment - seen is seen. The taken copy is held here
+// for as long as that panel is up, so a status refresh a second later (a queue moved, an account connected)
+// does not delete a sentence out from under somebody who is reading it; the next open finds the store empty
+// and shows nothing.
+//
+// A file static rather than a member because the three status lines are static functions - they are called
+// by both settings builders and by the refresh hooks, none of which hold a MainWindow.
+namespace {
+QHash<int, QStringList> g_dropNoticesForPanel;
+}
+
+void MainWindow::trackerPanelOpened()
+{
+    g_dropNoticesForPanel.clear();
+    for (const tracker::Id id : { tracker::Id::AniList, tracker::Id::MyAnimeList, tracker::Id::Kitsu })
+    {
+        const QStringList waiting = TrackerQueue::dropped(id);
+        if (waiting.isEmpty()) continue;
+        g_dropNoticesForPanel.insert(int(id), waiting);
+        TrackerQueue::clearDropped(id);   // shown is seen; the news does not wait a second time
+    }
+}
+
 // The status line's shape, spelled ONCE for every tracker. Both settings builders and both trackers read it,
 // so the four surfaces cannot tell the user different things about the same queue.
-static QString trackerStatusLineFor(bool configured, bool connected, int queued, const QString& err,
-                                    const QString& setupHint)
+static QString trackerStatusLineFor(tracker::Id id, bool configured, bool connected, int queued,
+                                    const QString& err, const QString& setupHint)
 {
     if (!configured) return setupHint;
     if (!connected)  return MainWindow::tr("Set up, but not connected.");
@@ -73,12 +106,17 @@ static QString trackerStatusLineFor(bool configured, bool connected, int queued,
         : MainWindow::tr("Connected. Everything has been sent.");
     // Never a credential: see AniListTracker.h / MyAnimeListTracker.h. These lines are sentences of ours.
     if (!err.isEmpty()) s += QStringLiteral("  ") + err;
+    // ...and whatever was dropped while nobody was looking (#328). NOT an interruption: it is a sentence in
+    // a panel the user chose to open, which is what "nothing about this is urgent" means in practice.
+    const QString waited = TrackerQueue::droppedNotice(g_dropNoticesForPanel.value(int(id)));
+    if (!waited.isEmpty() && !s.contains(waited)) s += QStringLiteral("  ") + waited;
     return s;
 }
 
 QString MainWindow::anilistStatusLine()
 {
-    return trackerStatusLineFor(AniListTracker::isConfigured(), AniListTracker::isConnected(),
+    return trackerStatusLineFor(tracker::Id::AniList,
+                                AniListTracker::isConfigured(), AniListTracker::isConnected(),
                                 AniListTracker::queuedCount(), AniListTracker::lastError(),
                                 tr("Not set up. Paste a Client ID and Secret to begin."));
 }
@@ -90,7 +128,8 @@ QString MainWindow::kitsuStatusLine()
     // configured() and connected() are the same question on Kitsu - there is no client to register, so
     // "set up but not signed in" is a state the user cannot be in. Passing the same fact twice is what
     // makes the shared builder skip straight from the hint to the connected line.
-    return trackerStatusLineFor(KitsuTracker::isConfigured(), KitsuTracker::isConnected(),
+    return trackerStatusLineFor(tracker::Id::Kitsu,
+                                KitsuTracker::isConfigured(), KitsuTracker::isConnected(),
                                 KitsuTracker::queuedCount(), KitsuTracker::lastError(),
                                 tr("Not signed in. Enter your Kitsu email and password to begin."));
 }
@@ -99,7 +138,8 @@ QString MainWindow::malStatusLine()
 {
     // The hint differs because MAL's requirement differs: it issues PUBLIC clients with no secret at all,
     // so the Client ID alone is enough to be "set up" (MyAnimeListTracker::isConfigured).
-    return trackerStatusLineFor(MyAnimeListTracker::isConfigured(), MyAnimeListTracker::isConnected(),
+    return trackerStatusLineFor(tracker::Id::MyAnimeList,
+                                MyAnimeListTracker::isConfigured(), MyAnimeListTracker::isConnected(),
                                 MyAnimeListTracker::queuedCount(), MyAnimeListTracker::lastError(),
                                 tr("Not set up. Paste a Client ID to begin."));
 }

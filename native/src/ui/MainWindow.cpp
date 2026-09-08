@@ -22676,6 +22676,9 @@ void MainWindow::openGeneralSettings()
         // --- AniList (issue #156): anime + manga progress. Trakt above keeps film and general TV; this
         // keeps anime and manga, and the two never write to each other. Every row has a twin in the
         // QWidget builder below - a setting in one builder is unreachable in the other mode. ---
+        // THE NEWS THAT WAITED (issue #328), taken before the first status line below is built: an update a
+        // service refused permanently was dropped while nobody was looking, and this is where it is said.
+        trackerPanelOpened();
         sep(tr("AniList (anime and manga)"));
         info(QStringLiteral("anilist.help"),
              tr("Sync chapters read and episodes watched to your AniList list. Create a free API client at "
@@ -25849,6 +25852,9 @@ void MainWindow::openGeneralSettings()
         // --- AniList (issue #156): the twins of the themed builder's anilist.* rows. A user-facing setting
         // has to exist in BOTH surfaces or it is simply unreachable in one mode. ---
         v->addSpacing(12);
+        // The twin of the themed builder's call (issue #328): the dropped-update notices are taken on open
+        // here too, or they would be shown on one layout and silently expire on the other.
+        trackerPanelOpened();
         auto* alHeading = new QLabel(tr("AniList (anime and manga)"));
         alHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
         v->addWidget(alHeading);

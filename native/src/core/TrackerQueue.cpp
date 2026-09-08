@@ -5,6 +5,8 @@
 #include "TrackerRules.h"
 
 #include <QDateTime>
+#include <QMetaType>
+#include <QObject>
 #include <QSettings>
 
 #include <utility>
@@ -95,10 +97,58 @@ void TrackerQueue::setLastError(Id id, const QString& message)
     store().sync();
 }
 
+// ---- the dropped-update notices (issue #328) ------------------------------------------------------------
+
+QStringList TrackerQueue::dropped(Id id)
+{
+    const QVariant v = store().value(droppedKey(ProfileStore::currentId(), id));
+    // QSettings' ini backend reads a one-element list back as a bare string, so both spellings are accepted
+    // - a single dropped update is by far the common case and must not read back as nothing.
+    if (v.metaType().id() == QMetaType::QStringList) return v.toStringList();
+    const QString one = v.toString();
+    return one.isEmpty() ? QStringList{} : QStringList{ one };
+}
+
+void TrackerQueue::noteDropped(Id id, const QString& message)
+{
+    const QString m = message.trimmed();
+    if (m.isEmpty()) return;                  // not a notice
+    QStringList all = dropped(id);
+    if (!all.isEmpty() && all.constLast() == m) return;   // the same refusal twice says one thing, not two
+    all.push_back(m);
+    while (all.size() > kDroppedMax) all.removeFirst();    // bounded, oldest first out
+    store().setValue(droppedKey(ProfileStore::currentId(), id), all);
+    store().sync();
+}
+
+void TrackerQueue::clearDropped(Id id)
+{
+    store().remove(droppedKey(ProfileStore::currentId(), id));
+    store().sync();
+}
+
+QString TrackerQueue::droppedNotice(const QStringList& messages)
+{
+    if (messages.isEmpty()) return QString();
+    // THE NEWEST FEW, spelled out. Each sentence names the update it is about, which is the only part
+    // anybody can act on; the rest are counted, because a settings panel is not a log.
+    const int kShown = 3;
+    const int extra = qMax(0, messages.size() - kShown);
+    QStringList shown;
+    for (int i = qMax(0, messages.size() - kShown); i < messages.size(); ++i) shown << messages.at(i);
+    QString out = shown.join(QStringLiteral("  "));
+    if (extra > 0)
+        out += QStringLiteral("  ") + QObject::tr("%n earlier update(s) were dropped too.", nullptr, extra);
+    return out;
+}
+
 void TrackerQueue::forgetAccount(Id id)
 {
     store().remove(queueKey(ProfileStore::currentId(), id));
     store().remove(lastErrorKey(ProfileStore::currentId(), id));
+    // ...and the notices, which are about updates this account's queue held. A fresh link starts with
+    // nothing owed and nothing to be told about.
+    store().remove(droppedKey(ProfileStore::currentId(), id));
     store().sync();
 }
 
@@ -215,7 +265,12 @@ void TrackerQueue::Sender::drain()
             // too. Said out loud in the status line, because a queue that quietly discards somebody's
             // progress is worse than one that wedges: at least a wedge is eventually noticed.
             removeDelivered(spec_.id, u);
-            setLastError(spec_.id, spec_.droppedMessage ? spec_.droppedMessage(u) : QString());
+            const QString said = spec_.droppedMessage ? spec_.droppedMessage(u) : QString();
+            setLastError(spec_.id, said);
+            // ...AND IT WAITS FOR THE USER (issue #328). The status line is read by whoever has the settings
+            // panel open, which for a background sync is nobody; this is the same sentence, kept until a
+            // panel has actually shown it.
+            noteDropped(spec_.id, said);
             if (spec_.changed) spec_.changed();
             drain();   // ...and the rows behind it go out now, which is the whole point of dropping it
             return;
