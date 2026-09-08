@@ -11,6 +11,7 @@
 #include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
 #include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
 #include "Tracker.h"         // isDeviceLocalKey()/linkKeyPrefix() - #156 straddles the carve-out both ways
+#include "PerItemStores.h"   // #332: THE per-item-store prefix table, shared with SettingsTxn::inScope
 #include <QSet>
 #include <QSettings>
 #include <QCryptographicHash>
@@ -418,121 +419,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
 // The per-item stores the progress merge document (CloudMerge) owns. applyBundle must never write these from
 // the heavy bundle (release-gating: a peer's stale copy of stats/<this-device>/... would clobber the live
 // accumulator namespace and then propagate on the next push).
+//
+// THE TABLE ITSELF LIVES IN core/PerItemStores.h (issue #332), with every entry's reason beside it, because
+// SettingsTxn::inScope needs the same answer and a second hand-maintained copy of it drifted for years — see
+// that header. A new per-item store is added THERE and this predicate inherits it.
 bool CloudSync::isPerItemStoreKey(const QString& key)
 {
-    return key.startsWith(QStringLiteral("resume/"))    || key.startsWith(QStringLiteral("recent/"))
-        || key.startsWith(QStringLiteral("marks/"))     || key.startsWith(QStringLiteral("favorites/"))
-        || key.startsWith(QStringLiteral("playlists/")) || key.startsWith(QStringLiteral("stats/"))
-        || key.startsWith(QStringLiteral("playstats/")) || key.startsWith(QStringLiteral("deleted/"))
-        // Saved filter presets (issue #184): owned by the CloudMerge document, same as favourites/playlists.
-        // Riding the heavy bundle too would make one preset save flip the stateHash and re-upload the whole
-        // zip, and an inbound bundle would write the row raw — bypassing the newest-ts + tombstone merge that
-        // keeps a peer from resurrecting a deleted preset.
-        || key.startsWith(QStringLiteral("filterpresets/"))
-        // Personal TV channels (issue #179): owned by the CloudMerge document, same family and same reasons as
-        // filterpresets above. A channel is a source + an ordering + a start epoch; riding the heavy bundle too
-        // would make one channel edit flip the stateHash and re-upload the whole zip, and an inbound bundle
-        // would write the row raw — bypassing the newest-ts + tombstone merge that keeps a peer from
-        // resurrecting a deleted channel.
-        || key.startsWith(QStringLiteral("channels/"))
-        // Followed series (issue #155). The SYNCED half of the follow feature: "I follow this show" is a
-        // statement about the user, not about this box, so it rides the merge document exactly as a favourite
-        // does — one follow press must not flip the heavy bundle's stateHash and re-upload the whole zip, and
-        // an inbound bundle would write the row raw, bypassing the newest-ts + tombstone merge that keeps a
-        // peer from resurrecting an unfollowed series. The matched prefix is "follow/" with the slash, which
-        // deliberately does NOT match the schedule settings under "following/" (those are ordinary synced
-        // preferences and must keep riding the bundle) nor the device-local snapshots under "followsnap/".
-        || key.startsWith(QStringLiteral("follow/"))
-        // Per-item metadata corrections (issue #24): owned by the merge document, same as the rest. Riding the
-        // heavy bundle too would make a single title fix flip the stateHash and re-upload the whole zip, and an
-        // inbound bundle would write the blob raw — bypassing the newest-updatedAt merge that keeps two devices'
-        // corrections from clobbering each other.
-        || key.startsWith(QStringLiteral("metaoverrides/"))
-        // Per-game launch overrides (issue #51): the game's preferred core/emulator/extra-args. Owned by the
-        // CloudMerge document, same family and same reasons as metaoverrides — one override save must not flip
-        // the stateHash and re-upload the whole zip, and an inbound bundle would write the blob raw, bypassing
-        // the newest-updatedAt + husk merge that keeps two devices' overrides (and a clear) from clobbering.
-        || key.startsWith(QStringLiteral("launchopts/"))
-        // Per-item playback-speed memory (issue #140). Owned by the CloudMerge document, same family and same
-        // reasons as metaoverrides/launchopts: a narrator's ideal speed is a property of the CONTENT, so it
-        // should follow the user across devices (per-item-synced, NOT device-local); riding the heavy bundle
-        // too would make one speed change flip the stateHash and re-upload the whole zip, and an inbound bundle
-        // would write the row raw — bypassing the newest-updatedAt merge that keeps two devices' speeds from
-        // clobbering. The inverse of #64/#75/#103's device-local carve-outs — probe_cloudmerge asserts both.
-        || key.startsWith(QStringLiteral("speed/"))
-        // Per-item lyric offset (issue #142). Same family, same reasoning as speed: how far out a track's .lrc
-        // file runs is a property of the CONTENT (of the lyric file shipped beside it), not of this machine, so
-        // it should follow the user across devices — per-item-synced, NOT device-local. Riding the heavy bundle
-        // too would make one ±0.5 s nudge flip the stateHash and re-upload the whole zip, and an inbound bundle
-        // would write the row raw, bypassing the newest-updatedAt merge that keeps two devices' nudges from
-        // clobbering each other. probe_cloudmerge asserts both classifications.
-        || key.startsWith(QStringLiteral("lyricoffset/"))
-        // Per-item TRACKER LINKS (issue #156). Which AniList entry a shelf row IS. The INVERSE
-        // classification of the credentials above, and for the reasons speed/ and lyricoffset/ are
-        // per-item-synced: a link is a property of the CONTENT, not of this machine, and it costs the
-        // user a prompt per item to establish, so it should follow them across devices. Riding the heavy
-        // bundle too would make one link flip the stateHash and re-upload the whole zip, and an inbound
-        // bundle would write the blob raw, bypassing the newest-updatedAt merge that keeps two devices'
-        // links (and an unlink husk) from clobbering each other. probe_cloudmerge asserts it is
-        // per-item-synced and NOT device-local.
-        || key.startsWith(QStringLiteral("trackerlink/"))
-        // Per-book bookmarks (issue #136). A bookmark is a POSITION the issue explicitly wants to "survive
-        // switching devices", so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge
-        // document — favourites/playlists shape (union by id, newest-ts, delete tombstone). Riding the heavy
-        // bundle too would make one bookmark flip the stateHash and re-upload the whole zip, and an inbound
-        // bundle would write the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a
-        // deleted bookmark. probe_cloudmerge asserts it is per-item-synced and NOT device-local.
-        || key.startsWith(QStringLiteral("bookmarks/"))
-        // Per-book highlights (issue #136). A highlight is a statement about the BOOK — the passage a reader
-        // marked — not about this device, so it syncs on exactly the bookmark terms above: per-item, per-
-        // profile, NOT device-local, riding the CloudMerge document with the union-by-id + newest-ts + delete-
-        // tombstone rule. (Contrast #239's open-failure state, which really IS about this device and stays
-        // local.) The prefix is "highlights/" with the slash; probe_cloudmerge asserts it is per-item-synced
-        // and NOT device-local so a later edit to either table cannot reclassify it silently.
-        || key.startsWith(QStringLiteral("highlights/"))
-        // The looked-up vocabulary list (issue #137). A word you had to look up is a fact about the READER,
-        // not about the machine they were holding at the time, so it syncs on exactly the highlight terms
-        // above: per-item, per-profile, NOT device-local, riding the CloudMerge document with the union-by-id
-        // + newest-ts + delete-tombstone rule. The id is the WORD (VocabularyStore::idFor), so two devices
-        // that met the same word converge on ONE row instead of listing it twice. probe_lookup asserts it is
-        // per-item-synced and NOT device-local so a later edit to either table cannot reclassify it silently.
-        || key.startsWith(QStringLiteral("vocabulary/"))
-        // Per-item audio bookmarks (issue #140). A bookmarked POSITION in an audiobook/podcast is a property of
-        // the CONTENT the issue wants to "survive switching devices", exactly like #136's reading bookmarks and
-        // resume — so it SYNCS per-item (per-profile, NOT device-local) and rides the CloudMerge document with
-        // the favourites/bookmarks shape (union by id, newest-ts, delete tombstone). Riding the heavy bundle too
-        // would DOUBLE-sync it — one bookmark flips the stateHash and re-uploads the whole zip, and an inbound
-        // bundle writes the row raw, bypassing the tombstone merge that keeps a peer from resurrecting a deleted
-        // bookmark. NOTE it does NOT match the device-local "audio/" prefix below ("audiobookmarks" has a 'b',
-        // not a '/', at that boundary) — probe_cloudmerge asserts it is per-item-synced AND not device-local so
-        // a future refactor of either table cannot break the classification silently.
-        || key.startsWith(QStringLiteral("audiobookmarks/"))
-        // Per-game pad2key profiles (issue #105). Owned by the CloudMerge document (a `pad2key` section, husk-on-
-        // clear), same family as launchopts/speed/bookmarks: which keys a pad synthesises for a game is a property
-        // of the game+user, not the device, so it SYNCS. Riding the heavy bundle too would DOUBLE-sync it — one
-        // toggle flips the stateHash + re-uploads the zip, and an inbound bundle writes the row raw, bypassing the
-        // newest-updatedAt merge. So it must be carved out here (the store defined the CloudMerge section but this
-        // exclusion was missing). probe_cloudmerge asserts it is per-item-synced and NOT device-local.
-        || key.startsWith(QStringLiteral("pad2key/"))
-        // The "you missed" per-show dismissal watermarks (issue #25). Here rather than in the device-local
-        // table above, and that is the design decision rather than a filing choice: a dismissal SHOULD
-        // follow the user — waving away a month of a show on the TV and being nagged about it on the phone
-        // an hour later is the complaint the marks sync already exists to answer. It rides the merge
-        // document rather than the heavy bundle for the family's usual reason (one button press must not
-        // flip the stateHash and re-upload the whole zip) and for one of its own: the bundle overwrites,
-        // and this store's whole correctness argument is that the only write is `max`.
-        || key.startsWith(QStringLiteral("missed/"))
-        // The profile's HOME ARRANGEMENT (issue #161, filed as #333). It had a CloudMerge section from the
-        // day it shipped -- serializeHomeRows/mergeHomeRows, whole-list newest-wins over a UNION of the row
-        // set -- and was missing from this table, so the two halves of the sync disagreed about what it is:
-        // the merge document unioned two devices' rows, while the heavy bundle carried the whole value and
-        // applyBundle wrote it RAW inbound. Whichever landed last decided, and a bundle landing last replaced
-        // the local arrangement with the peer's, DROPPING every row the peer did not carry. That is the one
-        // outcome a synced row list must never produce (HomeRows.h, issue #314: a device keeps a row it
-        // cannot even draw, precisely so a sync cannot erase it for the device that can). Here, the merge
-        // document owns it alone: the union survives, and one row drag stops flipping the stateHash and
-        // re-uploading the whole zip. probe_cloudmerge section 41 drives both arrival orders.
-        || key.startsWith(QStringLiteral("homerows/"));
+    return peritem::isKey(key);
 }
 
 QByteArray CloudSync::buildSettingsJson()

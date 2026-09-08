@@ -72,6 +72,7 @@
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
 #include "ChannelStore.h"       // issue #179: personal TV channels ride this document
 #include "HomeRows.h"         // issue #333: the per-profile home arrangement, and which sync path owns it
+#include "PerItemStores.h"    // issue #332: THE per-item-store prefix table, walked by section 42
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
@@ -5978,6 +5979,87 @@ int main(int argc, char** argv)
 
         wipeRows41();
         useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 42. ONE per-item table, two consumers, and a proof its answers did not move (issue #332) ---------
+    // The prefixes used to be written out twice -- once in CloudSync::isPerItemStoreKey and once in
+    // SettingsTxn::inScope, under a comment claiming the two matched. They had not matched for years (ten
+    // against twenty-one), and the eleven that never crossed are where #322 lived. The table now lives in
+    // core/PerItemStores.h and both predicates ask it.
+    //
+    // 42a is the assertion that would have caught the drift, and the reason it would is that it DERIVES from
+    // the table rather than restating it: it walks peritem::kPrefixes itself, so a prefix added tomorrow is
+    // asked of both consumers without anybody remembering to come back here. A test that spelled the list out
+    // a third time would simply have become the third copy to drift.
+    {
+        CHECK(peritem::kPrefixCount > 0);                       // ...a walk over an empty table proves nothing
+
+        // 42a. AGREEMENT, DERIVED FROM THE TABLE ITSELF.
+        for (const char* raw : peritem::kPrefixes)
+        {
+            const QString pre = QString::fromLatin1(raw);
+            const QString key = pre + QStringLiteral("probe332/x");
+            CHECK(peritem::isKey(key) == true);
+            CHECK(CloudSync::isPerItemStoreKey(key) == true);   // consumer 1: the sync carve-out
+            CHECK(SettingsTxn::inScope(key) == false);          // consumer 2: the settings transaction
+            // ...and no per-item store is ALSO device-local: the merge document has to be able to carry it.
+            CHECK(CloudSync::isDeviceLocalKey(key) == false);
+            // The bare prefix answers the same way as a key under it (a store that keys its group bare).
+            CHECK(CloudSync::isPerItemStoreKey(pre) == true);
+            CHECK(SettingsTxn::inScope(pre) == false);
+        }
+
+        // 42b. IDENTITY. The hoist was a refactor, so the ANSWERS must be the set they were before it --
+        // homerows/ aside, which section 41 is about. Spelled out on purpose, and the one place in the tree
+        // that is: this is the before/after ledger for the move, not a second source of truth, and it is what
+        // turns a silent deletion during some later edit into a red probe.
+        const QStringList expected{
+            QStringLiteral("resume/"),         QStringLiteral("recent/"),
+            QStringLiteral("marks/"),          QStringLiteral("favorites/"),
+            QStringLiteral("playlists/"),      QStringLiteral("stats/"),
+            QStringLiteral("playstats/"),      QStringLiteral("deleted/"),
+            QStringLiteral("filterpresets/"),  QStringLiteral("channels/"),
+            QStringLiteral("follow/"),         QStringLiteral("metaoverrides/"),
+            QStringLiteral("launchopts/"),     QStringLiteral("speed/"),
+            QStringLiteral("lyricoffset/"),    QStringLiteral("trackerlink/"),
+            QStringLiteral("bookmarks/"),      QStringLiteral("highlights/"),
+            QStringLiteral("vocabulary/"),     QStringLiteral("audiobookmarks/"),
+            QStringLiteral("pad2key/"),        QStringLiteral("missed/"),
+            QStringLiteral("homerows/"),
+        };
+        QStringList actual;
+        for (const char* raw : peritem::kPrefixes) actual << QString::fromLatin1(raw);
+        CHECK(actual == expected);
+        CHECK(peritem::kPrefixCount == expected.size());
+
+        // 42c. The one entry that has a WRITER'S CONSTANT behind it is still pinned to that constant.
+        // SettingsTxn used to match the tracker links through tracker::linkKeyPrefix() separately, which is
+        // what kept the exclusion from drifting from the writer; the table spells the prefix out, so the
+        // anti-drift assertion moves here rather than being lost.
+        bool haveTrackerLink = false;
+        for (const char* raw : peritem::kPrefixes)
+            if (tracker::linkKeyPrefix() == QLatin1String(raw)) haveTrackerLink = true;
+        CHECK(haveTrackerLink);
+        CHECK(SettingsTxn::inScope(tracker::linkKeyPrefix() + QStringLiteral("items/x")) == false);
+
+        // 42d. THE NEAR MISSES, asked of every consumer at once. Each of these is a real settings row (or a
+        // real device-local family) sitting one character from a prefix above, and each is the assertion that
+        // fails if somebody ever shortens an entry: "follow/" losing its slash would swallow the schedule
+        // settings, "audiobookmarks/" shortened to "audiobook" would swallow the audiobook speed row.
+        for (const char* raw : { "following/interval", "following/metered", "followsnap/default/x",
+                                 "iptv/default/sources", "audiobooks/speed", "pad/left", "padgame/abc/a",
+                                 "statsPanel/lastTab", "recentlyUsed/x", "homerowsPanel/lastTab",
+                                 "speedrun/x", "marksmanship/x" })
+        {
+            const QString key = QString::fromLatin1(raw);
+            CHECK(peritem::isKey(key) == false);
+            CHECK(CloudSync::isPerItemStoreKey(key) == false);
+        }
+        // ...and of the settings transaction, for the ones that are settings rows rather than device-local.
+        for (const char* raw : { "following/interval", "iptv/default/sources", "audiobooks/speed",
+                                 "pad/left", "padgame/abc/a", "statsPanel/lastTab", "recentlyUsed/x",
+                                 "homerowsPanel/lastTab", "speedrun/x", "marksmanship/x" })
+            CHECK(SettingsTxn::inScope(QString::fromLatin1(raw)) == true);
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

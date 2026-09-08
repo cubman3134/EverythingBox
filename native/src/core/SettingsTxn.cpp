@@ -6,6 +6,7 @@
 #include "TraktSync.h"         // backfillKeyPrefix() — the per-profile import cursor family, out of scope
 #include "Scrobble.h"          // isBackgroundStateKey() - the #192 counter/queue family, out of scope
 #include "Tracker.h"           // isBackgroundStateKey() - the #156 token/queue family, out of scope
+#include "PerItemStores.h"     // #332: THE per-item-store prefix table, shared with CloudSync::isPerItemStoreKey
 
 #include <QDebug>
 #include <QHash>
@@ -70,14 +71,15 @@ void SettingsTxn::setIniPathForTesting(const QString& path)
 bool SettingsTxn::inScope(const QString& key)
 {
     // The CloudMerge-owned per-item stores. Written continuously by playback, marking and stats accrual
-    // while a panel is open — rolling these back is data loss. This is the same family
-    // CloudSync::isPerItemStoreKey names, and issue #322 is what it cost to keep the two lists by hand: the
-    // set there had grown to twenty-one prefixes while this one still held ten, so eleven per-item stores
-    // sat inside the settings transaction that the comment already claimed were outside it. The two lists
-    // are still separate — SettingsTxn is QtCore-only so probe_settingstxn links lean, and CloudSync is a
-    // QObject over a network backend — but they are now the same set, homerows/ included: #333 moved that
-    // prefix into isPerItemStoreKey too, where its CloudMerge section always said it belonged. Every entry
-    // is pinned by probe_settingstxn.
+    // while a panel is open — rolling these back is data loss.
+    //
+    // ASKED THROUGH THE SHARED TABLE (issue #332), not through a copy of it. There used to be a second list
+    // here, under a comment claiming it matched CloudSync::isPerItemStoreKey. It did not — ten prefixes
+    // against twenty-one — and the eleven that never crossed are exactly where issue #322 lived. The table
+    // now lives in core/PerItemStores.h, which both predicates include and which carries every entry's
+    // reason; probe_settingstxn walks that array against this predicate, so a prefix added there and not
+    // honoured here is red rather than silent. The header is deliberately QtCore-free, so this unit stays
+    // QtCore-only and probe_settingstxn still links lean.
     //
     // WHY A PER-ITEM STORE MUST BE OUT OF SCOPE, in the two shapes #322 showed up in:
     //   * ITS EDITOR COMMITS ON ITS OWN TERMS. The home-row editor, the looked-up-word list and "Reset my
@@ -94,34 +96,12 @@ bool SettingsTxn::inScope(const QString& key)
     // None of these prefixes is a settings row: no key Settings.cpp writes begins with any of them (and the
     // paired in-scope neighbours in probe_settingstxn §1c are what keeps that true), so excluding them
     // cannot make anything the user typed into a panel undiscardable.
+    if (peritem::isKey(key)) return false;
+
+    // ...and the exclusions that are NOT per-item stores. Each is here on its own merits — a background
+    // writer, a one-shot latch, an identity — and none of them belongs in the shared table, which is a claim
+    // about who OWNS a key on the SYNC document rather than about who writes it mid-visit.
     static const char* kExcludedPrefixes[] = {
-        "resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/",
-        "missed/",     // "you missed" dismissals (#25) — a per-item store, same rule as marks/ above
-        "follow/",     // followed series (#155) — a per-item store, same rule as favorites/ above
-        // ---- issue #322: the rest of the CloudMerge-owned family, in isPerItemStoreKey's own order ----
-        // The three marked REACHABLE are the ones a user can edit from inside an open settings transaction
-        // today; the others are here because they are the same kind of key with the same owner, and leaving
-        // half a family in scope is what produced #322 in the first place.
-        "filterpresets/",    // saved filter presets (#184)
-        "channels/",         // personal TV channels (#179) — NOT "iptv/", which IS a settings row
-        "metaoverrides/",    // REACHABLE: Settings ▸ "Reset my metadata edits", both layouts (#24)
-        "launchopts/",       // per-game launch overrides (#51)
-        "speed/",            // per-item playback speed (#140)
-        "lyricoffset/",      // per-item lyric offset (#142)
-        "bookmarks/",        // per-book bookmarks (#136)
-        "highlights/",       // per-book highlights (#136)
-        "vocabulary/",       // REACHABLE: Settings ▸ Reading ▸ "Words I looked up" ▸ Remove (#137)
-        "audiobookmarks/",   // per-item audio bookmarks (#140) — distinct from the "audiobooks/" settings group
-        "pad2key/",          // per-game pad2key profiles (#105)
-        // ...and the one the issue was filed for. HomeRowStore::save() writes "homerows/<profile>/list"
-        // immediately and fires the sync hook, because its editor is a standalone screen with its own Done —
-        // and that editor is reached from BOTH settings builders (GS_TWINS: themed "home.rows" / classic
-        // "Choose home rows…"), i.e. from inside the transaction. In scope, answering Discard on the way out
-        // reverted a row edit the user had already finished and watched take effect. It is the same
-        // CloudMerge document section as the rows above (CloudMerge::mergeHomeRows), so it is filed with
-        // them — and since #333 CloudSync::isPerItemStoreKey names it as well, which is what that section
-        // being there always implied.
-        "homerows/",
         // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
         // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment
         // — including in the middle of a settings visit. In scope it would make the exit prompt claim settings
@@ -256,9 +236,10 @@ bool SettingsTxn::inScope(const QString& key)
     // un-link it. tracker/anilist/clientId and clientSecret are deliberately NOT matched: they are typed
     // into Settings and pasting the wrong one has to be discardable. probe_tracker pins both halves.
     if (tracker::isBackgroundStateKey(key)) return false;
-    // The per-item link store, for the reason marks/ and metaoverrides/ are excluded above: it is owned
-    // by the CloudMerge document and is written by the match prompt, not by this panel.
-    if (key.startsWith(tracker::linkKeyPrefix())) return false;
+    // (The per-item tracker LINK store used to be matched here, separately, through tracker::linkKeyPrefix().
+    // It is in the shared table now — "trackerlink/" — for the reason marks/ and metaoverrides/ are: the
+    // CloudMerge document owns it and the match prompt writes it, not this panel. probe_cloudmerge pins
+    // tracker::linkKeyPrefix() against that entry, so the writer's constant still cannot drift from it.)
 
     // ...with ONE exception inside that other half, and it is the "ra/user" / "ra/token" case above rather
     // than a new idea: Last.fm's credential (#192 increment 2) is a SESSION KEY the service hands back after
