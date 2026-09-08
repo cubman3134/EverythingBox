@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.213 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.214 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -3915,6 +3915,55 @@ if(EVERYTHINGBOX_BUILD_APP)
         message(STATUS "Gamepad: SDL2 found (${SDL2_LIBRARY})")
     else()
         message(STATUS "Gamepad: SDL2 not found - building without controller input")
+    endif()
+
+    # ---- The bundled controller database has to TRAVEL with the binary (issue #317) ------------------------
+    # gamecontrollerdb.txt is the community SDL_GameControllerDB we ship (provenance in
+    # native/gamecontrollerdb.provenance.txt) so that uncommon and third-party pads map to the standard
+    # layout. Gamepad::Impl::bringUp() and EmulatorManager's out-of-process enumeration both load it from
+    # SDL_GetBasePath() + "gamecontrollerdb.txt" — the app executable's OWN directory — and both are
+    # best-effort, so a missing file returns -1 and is swallowed. It had no staging rule at all: the database
+    # never reached that directory from any build, SDL ran on its built-in mappings alone, and the only
+    # symptom surfaced somewhere else entirely, as pads reported unrecognized by the seat code.
+    #
+    # Staged the way the other bundled data files here are: copy_if_different into the target's own directory
+    # (the runtime DLLs above), and on macOS through MACOSX_PACKAGE_LOCATION (resources/appicon.icns), because
+    # a .app's SDL_GetBasePath() is Contents/Resources and NOT Contents/MacOS where the exe sits. Unlike the
+    # DLL copies this is not conditional on EB_WINDEPLOYQT: the database is not part of the Qt/mpv runtime,
+    # and a build made with -DEB_WINDEPLOYQT=OFF still has pads to map. Android/iOS are excluded — their
+    # bundled data goes through AssetBootstrap's first-run extraction, which is a separate delivery.
+    if(APPLE AND NOT IOS)
+        target_sources(everythingbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gamecontrollerdb.txt")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/gamecontrollerdb.txt"
+            TARGET_DIRECTORY everythingbox
+            PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+        set(_eb_paddb_dir "$<TARGET_BUNDLE_CONTENT_DIR:everythingbox>/Resources")
+    elseif(NOT ANDROID AND NOT IOS)
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/gamecontrollerdb.txt" "$<TARGET_FILE_DIR:everythingbox>"
+            COMMENT "Staging gamecontrollerdb.txt (SDL controller mappings) beside EverythingBox")
+        set(_eb_paddb_dir "$<TARGET_FILE_DIR:everythingbox>")
+    endif()
+
+    # The probe for the rule above. It has to live HERE, not with the other console harnesses, for two
+    # reasons: _eb_paddb_dir is only defined once the staging rule has chosen a destination, and SDL2 is only
+    # found a few lines up (a probe declared earlier sees an empty SDL2_LIBRARY on a fresh configure). It
+    # links SDL2 when there is one, so the mapping count it reports comes from the loader the app itself
+    # calls; without SDL2 it still pins that the file is staged, and says which mode it ran in. It is
+    # deliberately NOT add_dependencies'd on everythingbox: CI builds the probes and the app in separate
+    # steps by design (see .github/workflows/ci.yml), and the suite builds the app before it runs any probe.
+    if(NOT ANDROID AND NOT IOS)
+        add_executable(probe_paddb tools/probe_paddb.cpp)
+        target_link_libraries(probe_paddb PRIVATE Qt6::Core)
+        target_compile_definitions(probe_paddb PRIVATE
+            "EB_PADDB_STAGED=\"${_eb_paddb_dir}/gamecontrollerdb.txt\""
+            "EB_PADDB_SOURCE=\"${CMAKE_CURRENT_SOURCE_DIR}/gamecontrollerdb.txt\"")
+        if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
+            target_include_directories(probe_paddb PRIVATE ${SDL2_INCLUDE_DIR})
+            target_link_libraries(probe_paddb PRIVATE ${SDL2_LIBRARY})
+            target_compile_definitions(probe_paddb PRIVATE EB_PADDB_HAVE_SDL)
+        endif()
     endif()
 
     # ---- Windows: make the binary RUNNABLE WHERE IT IS BUILT (issue #172) ---------------------------------
