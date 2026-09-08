@@ -880,6 +880,20 @@ QList<QPair<QString, QString>> Subsonic::scrobbleParams(const QVector<QString>& 
     return out;
 }
 
+QList<QPair<QString, QString>> Subsonic::albumListParams(const QString& type, int size, int offset)
+{
+    if (type.isEmpty() || size <= 0) return {};
+    return { { QStringLiteral("type"),   type },
+             { QStringLiteral("size"),   QString::number(size) },
+             { QStringLiteral("offset"), QString::number(qMax(0, offset)) } };
+}
+
+bool Subsonic::morePagesLikely(int returned, int windowSize, int addedNew)
+{
+    if (windowSize <= 0) return false;
+    return returned >= windowSize && addedNew > 0;
+}
+
 QList<QPair<QString, QString>> Subsonic::starParams(Kind kind, const QString& remoteId)
 {
     if (remoteId.isEmpty()) return {};

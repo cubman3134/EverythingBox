@@ -120,6 +120,20 @@ public:
     void fetchStarred(const QString& serverId, Done done);
     void fetchNewest(const QString& serverId, Done done);
 
+    // ...and RECENTLY ADDED IS THE ONE THAT PAGES (issue #298). Playlists and Starred are returned whole by
+    // the server; getAlbumList2 is a windowed query with a cap, so one request is a PAGE and rendering it as
+    // the whole level silently truncates a large library — which is indistinguishable, from the outside,
+    // from a complete answer. `fetchMoreNewest` asks for the next window at `offset` and APPENDS; the level
+    // calls it when the user reaches the end, the same lazy shape the addon browse already uses.
+    //
+    // Idempotent and cheap to over-call: it answers instantly with ok when there is no more to fetch, when
+    // the first page has not landed yet, or when a page is already in flight.
+    void fetchMoreNewest(const QString& serverId, Done done);
+    // Is there another page? False before the first one lands, and false once a page came back short of the
+    // window — or came back with nothing this cache did not already hold, which is what a server that
+    // ignores `offset` looks like from here (and the only defence against paging it for ever).
+    bool newestHasMore(const QString& serverId) const;
+
     // The cached rows, possibly empty. Empty and harmless for an unknown server or an unfetched level: a
     // stale route must render an empty level, never crash.
     const QVector<MusicLibrary::Album>& playlists(const QString& serverId) const;
@@ -186,9 +200,23 @@ private:
         bool playlistsLoaded = false;
         bool starredLoaded   = false;
         bool newestLoaded    = false;
+        // Recently added is paged (#298): how many rows have been asked for so far, and whether the last
+        // window came back full. `newestKeys` is the duplicate guard — a server that ignores `offset`
+        // answers page two with page one, and without this the level would grow the same albums for ever.
+        int          newestOffset = 0;
+        bool         newestMore   = false;
+        QSet<QString> newestKeys;
     };
 
+    // ONE PAGE of recently-added, and it is deliberately a MODEST one: nobody scrolls to the 400th most
+    // recently added album, so the level draws quickly and the rest arrives only if somebody goes looking.
+    // getAlbumList2 tops out at 500 per request; this is the window, not the cap.
+    static constexpr int kNewestPageSize = 100;
+
     Cache& cacheFor(const QString& serverId);
+    // The one request both fetchNewest and fetchMoreNewest issue. `append` is the whole difference: the
+    // first page REPLACES (so a re-entered level is not doubled), a later one appends.
+    void   fetchNewestPage(const QString& serverId, bool append, Done done);
     void   request(const SubsonicServer& srv, const QString& method,
                    const QList<QPair<QString, QString>>& extra,
                    std::function<void(const Subsonic::Node&, const Result&)> then);
