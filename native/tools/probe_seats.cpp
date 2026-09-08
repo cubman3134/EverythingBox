@@ -15,13 +15,33 @@
 //     mapping untouched (byte-identity predicate; mutation-killed);
 //   * an out-of-range seat (-1, kMaxSeats) yields NO edit; an unknown emulator yields NO edit.
 //
+// INCREMENT 2 ALSO PINS (issue #104):
+//   * BRAND-MATRIX HONESTY — a pad with a GUID but no SDL mapping yields NO edit from ANY of the four emulators
+//     (driven separately, so a guard in one branch cannot pass), while a DEFAULT-CONSTRUCTED PadInfo (the "no
+//     pad enumerated" fallback seat) still writes the shipped P1 block; and the message names the device and the
+//     emulator;
+//   * HOTKEYS — the F2/F4/F12 scheme (the keys RetroView reserves in-process) written for PCSX2 and DuckStation
+//     with their own hotkey identifiers, and ABSENT for Dolphin (all-or-nothing Hotkeys.ini) and Cemu (no
+//     configurable hotkeys);
+//   * THE MANAGEMENT SWITCH — with it off, EVERY ControllerSeats::Writer method refuses (all four are driven,
+//     against a real temp directory) and neither a file nor a snapshot appears;
+//   * THE SNAPSHOT RULE — "<file>.eb-orig" is taken once, before the first modification, holds the pre-EB bytes,
+//     and is NOT refreshed by a later write or by a later launch's Writer; a file we created has no snapshot;
+//   * SEAT 0 ON DISK == INCREMENT 1's OUTPUT — the bytes the write path leaves in PCSX2.ini / controller0.xml
+//     for seat 0 with no pad enumerated are exactly increment 1's, so the single-pad couch case is a no-op.
+//
 // FIXTURES ARE HAND-AUTHORED, INDEPENDENT OF THE CODE UNDER TEST: the expected seat-0 blocks below are the
 // literal Player-1 config text the app shipped BEFORE this issue (copied from the pre-#104 prepareControllerConfig
 // write side), NOT produced by running controllerEdits. An assertion therefore cannot pass merely because it
 // re-ran the function it checks. controllerEdits is the new code under test; the shipped P1 text is the oracle.
 #include "ControllerSeats.h"
+#include "ControllerWrite.h"   // issue #104 increment 2: the management switch + the one write choke point
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QTemporaryDir>
 #include <cstdio>
 
 using namespace ControllerSeats;
@@ -54,8 +74,11 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
 
     // ---- assignSeats: stable order, payload carried, capped at kMaxSeats ------------------------------------
-    auto pad = [](int idx, const char* guid, const char* name) {
-        PadInfo p; p.index = idx; p.guid = QString::fromLatin1(guid); p.name = QString::fromLatin1(name); return p;
+    // Every pad here carries an SDL MAPPING by default, because that is what makes it a pad we may write config
+    // for (issue #104 increment 2's brand-matrix rule). Pass "" for the pad SDL cannot map.
+    auto pad = [](int idx, const char* guid, const char* name, const char* mapping = "a:b0,b:b1,x:b2,y:b3,") {
+        PadInfo p; p.index = idx; p.guid = QString::fromLatin1(guid); p.name = QString::fromLatin1(name);
+        p.sdlMapping = QString::fromLatin1(mapping); return p;
     };
 
     CHECK(assignSeats(QVector<PadInfo>{}).isEmpty());                       // no pads -> no seats
@@ -374,6 +397,204 @@ int main(int argc, char** argv)
     CHECK(controllerEdits(QStringLiteral("pcsx2"), 4, any).isEmpty());
     CHECK(controllerEdits(QStringLiteral("melonds"), 0, any).isEmpty());           // unhandled emulator
     CHECK(controllerEdits(QStringLiteral("nonsuch"), 0, any).isEmpty());           // unknown emulator
+
+    // ================= increment 2: the pad SDL cannot map gets NO config ====================================
+    // The brand-matrix rule. A device with a GUID but no SDL mapping is one whose buttons we cannot name, so
+    // every emulator yields no edit for it — the write side names it to the user instead. Drive all four, not
+    // one: a guard placed in a single branch would pass a one-emulator check and still write three wrong files.
+    {
+        const PadInfo unknown = pad(0, "03000000ffff0000ffff000000000000", "Frobnitz Arcade Pad", "");
+        CHECK(padIsUnrecognized(unknown));
+        CHECK(controllerEdits(QStringLiteral("dolphin"), 0, unknown).isEmpty());
+        CHECK(controllerEdits(QStringLiteral("pcsx2"), 0, unknown).isEmpty());
+        CHECK(controllerEdits(QStringLiteral("duckstation"), 0, unknown).isEmpty());
+        CHECK(controllerEdits(QStringLiteral("cemu"), 0, unknown).isEmpty());
+        // ...and not only in seat 0: seat 2 of a four-player couch is refused the same way.
+        CHECK(controllerEdits(QStringLiteral("pcsx2"), 2, unknown).isEmpty());
+
+        // A pad SDL DOES map is written normally — the guard rejects the unmappable, not everything.
+        CHECK(!controllerEdits(QStringLiteral("pcsx2"), 0, pad(0, "0300aabb", "Xbox")).isEmpty());
+
+        // THE THIRD STATE, and the regression this must not cause: a DEFAULT-CONSTRUCTED PadInfo is "SDL absent
+        // or nothing attached", NOT "a pad we can't map". It still writes the shipped P1 block, exactly as the
+        // code did before #104 — the fallback seat EmulatorManager pushes when no pad is enumerated.
+        CHECK(!padIsUnrecognized(PadInfo{}));
+        CHECK(controllerEdits(QStringLiteral("pcsx2"), 0, PadInfo{}).size() == 2);
+        CHECK(controllerEdits(QStringLiteral("cemu"), 0, PadInfo{}).size() == 1);
+
+        // The message names the DEVICE (which one) and the EMULATOR (where to fix it), and says nothing at all
+        // when there is nothing to say.
+        CHECK(unrecognizedPadMessage(QStringList{}, QStringLiteral("PCSX2")).isEmpty());
+        const QString msg = unrecognizedPadMessage(QStringList{ QStringLiteral("Frobnitz Arcade Pad") },
+                                                   QStringLiteral("PCSX2"));
+        CHECK(msg.contains(QLatin1String("Frobnitz Arcade Pad")));
+        CHECK(msg.contains(QLatin1String("PCSX2")));
+        CHECK(msg.contains(QLatin1String("Unrecognized controller")));
+
+        // THE NAG RULE: each unmappable device is named ONCE, not on every launch. (The machine this was
+        // developed on has an analogue keyboard SDL reports as a joystick and cannot map; without this, every
+        // standalone game launch on it would open with a warning about a keyboard.)
+        const PadInfo other = pad(1, "03000000dead0000beef000000000000", "Flight Stick", "");
+        const QVector<PadInfo> attached{ unknown, other };
+        CHECK(unreportedPads(attached, QStringList{}).size() == 2);                    // first launch: both
+        CHECK(unreportedPads(attached, QStringList{ unknown.guid }).size() == 1);      // one already said
+        CHECK(unreportedPads(attached, QStringList{ unknown.guid }).first().guid == other.guid);
+        CHECK(unreportedPads(attached, QStringList{ unknown.guid, other.guid }).isEmpty()); // both said: silence
+        // A device with no GUID cannot be remembered, so it is never reported (it would repeat forever).
+        CHECK(unreportedPads(QVector<PadInfo>{ PadInfo{} }, QStringList{}).isEmpty());
+    }
+
+    // ================= increment 2: hotkeys, and the emulators that get none =================================
+    // The scheme is ONE scheme across both tiers: F2 save, F4 load, F12 screenshot — the keys RetroView reserves
+    // in-process. An emulator whose config can express them safely gets exactly those three; one that cannot gets
+    // NOTHING rather than an approximation.
+    {
+        CHECK(QLatin1String(kHotkeySaveStateKey)  == QLatin1String("F2"));
+        CHECK(QLatin1String(kHotkeyLoadStateKey)  == QLatin1String("F4"));
+        CHECK(QLatin1String(kHotkeyScreenshotKey) == QLatin1String("F12"));
+
+        const QVector<HotkeyEdit> p = hotkeyEdits(QStringLiteral("pcsx2"));
+        CHECK(p.size() == 3);
+        CHECK(p[0] == (HotkeyEdit{ QStringLiteral("inis/PCSX2.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("SaveStateToSlot"), QStringLiteral("Keyboard/F2") }));
+        CHECK(p[1] == (HotkeyEdit{ QStringLiteral("inis/PCSX2.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("LoadStateFromSlot"), QStringLiteral("Keyboard/F4") }));
+        CHECK(p[2] == (HotkeyEdit{ QStringLiteral("inis/PCSX2.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("Screenshot"), QStringLiteral("Keyboard/F12") }));
+
+        const QVector<HotkeyEdit> d = hotkeyEdits(QStringLiteral("duckstation"));
+        CHECK(d.size() == 3);
+        CHECK(d[0] == (HotkeyEdit{ QStringLiteral("settings.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("SaveSelectedSaveState"), QStringLiteral("Keyboard/F2") }));
+        CHECK(d[1] == (HotkeyEdit{ QStringLiteral("settings.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("LoadSelectedSaveState"), QStringLiteral("Keyboard/F4") }));
+        CHECK(d[2] == (HotkeyEdit{ QStringLiteral("settings.ini"), QStringLiteral("Hotkeys"),
+                                   QStringLiteral("Screenshot"), QStringLiteral("Keyboard/F12") }));
+
+        // Dolphin: its Hotkeys.ini is all-or-nothing (a present section means every unnamed hotkey resolves to
+        // NO binding), so writing three keys would unbind the rest. Cemu: no configurable hotkeys at all.
+        CHECK(hotkeyEdits(QStringLiteral("dolphin")).isEmpty());
+        CHECK(hotkeyEdits(QStringLiteral("cemu")).isEmpty());
+        CHECK(hotkeyEdits(QStringLiteral("melonds")).isEmpty());
+        CHECK(hotkeyEdits(QStringLiteral("nonsuch")).isEmpty());
+    }
+
+    // ================= increment 2: the management switch, over EVERY writer =================================
+    // Not "the one call site checks a flag": the switch is read once into the Writer and every writing method
+    // refuses on its own. Drive ALL FOUR methods with the switch off and assert the filesystem is untouched — a
+    // method that forgot the check would show up here as a file that exists, or bytes that changed.
+    {
+        QTemporaryDir tmp;
+        CHECK(tmp.isValid());
+        const QString root = tmp.path();
+
+        auto readAll = [](const QString& p) {
+            QFile f(p); QByteArray b; if (f.open(QIODevice::ReadOnly)) { b = f.readAll(); f.close(); } return b;
+        };
+        auto writeFile = [](const QString& p, const QByteArray& b) {
+            QDir().mkpath(QFileInfo(p).absolutePath());
+            QFile f(p); if (f.open(QIODevice::WriteOnly)) { f.write(b); f.close(); }
+        };
+
+        // --- switch OFF: every writer refuses ---------------------------------------------------------------
+        {
+            Writer off(QStringLiteral("pcsx2"), false);
+            CHECK(!off.manages());
+            const QString seeded  = root + QStringLiteral("/off/seeded.xml");        // absent -> must stay absent
+            const QString existing = root + QStringLiteral("/off/existing.ini");
+            static const QByteArray kUserFile = "[Pad1]\nUp = MyOwnBinding\n";
+            writeFile(existing, kUserFile);
+
+            CHECK(off.seedIfAbsent(seeded, "<x/>") == false);
+            CHECK(off.appendSectionIfAbsent(existing, "[Pad2]", "\n[Pad2]\nUp = ours\n") == false);
+            CHECK(off.replaceContents(existing, "clobbered") == false);
+            CHECK(off.addIniKeyIfAbsent(existing, QStringLiteral("Hotkeys"),
+                                        QStringLiteral("Screenshot"), QStringLiteral("Keyboard/F12")) == false);
+
+            CHECK(off.writes() == 0);
+            CHECK(off.snapshots().isEmpty());
+            CHECK(!QFileInfo::exists(seeded));                       // nothing created
+            CHECK(readAll(existing) == kUserFile);                   // and not one byte changed
+            CHECK(!QFileInfo::exists(Writer::snapshotPath(existing)));// not even a snapshot: we never touched it
+        }
+
+        // --- switch ON: the same four writers all work ------------------------------------------------------
+        {
+            Writer on(QStringLiteral("pcsx2"), true);
+            CHECK(on.manages());
+            const QString seeded   = root + QStringLiteral("/on/seeded.xml");
+            const QString existing = root + QStringLiteral("/on/existing.ini");
+            static const QByteArray kUserFile = "[Pad1]\nUp = MyOwnBinding\n";
+            writeFile(existing, kUserFile);
+
+            CHECK(on.seedIfAbsent(seeded, "<x/>"));
+            CHECK(readAll(seeded) == QByteArray("<x/>"));
+            CHECK(on.seedIfAbsent(seeded, "<other/>") == false);     // only when absent — never a second time
+            CHECK(readAll(seeded) == QByteArray("<x/>"));
+
+            CHECK(on.appendSectionIfAbsent(existing, "[Pad2]", "\n[Pad2]\nUp = ours\n"));
+            CHECK(readAll(existing) == kUserFile + "\n[Pad2]\nUp = ours\n");
+            CHECK(on.appendSectionIfAbsent(existing, "[Pad2]", "\n[Pad2]\nUp = again\n") == false); // marker present
+
+            // Key-level add-if-absent: creates the section, then refuses to touch a key that is already bound.
+            CHECK(on.addIniKeyIfAbsent(existing, QStringLiteral("Hotkeys"),
+                                       QStringLiteral("Screenshot"), QStringLiteral("Keyboard/F12")));
+            CHECK(readAll(existing).contains("[Hotkeys]"));
+            CHECK(readAll(existing).contains("Screenshot = Keyboard/F12"));
+            CHECK(on.addIniKeyIfAbsent(existing, QStringLiteral("Hotkeys"),
+                                       QStringLiteral("Screenshot"), QStringLiteral("Keyboard/F5")) == false);
+            CHECK(!readAll(existing).contains("Keyboard/F5"));       // an existing binding is never replaced
+            // A DIFFERENT key in the same section is added beside it.
+            CHECK(on.addIniKeyIfAbsent(existing, QStringLiteral("Hotkeys"),
+                                       QStringLiteral("SaveStateToSlot"), QStringLiteral("Keyboard/F2")));
+            CHECK(readAll(existing).contains("SaveStateToSlot = Keyboard/F2"));
+            CHECK(readAll(existing).contains("Screenshot = Keyboard/F12"));
+
+            // --- THE SNAPSHOT RULE: taken once, before the first change, and never overwritten -------------
+            const QString orig = Writer::snapshotPath(existing);
+            CHECK(QFileInfo::exists(orig));
+            CHECK(readAll(orig) == kUserFile);                       // the file as it was BEFORE we touched it
+            CHECK(on.snapshots().size() == 1);                       // one snapshot for this file, not one per write
+            CHECK(!QFileInfo::exists(Writer::snapshotPath(seeded))); // a file we CREATED has nothing to preserve
+
+            // Later writes — including a whole-file replace — must not refresh it. If they did, the copy would
+            // hold a config EverythingBox had already changed, which is not an undo.
+            CHECK(on.replaceContents(existing, "totally different\n"));
+            CHECK(readAll(existing) == QByteArray("totally different\n"));
+            CHECK(readAll(orig) == kUserFile);                       // still the ORIGINAL, not the last version
+            CHECK(on.snapshots().size() == 1);
+
+            // A brand-new Writer (the next launch) must not refresh it either.
+            Writer nextLaunch(QStringLiteral("pcsx2"), true);
+            CHECK(nextLaunch.replaceContents(existing, "third version\n"));
+            CHECK(readAll(orig) == kUserFile);
+            CHECK(nextLaunch.snapshots().isEmpty());                 // nothing new was snapshotted
+        }
+
+        // --- SEAT 0 THROUGH THE WRITER == INCREMENT 1'S OUTPUT, BYTE FOR BYTE -------------------------------
+        // The strongest regression assertion available: with the switch on (the default) and no pad enumerated,
+        // the FILES ON DISK after this increment's write path are exactly the bytes increment 1 produced. The
+        // expectations are the hand-authored shipped-P1 fixtures above, not a re-run of the code under test.
+        {
+            Writer w(QStringLiteral("pcsx2"), true);
+            const QString ini = root + QStringLiteral("/p1/inis/PCSX2.ini");
+            for (const ConfigEdit& e : controllerEdits(QStringLiteral("pcsx2"), 0, PadInfo{}))
+                w.appendSectionIfAbsent(ini, e.marker.toUtf8(), e.body);
+            QByteArray expect;
+            for (const ConfigEdit& e : controllerEdits(QStringLiteral("pcsx2"), 0, PadInfo{})) expect += e.body;
+            CHECK(readAll(ini) == expect);
+            CHECK(readAll(ini).startsWith("\n[InputSources]\nSDL = true\n"));
+            CHECK(readAll(ini).contains("\n[Pad1]\nType = DualShock2\nUp = SDL-0/DPadUp\n"));
+            CHECK(!QFileInfo::exists(Writer::snapshotPath(ini)));    // created from nothing: no snapshot to take
+
+            Writer wc(QStringLiteral("cemu"), true);
+            const QString xml = root + QStringLiteral("/p1/controllerProfiles/controller0.xml");
+            for (const ConfigEdit& e : controllerEdits(QStringLiteral("cemu"), 0, PadInfo{}))
+                wc.seedIfAbsent(xml, e.body);
+            CHECK(readAll(xml) == cemuControllerBody(0));
+            CHECK(readAll(xml).contains("<type>Wii U GamePad</type>"));
+        }
+    }
 
     if (failures == 0) std::puts("SEATS-OK");
     return failures == 0 ? 0 : 1;

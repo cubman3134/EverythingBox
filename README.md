@@ -48,7 +48,11 @@ Everything lives under [`native/`](native/):
   [**Audiobooks**](native/docs/audiobooks.md) (how a folder becomes a book, and what
   online matching fills in — narrator, series, cover — and how to reject a bad match), and
   [**Runahead**](native/docs/runahead.md) (removing a game's own internal input lag — what it
-  costs, why the setting is per game, and when it refuses instead of slowing the game down).
+  costs, why the setting is per game, and when it refuses instead of slowing the game down), and
+  [**Controllers in standalone emulators**](native/docs/controllers-in-standalone-emulators.md)
+  (players 1–4 seated into Dolphin/PCSX2/DuckStation/Cemu at launch, the save/load/screenshot
+  hotkey scheme, the per-emulator "let EverythingBox set up controllers" switch, the `.eb-orig`
+  copy that undoes it, and what happens to a pad SDL cannot recognise).
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf

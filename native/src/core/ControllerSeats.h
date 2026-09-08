@@ -31,9 +31,17 @@
 //   * Cemu — controllerProfiles/controller{index}.xml is 0-based; <uuid>{index}</uuid> binds that device slot.
 // An unset seat (out of range) or unknown emulator yields NO edit — degrade to "open the emulator", never guess.
 //
-// DEFERRED (issue stays open — Refs #104, not Fixes): hotkey-combo propagation; expanding past these four
-// emulators (the brand matrix); and live-GUID PINNING — keeping a given physical pad on the same seat across a
-// replug. PadInfo carries a `guid` field reserved for that pinning, but this landing keys purely on the
+// INCREMENT 2 ADDS (issue #104): hotkeyEdits() — the emulator's OWN save-state/load-state/screenshot hotkeys,
+// bound to the same F2 / F4 / F12 the in-process tier reserves, for the emulators whose config can express them
+// SAFELY; and padIsUnrecognized() — the brand-matrix honesty rule, which refuses to write a mapping for a pad
+// SDL has no gamepad mapping for. Both are pure and pinned by probe_seats. The MANAGEMENT SWITCH ("manage
+// controllers: EverythingBox / the emulator itself") is enforced one level out, by ControllerSeats::Writer in
+// ControllerWrite.h — every input-config write goes through that object, so the switch is an invariant over
+// the writers rather than a check at one call site.
+//
+// STILL DEFERRED (issue stays open — Refs #104, not Fixes): expanding past these emulators (the rest of the
+// brand matrix); and live-GUID PINNING — keeping a given physical pad on the same seat across a replug.
+// PadInfo carries a `guid` field reserved for that pinning, but this landing keys purely on the
 // connection-order index (the identity today's XInput/N and SDL-N device strings already use).
 //
 // NOTE ON MULTITAP (PCSX2 / DuckStation): the PS1/PS2 hardware has two physical controller ports; players 3-4
@@ -42,7 +50,9 @@
 // benign failure mode ("this seat does nothing until multitap") mirrors #103's "this one setting does nothing".
 // Dolphin and Cemu seat four players natively.
 #pragma once
+#include <QCoreApplication>
 #include <QString>
+#include <QStringList>
 #include <QByteArray>
 #include <QVector>
 
@@ -276,6 +286,124 @@ namespace ControllerSeats
                "\t\t</mappings>\n\t</controller>\n</emulated_controller>\n";
     }
 
+    // ---- brand-matrix honesty: the pad SDL cannot map (issue #104 increment 2) -------------------------------
+    // SDL's controller db covers the mainstream (Xbox, DualSense/DualShock, Switch Pro, 8BitDo). A device it has
+    // NO gamepad mapping for is one whose physical buttons we cannot name: writing "A = Button E" for it would be
+    // a guess, and a silently wrong config is the failure mode that makes somebody distrust the whole feature.
+    // So: no write for that pad, and the write side says so in words (unrecognizedPadMessage) at the moment it
+    // matters — the launch that would have configured it.
+    //
+    // The check is on the SDL identity, the same one `gamecontrollerdb.txt` keys on: a pad is UNRECOGNIZED when
+    // it has a joystick GUID (so it is a device we really enumerated) but no mapping string. Note the third
+    // state and why it is not this one: when SDL is absent or nothing is attached, the write side falls back to
+    // a single seat carrying a DEFAULT-CONSTRUCTED PadInfo — empty guid AND empty mapping. That is "no pad
+    // enumerated", not "a pad we can't map", and it must keep writing the P1 block byte-for-byte as it did
+    // before #104. Keying on a NON-EMPTY guid is exactly what separates the two.
+    inline bool padIsUnrecognized(const PadInfo& pad)
+    {
+        return !pad.guid.isEmpty() && pad.sdlMapping.isEmpty();
+    }
+
+    // Which of `unmapped` have NOT been named to the user before, keyed on the SDL GUID. THE NAG RULE: a machine
+    // can have a device permanently attached that SDL will never map — an analogue keyboard, a wheel, some HID
+    // oddity — and telling somebody about it on EVERY game launch forever is a nag, not information. Say it the
+    // FIRST time we see that device (which is the launch that matters: the one after they plugged it in) and not
+    // again. The caller persists the returned GUIDs; the answer only changes when a new device appears or the
+    // bundled controller database is refreshed. Pure so the rule is testable without a settings store.
+    inline QVector<PadInfo> unreportedPads(const QVector<PadInfo>& unmapped, const QStringList& alreadyReported)
+    {
+        QVector<PadInfo> out;
+        for (const PadInfo& p : unmapped)
+            if (!p.guid.isEmpty() && !alreadyReported.contains(p.guid)) out.push_back(p);
+        return out;
+    }
+
+    // What the user is told when at least one attached device has no SDL mapping. Names the device (so they know
+    // WHICH one) and the emulator (so they know WHERE to map it). Empty list -> empty message: the write side
+    // says nothing when there is nothing to say.
+    inline QString unrecognizedPadMessage(const QStringList& padNames, const QString& emulatorDisplayName)
+    {
+        if (padNames.isEmpty()) return QString();
+        return QCoreApplication::translate("ControllerSeats",
+                   "Unrecognized controller: %1. EverythingBox can't tell which button is which, so it left it "
+                   "out of %2's controller setup — map it in %2's own controller settings.")
+            .arg(padNames.join(QStringLiteral(", ")), emulatorDisplayName);
+    }
+
+    // ---- hotkeys: the emulator's OWN save/load/screenshot, on the in-process tier's keys ---------------------
+    // One hotkey binding: "key = value" inside [section] of `file`, ADDED ONLY IF THAT KEY IS ABSENT (the write
+    // side's addIniKeyIfAbsent). Key-level, never section-level: adding a binding can then never remove one the
+    // user or the emulator already had.
+    struct HotkeyEdit
+    {
+        QString file;
+        QString section;
+        QString key;
+        QString value;
+        bool operator==(const HotkeyEdit& o) const
+        { return file == o.file && section == o.section && key == o.key && value == o.value; }
+        bool operator!=(const HotkeyEdit& o) const { return !(*this == o); }
+    };
+
+    // THE SCHEME, one for both tiers. EverythingBox's in-process (libretro) tier reserves F2 = save state,
+    // F4 = load state, F12 = screenshot (RetroView's keyPressEvent — "reserved, not remappable"). The standalone
+    // tier gets the SAME three keys in the emulator's own hotkey config, so the muscle memory transfers: F2
+    // saves whether the game is running in a core or in PCSX2.
+    static constexpr const char* kHotkeySaveStateKey  = "F2";
+    static constexpr const char* kHotkeyLoadStateKey  = "F4";
+    static constexpr const char* kHotkeyScreenshotKey = "F12";
+
+    // The hotkey writes for `emulatorId`, or NO edits when we are not confident this emulator's config can take
+    // them safely. Per-emulator support (each name read out of the emulator's own shipped binary — its hotkey
+    // identifier table — not from memory or a wiki):
+    //
+    //   * PCSX2 — inis/PCSX2.ini [Hotkeys]. Identifiers SaveStateToSlot / LoadStateFromSlot ("Save State To
+    //     Selected Slot" / "Load State From Selected Slot") and Screenshot ("Save Screenshot"); binding values
+    //     are "Keyboard/<KEY>" (the literal "Keyboard/F1" is in the shipped pcsx2-qt.exe). Bindings are read
+    //     PER KEY, so adding three keys leaves every other hotkey exactly as it was.
+    //   * DuckStation — settings.ini [Hotkeys]. Identifiers SaveSelectedSaveState / LoadSelectedSaveState and
+    //     Screenshot; same "Keyboard/<KEY>" value form (again a literal in the shipped exe). Same per-key read.
+    //
+    // DELIBERATELY NOTHING, and this is the "gets nothing rather than an approximation" rule, not an oversight:
+    //
+    //   * Dolphin — User/Config/Hotkeys.ini is ALL-OR-NOTHING. Dolphin applies its compiled-in hotkey defaults
+    //     only when that file is ABSENT (InputConfig::LoadConfig: an ini that loads means every binding comes
+    //     from the section, and a control the section does not name resolves to an EMPTY expression). Writing
+    //     three keys into a file Dolphin has not written yet would therefore UNBIND the rest — Esc to stop,
+    //     fullscreen, frame advance, its own F1-F8 state slots and F9 screenshot. Dolphin's defaults already
+    //     cover save/load/screenshot, so there is nothing to gain and a whole hotkey set to lose.
+    //   * Cemu — has no configurable hotkeys at all. Its own first-run text states the complete set as global
+    //     and fixed (CTRL, CTRL+TAB, ALT+ENTER, ESC), and it has no save states to bind.
+    //   * Everything else — not investigated against its own config format, so nothing is written for it. The
+    //     #103 restraint: where we are not confident, write nothing and say so.
+    inline QVector<HotkeyEdit> hotkeyEdits(const QString& emulatorId)
+    {
+        QVector<HotkeyEdit> out;
+        const QString kb = QStringLiteral("Keyboard/");
+        const QString sec = QStringLiteral("Hotkeys");
+        if (emulatorId == QLatin1String("pcsx2"))
+        {
+            const QString ini = QStringLiteral("inis/PCSX2.ini");
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("SaveStateToSlot"),
+                                      kb + QLatin1String(kHotkeySaveStateKey) });
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("LoadStateFromSlot"),
+                                      kb + QLatin1String(kHotkeyLoadStateKey) });
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("Screenshot"),
+                                      kb + QLatin1String(kHotkeyScreenshotKey) });
+        }
+        else if (emulatorId == QLatin1String("duckstation"))
+        {
+            const QString ini = QStringLiteral("settings.ini");
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("SaveSelectedSaveState"),
+                                      kb + QLatin1String(kHotkeySaveStateKey) });
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("LoadSelectedSaveState"),
+                                      kb + QLatin1String(kHotkeyLoadStateKey) });
+            out.push_back(HotkeyEdit{ ini, sec, QStringLiteral("Screenshot"),
+                                      kb + QLatin1String(kHotkeyScreenshotKey) });
+        }
+        return out;
+    }
+
     // ---- pure: the per-emulator player-N config mapping — the mutation-tested core -------------------------
     // The exact config writes to seat player `seatIndex` (0-based) in emulator `emulatorId`. An out-of-range seat
     // or an unknown/unhandled emulator yields NO edit. `pad.name` is consumed by the Dolphin branch (its SDL
@@ -284,6 +412,11 @@ namespace ControllerSeats
     {
         QVector<ConfigEdit> out;
         if (seatIndex < 0 || seatIndex >= kMaxSeats) return out; // out-of-range seat -> no edit
+        // Brand-matrix honesty (increment 2): a pad SDL has no mapping for gets NO config, because every button
+        // name below would be a guess. The write side names it to the user instead (unrecognizedPadMessage).
+        // A default-constructed PadInfo — the "SDL absent / nothing attached" fallback seat — has no guid and is
+        // NOT unrecognized, so the pre-#104 P1-only write is untouched.
+        if (padIsUnrecognized(pad)) return out;
         const int n = seatIndex;                                 // device index == seat index this landing
 
         if (emulatorId == QLatin1String("dolphin"))

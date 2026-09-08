@@ -1,0 +1,40 @@
+gamecontrollerdb.txt — where it came from, and how it is maintained
+===================================================================
+
+WHAT IT IS. `native/gamecontrollerdb.txt` beside this note is BUNDLED DATA, not code. It is the community
+SDL controller-mapping database: one line per physical controller model, keyed on the SDL joystick GUID, saying
+which raw button and axis index is that pad's A, its left stick, its right trigger. SDL ships its own built-in
+mappings for the mainstream pads; this file augments and overrides them, which is what lets a pad SDL does not
+know about still come up correctly named.
+
+WHERE IT IS USED. Loaded at startup by `SDL_GameControllerAddMappingsFromFile` from the application directory —
+`native/src/input/Gamepad.cpp` for the in-process tier, and `EmulatorManager::enumerateConnectedPadsEx` for the
+standalone tier, so both tiers agree on what a given pad is. A device this file (plus SDL's built-ins) cannot
+map is reported to the user by name at launch rather than configured by guesswork; see
+`native/docs/controllers-in-standalone-emulators.md`.
+
+IT IS NOT FETCHED AT RUNTIME. The app never downloads it. It ships with the build, and the build is what pins
+which mappings a release has. A runtime fetch would make two machines on the same version behave differently
+and would put a network dependency on the path between "press a button" and "the game responds".
+
+REFRESHED PER RELEASE, AS DATA. Updating it is a data refresh, not a code change: replace the file wholesale
+with the current upstream copy and record the commit below. No code changes with it; nothing in the app parses
+it, SDL does.
+
+  Upstream:        https://github.com/mdqinc/SDL_GameControllerDB
+  Format:          "Game Controller DB for SDL in 2.0.16 format" (upstream's own header line)
+  Licence:         upstream's terms — recorded in this repository's NOTICE file
+  Taken from:      commit 28a856f2b92da8891b161acd0abd64fbf4445d97 ("Add Austgame Linux mapping"),
+                   authored 2026-09-07, the tip of upstream's default branch on that date
+  Refreshed:       2026-09-07 (issue #104), replacing a copy that was 32 mappings behind
+  Contents:        2275 mappings — Windows 869, Linux 743, Mac OS X 322, Android 299, iOS 42
+
+TO REFRESH IT:
+
+  curl -o native/gamecontrollerdb.txt \
+    https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/<commit>/gamecontrollerdb.txt
+
+then update the four "Taken from / Refreshed / Contents" lines above with the commit you pinned, its date and
+the new counts. Pin a COMMIT, never a branch name: "whatever main said the day I ran it" is not a record of
+what shipped. The file is stored with LF endings in git and checked out CRLF like the rest of this tree; do not
+hand-edit it — an entry that belongs in it belongs upstream, where every other SDL application gets it too.

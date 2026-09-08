@@ -2597,6 +2597,65 @@ else
 fi
 echo
 
+# Emulator-manager builder parity for the controller switch (issue #104). openEmulatorManager() has the SAME two
+# builders openGeneralSettings() has — a themed PanelRow list and a classic QWidget form — but the GS_TWINS gate
+# above only reads openGeneralSettings, so a control added here is asserted by nothing. That matters more than
+# usual for this one: the switch is a PROMISE ("EverythingBox will not touch this emulator's input config"), and
+# a promise reachable on one layout only is not a promise. So: both builders must construct it, both must read
+# and write it through the same EmulatorManager setter (one write path, no drift), and both must say where the
+# .eb-orig undo copy lives — a user who cannot see where the undo is does not have one.
+echo "=== emulator manager controller-switch parity ==="
+EMM="$HERE/../src/ui/MainWindow.cpp"
+em_fail=0
+em_note() { echo "  $1"; em_fail=1; }
+if [ ! -f "$EMM" ]; then
+  echo "FAIL: emulator manager controller-switch parity (MainWindow.cpp not found at $EMM)"; fail=1
+else
+  em_themed="$(mktemp)"; em_classic="$(mktemp)"
+  # Split openEmulatorManager in two at the classic builder's showPanel() call, exactly as the GS gate splits
+  # openGeneralSettings. A file operand is always supplied so awk cannot fall back to the suite's own stdin.
+  awk -v T="$em_themed" -v C="$em_classic" '
+    /^void MainWindow::openEmulatorManager\(\)/ { fn = 1 }
+    fn && /showPanel\(tr\("Emulators"\)/        { part = 2 }
+    fn && part != 2                            { print > T; next }
+    fn && part == 2                            { print > C }
+    fn && part == 2 && /^\}/                   { fn = 0 }
+  ' "$EMM" </dev/null
+  em_tl="$(wc -l < "$em_themed" | tr -d '[:space:]')"
+  em_cl="$(wc -l < "$em_classic" | tr -d '[:space:]')"
+  # Corpus assertions FIRST: an empty region makes every check below vacuously true, which reads as "enforced".
+  if [ "$em_tl" -lt 40 ]; then
+    em_note "the THEMED openEmulatorManager region is $em_tl line(s) — expected the whole \`#ifdef EB_HAVE_QML\` branch. The split markers moved; treat a PASS here as meaningless."
+  fi
+  if [ "$em_cl" -lt 40 ]; then
+    em_note "the CLASSIC openEmulatorManager region is $em_cl line(s) — expected the whole showPanel(tr(\"Emulators\")) body. The split markers moved; treat a PASS here as meaningless."
+  fi
+  if [ "$(grep -c -F -- 'QStringLiteral("emu.controllers:")' "$em_themed")" -eq 0 ]; then
+    em_note "the THEMED emulator manager builds no per-emulator controller switch row (emu.controllers:<id>). On the themed home there is then no way to tell EverythingBox to leave an emulator's input config alone."
+  fi
+  if [ "$(grep -c -F -- 'new QCheckBox(tr("Let EverythingBox set up controllers"))' "$em_classic")" -eq 0 ]; then
+    em_note "the CLASSIC emulator manager never constructs the controller switch checkbox, so a user who has not enabled the themed home cannot reach the setting at all."
+  fi
+  for em_half in "$em_themed" "$em_classic"; do
+    if [ "$(grep -c -F -- 'EmulatorManager::manageControllers(' "$em_half")" -eq 0 ]; then
+      em_note "one openEmulatorManager builder never READS EmulatorManager::manageControllers(), so its control shows a state that is not the stored one."
+    fi
+    if [ "$(grep -c -F -- 'EmulatorManager::setManageControllers(' "$em_half")" -eq 0 ]; then
+      em_note "one openEmulatorManager builder never WRITES through EmulatorManager::setManageControllers(), so the two layouts do not share a write path."
+    fi
+    if [ "$(grep -c -F -- 'eb-orig' "$em_half")" -eq 0 ]; then
+      em_note "one openEmulatorManager builder never names the .eb-orig copy. The switch's whole safety story is that the original config is recoverable without us; a layout that does not say where it is has not told the user that."
+    fi
+  done
+  rm -f "$em_themed" "$em_classic"
+  if [ "$em_fail" -eq 0 ]; then
+    echo "PASS: emulator manager controller-switch parity (themed $em_tl lines, classic $em_cl lines)"
+  else
+    echo "FAIL: emulator manager controller-switch parity — the switch is not reachable and undoable on both layouts."; fail=1
+  fi
+fi
+echo
+
 # Themed local-leaf routing parity. A leaf's Enter reaches playback down TWO dispatch paths: the classic grid
 # calls HomeView::activateItem, and the themed (Triple/XMB) column opens an inline chooser whose Play calls
 # HomeView::playThemedLeaf. Both must answer "is this row a local file, which no addon can resolve?" the same
