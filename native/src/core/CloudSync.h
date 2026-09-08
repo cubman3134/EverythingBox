@@ -40,9 +40,11 @@ public:
     // pad, this device's identity/cloud tokens, the local downloads/pc-games catalogs). Note the deliberate
     // SIBLING carve-outs: sync/global/* and profiles/list and library/showHidden DO sync.
     static bool isDeviceLocalKey(const QString& key);
-    // A per-item store key (resume/recent/marks/favorites/playlists/stats/playstats/deleted). The progress
-    // merge document (CloudMerge) owns these exclusively, so applyBundle must NEVER write them from the heavy
-    // bundle — a stale peer copy would clobber this device's live accumulator namespace and then propagate.
+    // A per-item store key (resume/recent/marks/favorites/playlists/stats/playstats/deleted, and the dozen
+    // that joined them since — homerows/ is the newest, #333). The progress merge document (CloudMerge) owns
+    // these exclusively, so applyBundle must NEVER write them from the heavy bundle — a stale peer copy would
+    // clobber this device's live accumulator namespace and then propagate. The rule is symmetrical: anything
+    // with a CloudMerge section belongs here, or the bundle silently becomes a second, RAW writer of it.
     static bool isPerItemStoreKey(const QString& key);
     // The bundle's settings.json content (device-local excluded) — the exact bytes buildBundle embeds. Exposed
     // so the headless probe exercises the real carve-out without the zip/network.

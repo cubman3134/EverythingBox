@@ -13,6 +13,7 @@
 // Prints SETTINGSTXN-OK on success; any failure prints SETTINGSTXN-FAIL <cond> and exits non-zero.
 #include "SettingsTxn.h"
 #include "TraktSync.h"   // backfillThroughKey/backfillDoneKey — the per-profile cursor the scope excludes
+#include "PerItemStores.h"  // #332: THE per-item-store table this predicate now asks (walked by §1d)
 
 #include <QCoreApplication>
 #include <QDir>
@@ -201,6 +202,26 @@ int main(int argc, char** argv)
                            "lyricoffsetPanel/x", "bookmarksPanel/x", "highlightsPanel/x",
                            "pad2keyPanel/x" })
         CHECK(SettingsTxn::inScope(QString::fromLatin1(k)) == true);
+
+    // ---- 1d. inScope agrees with the SHARED table, WALKED rather than restated (issue #332) -------
+    // §1 and §1c above spell out the per-item prefixes by hand, which is worth having — each is paired with
+    // an in-scope neighbour, and that pairing is what stops an entry being shortened. What neither of them
+    // can do is notice a prefix added to core/PerItemStores.h TOMORROW, and that is exactly the failure #332
+    // is about: two hand-maintained lists, one of them updated. So this walks the table itself. A store added
+    // there is asked of this predicate without anybody editing this file.
+    CHECK(peritem::kPrefixCount > 0);                     // a walk over an empty table would pass vacuously
+    for (const char* raw : peritem::kPrefixes)
+    {
+        const QString pre = QString::fromLatin1(raw);
+        CHECK(peritem::isKey(pre) == true);               // the table answers for its own entries...
+        CHECK(SettingsTxn::inScope(pre) == false);        // ...and this predicate honours every one of them
+        CHECK(SettingsTxn::inScope(pre + QStringLiteral("p1/items")) == false);
+        // ...and the entry keeps its BOUNDARY: a key that merely starts like it is an ordinary settings row
+        // a Discard must still be able to revert. (Only meaningful for the prefixes that end in a separator;
+        // a store whose key spelling has no separator would need its own near-miss assertion.)
+        if (pre.endsWith(QLatin1Char('/')))
+            CHECK(SettingsTxn::inScope(pre.left(pre.size() - 1) + QStringLiteral("Panel/lastTab")) == true);
+    }
 
     // ---- 2. inScope: DEVICE-LOCAL BUT IN SCOPE ----------------------------------------------------
     // These are the cases a naive "exclude everything CloudSync::isDeviceLocalKey covers" implementation

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.228 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.231 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -898,6 +898,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
         src/core/LocalMetaMerge.cpp src/core/LocalMetaMerge.h        # pure .nfo>scraped merge for resolved local files (#73)
         src/core/Theme.cpp        src/core/Theme.h
+        src/core/PerItemStores.h                                   # #332: THE per-item-store prefix table (header-only)
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h  # Increment B: Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
@@ -2260,6 +2261,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # which IS this probe's per-process scratch ini, so the remap and the stores share one file already.
         src/core/PcGameId.cpp        src/core/PcGameId.h
         src/core/PcGameRemap.cpp     src/core/PcGameRemap.h
+        src/core/PerItemStores.h                                    # #332: THE per-item-store prefix table, walked by section 42
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         # issue #110: the offline-download keys, asked through their own builders so the carve-out cannot
         # drift from the writers. All three are QtCore-only (Jellyfin.h supplies the qualified-id grammar
@@ -2335,6 +2337,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_settingstxn tools/probe_settingstxn.cpp
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
         src/core/TraktSync.cpp       src/core/TraktSync.h          # backfillKeyPrefix() — the excluded family
+        src/core/PerItemStores.h                                     # #332: the shared table section 1d walks
         src/core/SettingsTxn.cpp src/core/SettingsTxn.h)
     target_include_directories(probe_settingstxn PRIVATE src src/core)
     # The ini-redirect seam exists ONLY here (same rule as probe_theme's above): without the macro the setter
