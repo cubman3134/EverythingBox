@@ -61,6 +61,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <functional>
 
@@ -79,6 +80,15 @@ public:
     // one place that looks for an existing one cannot spell it differently.
     static QString idPrefix();
     static QString idFor(const QString& serverId);
+
+    // WHICH INSTALLED PROVIDERS BELONG TO A SERVER THAT IS GONE (issue #299). Pure, and it is the whole
+    // decision: given every provider id the orchestrator currently holds and every server id the store
+    // currently lists, it returns the ids to remove. Two properties it must have, and a probe pins both:
+    //   * it names ONLY this provider's own ids - an id that does not start with idPrefix() belongs to
+    //     Last.fm or ListenBrainz and must never be handed to a removal, whatever the servers say;
+    //   * a server that is still configured is never named, so a sync that runs on every store change (it
+    //     does - adding a server fires the same hook) removes nothing it should not.
+    static QStringList staleIds(const QStringList& installedProviderIds, const QStringList& serverIds);
 
     QString id() const override;
     QString displayName() const override;

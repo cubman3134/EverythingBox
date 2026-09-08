@@ -60,6 +60,22 @@ public:
     // history and a new ListenBrainz account wants both, each gets its own queue, its own delivered counter,
     // its own backoff and its own last error, and one being refused never holds up the other.
     void addProvider(ScrobbleProvider* provider);
+    // ...and REMOVE ONE, by its id (issue #299). A destination the user has deleted - a music server
+    // removed in Settings - leaves a provider behind that answers configured() == false: it accepts nothing,
+    // queues nothing and posts nothing, but it is still installed, still counted and still there until the
+    // next launch.
+    //
+    // ONE PROVIDER, NOT A REBUILD, and that distinction is the whole of the fix. Rebuilding the set would
+    // destroy and recreate the Last.fm provider alongside it, and LastFmClient carries connections made once
+    // at startup plus an AUTHORISATION POLL that a recreation silently abandons mid-flight - a user in the
+    // middle of linking Last.fm would watch it never finish, which is worse than a dormant object. So this
+    // takes exactly the slot whose id matches and leaves every other slot's backoff, in-flight submission
+    // and delivered counter untouched.
+    //
+    // The removed provider's QUEUE IS NOT TOUCHED. ScrobbleQueue is filed per provider id and outlives any
+    // installation of it; deleting somebody's unsent listens because their server went away is a decision
+    // this function is not entitled to make. Returns true when a slot was actually removed.
+    bool removeProvider(const QString& id);
     // The installed providers, in the order they were added. Empty until one is set.
     QVector<ScrobbleProvider*> providers() const;
 
@@ -134,6 +150,9 @@ private:
     bool owes(Slot* s, const Scrobble::Track& track) const;
 
     void finishCurrent();                       // the current watch owes a scrobble -> queue it, everywhere
+    // The installed slot with this provider id, or null. Used where a POINTER would outlive its slot - a
+    // submission callback that arrives after the destination was removed (issue #299).
+    Slot* slotById(const QString& id);
     void pumpSlot(Slot* s);
     void scheduleRetry(Slot* s);
     void recordResult(Slot* s, const ScrobbleResult& r, int submitted);

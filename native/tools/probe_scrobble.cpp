@@ -1666,6 +1666,131 @@ int main(int argc, char** argv)
             ScrobbleQueue::setLastError(providerId, QString());
         }
 
+        // ---- 8i. A REMOVED SERVER TAKES ITS PROVIDER WITH IT (issue #299) -----------------------------
+        // The provider set used to be add-only, on the argument that a removed server's provider answers
+        // configured() == false and so accepts nothing, queues nothing and posts nothing. All true, and it
+        // was still installed - counted, walked by every pump, and there until the next launch.
+        {
+            const QString pA = SubsonicScrobbleProvider::idFor(sidA);
+            const QString pB = SubsonicScrobbleProvider::idFor(sidB);
+
+            // THE RULE, pure: which installed ids belong to a server that is gone.
+            CHECK(SubsonicScrobbleProvider::staleIds({ pA, pB }, { sidA }) == QStringList{ pB },
+                  "remove: the provider whose server went away is named, and only that one");
+            CHECK(SubsonicScrobbleProvider::staleIds({ pA }, { sidA }).isEmpty(),
+                  "remove: a server that is still configured is never named - this runs on EVERY store "
+                  "change, including the one that ADDS a server");
+            CHECK(SubsonicScrobbleProvider::staleIds({ pA, pB }, {}).size() == 2,
+                  "remove: every server gone means every one of these providers goes");
+            CHECK(SubsonicScrobbleProvider::staleIds(
+                      { QStringLiteral("lastfm"), QStringLiteral("listenbrainz") }, {}).isEmpty(),
+                  "remove: ...and NEVER another service's provider, whatever the server list says - that "
+                  "is the whole reason the set is not rebuilt");
+
+            // ...AND THE ORCHESTRATOR, with a live unrelated destination beside the two servers. Its state
+            // is what a rebuild would have destroyed, so it is what this pins.
+            SubsonicServer second = srv;
+            second.id   = sidB;
+            second.name = QStringLiteral("Second box");
+            SubsonicServerStore::add(second);
+            Settings::setScrobbleEnabled(true);
+            Settings::setListenBrainzToken(QString::fromLatin1(kFakeToken));
+            Settings::setListenBrainzApiUrl(QStringLiteral("http://127.0.0.1:1"));   // nobody is listening
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            ScrobbleQueue::setLastError(QStringLiteral("listenbrainz"), QString());
+
+            Scrobbler s;
+            ListenBrainzClient* lb = new ListenBrainzClient(nullptr);
+            s.setProvider(lb);
+            s.addProvider(new SubsonicScrobbleProvider(sidA));
+            s.addProvider(new SubsonicScrobbleProvider(sidB));
+            CHECK(s.providers().size() == 3, "remove: three destinations installed to begin with");
+
+            // Give the unrelated destination REAL LIVE STATE: a listen it could not deliver, an error line
+            // and a backoff climbing. This is the mid-flight state the header refuses to destroy.
+            playThrough(s, musicTrack(QStringLiteral("Amber"), QStringLiteral("Still owed"), 60), 40);
+            spinUntil([&] { return ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1
+                                && !ScrobbleQueue::lastError(QStringLiteral("listenbrainz")).isEmpty(); });
+            CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1,
+                  "remove: the unrelated destination has a listen waiting before the removal");
+
+            // THE REMOVAL. One server deleted in Settings; the sync reconciles by id.
+            SubsonicServerStore::remove(sidB);
+            QStringList installed;
+            for (const ScrobbleProvider* p : s.providers()) installed.push_back(p->id());
+            QStringList live;
+            for (const SubsonicServer& srvRow : SubsonicServerStore::list()) live.push_back(srvRow.id);
+            const QStringList stale = SubsonicScrobbleProvider::staleIds(installed, live);
+            CHECK(stale == QStringList{ pB }, "remove: exactly one provider is stale");
+            for (const QString& id : stale) CHECK(s.removeProvider(id), "remove: ...and it is removed");
+
+            CHECK(s.providers().size() == 2,
+                  "remove: the set SHRANK - a removed server no longer leaves an inert provider behind for "
+                  "the session");
+            bool stillThere = false, srvAStillThere = false, sameObject = false;
+            for (const ScrobbleProvider* p : s.providers())
+            {
+                if (p->id() == pB) stillThere = true;
+                if (p->id() == pA) srvAStillThere = true;
+                if (p == static_cast<const ScrobbleProvider*>(lb)) sameObject = true;
+            }
+            CHECK(!stillThere, "remove: the removed server's provider is gone");
+            CHECK(srvAStillThere, "remove: ...and the OTHER music server's provider is untouched");
+            CHECK(sameObject,
+                  "remove: the unrelated destination is the SAME OBJECT, not a recreated one - rebuilding "
+                  "the set is what would abandon Last.fm's authorisation poll mid-flight");
+            CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 1,
+                  "remove: its queued listen is still queued");
+            CHECK(!ScrobbleQueue::lastError(QStringLiteral("listenbrainz")).isEmpty(),
+                  "remove: ...and its error line still says what happened");
+            CHECK(!s.statusLine().contains(QStringLiteral("Second box")),
+                  "remove: the status line stops naming a destination that no longer exists");
+
+            // ...AND IT STILL WORKS. The surviving slot keeps its timer and its queue, so pointing the
+            // service back at something that answers delivers the listen that was waiting through it.
+            {
+                FakeService svc;
+                CHECK(svc.listen(), "remove: the fake listening service is up");
+                Settings::setListenBrainzApiUrl(svc.root());
+                s.retryNow();
+                spinUntil([&] { return ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 0; }, 6000);
+                CHECK(ScrobbleQueue::count(QStringLiteral("listenbrainz")) == 0,
+                      "remove: the surviving destination delivers what it was owed - its slot, its timer "
+                      "and its queue all came through the removal intact");
+            }
+
+            // A REMOVAL WHILE A SUBMISSION IS IN FLIGHT. The batch is on its way to a port nobody is
+            // listening on when the destination is taken away; the reply is looked up by id when it lands,
+            // finds nothing, and is dropped rather than written through a freed slot.
+            {
+                SubsonicServer third = srv;
+                third.id = sidB;
+                third.name = QStringLiteral("Third box");
+                third.url = QStringLiteral("http://127.0.0.1:1");
+                SubsonicServerStore::add(third);
+                const QString trackC = Subsonic::qualify(sidB, Subsonic::Kind::Track,
+                                                         QStringLiteral("s-9"));
+                ScrobbleQueue::clear(pB);
+                s.addProvider(new SubsonicScrobbleProvider(sidB));
+                playThrough(s, subsonicTrack(trackC, QStringLiteral("In flight"), 60), 40);
+                SubsonicServerStore::remove(sidB);
+                CHECK(s.removeProvider(pB), "remove: the destination goes while its batch is on the wire");
+                spinUntil([&] { return false; }, 1200);   // let the reply land on a slot that is not there
+                CHECK(s.providers().size() == 2,
+                      "remove: ...and the set is still the two that remain - a reply for a removed "
+                      "destination records nothing rather than writing through a freed slot");
+                CHECK(!s.statusLine().isEmpty(),
+                      "remove: ...and the status line is still answerable afterwards");
+                ScrobbleQueue::clear(pB);
+                ScrobbleQueue::setLastError(pB, QString());
+            }
+
+            Settings::setListenBrainzApiUrl(QString());
+            Settings::setListenBrainzToken(QString());
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            ScrobbleQueue::setLastError(QStringLiteral("listenbrainz"), QString());
+        }
+
         SubsonicServerStore::remove(sidA);
         Settings::setScrobbleEnabled(false);
         Settings::setScrobbleServerForwards(false);

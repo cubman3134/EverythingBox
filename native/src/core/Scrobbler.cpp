@@ -78,6 +78,25 @@ void Scrobbler::addProvider(ScrobbleProvider* provider)
     pump();
 }
 
+bool Scrobbler::removeProvider(const QString& id)
+{
+    if (id.isEmpty()) return false;
+    for (int i = 0; i < slots_.size(); ++i)
+    {
+        Slot* s = slots_[i];
+        if (!s || !s->provider || s->provider->id() != id) continue;
+        // ONE SLOT. Every other slot keeps its backoff, its in-flight submission and its retry timer - see
+        // the header for why a rebuild is not an option (an authorisation poll abandoned mid-flight).
+        if (s->retry) s->retry->stop();
+        slots_.remove(i);
+        delete s->provider;      // its network callbacks are context-connected to it and go with it
+        delete s;
+        emit statusChanged();    // the status line stops naming a destination that no longer exists
+        return true;
+    }
+    return false;
+}
+
 QVector<ScrobbleProvider*> Scrobbler::providers() const
 {
     QVector<ScrobbleProvider*> out;
@@ -200,6 +219,12 @@ void Scrobbler::pump()
     for (Slot* s : slots_) pumpSlot(s);
 }
 
+Scrobbler::Slot* Scrobbler::slotById(const QString& id)
+{
+    for (Slot* s : slots_) if (s && s->provider && s->provider->id() == id) return s;
+    return nullptr;
+}
+
 void Scrobbler::pumpSlot(Slot* s)
 {
     if (!s || s->pumping || !s->provider || !s->provider->configured()) return;
@@ -209,9 +234,16 @@ void Scrobbler::pumpSlot(Slot* s)
 
     s->pumping = true;
     const int n = int(batch.size());
-    s->provider->submit(batch, [this, s, n](ScrobbleResult r) {
-        s->pumping = false;
-        recordResult(s, r, n);
+    // BY ID, NOT BY POINTER (issue #299). A provider can be REMOVED while its submission is in flight - the
+    // user deletes the music server mid-batch - and a callback holding the Slot* would then write through a
+    // freed one. Looking the slot up when the answer arrives means a removed destination's reply is simply
+    // dropped, which is the correct outcome: there is nothing left to record it against.
+    const QString pid = s->provider->id();
+    s->provider->submit(batch, [this, pid, n](ScrobbleResult r) {
+        Slot* live = slotById(pid);
+        if (!live) return;                  // removed while in flight: nothing to record, nothing dangling
+        live->pumping = false;
+        recordResult(live, r, n);
     });
 }
 
