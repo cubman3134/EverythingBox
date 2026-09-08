@@ -405,12 +405,20 @@ keys — there is no drag-and-drop to reach for.
 - **It is per profile, and it syncs.** The arrangement rides the same profile sync as your favourites and
   playlists, so a new device inherits it. If two devices are edited apart, the most recent arrangement wins
   and rows only one of them knew about are kept, never dropped.
-- **Your theme still decides what it can show.** The list orders and hides rows among the ones the active
-  home actually draws; it cannot add a row a theme has no place for. The classic home arranges its shelves
-  (Continue watching, Airing Soon, You Missed, Favorites, and — once you add them — Downloaded, a playlist,
-  or a saved filter); a themed home arranges its media-type categories and catalogue tiles. Rows that belong
-  to the other layout are kept in your list and simply skipped, so switching layouts never loses them. Theme
-  authors: see [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
+- **Each row belongs to one home, and the editor says which.** The two layouts have two different home
+  screens and the rows are not interchangeable. The **classic** home is a list of shelves — Continue
+  watching, Continue watching (media server), New, Airing Soon, ★ Favorites, 🙋 Requested, and, once you add
+  them, ⬇ Downloaded, a playlist or a saved filter. A **themed** home is a grid or cross of your media-type
+  categories and catalogue tiles, so those two are its rows. A row that belongs to the other layout is
+  labelled *only on the classic home* / *only on the themed home* wherever it is listed, including on the
+  **Add row…** screen, so you can see before you add it that it will not appear on the home you are looking
+  at.
+- **A row for the other layout is kept, never pruned.** The list syncs, so a device that quietly dropped what
+  it cannot draw would delete the arrangement your other device is using. Rows that belong to the other
+  layout stay in your list and are simply skipped while that layout is off — switching layouts brings them
+  back exactly where you left them. The same goes for a row whose producer has gone away (a deleted saved
+  filter, a removed add-on): it is marked *not on this device* and kept. Theme authors: see
+  [`native/themes2/THEME_FORMAT.md`](native/themes2/THEME_FORMAT.md).
 ## Themes
 
 A theme decides what the app looks like: colours, layout, artwork, the sounds it makes. Three ship with the

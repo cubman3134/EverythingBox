@@ -10337,13 +10337,29 @@ void MainWindow::openHomeRowsEditor()
     // it reads can change while this editor is up.
     const QVector<HomeView::HomeRowChoice> catalogue = home_->homeRowCatalogue();
 
+    // WHICH HOME THE USER IS LOOKING AT (issue #314). The row vocabulary spans both layouts and nearly every
+    // family belongs to exactly one of them, so an editor that lists them all identically accepts a row that
+    // then draws nothing on the home in front of you. The list is deliberately NOT filtered to this layout —
+    // it syncs, and a device that hid what it cannot draw would leave the user unable to arrange the rows
+    // their other device shows. It is labelled instead.
+    const bool themedHome = themedHomeEnabled();
+
     // Label a rowId for the list. A row the list holds but this device cannot produce — a preset that was
     // deleted, an add-on that was removed, a peer's row for a producer we do not have — is shown as itself
     // and marked, never hidden and never dropped: it is still in the store, and it still works on the device
     // that has the producer (HomeRows.h).
-    auto labelFor = [this, &catalogue](const QString& rowId) {
+    //
+    // A row this device DOES produce, but on the OTHER layout's home, is marked too and for the same reason:
+    // it will appear the moment the user switches layouts, so hiding or dropping it would be a lie in the
+    // other direction. "not on this device" wins where both could apply — a row with no producer here at all
+    // is not going to appear whichever home is on.
+    auto labelFor = [this, &catalogue, themedHome](const QString& rowId) {
         for (const HomeView::HomeRowChoice& c : catalogue)
-            if (c.rowId == rowId) return c.label;
+            if (c.rowId == rowId)
+            {
+                const QString note = homerows::layoutNote(rowId, themedHome);
+                return note.isEmpty() ? c.label : tr("%1   —  %2").arg(c.label, note);
+            }
         return tr("%1  (not on this device)").arg(rowId);
     };
     auto cappable = [&catalogue](const QString& rowId) {
@@ -10399,8 +10415,10 @@ void MainWindow::openHomeRowsEditor()
             for (const homerows::Row& r : rows) already.insert(r.rowId);
             QVector<HomeView::HomeRowChoice> offer;
             QStringList labels;
+            // labelFor, not c.label: the note has to be on the screen where the user DECIDES to add the row,
+            // otherwise they find out by adding it and then looking for it on a home that never draws it.
             for (const HomeView::HomeRowChoice& c : catalogue)
-                if (!already.contains(c.rowId)) { offer << c; labels << c.label; }
+                if (!already.contains(c.rowId)) { offer << c; labels << labelFor(c.rowId); }
             if (offer.isEmpty())
             {
                 NavConfirm::ask(tr("Add row"), tr("Every row this device can show is already in your list."),
