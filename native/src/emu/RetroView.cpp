@@ -16,6 +16,7 @@
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include "../core/SystemCatalog.h"
+#include "../core/CustomCores.h"   // #98: label a custom core in the crash/no-picture warnings
 #include "../core/LaunchRecipe.h"  // #190: the per-system launch recipe whose core options are seeded below
 #include "../core/SaveMeta.h"
 #include "../core/PortMapper.h"
@@ -1933,7 +1934,12 @@ bool RetroView::runOneCoreFrame(bool shown)
     applyFreezeCheats();    // #96: hold any address-freeze cheats by writing them back post-run
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
-        qWarning("emu: core '%s' faulted during runFrame — stopping", coreName_.toUtf8().constData());
+        // ISSUE #98: label a CUSTOM core's fault as such. A curated core faulting is our problem; a core the
+        // user supplied faulting is the core's, and a log that does not say which is which sends the reader
+        // hunting for a frontend bug that is not there. This is the second half of the warranty (the first is
+        // the one-time notice): we do not nag, but we do record whose code crashed.
+        qWarning("emu: core '%s'%s faulted during runFrame — stopping", coreName_.toUtf8().constData(),
+                 CustomCores::isCustomRef(coreName_) ? " [CUSTOM CORE — not curated]" : "");
         if (threaded_)
         {
             // On the worker thread stop() must not run directly: stopEmu() joins emuThread_ (a self-join deadlock)
@@ -1969,8 +1975,9 @@ bool RetroView::runOneCoreFrame(bool shown)
                   coreName_.toUtf8().constData());
         }
         else if (++noVideoTicks_ == 180)
-            qWarning("emu: no video after 180 core frames ('%s') — the core produced no picture",
-                     coreName_.toUtf8().constData());
+            qWarning("emu: no video after 180 core frames ('%s')%s — the core produced no picture",
+                     coreName_.toUtf8().constData(),
+                     CustomCores::isCustomRef(coreName_) ? " [CUSTOM CORE — not curated]" : "");
     }
     return true;
 }

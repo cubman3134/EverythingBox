@@ -126,6 +126,14 @@ public:
     void runEmulator(const ExternalEmulator& em, const QString& rom = QString(), const QString& title = QString(),
                      const QString& thumb = QString(), const QString& key = QString(), const QString& system = QString(),
                      const QString& sourceRom = QString()); // sourceRom = the reopenable source (archive) for Recent; rom = the boot path
+    // Issue #98: run a libretro core with NO content. Only meaningful for a core that declared
+    // supports_no_game (the game-engine cores — 2048, mrboom, the TIC-80 cousins); those have no ROM to be
+    // opened from, so this is their only way in. `coreRef` is the core name CoreManager resolves — in
+    // practice a "custom:<id>" ref, since no catalogue core is content-less. Deliberately NOT recorded in
+    // Recents or PlayStats: both are keyed by a game identity, and a core with no content has none; the
+    // Run entry in Settings ▸ Emulation ▸ Custom cores is the durable way back to it.
+    void runCoreWithoutContent(const QString& coreRef, const QString& title);
+
     void install(const ExternalEmulator& em);  // download + extract only (Settings ▸ Emulators button)
     bool emulatorBusy() const;                 // an emulator run/install is in progress
     void forceCloseEmulator();                 // wait-page Stop button: hard-kill the running emulator

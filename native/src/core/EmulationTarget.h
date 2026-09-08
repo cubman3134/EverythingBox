@@ -16,7 +16,13 @@
 // otherwise it degrades to the system's built-in libretro/standalone default — the 3b clamp, no store change).
 //
 // Header-only: the helpers are trivial and pure. Any target that includes this links the LaunchOpts resolvers
-// (LaunchOptionsStore.cpp) it delegates to; nothing else new.
+// (LaunchOptionsStore.cpp) and the custom-core registry (CustomCores.cpp) it delegates to; nothing else new.
+//
+// ISSUE #98 (custom cores) enters here at exactly ONE seam: candidateCoresFor(), below. Everything that used to
+// read `sys->cores` to answer "which cores may this system run on" now reads that instead, so a user-supplied
+// core is offered, selectable and resolvable by the same rules a catalogue core is — while cores[0], the
+// default, is untouched. With no custom core registered the seam is the identity function and every decision in
+// this header is byte-for-byte what it was.
 #pragma once
 #include <QList>
 #include <QString>
@@ -26,6 +32,7 @@
 #include "SystemCatalog.h"       // GameSystem (cores / externalEmulator) + SystemCatalog::byId
 #include "EmulatorRegistry.h"    // ExternalEmulator (displayName / systems) + EmulatorRegistry::all/byId
 #include "LaunchOptionsStore.h"  // LaunchOpts::Override + the resolveCore/resolveEmulatorId/resolveBackend resolvers
+#include "CustomCores.h"         // issue #98: the user-tier custom cores appended beside the catalogue's candidates
 
 // The three engines a game can launch on. Libretro is the historical default; RetroPark and Standalone are the
 // two alternatives the picker tags. (Distinct from EmuBackend, which names only the in-process pair
@@ -53,6 +60,22 @@ inline constexpr bool kStandaloneBuildAvailable = true;
 inline bool standaloneEngineSurvives(const GameSystem* sys, bool standaloneAvailable)
 {
     return sys != nullptr && (standaloneAvailable || sys->cores.isEmpty());
+}
+
+// THE candidate-core list for a system, in ONE place (issue #98). It is the catalogue's `cores` — unchanged, in
+// order — followed by every REGISTERED CUSTOM core that claims one of the system's extensions. Every consumer of
+// "which cores may this system run on" asks this and nothing else, so the picker's offered list, the per-game
+// override's validity check (LaunchOpts::resolveCore takes exactly this list) and the launcher's resolution
+// cannot diverge.
+//
+// A custom core is APPENDED, never inserted: cores[0] stays the catalogue default, so a custom core that merely
+// COULD open a file never displaces the core the app would have chosen — it runs only when the user explicitly
+// picks it. And with nothing registered, CustomCores::augmentCandidates hands the catalogue list straight back,
+// which is what makes every launch decision on an untouched install byte-for-byte what it was.
+inline QStringList candidateCoresFor(const GameSystem* sys)
+{
+    if (!sys) return QStringList();
+    return CustomCores::augmentCandidates(sys->cores, sys->extensions, CustomCores::all());
 }
 
 // The registry emulators BOUND to a system: every ExternalEmulator whose `systems` list names this system id,
@@ -93,7 +116,13 @@ namespace EmulationTargets
         EmulationTarget t;
         t.engine = EmuEngine::Libretro;
         t.ref = core;
-        t.displayName = core + QStringLiteral(" (libretro)");
+        // A CUSTOM core (issue #98) is tagged "(custom core)" rather than "(libretro)" and shown under the name
+        // it reports for itself, not the "custom:<id>" ref. The tag is the visible half of the warranty: a row
+        // the app does not stand behind must say so where the choice is made, not only in the notice. A ref that
+        // is not registered (a stale per-game override naming a core the user removed) falls back to the plain
+        // libretro spelling, so it can never render as a blank label.
+        const QString custom = CustomCores::displayNameFor(core);
+        t.displayName = custom.isEmpty() ? (core + QStringLiteral(" (libretro)")) : custom;
         t.id = QStringLiteral("libretro:") + core;
         return t;
     }
@@ -169,10 +198,14 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool re
     QList<EmulationTarget> out;
     if (!sys) return out;
 
+    // The catalogue's cores plus any registered CUSTOM core claiming one of this system's extensions (#98),
+    // appended after them — so the first row below is still cores[0], the catalogue default.
+    const QStringList candidates = candidateCoresFor(sys);
+
     if (sys->externalEmulator.isEmpty())
     {
         // The system's cores lead, so its DEFAULT (cores[0]) is still the first row of the picker...
-        for (const QString& core : sys->cores)
+        for (const QString& core : candidates)
             out.push_back(EmulationTargets::libretro(core));
         // ...then any registry emulator BOUND to it (n64 -> ares), in registry order, behind the same platform
         // gate the standalone branch below uses. The gate is standaloneEngineSurvives and NOT a bare
@@ -204,7 +237,7 @@ inline QList<EmulationTarget> emulationTargetsFor(const GameSystem* sys, bool re
     // back onto the in-process tier from the picker — and so the target list names the same cores the
     // platform gate above degrades to. A libretro system already listed its cores in the first branch.
     if (!sys->externalEmulator.isEmpty())
-        for (const QString& core : sys->cores)
+        for (const QString& core : candidates)
             out.push_back(EmulationTargets::libretro(core));
 
     if (retroParkAvailable && retroParkSupportsSystem(sys->id))
@@ -345,7 +378,13 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
     const bool standaloneBuiltIn = declaresEmulator && standaloneEngineSurvives(sys, standaloneAvailable);
     const bool standaloneHolds   = (declaresEmulator || !boundEmulatorsFor(sys->id).isEmpty())
                                    && standaloneEngineSurvives(sys, standaloneAvailable);
-    const bool libretroHolds     = !sys->cores.isEmpty();
+    // The libretro engine needs at least one candidate to NAME — and (issue #98) a registered custom core is
+    // such a candidate. That matters on a CORELESS system (gc): without it, an explicit per-game pick of a
+    // custom core there would take the standalone arm and silently launch Dolphin instead of the core the user
+    // chose. `standaloneEngineSurvives` deliberately stays on the CATALOGUE cores: it answers "what did the
+    // system declare", i.e. what a platform degrade has to fall back to, and a user-supplied core is not that.
+    const QStringList candidates = candidateCoresFor(sys);
+    const bool libretroHolds     = !candidates.isEmpty();
 
     // (d) the system built-in — which is standalone only where the system DECLARES an emulator, so a bound-only
     // system (n64) keeps its libretro default — then overridden by (c) the per-system default and (b) the
@@ -371,7 +410,7 @@ inline EmulationTarget resolveEmulationTarget(const GameSystem* sys, const Launc
     }
 
     const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
-    return EmulationTargets::libretro(LaunchOpts::resolveCore(baseCore, ov, sys->cores));
+    return EmulationTargets::libretro(LaunchOpts::resolveCore(baseCore, ov, candidates));
 }
 
 // The CorePlan-relevant outcome of a launch (Unified Emulation Picker Task 3): the FINAL engine + resolved
@@ -478,13 +517,13 @@ inline ResolvedLaunch resolveLaunch(const GameSystem* sys, const LaunchOpts::Ove
             if (!presenting)
             {
                 const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
-                r.core = LaunchOpts::resolveCore(baseCore, ov, sys->cores);
+                r.core = LaunchOpts::resolveCore(baseCore, ov, candidateCoresFor(sys));
             }
             break;
         case EmuEngine::Libretro:
         {
             const QString baseCore = perSystemCore.isEmpty() ? sys->cores.value(0) : perSystemCore;
-            r.core = LaunchOpts::resolveCore(baseCore, ov, sys->cores);
+            r.core = LaunchOpts::resolveCore(baseCore, ov, candidateCoresFor(sys));
             break;
         }
     }
