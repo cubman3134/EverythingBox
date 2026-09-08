@@ -5563,7 +5563,17 @@ void MainWindow::openBrowseContextMenu()
     const bool hasJfDownload = jfSurfaceOk
         && home_->browseJellyfinDownload(jfThemedIdx, &jfKind, &jfRef, &jfSeasonRef, &jfTitle, &jfThumb);
 
-    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl };
+    // #308: the channel guide's jump-to-now, offered ONLY while standing in the guide. Start is the spare
+    // button the issue asks about: it already means "the menu for what I am looking at" on both layouts, it
+    // is already a nav-kit NavMenu, and it costs no new key, no new host property and no QML - so the verb
+    // exists on the themed and the classic guide alike without inventing a control for either.
+    //
+    // Surface-gated the way the Jellyfin verb below is, and for its reason: the classic cursor survives the
+    // page being swapped away, so an ungated question would offer the verb over the player page.
+    const bool atGuide = home_ && home_->atChannelGuideLevel()
+                         && (themedBrowseIndex() >= 0 || stack_->currentWidget() == home_);
+
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5580,6 +5590,8 @@ void MainWindow::openBrowseContextMenu()
         offer(NowPlaying, tr("Now playing — %1").arg(nowPlayingLabel()));
         offer(StopMusic, tr("Stop the music"));
     }
+    // FIRST while it is offered at all: standing in the guide, "what is on now" is the thing you came for.
+    if (atGuide) offer(GuideNow, tr("Jump to what's on now"));
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
@@ -5598,6 +5610,9 @@ void MainWindow::openBrowseContextMenu()
     {
         case NowPlaying:  resumeNowPlayingPage(); break;
         case StopMusic:   stopMusicPlayback(); break;
+        // Re-cuts the guide from the current clock and re-lands on now - the same thing opening it does, so
+        // the two cannot drift apart and a guide left up for an hour is corrected rather than re-selected.
+        case GuideNow:    if (home_) home_->jumpChannelGuideToNow(); break;
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;

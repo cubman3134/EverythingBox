@@ -362,6 +362,10 @@ public:
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
     bool atFavoritesLevel() const;           // the current level is a console's synthetic Favorites folder
+    // The channel guide (#179 inc 2), and the verb that re-lands it on what is on (#308). Public because the
+    // Start-button menu is MainWindow's, and this is the one level it offers the verb on.
+    bool atChannelGuideLevel() const;
+    void jumpChannelGuideToNow();
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
@@ -922,6 +926,7 @@ private:
     void openChannelsLevel();                                  // drill Home's "Channels" folder -> the shelf
     void openChannelGuideLevel();                              // …and its "Guide (today)" row -> the grid (#179 inc 2)
     void populateChannelGuide();                               // (re)build the grid; also what Back re-runs
+    void selectBrowseRowById(const QString& id);               // land the CLASSIC grid on a row by its id
     void populateChannels();                                   // (re)build it: one row per channel + a "create" row
     void editChannelInteractive(const QString& channelId);     // create ("") or edit/delete one channel
     bool pickChannelSource(channels::SourceKind& kind, QString& sourceId, QString& label); // the source menu

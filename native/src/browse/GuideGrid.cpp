@@ -8,6 +8,8 @@ namespace browse
 
 static QLatin1String cellIdPrefix() { return QLatin1String("_guideprog:"); }
 
+QString guideOnAirMarker() { return QStringLiteral("●  "); }
+
 QString guideCellId(const QString& channelKey, const QDateTime& startUtc)
 {
     return cellIdPrefix() + channelKey + QLatin1Char('@') + startUtc.toUTC().toString(Qt::ISODate);
@@ -66,7 +68,7 @@ MediaCatalog guideGridCatalog(const QString& title, const QVector<GuideChannel>&
             MediaItem it;
             it.id       = guideCellId(ch.key, p.startUtc);
             it.type     = cellType;
-            it.title    = (onAir ? QStringLiteral("●  ") : QString()) + hhmm + QStringLiteral("  ") + p.title;
+            it.title    = (onAir ? guideOnAirMarker() : QString()) + hhmm + QStringLiteral("  ") + p.title;
             it.subtitle = p.desc;
             if (!cellMimePrefix.isEmpty())
                 it.mime = cellMimePrefix + ch.key + QLatin1Char('@') + p.startUtc.toUTC().toString(Qt::ISODate);
@@ -75,6 +77,38 @@ MediaCatalog guideGridCatalog(const QString& title, const QVector<GuideChannel>&
     }
     cat.hasMore = false;
     return cat;
+}
+
+int guideNowIndex(const MediaCatalog& cat, const QDateTime& nowUtc)
+{
+    const QDateTime now = nowUtc.toUTC();
+    const QString   mark = guideOnAirMarker();
+    int  answer = -1;      // this channel section's answer so far
+    bool onAir  = false;   // ...and whether it is the strong kind (rule 1) rather than the next-up (rule 2)
+
+    // One walk, section by section. `i == size` closes the last section, which is why the loop runs one past
+    // the end rather than repeating the flush after it.
+    for (int i = 0; i <= cat.items.size(); ++i)
+    {
+        const bool end    = (i == cat.items.size());
+        const bool header = !end && cat.items.at(i).type == QLatin1String("_livetvheader");
+        if (end || header)
+        {
+            if (answer >= 0) return answer;   // the first channel that answers at all wins
+            onAir = false;                     // ...otherwise start the next section clean
+            continue;
+        }
+        const MediaItem& it = cat.items.at(i);
+        QString key; QDateTime start;
+        if (!parseGuideCellId(it.id, key, start)) continue;   // a note row / anything that is not a cell
+        if (it.title.startsWith(mark))
+        {
+            if (!onAir) { answer = i; onAir = true; }   // rule 1, and the first marked cell is the answer
+            continue;
+        }
+        if (!onAir && answer < 0 && start >= now) answer = i;  // rule 2: the next one due to start
+    }
+    return -1;
 }
 
 }
