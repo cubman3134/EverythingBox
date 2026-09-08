@@ -10916,7 +10916,10 @@ void MainWindow::openThemedDetail(int browseIndex)
     // stale), so "I" is inert there.
     if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return;
     const int bi = (browseIndex >= 0) ? browseIndex : r->property("currentIndex").toInt();
-    const QVariantMap data = home_->themedDetailData(bi);
+    // DetailOpened: the one build that is allowed to ask a request service for this title's status (#315).
+    // Every other call into themedDetailData is a re-push of a card that is already up, or the themed
+    // metadata path re-deriving the verbs for a HOVERED row, and neither is a reason to touch the network.
+    const QVariantMap data = home_->themedDetailData(bi, requests::StatusTrigger::DetailOpened);
     if (data.isEmpty()) return; // a divider / synthetic / non-media row: nothing to detail
 
     themedDetailIndex_ = bi;

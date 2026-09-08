@@ -280,7 +280,12 @@ public:
     // (session cache / gamelist.xml / MetaCache), plus a joined `factsText`, an `actions` verb list (play/
     // favorite/download/playlist, filtered per-item), a `favorite` flag and a `readable` flag. Empty map for a
     // divider/synthetic row (not a media item). This is what the themed detail view binds through selected.*.
-    QVariantMap themedDetailData(int browseIndex);
+    // `trigger` says WHY it is being built, and the only thing it changes is whether a request status may be
+    // fetched from the network (issue #315). It defaults to Hover — the safe answer — so a call site added
+    // later cannot start issuing a GET per hovered row by omission; the one caller that means "the user
+    // opened this" says so.
+    QVariantMap themedDetailData(int browseIndex,
+                                 requests::StatusTrigger trigger = requests::StatusTrigger::Hover);
     bool isThemedInfoLeaf(int browseIndex) const;  // a non-expandable info-page leaf (movie/book/…): opens detail
     // The per-profile marks key (MetaCache::keyFor) for the browse-item at `browseIndex`, or empty for an out-
     // of-range/synthetic row. MainWindow's detail hide/status/tags verbs address ItemMarks through this so they

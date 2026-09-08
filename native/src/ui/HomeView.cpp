@@ -10935,7 +10935,7 @@ QString HomeView::currentLevelSystemId() const
     return QString();
 }
 
-QVariantMap HomeView::themedDetailData(int idx)
+QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
 {
     QVariantMap out;
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return out;
@@ -11065,10 +11065,16 @@ QVariantMap HomeView::themedDetailData(int idx)
             verbs << QStringLiteral("request");
             out.insert(QStringLiteral("requestLabel"), rq.label);
             out.insert(QStringLiteral("requestState"), rq.token);
-            // FETCHED ON VIEW, NEVER POLLED. themedDetailData is rebuilt whenever the card is re-pushed, so
-            // this can fire several times for one page — MainWindow's handler asks the service AT MOST ONCE
-            // per title per session, which is what makes "on view" cheap rather than a request per redraw.
-            emit requestStatusNeeded(it);
+            // FETCHED WHEN THE DETAIL VIEW IS OPENED, NEVER ON A HOVER AND NEVER POLLED (issues #109, #315).
+            // requestStateFor above has ALREADY drawn the pill from whatever has landed, so a hover is fully
+            // served from cache and asks nobody; this builder also runs for a HOVERED row (the themed
+            // metadata path re-derives the action row when a stream id bridges in), and firing the fetch
+            // there meant scrolling a shelf of requestable titles issued one GET per row. The rule itself is
+            // requests::fetchesStatus, so it is one decision in one place rather than a condition inside a
+            // long builder. On the open path this can still fire several times for one page — the card is
+            // re-pushed on every correction and every late answer — and MainWindow's handler asks the
+            // service AT MOST ONCE per title per session, which is what keeps that cheap.
+            if (requests::fetchesStatus(trigger)) emit requestStatusNeeded(it);
         }
     }
     verbs << QStringLiteral("playlist");
