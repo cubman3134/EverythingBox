@@ -71,6 +71,7 @@
 #include "RecentStore.h"        // issue #150: the reader §27 asserts through (the list Home renders)
 #include "PlaybackSession.h"    // issue #150: the reader §26 asserts through (the pending resume seek)
 #include "ChannelStore.h"       // issue #179: personal TV channels ride this document
+#include "HomeRows.h"         // issue #333: the per-profile home arrangement, and which sync path owns it
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
@@ -5848,6 +5849,134 @@ int main(int argc, char** argv)
         CHECK(urlBlob.contains(QStringLiteral("://")));  // ...so the credential IS on the sync document
 
         wipeStores();
+        useProfile(QStringLiteral("cmA"));
+    }
+
+    // ---- 41. Custom home rows ride ONE sync path, and it is the merge document (issue #333) ---------------
+    // "homerows/<profile>/list" had a CloudMerge section (mergeHomeRows, above) but was absent from
+    // CloudSync::isPerItemStoreKey, so the two halves of the sync classified it differently: the merge
+    // document unioned the row set, while the heavy settings bundle carried the whole value and applied it
+    // RAW inbound. Whichever landed last decided, and when the bundle landed last it OVERWROTE the local
+    // arrangement with the peer's -- which is precisely the outcome HomeRows.h says a synced row list must
+    // never produce, because a row the winner does not carry is a row erased on a device that still wants it.
+    //
+    // Asserted BOTH ways for section 16's reason (a mistaken filing is invisible from one side), and the
+    // two-device case is driven in BOTH arrival orders: it is the ORDER that used to decide the answer, so a
+    // single order would leave half the bug green.
+    {
+        const QString p41   = QStringLiteral("hr41");
+        const QString hrKey = QStringLiteral("homerows/") + p41 + QStringLiteral("/list");
+        useProfile(p41);
+
+        auto wipeRows41 = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.remove(QStringLiteral("homerows"));
+            raw.sync();
+        };
+        // Raw injection with an EXPLICIT stamp: HomeRowStore::save() always stamps `now`, and the whole
+        // question here is which of two devices' arrangements is the newer one.
+        auto injRows41 = [&](const QStringList& ids, qint64 upd) {
+            QJsonArray arr;
+            for (const QString& id : ids)
+            {
+                QJsonObject o;
+                o[QStringLiteral("rowId")]   = id;
+                o[QStringLiteral("visible")] = true;
+                o[QStringLiteral("cap")]     = 0;
+                arr.append(o);
+            }
+            QJsonObject doc;
+            doc[QStringLiteral("updatedAt")] = double(upd);
+            doc[QStringLiteral("rows")]      = arr;
+            setRaw(hrKey, compactO(doc));
+        };
+        auto rowIds41 = [&]() {
+            QStringList out;
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(hrKey).toString().toUtf8())
+                                           .object().value(QStringLiteral("rows")).toArray())
+                out << v.toObject().value(QStringLiteral("rowId")).toString();
+            return out;
+        };
+
+        // The two devices' arrangements. "addon:onlyOnA"/"addon:onlyOnB" are ids NO home in this build can
+        // draw, deliberately: a device must keep a row it cannot render rather than prune it, or the next
+        // sync erases the peer that CAN render it (HomeRows.h, issue #314).
+        const QStringList rowsA{ QStringLiteral("continue"), QStringLiteral("favorites"),
+                                 QStringLiteral("addon:onlyOnA") };
+        const QStringList rowsB{ QStringLiteral("favorites"), QStringLiteral("continue"),
+                                 QStringLiteral("addon:onlyOnB") };
+
+        // 41a. THE CLASSIFICATION, both ways. It is the merge document's, and it is not device-local (the
+        // arrangement is a statement about the user, not about this box, so it must reach a peer at all).
+        CHECK(CloudSync::isPerItemStoreKey(hrKey) == true);
+        CHECK(CloudSync::isDeviceLocalKey(hrKey)  == false);
+
+        // 41b. OUTBOUND: the heavy bundle does not carry it...
+        wipeRows41();
+        injRows41(rowsA, T - 100);
+        CHECK(!QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object().contains(hrKey));
+        // ...and the CONTROL, without which that absence is satisfied by a bundle that carries nothing: the
+        // MERGE document does carry the same profile's arrangement.
+        CHECK(serializeNow().value(QStringLiteral("homerows")).toObject().contains(p41));
+
+        // 41c. ...so a row edit is per-item churn: it must not flip the fingerprint and re-upload the zip.
+        const QByteArray fp41 = CloudSync::stateFingerprint();
+        injRows41(rowsB, T - 50);
+        CHECK(CloudSync::stateFingerprint() == fp41);
+
+        // 41d. TWO DEVICES, BOTH EDITED -- the case the issue is about, in the order that used to lose a row.
+        // A is the older arrangement; B is this device's, and newer, so B's ORDER wins and A's unique row is
+        // appended. Nothing is pruned on either side.
+        wipeRows41();
+        injRows41(rowsA, T - 100);
+        const QByteArray  bundleA = CloudSync::buildSettingsJson();   // what device A's heavy bundle carries
+        const QJsonObject docA    = serializeNow();                   // ...and what its merge document does
+        wipeRows41();
+        injRows41(rowsB, T - 50);
+        CloudSync::applySettingsJson(bundleA);   // the bundle lands first...
+        mergeDoc(docA);                          // ...then the merge document
+        {
+            const QStringList got = rowIds41();
+            CHECK(got.size() == 4);
+            CHECK(got.contains(QStringLiteral("addon:onlyOnA")));   // the peer's row survived
+            CHECK(got.contains(QStringLiteral("addon:onlyOnB")));   // ...and so did this device's
+            CHECK(got.value(0) == QStringLiteral("favorites"));     // the NEWER arrangement won the order
+        }
+
+        // 41e. ...and the other arrival order, which is the same document pair with the bundle landing LAST.
+        wipeRows41();
+        injRows41(rowsB, T - 50);
+        mergeDoc(docA);
+        CloudSync::applySettingsJson(bundleA);
+        {
+            const QStringList got = rowIds41();
+            CHECK(got.size() == 4);
+            CHECK(got.contains(QStringLiteral("addon:onlyOnA")));
+            CHECK(got.contains(QStringLiteral("addon:onlyOnB")));
+            CHECK(got.value(0) == QStringLiteral("favorites"));
+        }
+
+        // 41f. A RESET still propagates. The husk (an empty list with a fresh stamp) is the one arrangement
+        // that CLEARS rather than unions, and carving the key out of the bundle must not have changed that.
+        wipeRows41();
+        injRows41(QStringList(), T);                     // this device reset...
+        const QJsonObject docReset = serializeNow();
+        wipeRows41();
+        injRows41(rowsA, T - 100);                       // ...the peer still holds the old arrangement
+        mergeDoc(docReset);
+        CHECK(rowIds41().isEmpty());
+
+        // 41g. INBOUND, stated as the property rather than as an outcome: a peer's bundle can no longer
+        // write this key at all, even when this device has no arrangement of its own for it to "restore".
+        wipeRows41();
+        CloudSync::applySettingsJson(bundleA);
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(!raw.contains(hrKey));
+        }
+
+        wipeRows41();
         useProfile(QStringLiteral("cmA"));
     }
 

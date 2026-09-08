@@ -75,8 +75,9 @@ bool SettingsTxn::inScope(const QString& key)
     // set there had grown to twenty-one prefixes while this one still held ten, so eleven per-item stores
     // sat inside the settings transaction that the comment already claimed were outside it. The two lists
     // are still separate — SettingsTxn is QtCore-only so probe_settingstxn links lean, and CloudSync is a
-    // QObject over a network backend — but they are now the same set (plus homerows/ below, which
-    // isPerItemStoreKey has never carried), and probe_settingstxn pins every entry.
+    // QObject over a network backend — but they are now the same set, homerows/ included: #333 moved that
+    // prefix into isPerItemStoreKey too, where its CloudMerge section always said it belonged. Every entry
+    // is pinned by probe_settingstxn.
     //
     // WHY A PER-ITEM STORE MUST BE OUT OF SCOPE, in the two shapes #322 showed up in:
     //   * ITS EDITOR COMMITS ON ITS OWN TERMS. The home-row editor, the looked-up-word list and "Reset my
@@ -118,7 +119,8 @@ bool SettingsTxn::inScope(const QString& key)
         // "Choose home rows…"), i.e. from inside the transaction. In scope, answering Discard on the way out
         // reverted a row edit the user had already finished and watched take effect. It is the same
         // CloudMerge document section as the rows above (CloudMerge::mergeHomeRows), so it is filed with
-        // them, even though CloudSync::isPerItemStoreKey does not name it (see the report for #322).
+        // them — and since #333 CloudSync::isPerItemStoreKey names it as well, which is what that section
+        // being there always implied.
         "homerows/",
         // followsnap/* (#155): the device-local snapshot of what each followed series held at the last check,
         // plus the children not yet shown. Written by the BACKGROUND refresh, which can complete at any moment

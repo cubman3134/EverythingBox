@@ -521,7 +521,18 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
         // document rather than the heavy bundle for the family's usual reason (one button press must not
         // flip the stateHash and re-upload the whole zip) and for one of its own: the bundle overwrites,
         // and this store's whole correctness argument is that the only write is `max`.
-        || key.startsWith(QStringLiteral("missed/"));
+        || key.startsWith(QStringLiteral("missed/"))
+        // The profile's HOME ARRANGEMENT (issue #161, filed as #333). It had a CloudMerge section from the
+        // day it shipped -- serializeHomeRows/mergeHomeRows, whole-list newest-wins over a UNION of the row
+        // set -- and was missing from this table, so the two halves of the sync disagreed about what it is:
+        // the merge document unioned two devices' rows, while the heavy bundle carried the whole value and
+        // applyBundle wrote it RAW inbound. Whichever landed last decided, and a bundle landing last replaced
+        // the local arrangement with the peer's, DROPPING every row the peer did not carry. That is the one
+        // outcome a synced row list must never produce (HomeRows.h, issue #314: a device keeps a row it
+        // cannot even draw, precisely so a sync cannot erase it for the device that can). Here, the merge
+        // document owns it alone: the union survives, and one row drag stops flipping the stateHash and
+        // re-uploading the whole zip. probe_cloudmerge section 41 drives both arrival orders.
+        || key.startsWith(QStringLiteral("homerows/"));
 }
 
 QByteArray CloudSync::buildSettingsJson()
