@@ -470,15 +470,15 @@ drive the rest:
 
 ## Trackers (anime and manga)
 
-**AniList** and **MyAnimeList** keep your anime and manga progress in step with the app: finish a chapter
-or an episode here and the chapter/episode count on your list moves with it. Trakt (above) keeps film and
-general TV; these never write to each other.
+**AniList**, **MyAnimeList** and **Kitsu** keep your anime and manga progress in step with the app: finish
+a chapter or an episode here and the chapter/episode count on your list moves with it. Trakt (above) keeps
+film and general TV; these never write to each other.
 
-**Both at once is the normal case.** Connect one or connect both. Each tracker holds its own link for a
-series (the same show is a different id on each), its own queue of things still to send, and its own rate
-limit, so a finished chapter goes to every tracker you have connected, independently. One of them being
-signed out, rate-limited or simply not knowing about a series does not stop the other receiving it, and
-nothing is ever counted twice.
+**All three at once is the normal case.** Connect one, or two, or all three. Each tracker holds its own
+link for a series (the same show is a different id on each), its own queue of things still to send, and
+its own rate limit, so a finished chapter goes to every tracker you have connected, independently. One of
+them being signed out, rate-limited or simply not knowing about a series does not stop the others
+receiving it, and nothing is ever counted twice.
 
 **Setting up AniList.** The app ships no AniList client of its own yet, so you register a free one:
 
@@ -501,7 +501,17 @@ secret box is there for a client that does have one and can be left empty otherw
 a one-time value is generated for each attempt, kept in memory only, and is what proves the reply belongs
 to the request the app sent.
 
-Your client ids, secrets and tokens — for either tracker — are stored **on this device only** and are
+**Setting up Kitsu.** There is nothing to register:
+
+1. Open **Settings -> General -> Kitsu**.
+2. Type the **email** and **password** of your Kitsu account and press **Sign in to Kitsu**.
+
+No browser opens, because Kitsu does not use one: it hands the app a token straight back. **Your password
+is used once, to sign in, and is never written to this machine** — only the token it returns is kept.
+If you would rather not type a password into the app at all, connect AniList or MyAnimeList instead; they
+authorise in a browser and the app never sees the password.
+
+Your client ids, secrets and tokens — for any of the three — are stored **on this device only** and are
 deliberately excluded from cloud sync, so you enter them once per machine. (They are also excluded from a
 settings *Discard*: linking an account from inside the settings screen is not something backing out of it
 should undo.)
@@ -514,31 +524,33 @@ a wrong link would write your progress onto the wrong series in a list you curat
 did not choose is never written, and results that share nothing with what you searched for are not even
 offered.
 
-With two trackers connected you are asked about **one of them per finished chapter**, not both at once —
-the next one is offered on the next chapter, or straight away from the item's detail page. **Track...**
-there asks which tracker first (when more than one is connected) and then offers *Refresh from <tracker>*,
-*Link to a different entry...* and *Unlink*.
+With more than one tracker connected you are asked about **one of them per finished chapter**, never two
+or three at once — the next one is offered on the next chapter, or straight away from the item's detail
+page. **Track...** there asks which tracker first (when more than one is connected) and then offers
+*Refresh from <tracker>*, *Link to a different entry...* and *Unlink*.
 
 **What is sent, and when.** One update per series per 30 seconds *per tracker*, so a fast reader does not
 spend an account's rate limit; anything that cannot be sent is written to disk and delivered on the next
 launch, so an offline session is not lost. The last chapter/episode of a series sets its status to
 **Completed** - but only when the tracker's own count agrees that it *was* the last one. A **score** is
-sent only if you have actually rated the item here: both services read a zero as an answer rather than as
-"unrated", so an unrated item sends no score at all rather than wiping one you set by hand. (Scores are
-0-100 here and 0-10 on MyAnimeList; the app converts, rounding rather than truncating.)
+sent only if you have actually rated the item here: all three services read a score you did not give as an
+answer rather than as "unrated", so an unrated item sends no score at all rather than wiping one you set by
+hand. (Scores are 0-100 here, 0-10 on MyAnimeList and 2-20 on Kitsu; the app converts, rounding rather than
+truncating.)
 
-**When a tracker pushes back.** If MyAnimeList rate-limits us, the app waits — a minute at first, doubling
-up to half an hour, and longer still if MyAnimeList asks for longer — rather than retrying tightly, which
-is what gets an application banned. An update it will *never* accept (a list entry that no longer exists)
-is dropped and said so in the settings line, rather than left at the front of the queue blocking every
-chapter behind it.
+**When a tracker pushes back.** If a tracker rate-limits us, the app waits — a minute at first, doubling up
+to half an hour, and longer still if that tracker asks for longer — rather than retrying tightly, which is
+what gets an application banned. An update it will *never* accept (a list entry that no longer exists) is
+dropped and said so in that tracker's settings line, rather than left at the front of the queue blocking
+every chapter behind it. All three trackers answer a failure the same way, from one rule, and each does it
+on its own queue: a chapter one account refused stays pending on that one and is delivered on the others.
 
 **Refreshing.** *Refresh from <tracker>* reconciles both ways, **furthest wins**: if the tracker is ahead
 (you read three chapters in another app), the app catches up; if the app is ahead, the tracker is pushed
 to. Neither side is ever moved backwards, and each tracker is reconciled on its own.
 
-**Not there yet:** Kitsu (the seam is built for it and the id is reserved), a zero-config built-in client
-so no registration is needed, list browsing, and recommendations.
+**Not there yet:** a zero-config built-in client for AniList and MyAnimeList so no registration is needed,
+list browsing, and recommendations.
 
 ## Gestures
 

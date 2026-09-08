@@ -370,6 +370,160 @@ namespace tracker
         SendPolicy sendPolicy();
     }
 
+    // ================= the Kitsu wire (issue #156, increment 3) ==========================================
+    //
+    // A THIRD provider behind the SAME seam, and the test of what #326 hoisted. Kitsu supplies its status
+    // codes, its wire format and its auth, and consumes the shared queue, the shared credential store, the
+    // shared drain loop and the ONE classification of a failure. Nothing above this namespace changed to
+    // admit it — §21 of probe_tracker asserts AniList's and MyAnimeList's bytes are untouched.
+    //
+    // KITSU IS NOT MYANIMELIST EITHER, and these five differences are why this namespace exists rather than
+    // a parameter on MAL's:
+    //   1. THERE IS NO BROWSER. Kitsu's OAuth 2 offers the **password grant** to ordinary users: the app
+    //      posts the account's own email and password once and gets a token pair back. No client is
+    //      registered, no client id or secret exists to type, no loopback listener is opened and no
+    //      `state` is carried, because nothing round-trips through a third party that could be spoofed.
+    //      The shared loopback helpers (tracker::parseLoopbackRequest / loopbackResponse) are therefore
+    //      simply UNUSED here — offered, not imposed.
+    //   2. JSON:API, not plain REST. Bodies are {"data":{"type":…,"attributes":{…}}} and travel under
+    //      application/vnd.api+json; filters are filter[…] query parameters.
+    //   3. A LIST ENTRY IS ITS OWN RESOURCE with its own id, and it belongs to a USER. So a write is
+    //      either a PATCH of an existing library-entry or a POST creating one, and the create needs the
+    //      signed-in user's id. That id is derived from the token (users?filter[self]=true), held in
+    //      memory for the session and NEVER written to disk — which is also what makes the write
+    //      idempotent: a replayed update finds the entry and PATCHes it rather than creating a second row.
+    //   4. Its score is `ratingTwenty`, an integer 2..20, while the seam (and AniList) carry 0..100.
+    //   5. Its progress field is `progress` for BOTH kinds — no watched/read asymmetry to get wrong — but
+    //      the unit COUNT is `episodeCount` or `chapterCount`, so the kind still reaches the wire.
+    //
+    // FIXTURES, NOT AN ACCOUNT. Every shape here is written from Kitsu's published JSON:API reference. No
+    // Kitsu account was created, no API client was registered and nothing in this work contacted Kitsu —
+    // the probe and the live drive were both answered by a local fixture server.
+    namespace kitsu
+    {
+        // The API host and the OAuth host, named once. Overridable at RUN TIME through EB_KITSU_ENDPOINT /
+        // EB_KITSU_AUTH so a fixture stub can stand in for the real service in a live drive — read in
+        // KitsuTracker.cpp, not here, so a probe asserting the DEFAULT cannot be satisfied by an
+        // environment variable. Kitsu's pre-rebrand host was kitsu.io and still redirects here; the
+        // override is the escape hatch if that ever stops being true.
+        inline QString defaultApiUrl()   { return QStringLiteral("https://kitsu.app/api/edge"); }
+        inline QString defaultAuthBase() { return QStringLiteral("https://kitsu.app/api/oauth"); }
+
+        // ---- auth: the password grant -----------------------------------------------------------------
+        // THE WHOLE SIGN-IN, in one POST. There is no authorize URL to open and no code to redeem, so the
+        // pair below is the entirety of what a caller has to build.
+        //
+        // FORM-ENCODED. Kitsu's token endpoint takes application/x-www-form-urlencoded, like MAL's.
+        //
+        // THE PASSWORD IS AN ARGUMENT AND NEVER A STORED VALUE. It exists for the length of this call and
+        // of the request it builds; KitsuTracker holds it in memory for one sign-in and clears it, and
+        // §20's byte-scan asserts it reaches the ini ZERO times — a stronger claim than the "exactly once"
+        // the other two secrets get, and the right one, because this credential is never stored at all.
+        QByteArray passwordGrantBody(const QString& username, const QString& password);
+        // The refresh. Kitsu issues a refresh token with every grant and rotates it, like MAL.
+        QByteArray tokenRefreshBody(const QString& refreshToken);
+
+        // What Kitsu's token endpoint hands back. Its OWN struct, for the reason mal::TokenReply is its
+        // own: the three services are free to diverge, and sharing the type would make the day one of them
+        // adds a field a change to the other two's parsers.
+        struct TokenReply
+        {
+            bool    ok = false;
+            QString accessToken;
+            QString refreshToken;
+            qint64  expiresInSec = 0;
+        };
+        // TOTAL, and gated on a NON-EMPTY access token for the reason the other two are: Kitsu answers a
+        // refused grant with {"error":"invalid_grant","error_description":"…"} — a JSON object a caller
+        // would otherwise store over the live tokens, permanently unlinking the account.
+        TokenReply parseTokenReply(const QByteArray& json);
+
+        // ---- who the token belongs to -----------------------------------------------------------------
+        // GET .../users?filter[self]=true. The signed-in user's id is needed to READ a library entry (it is
+        // a filter) and to CREATE one (it is a relationship). It is NOT a credential and NOT stored: it is
+        // derived from the token, so caching it on disk is the one way it could ever go stale against a
+        // re-linked account.
+        QString selfUrl(const QString& apiBase);
+        // The id out of that reply, or "" for anything that is not one.
+        QString parseSelfId(const QByteArray& json);
+
+        // ---- search -----------------------------------------------------------------------------------
+        // Kitsu's filter[text] is a full-text search and answers a two-character query with noise, so the
+        // same floor MAL has applies here — and for the same reason, it is refused rather than sent.
+        constexpr int kMinQueryChars = 3;
+        bool searchable(const QString& title);
+
+        // GET .../anime?filter[text]=…&page[limit]=… (or …/manga). `year` narrows on the media's start year
+        // when non-zero and is OMITTED when 0 — omitted, not sent as 0, because filter[year]=0 matches
+        // nothing rather than everything. Returns "" when `title` is not searchable, so "we did not ask"
+        // and "Kitsu said nothing" are the same empty result to the caller and neither is an error.
+        QString searchUrl(const QString& apiBase, const QString& title, int year, Kind kind, int limit);
+        // TOTAL. `asked` is the kind the caller searched for and is what a row carrying no count at all is
+        // filed under, exactly as MAL's is. A row with no id, or no title, is skipped without costing the
+        // rest.
+        QVector<Match> parseSearch(const QByteArray& json, Kind asked);
+        // Kitsu paginates with an ABSOLUTE next URL in `links.next`. Followed only when it is on the SAME
+        // ORIGIN as `apiBase` — an absolute URL in a response body is attacker-controlled input, and
+        // following one blindly would send the account's bearer token to whatever host it named. Returns ""
+        // for absent, malformed, or off-origin.
+        QString nextPageUrl(const QByteArray& json, const QString& apiBase);
+
+        // ---- the account's entry ----------------------------------------------------------------------
+        // GET .../library-entries?filter[user_id]=…&filter[kind]=…&filter[media_id]=…&include=…
+        // KIND-DEPENDENT in the filter AND in the include, which is why the seam passes Kind to fetchEntry:
+        // the include is what brings the unit COUNT back with the entry, and a missing count is a missing
+        // COMPLETED rule later. Empty when either id is empty — a request with a blank filter would return
+        // somebody else's whole library.
+        QString entryUrl(const QString& apiBase, const QString& userId, const QString& mediaId, Kind kind);
+        // ok=false = "this body was not a library-entries reply". exists=false = "it was, and the account
+        // has no row for this media" — Kitsu says that with an EMPTY `data` array, which is a success.
+        // `entryIdOut` receives the library entry's OWN id, which is what a PATCH is addressed to; it is
+        // "" when there is no row, and that is precisely what selects the create path.
+        bool parseEntry(const QByteArray& json, const QString& mediaId, Kind kind, Entry& out,
+                        QString* entryIdOut);
+
+        // ---- the push ---------------------------------------------------------------------------------
+        // PATCH .../library-entries/{entryId} when the account already has a row, POST .../library-entries
+        // when it does not. Both spelled off the SAME emptiness test, so the URL and the method can never
+        // disagree about which of the two this is.
+        QString saveUrl(const QString& apiBase, const QString& entryId);
+        QByteArray saveMethod(const QString& entryId);   // "PATCH" or "POST"
+        // The JSON:API document, and THE SAME THREE SAFETY RULES the other two carry, restated against
+        // Kitsu's spellings because they are decisions about content and not about syntax:
+        //   * `ratingTwenty` is present ONLY when u.hasScore. Kitsu reads an explicit rating as a rating;
+        //     sending one the user never gave overwrites the one they did.
+        //   * `status` is "completed" only when u.completes AND the unit really is the last one by
+        //     `totalUnits`. Otherwise "current".
+        //   * `progress` is never below 1.
+        // A create additionally carries the user and media RELATIONSHIPS; a PATCH carries the entry's id
+        // and no relationships, because re-stating them on an update is how an entry gets re-pointed at
+        // another user's library.
+        QByteArray saveBody(const Update& u, int totalUnits, const QString& entryId, const QString& userId);
+
+        // Kitsu's list statuses. NOT kind-dependent (unlike MAL's): "current" and "planned" for both.
+        // An unknown token reads back as Current, for the reason the other two do.
+        QString statusToken(Status s);
+        Status  statusFromToken(const QString& token);
+
+        // ---- the score conversion ---------------------------------------------------------------------
+        // The seam carries 0..100 (AniList's POINT_100 raw). Kitsu's is `ratingTwenty`, an integer 2..20 —
+        // note the FLOOR: 2, not 0. Kitsu has no "zero" rating; the absence of a rating is the absence of
+        // the field, which is why neither direction is ever called for an update that has no score, and
+        // why scoreToKitsu clamps UP to 2 rather than sending a 0 the API refuses.
+        // ROUNDING rather than truncating, for mal::scoreToMal's reason: 85 is a 17, and a 17 read back
+        // is 85.
+        int scoreToKitsu(int hundred);
+        int scoreFromKitsu(int twenty);
+
+        // ---- rate limits ------------------------------------------------------------------------------
+        // The base and the ceiling are the shared ones; only the STATUS SET is Kitsu's, and it is MAL's
+        // rather than AniList's because Kitsu is JSON:API over REST and really does answer a rejected
+        // attribute with 422. That is the whole of what this provider adds to #326's classification.
+        constexpr qint64 kBackoffBaseMs = 60000;      // 1 minute
+        constexpr qint64 kBackoffMaxMs  = 1800000;    // 30 minutes
+        SendPolicy sendPolicy();
+    }
+
     // ================= how sure we are of a match (issue #156's conservatism rule) =======================
     //
     // "A match we are not sure of is not written." A wrong link writes somebody's progress onto the wrong

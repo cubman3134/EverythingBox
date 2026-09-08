@@ -1,4 +1,18 @@
-// Headless check of the tracker seam and BOTH provider rules layers (issue #156, increments 1 and 2).
+// Headless check of the tracker seam and ALL THREE provider rules layers (issue #156, increments 1-3).
+//
+// INCREMENT 3 ADDED KITSU, and sections 20-21 are its half. They are written to answer ONE question:
+// did the layer issue #326 hoisted hold for a provider it was not written against? So §20 asserts only
+// what Kitsu SUPPLIES (its password grant, its JSON:API wire, its status codes) and then drives
+// everything it CONSUMES — tracker::classifySend and TrackerQueue::Sender — with Id::Kitsu, because
+// there is no Kitsu copy of either. §21 pins three trackers at once with one and then two of them
+// failing, and AniList and MyAnimeList being byte-identical with Kitsu configured beside them.
+//
+// KITSU'S CREDENTIAL CLAIM IS STRONGER THAN THE OTHER TWO'S. Its sign-in is an OAuth password grant,
+// so the credential is the user's own account password and it is NEVER STORED: §20's byte-scan asserts
+// it occurs ZERO times in the ini, where §3 and §18 assert exactly one occurrence for a client secret
+// that legitimately lives there.
+//
+// NO KITSU ACCOUNT WAS CREATED and no API client was registered for this work.
 //
 // INCREMENT 2 ADDED MYANIMELIST behind the same seam, and sections 12-18 are its half: the OAuth+PKCE
 // exchange, the REST wire (search, pagination, the entry read, the list write), the rate-limit backoff,
@@ -158,6 +172,67 @@ static const char* kMalErrorReply = R"({
   "error": "invalid_token", "message": "The access token is invalid"
 })";
 
+
+// ---- Kitsu fixtures (issue #156, increment 3) -----------------------------------------------------------
+//
+// Written from Kitsu's published JSON:API reference. NO KITSU ACCOUNT WAS CREATED, no API client was
+// registered, and neither this probe nor the live drive that accompanies it contacted Kitsu: a local
+// fixture server answered both.
+//
+// THE PASSWORD IS THE ONE CREDENTIAL IN THIS FEATURE THAT IS NEVER STORED. §20's byte-scan asserts it
+// occurs ZERO times in the ini, where AniList's and MyAnimeList's secrets are asserted to occur exactly
+// once. It is never printed by this probe.
+static const char* kKitsuEmail    = "fixture-kitsu@example.invalid";
+static const char* kKitsuPassword = "FIXTURE-KITSU-PASSWORD-M3V6B";
+
+// `users?filter[self]=true` — the signed-in account, whose id every library-entry request needs.
+static const char* kSelfReply = R"({
+  "data": [ { "id": "42", "type": "users", "attributes": { "name": "fixture" } } ]
+})";
+
+// A search reply in Kitsu's shape: JSON:API resource objects with the payload under `attributes`, and an
+// absolute `links.next`. The first row is anime with both titles and an original poster; the second is
+// manga with one title and only a medium poster; the third is MALFORMED (no id) and must be skipped
+// without costing the other two.
+static const char* kKitsuSearchReply = R"({
+  "data": [
+    { "id": "7442", "type": "anime", "attributes": {
+        "canonicalTitle": "Boku no Hero Academia",
+        "titles": { "en": "My Hero Academia", "en_jp": "Boku no Hero Academia", "ja_jp": "僕" },
+        "startDate": "2016-04-03", "episodeCount": 13,
+        "posterImage": { "medium": "https://media.kitsu.test/1-medium.jpg",
+                         "original": "https://media.kitsu.test/1-original.jpg" } } },
+    { "id": "1712", "type": "manga", "attributes": {
+        "canonicalTitle": "Berserk",
+        "titles": { "en": "" },
+        "startDate": "1989-08-25", "chapterCount": 364,
+        "posterImage": { "medium": "https://media.kitsu.test/2-medium.jpg" } } },
+    { "type": "anime", "attributes": { "canonicalTitle": "No Id At All", "startDate": "2020" } }
+  ],
+  "links": { "next": "https://kitsu.app/api/edge/anime?page%5Boffset%5D=8" }
+})";
+
+// A row Kitsu has no count and no date for — an unreleased series. It is filed under the kind the caller
+// ASKED for, because the search endpoint itself is per kind.
+static const char* kKitsuUnreleasedReply = R"({
+  "data": [ { "id": "99999", "type": "manga", "attributes": { "canonicalTitle": "Something Unannounced" } } ]
+})";
+
+// The account HAS a row for this manga: 12 chapters in, current, ratingTwenty 17 (which is 85 at the seam).
+// The library entry has its OWN id — 551 — which is what a PATCH is addressed to, and the media it belongs
+// to comes back under `included`, which is where the unit COUNT is read from.
+static const char* kKitsuEntryReply = R"({
+  "data": [ { "id": "551", "type": "libraryEntries", "attributes": {
+      "status": "current", "progress": 12, "ratingTwenty": 17, "reconsuming": false } } ],
+  "included": [ { "id": "1712", "type": "manga",
+                  "attributes": { "canonicalTitle": "Berserk", "chapterCount": 364 } } ]
+})";
+
+// A JSON:API error document. It arrives at several statuses and must be "not that payload" to every parser.
+static const char* kKitsuErrorReply = R"({
+  "errors": [ { "title": "Unauthorized", "detail": "invalid token", "status": "401" } ]
+})";
+
 // ---- a tracker that is not a tracker --------------------------------------------------------------------
 // The several-trackers-at-once rule is about what happens when one of them is off, unlinked or refusing,
 // and none of those states is reachable through a real socket in a probe. tracker::Tracker is a pure
@@ -268,8 +343,12 @@ static void senderDrain(Id id, const SendPolicy& policy, const QVector<ScriptedR
         // the continue-after-a-drop — reachable in a probe with no socket and no event loop.
         if (done) done(r);
     };
-    spec.droppedMessage = [droppedFmt](const Update& u) {
-        const QString title = TrackerLinks::get(Id::AniList, u.itemKey).title;
+    spec.droppedMessage = [droppedFmt, id](const Update& u) {
+        // THE SPEC'S OWN id. It was Id::AniList when only two trackers existed and only AniList's drop
+        // message was driven through here; a third provider made that a lookup on the wrong tracker's link
+        // store, which reads back an empty title and quietly turns a "which item" message into a generic
+        // one. §19's runs drain Id::AniList and are unaffected.
+        const QString title = TrackerLinks::get(id, u.itemKey).title;
         return droppedFmt.isEmpty() ? QStringLiteral("dropped:") + u.itemKey
                                     : droppedFmt.arg(title.isEmpty() ? u.itemKey : title);
     };
@@ -1999,6 +2078,766 @@ int main(int argc, char** argv)
 
         TrackerQueue::forgetAccount(Id::AniList);
         TrackerQueue::forgetAccount(Id::MyAnimeList);
+    }
+
+
+    // ===== §20  KITSU, THE THIRD PROVIDER ON THE SHARED LAYER (issue #156, increment 3) ================
+    // The increment's real question is not "does Kitsu work" but "did #326's hoist hold for a provider it
+    // was not written against". So this section is deliberately split: everything Kitsu SUPPLIES is
+    // asserted here, and everything it CONSUMES is asserted by driving the SHARED functions
+    // (tracker::classifySend, TrackerQueue::Sender, TrackerQueue's queue and credential store) with
+    // Id::Kitsu — never a Kitsu copy of them, because there is not one.
+    //
+    // NO KITSU ACCOUNT WAS CREATED, no API client was registered, and nothing here or in the live drive
+    // that accompanies it contacted Kitsu. Every fixture is written from Kitsu's published JSON:API
+    // reference and was answered by a local fixture server.
+    {
+        // ---- auth: the PASSWORD GRANT, which is the one place Kitsu is unlike the other two ----------
+        // There is no client to register, so there is no authorize URL, no loopback listener, no PKCE
+        // verifier and no `state`: the whole sign-in is one POST carrying the account's own credentials.
+        const QByteArray grant = kitsu::passwordGrantBody(QString::fromLatin1(kKitsuEmail),
+                                                          QString::fromLatin1(kKitsuPassword));
+        CHECK(grant.contains("grant_type=password"));
+        CHECK(grant.contains("username=fixture-kitsu%40example.invalid"));
+        // THE THINGS THAT ARE NOT THERE, each of which would be a bug rather than an omission: Kitsu's
+        // password grant takes no client credentials and no redirect, and sending an empty client_id is a
+        // different request to an OAuth server than sending none.
+        CHECK(!grant.contains("client_id"));
+        CHECK(!grant.contains("client_secret"));
+        CHECK(!grant.contains("redirect_uri"));
+        CHECK(!grant.contains("code_verifier"));
+        // PERCENT-ENCODED BY HAND, and this is the case that proves why: QUrlQuery leaves '+' alone, and a
+        // '+' in a password decodes on the far side as a SPACE — which presents to the user as "wrong
+        // password" on a password that is perfectly right.
+        const QByteArray awkward = kitsu::passwordGrantBody(QStringLiteral("a b@c.d"),
+                                                            QStringLiteral("p+q&r s"));
+        CHECK(awkward.contains("password=p%2Bq%26r%20s"));
+        CHECK(!awkward.contains("password=p+q"));
+        // The username IS trimmed (a pasted email drags whitespace); the password is NOT, because
+        // whitespace is legal in one and trimming it would sign in as something the user did not type.
+        CHECK(kitsu::passwordGrantBody(QStringLiteral("  who@x.y  "), QStringLiteral(" pw "))
+                  .contains("username=who%40x.y"));
+        CHECK(kitsu::passwordGrantBody(QStringLiteral("who@x.y"), QStringLiteral(" pw "))
+                  .contains("password=%20pw%20"));
+
+        const QByteArray refresh = kitsu::tokenRefreshBody(QStringLiteral("RT-KITSU"));
+        CHECK(refresh.contains("grant_type=refresh_token"));
+        CHECK(refresh.contains("refresh_token=RT-KITSU"));
+        // A refresh carries NO password. If it did, the credential would have had to be stored to be
+        // available at refresh time, which is the whole thing this design avoids.
+        CHECK(!refresh.contains("password"));
+        CHECK(!refresh.contains("username"));
+
+        // A real reply.
+        kitsu::TokenReply kt = kitsu::parseTokenReply(
+            R"({"access_token":"KA","refresh_token":"KR","expires_in":2592000,)"
+            R"("created_at":1700000000,"scope":"all","token_type":"bearer"})");
+        CHECK(kt.ok);
+        CHECK(kt.accessToken == QLatin1String("KA"));
+        CHECK(kt.refreshToken == QLatin1String("KR"));
+        CHECK(kt.expiresInSec == 2592000);
+        // THE ONE THAT PERMANENTLY UNLINKS AN ACCOUNT, held for the third provider: each of these is a
+        // body that is not a token reply, and each must come back ok=false so the caller stores nothing.
+        CHECK(!kitsu::parseTokenReply(
+                  R"({"error":"invalid_grant","error_description":"bad password"})").ok);
+        CHECK(!kitsu::parseTokenReply(R"({"access_token":""})").ok);
+        CHECK(!kitsu::parseTokenReply("<html>captive portal</html>").ok);
+        CHECK(!kitsu::parseTokenReply("[]").ok);
+        CHECK(!kitsu::parseTokenReply(QByteArray()).ok);
+        CHECK(kitsu::parseTokenReply(R"({"error":"x"})").accessToken.isEmpty());
+        // A refresh that omits the refresh token is legal; the caller keeps the old one.
+        kt = kitsu::parseTokenReply(R"({"access_token":"KB","expires_in":"3600"})");
+        CHECK(kt.ok);
+        CHECK(kt.refreshToken.isEmpty());
+        CHECK(kt.expiresInSec == 3600);
+
+        // ---- who the token belongs to ----------------------------------------------------------------
+        CHECK(kitsu::selfUrl(QStringLiteral("https://k/api/edge"))
+              == QLatin1String("https://k/api/edge/users?filter%5Bself%5D=true"));
+        CHECK(kitsu::parseSelfId(kSelfReply) == QLatin1String("42"));
+        // TOTAL: a body that is not one, an empty collection, and a row with no id all read back "".
+        CHECK(kitsu::parseSelfId(R"({"data":[]})").isEmpty());
+        CHECK(kitsu::parseSelfId(R"({"errors":[{"status":"401"}]})").isEmpty());
+        CHECK(kitsu::parseSelfId("not json").isEmpty());
+        CHECK(kitsu::parseSelfId(QByteArray()).isEmpty());
+
+        // ---- search ----------------------------------------------------------------------------------
+        const QString api = QStringLiteral("https://kitsu.app/api/edge");
+        const QString su = kitsu::searchUrl(api, QStringLiteral("  My Hero  "), 0, Kind::Anime, 8);
+        CHECK(su.startsWith(QLatin1String("https://kitsu.app/api/edge/anime?")));
+        CHECK(su.contains(QLatin1String("filter%5Btext%5D=My%20Hero")));   // trimmed, and encoded
+        CHECK(su.contains(QLatin1String("page%5Blimit%5D=8")));
+        CHECK(su.contains(QLatin1String("episodeCount")));                 // the COMPLETED rule's input
+        // OMITTED, not sent as 0. filter[year]=0 matches nothing, so a caller with no year would get an
+        // empty list rather than an unfiltered one.
+        CHECK(!su.contains(QLatin1String("filter%5Byear%5D")));
+        CHECK(kitsu::searchUrl(api, QStringLiteral("Berserk"), 1989, Kind::Manga, 8)
+                  .contains(QLatin1String("filter%5Byear%5D=1989")));
+        // The kind reaches the wire in BOTH the path and the field list.
+        CHECK(kitsu::searchUrl(api, QStringLiteral("Berserk"), 0, Kind::Manga, 8)
+                  .startsWith(QLatin1String("https://kitsu.app/api/edge/manga?")));
+        CHECK(kitsu::searchUrl(api, QStringLiteral("Berserk"), 0, Kind::Manga, 8)
+                  .contains(QLatin1String("chapterCount")));
+        // Too short to ask about: "we did not ask" and "Kitsu said nothing" are the same empty result.
+        CHECK(kitsu::searchable(QStringLiteral("abc")));
+        CHECK(!kitsu::searchable(QStringLiteral("ab")));
+        CHECK(!kitsu::searchable(QStringLiteral("   a   ")));
+        CHECK(kitsu::searchUrl(api, QStringLiteral("ab"), 0, Kind::Anime, 8).isEmpty());
+
+        QVector<Match> km = kitsu::parseSearch(kKitsuSearchReply, Kind::Anime);
+        // Three rows in, TWO out: the third has no id and is skipped without costing the other two.
+        CHECK(km.size() == 2);
+        if (km.size() == 2)
+        {
+            CHECK(km[0].mediaId == QLatin1String("7442"));
+            CHECK(km[0].title == QLatin1String("My Hero Academia"));       // titles.en preferred
+            CHECK(km[0].altTitle == QLatin1String("Boku no Hero Academia"));
+            CHECK(km[0].year == 2016);
+            CHECK(km[0].kind == Kind::Anime);
+            CHECK(km[0].totalUnits == 13);
+            CHECK(km[0].coverUrl == QLatin1String("https://media.kitsu.test/1-original.jpg"));
+            // One title only: the canonical one is used and there is no second line to show.
+            CHECK(km[1].mediaId == QLatin1String("1712"));
+            CHECK(km[1].title == QLatin1String("Berserk"));
+            CHECK(km[1].altTitle.isEmpty());
+            CHECK(km[1].kind == Kind::Manga);      // the COUNT decides the kind, not the endpoint
+            CHECK(km[1].totalUnits == 364);
+            CHECK(km[1].coverUrl == QLatin1String("https://media.kitsu.test/2-medium.jpg"));
+        }
+        // A row Kitsu has no count for is filed under the kind the caller ASKED for.
+        km = kitsu::parseSearch(kKitsuUnreleasedReply, Kind::Manga);
+        CHECK(km.size() == 1);
+        if (km.size() == 1)
+        {
+            CHECK(km[0].kind == Kind::Manga);
+            CHECK(km[0].totalUnits == 0);
+            CHECK(km[0].year == 0);
+        }
+        // EMPTY, MALFORMED, and an ERROR DOCUMENT: all three are an empty list, never a partial one.
+        CHECK(kitsu::parseSearch(R"({"data":[]})", Kind::Anime).isEmpty());
+        CHECK(kitsu::parseSearch(kKitsuErrorReply, Kind::Anime).isEmpty());
+        CHECK(kitsu::parseSearch("<html>", Kind::Anime).isEmpty());
+        CHECK(kitsu::parseSearch(QByteArray(), Kind::Anime).isEmpty());
+        CHECK(kitsu::parseSearch("[]", Kind::Anime).isEmpty());
+
+        // PAGINATION, and the same-origin rule that keeps the account's bearer token off a host a response
+        // body chose. `links.next` is attacker-controlled input by definition.
+        CHECK(kitsu::nextPageUrl(kKitsuSearchReply, api)
+                  .startsWith(QLatin1String("https://kitsu.app/api/edge/anime?page%5Boffset%5D=8")));
+        CHECK(kitsu::nextPageUrl(kKitsuSearchReply, QStringLiteral("https://kitsu.app.evil.test/api/edge"))
+                  .isEmpty());
+        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"http://kitsu.app/api/edge/anime"}})", api).isEmpty());
+        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"https://kitsu.app:8443/api/edge/anime"}})", api)
+                  .isEmpty());
+        CHECK(kitsu::nextPageUrl(R"({"data":[]})", api).isEmpty());
+        CHECK(kitsu::nextPageUrl("garbage", api).isEmpty());
+
+        // ---- the account's entry ---------------------------------------------------------------------
+        const QString eu = kitsu::entryUrl(api, QStringLiteral("42"), QStringLiteral("1712"), Kind::Manga);
+        CHECK(eu.startsWith(QLatin1String("https://kitsu.app/api/edge/library-entries?")));
+        CHECK(eu.contains(QLatin1String("filter%5Buser_id%5D=42")));
+        CHECK(eu.contains(QLatin1String("filter%5Bmedia_id%5D=1712")));
+        CHECK(eu.contains(QLatin1String("filter%5Bkind%5D=manga")));
+        CHECK(eu.contains(QLatin1String("include=manga")));   // what brings the unit count back
+        // EMPTY IN, EMPTY OUT. A blank user filter would answer with somebody else's library and a blank
+        // media filter with the whole of ours, so neither request is ever built.
+        CHECK(kitsu::entryUrl(api, QString(), QStringLiteral("1712"), Kind::Manga).isEmpty());
+        CHECK(kitsu::entryUrl(api, QStringLiteral("42"), QString(), Kind::Manga).isEmpty());
+
+        Entry ke;
+        QString keId = QStringLiteral("stale");
+        CHECK(kitsu::parseEntry(kKitsuEntryReply, QStringLiteral("1712"), Kind::Manga, ke, &keId));
+        CHECK(ke.exists);
+        CHECK(ke.mediaId == QLatin1String("1712"));
+        CHECK(ke.progress == 12);
+        CHECK(ke.status == Status::Current);
+        CHECK(ke.score == 85);                 // ratingTwenty 17 -> 85 at the seam
+        CHECK(ke.totalUnits == 364);           // off the INCLUDED media, not off the entry
+        CHECK(keId == QLatin1String("551"));   // the library entry's OWN id — what a PATCH is addressed to
+
+        // ASKED, ANSWERED, AND THE ACCOUNT HAS NO ROW. An empty `data` array is a SUCCESS, and it is what
+        // selects the create path — distinct from "progress 0" and distinct from a failed request.
+        keId = QStringLiteral("stale");
+        CHECK(kitsu::parseEntry(R"({"data":[],"included":[]})", QStringLiteral("1712"), Kind::Manga,
+                                ke, &keId));
+        CHECK(!ke.exists);
+        CHECK(ke.progress == 0);
+        CHECK(keId.isEmpty());
+        // ...and "this body was not an entry reply at all", which is a failed request and leaves the row
+        // queued. Each of these must be false, not an empty entry.
+        CHECK(!kitsu::parseEntry(kKitsuErrorReply, QStringLiteral("1712"), Kind::Manga, ke, &keId));
+        CHECK(!kitsu::parseEntry(R"({"data":{"id":"551"}})", QStringLiteral("1712"), Kind::Manga,
+                                 ke, &keId));   // a single resource, not a collection
+        CHECK(!kitsu::parseEntry("not json", QStringLiteral("1712"), Kind::Manga, ke, &keId));
+        CHECK(!kitsu::parseEntry(QByteArray(), QStringLiteral("1712"), Kind::Manga, ke, &keId));
+        // A NULL out-parameter is legal — fetchEntry does not want the entry id.
+        CHECK(kitsu::parseEntry(kKitsuEntryReply, QStringLiteral("1712"), Kind::Manga, ke, nullptr));
+
+        // ---- the push, and its IDEMPOTENCE -----------------------------------------------------------
+        Update ku;
+        ku.itemKey = QStringLiteral("marks:series:berserk");
+        ku.mediaId = QStringLiteral("1712");
+        ku.kind = Kind::Manga;
+        ku.unit = 13;
+        ku.atMs = 1'700'000'000'000LL;
+
+        // The verb and the URL come off ONE emptiness test, so they cannot disagree about which of the two
+        // this is.
+        CHECK(kitsu::saveMethod(QString()) == QByteArray("POST"));
+        CHECK(kitsu::saveMethod(QStringLiteral("551")) == QByteArray("PATCH"));
+        CHECK(kitsu::saveUrl(api, QString()) == api + QLatin1String("/library-entries"));
+        CHECK(kitsu::saveUrl(api, QStringLiteral("551")) == api + QLatin1String("/library-entries/551"));
+
+        // THE CREATE. Reached only when the read said the account really has no row.
+        const QByteArray create = kitsu::saveBody(ku, 364, QString(), QStringLiteral("42"));
+        const QJsonObject cdata = QJsonDocument::fromJson(create).object()
+                                      .value(QStringLiteral("data")).toObject();
+        CHECK(cdata.value(QStringLiteral("type")).toString() == QLatin1String("libraryEntries"));
+        CHECK(!cdata.contains(QStringLiteral("id")));   // there is nothing to address yet
+        const QJsonObject crels = cdata.value(QStringLiteral("relationships")).toObject();
+        CHECK(crels.value(QStringLiteral("user")).toObject().value(QStringLiteral("data")).toObject()
+                   .value(QStringLiteral("id")).toString() == QLatin1String("42"));
+        CHECK(crels.value(QStringLiteral("manga")).toObject().value(QStringLiteral("data")).toObject()
+                   .value(QStringLiteral("id")).toString() == QLatin1String("1712"));
+        CHECK(crels.value(QStringLiteral("manga")).toObject().value(QStringLiteral("data")).toObject()
+                   .value(QStringLiteral("type")).toString() == QLatin1String("manga"));
+        CHECK(!crels.contains(QStringLiteral("anime")));   // the KIND reaches the relationship name
+
+        // THE UPDATE. It carries the entry's id and NO relationships: re-stating them on a PATCH is how an
+        // entry gets re-pointed at another user's library or at another series.
+        const QByteArray patch = kitsu::saveBody(ku, 364, QStringLiteral("551"), QStringLiteral("42"));
+        const QJsonObject pdata = QJsonDocument::fromJson(patch).object()
+                                      .value(QStringLiteral("data")).toObject();
+        CHECK(pdata.value(QStringLiteral("id")).toString() == QLatin1String("551"));
+        CHECK(!pdata.contains(QStringLiteral("relationships")));
+        CHECK(!patch.contains("\"42\""));   // the user id is not on the wire on an update at all
+
+        // IDEMPOTENT BY CONSTRUCTION, twice over:
+        //   * the same update produces byte-identical bytes, so a replay after a restart is the same
+        //     request and not a second, different one;
+        CHECK(kitsu::saveBody(ku, 364, QStringLiteral("551"), QStringLiteral("42")) == patch);
+        //   * and once the row exists the write is a PATCH addressed to it, so a replayed queue row can
+        //     never create a SECOND library entry for the same series. That is the property; the pair
+        //     below is what makes it hold.
+        {
+            Entry existing;
+            QString existingId;
+            kitsu::parseEntry(kKitsuEntryReply, QStringLiteral("1712"), Kind::Manga, existing, &existingId);
+            CHECK(existing.exists);
+            CHECK(kitsu::saveMethod(existingId) == QByteArray("PATCH"));
+            CHECK(!kitsu::saveBody(ku, 364, existingId, QStringLiteral("42"))
+                       .contains("relationships"));
+        }
+
+        // THE THREE SAFETY RULES, restated against Kitsu's spellings.
+        //   1. No rating unless the app really has one. Kitsu reads a present ratingTwenty as a rating the
+        //      user gave, so sending one they did not give overwrites the one they did.
+        CHECK(!patch.contains("ratingTwenty"));
+        ku.hasScore = true;
+        ku.score = 85;
+        CHECK(kitsu::saveBody(ku, 364, QStringLiteral("551"), QStringLiteral("42"))
+                  .contains("\"ratingTwenty\":17"));
+        ku.hasScore = false;
+        //   2. COMPLETED needs the app's claim AND Kitsu's own count to agree.
+        ku.completes = true;
+        CHECK(kitsu::saveBody(ku, 364, QStringLiteral("551"), QString()).contains("\"status\":\"current\""));
+        CHECK(kitsu::saveBody(ku, 13, QStringLiteral("551"), QString()).contains("\"status\":\"completed\""));
+        CHECK(kitsu::saveBody(ku, 0, QStringLiteral("551"), QString()).contains("\"status\":\"completed\""));
+        ku.completes = false;
+        CHECK(kitsu::saveBody(ku, 13, QStringLiteral("551"), QString()).contains("\"status\":\"current\""));
+        //   3. Progress is never below 1: a 0 tells the account you have read nothing.
+        ku.unit = 0;
+        CHECK(kitsu::saveBody(ku, 364, QStringLiteral("551"), QString()).contains("\"progress\":1"));
+        ku.unit = -4;
+        CHECK(kitsu::saveBody(ku, 364, QStringLiteral("551"), QString()).contains("\"progress\":1"));
+        ku.unit = 13;
+
+        // ---- statuses and the score conversion -------------------------------------------------------
+        // NOT kind-dependent, unlike MAL's — and asserted so, because copying MAL's watching/reading split
+        // over would be a silently wrong write.
+        CHECK(kitsu::statusToken(Status::Current) == QLatin1String("current"));
+        CHECK(kitsu::statusToken(Status::Planning) == QLatin1String("planned"));
+        CHECK(kitsu::statusToken(Status::Completed) == QLatin1String("completed"));
+        CHECK(kitsu::statusToken(Status::Dropped) == QLatin1String("dropped"));
+        CHECK(kitsu::statusToken(Status::Paused) == QLatin1String("on_hold"));
+        CHECK(kitsu::statusToken(Status::Repeating) == QLatin1String("current"));
+        CHECK(kitsu::statusFromToken(QStringLiteral("completed")) == Status::Completed);
+        CHECK(kitsu::statusFromToken(QStringLiteral("planned")) == Status::Planning);
+        CHECK(kitsu::statusFromToken(QStringLiteral("on_hold")) == Status::Paused);
+        CHECK(kitsu::statusFromToken(QStringLiteral("dropped")) == Status::Dropped);
+        CHECK(kitsu::statusFromToken(QStringLiteral("current")) == Status::Current);
+        CHECK(kitsu::statusFromToken(QStringLiteral("something new")) == Status::Current);
+        CHECK(kitsu::statusFromToken(QString()) == Status::Current);
+        // ROUNDED, and CLAMPED UP to 2 — Kitsu's scale starts at 2 and refuses a 0. 85 is a 17, and a 17
+        // read back is 85, so a score survives a push/pull round trip.
+        CHECK(kitsu::scoreToKitsu(100) == 20);
+        CHECK(kitsu::scoreToKitsu(85) == 17);
+        CHECK(kitsu::scoreToKitsu(83) == 17);
+        CHECK(kitsu::scoreToKitsu(1) == 2);
+        CHECK(kitsu::scoreToKitsu(0) == 2);
+        CHECK(kitsu::scoreToKitsu(500) == 20);
+        CHECK(kitsu::scoreToKitsu(-5) == 2);
+        CHECK(kitsu::scoreFromKitsu(17) == 85);
+        CHECK(kitsu::scoreFromKitsu(20) == 100);
+        CHECK(kitsu::scoreFromKitsu(0) == 0);     // no rating on the entry stays "unrated"
+        CHECK(kitsu::scoreFromKitsu(-3) == 0);
+        CHECK(kitsu::scoreFromKitsu(99) == 100);
+        CHECK(kitsu::scoreToKitsu(kitsu::scoreFromKitsu(17)) == 17);
+
+        // ---- THE HOIST HELD: Kitsu's failures go through the SHARED classification -------------------
+        // Not a Kitsu backoff — tracker::classifySend, asked with kitsu::sendPolicy(). The only thing this
+        // provider adds is a set of status codes.
+        const SendPolicy kp = kitsu::sendPolicy();
+        CHECK(kitsu::kBackoffBaseMs == 60000);
+        CHECK(kitsu::kBackoffMaxMs == 1800000);
+        CHECK(kp.baseMs == 60000);
+        CHECK(kp.maxMs == 1800000);
+        // MAL's set, not AniList's, and for a structural reason: Kitsu is JSON:API over REST, so 422 is a
+        // status it really can answer with, where AniList's single GraphQL endpoint cannot.
+        for (int code : { 400, 404, 422 })
+        {
+            CHECK(classifySend(kp, code, 0, 1).permanent);
+            CHECK(!classifySend(kp, code, 0, 1).retry);
+        }
+        CHECK(kp.permanent == mal::sendPolicy().permanent);
+        CHECK(kp.permanent != anilist::sendPolicy().permanent);
+        // 401 is the token: refresh, keep the row, and a Retry-After does not lengthen it.
+        {
+            const SendVerdict v = classifySend(kp, 401, 300, 1);
+            CHECK(v.retry);
+            CHECK(v.reauth);
+            CHECK(!v.permanent);
+            CHECK(v.delayMs == 60000);
+        }
+        // 429: a minute at least, Retry-After honoured UPWARD only, doubling, capped.
+        CHECK(classifySend(kp, 429, 0, 1).delayMs == 60000);
+        CHECK(classifySend(kp, 429, 300, 1).delayMs == 300000);
+        CHECK(classifySend(kp, 429, 1, 1).delayMs == 60000);
+        CHECK(classifySend(kp, 429, 0, 3).delayMs == 240000);
+        CHECK(classifySend(kp, 429, 0, 1000).delayMs == 1800000);
+        // 5xx, a dead socket, and a 4xx nobody has a rule for: all a waiting problem, none of them costs
+        // anybody their queue. 403 is deliberately retried — a suspended account and a temporarily
+        // refused client share it.
+        for (int code : { 500, 503, 0, 403, 418 })
+        {
+            CHECK(classifySend(kp, code, 0, 1).retry);
+            CHECK(!classifySend(kp, code, 0, 1).permanent);
+        }
+        CHECK(!classifySend(kp, 200, 0, 1).retry);
+        CHECK(!classifySend(kp, 201, 0, 1).retry);   // a create answers 201, and that is not a failure
+        CHECK(!classifySend(kp, 201, 0, 1).permanent);
+
+        // ---- ...and through the SHARED DRAIN LOOP, with Id::Kitsu ------------------------------------
+        // TrackerQueue::Sender, unmodified, driven with Kitsu's policy: every arm behaves as it does for
+        // the other two, and the permanently-refused row is DROPPED rather than left to wedge the head of
+        // an ordered queue.
+        const qint64 KT = 1'900'000'000'000LL;
+        struct KArm { int status; qint64 retryAfter; bool drops; qint64 wait; };
+        const QVector<KArm> karms = {
+            { 400, 0,   true,  0 },
+            { 404, 0,   true,  0 },
+            { 422, 0,   true,  0 },
+            { 429, 0,   false, 60000 },
+            { 429, 900, false, 900000 },
+            { 503, 0,   false, 60000 },
+            { 401, 0,   false, 60000 },
+            { 0,   0,   false, 60000 },
+        };
+        for (const KArm& a : karms)
+        {
+            seedQueue(Id::Kitsu, { { QStringLiteral("156c:one"), 4 } }, KT - 1000);
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::Kitsu, kp, { { a.status, a.retryAfter, false } }, at, sent, pushed, KT, waits);
+            CHECK(sent.size() == 1);
+            CHECK(pushed.isEmpty());
+            if (a.drops)
+            {
+                CHECK(TrackerQueue::count(Id::Kitsu) == 0);
+                CHECK(waits.value(0) == 0);
+            }
+            else
+            {
+                CHECK(TrackerQueue::count(Id::Kitsu) == 1);
+                CHECK(waits.value(0) == a.wait);
+            }
+            CHECK(!TrackerQueue::lastError(Id::Kitsu).isEmpty());   // the user is told something either way
+        }
+        // THE UNWEDGE, on Kitsu's queue: a permanently-refused row at the HEAD does not block the rows
+        // behind it, and the ones behind it LAND — not "are retried", land.
+        TrackerLinks::set(Id::Kitsu, QStringLiteral("156c:a"), QStringLiteral("mk"), Kind::Anime,
+                          QStringLiteral("A Deleted Series"), 12);
+        seedQueue(Id::Kitsu, { { QStringLiteral("156c:a"), 3 },
+                               { QStringLiteral("156c:b"), 5 },
+                               { QStringLiteral("156c:c"), 7 } }, KT - 1000);
+        {
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::Kitsu, kp, { { 422, 0, false }, { 200, 0, true }, { 201, 0, true } }, at,
+                        sent, pushed, KT, waits,
+                        QStringLiteral("Kitsu refused the update for %1 and it has been dropped; "
+                                       "the rest are still queued."));
+            CHECK(sent.size() == 3);
+            CHECK(pushed.size() == 2);
+            CHECK(pushed.value(0) == QLatin1String("156c:b@5"));
+            CHECK(pushed.value(1) == QLatin1String("156c:c@7"));
+            CHECK(TrackerQueue::count(Id::Kitsu) == 0);
+            // ...and the run ENDED on a success, which correctly clears the status line. The drop's own
+            // sentence is asserted in its own run below — a combined assertion here would be checking the
+            // last thing that happened, not the drop.
+            CHECK(TrackerQueue::lastError(Id::Kitsu).isEmpty());
+        }
+        // THE DROP IS VISIBLE, and it says WHICH one. A queue that quietly discards somebody's progress is
+        // worse than one that wedges, because at least a wedge is eventually noticed.
+        seedQueue(Id::Kitsu, { { QStringLiteral("156c:a"), 3 } }, KT - 1000);
+        {
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::Kitsu, kp, { { 400, 0, false } }, at, sent, pushed, KT, waits,
+                        QStringLiteral("Kitsu refused the update for %1 and it has been dropped; "
+                                       "the rest are still queued."));
+            const QString line = TrackerQueue::lastError(Id::Kitsu);
+            CHECK(!line.isEmpty());
+            CHECK(line.contains(QLatin1String("A Deleted Series")));   // WHICH item
+            CHECK(line.contains(QLatin1String("dropped")));            // ...and what happened to it
+            CHECK(line.contains(QLatin1String("Kitsu")));              // ...and on which tracker
+            // Never a credential, never a request, never a response body.
+            CHECK(!line.contains(QString::fromLatin1(kKitsuPassword)));
+            CHECK(!line.contains(QLatin1String("Bearer")));
+            CHECK(!line.contains(QLatin1String("http")));
+        }
+        // A SUCCESS clears the line and empties the queue, on Kitsu's queue as on the other two — and a
+        // 201 (a created library entry) counts as one.
+        TrackerQueue::setLastError(Id::Kitsu, QStringLiteral("something old"));
+        seedQueue(Id::Kitsu, { { QStringLiteral("156c:two"), 9 } }, KT - 1000);
+        {
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::Kitsu, kp, { { 201, 0, true } }, at, sent, pushed, KT + kDebounceMs * 4, waits);
+            CHECK(pushed.value(0) == QLatin1String("156c:two@9"));
+            CHECK(TrackerQueue::count(Id::Kitsu) == 0);
+            CHECK(TrackerQueue::lastError(Id::Kitsu).isEmpty());
+        }
+        TrackerQueue::forgetAccount(Id::Kitsu);
+
+        // ---- THE KITSU CREDENTIAL BYTE-SCAN ----------------------------------------------------------
+        // §3 asserts AniList's secret is on disk EXACTLY ONCE and §18 asserts the same for MyAnimeList.
+        // Kitsu's claim is STRONGER and is the right one for this design: the account password is never
+        // stored at all, so it must occur ZERO times. Nothing this probe prints contains it.
+        {
+            QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                        QSettings::IniFormat);
+            // Everything the Kitsu path really does write: the token pair and an expiry, through the
+            // SHARED credential store — there is no Kitsu store.
+            TrackerQueue::storeTokens(Id::Kitsu, QStringLiteral("KITSU-ACCESS-TOKEN-FIXTURE"),
+                                      QStringLiteral("KITSU-REFRESH-TOKEN-FIXTURE"), 2592000, 1700000000);
+            const QString kKey = QStringLiteral("tt-kitsu-scan");
+            TrackerLinks::set(Id::Kitsu, kKey, QStringLiteral("1712"), Kind::Manga,
+                              QStringLiteral("Berserk"), 364);
+            Update qu;
+            qu.itemKey = kKey;
+            qu.mediaId = QStringLiteral("1712");
+            qu.kind = Kind::Manga;
+            qu.unit = 12;
+            qu.atMs = 1'700'000'000'000LL;
+            TrackerQueue::enqueue(Id::Kitsu, qu);
+            TrackerQueue::setLastError(Id::Kitsu, QStringLiteral("Kitsu did not accept the update; "
+                                                                "it is queued and will be retried."));
+            s.sync();
+
+            QFile f(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile));
+            CHECK(f.open(QIODevice::ReadOnly));
+            const QByteArray ini = f.readAll();
+            f.close();
+            CHECK(!ini.isEmpty());   // a scan of nothing passes trivially; assert the corpus first
+            // ...and assert the credential EXISTS somewhere first, or "zero occurrences" is a statement
+            // about a string that was never anywhere. It is in the GRANT BODY, which goes over TLS and is
+            // never written down.
+            CHECK(kitsu::passwordGrantBody(QString::fromLatin1(kKitsuEmail),
+                                           QString::fromLatin1(kKitsuPassword)).contains(kKitsuPassword));
+
+            // ZERO. Not once — never.
+            CHECK(ini.indexOf(kKitsuPassword) < 0);
+            // The email is not written either: it is a sign-in field held in memory, not a setting.
+            CHECK(ini.indexOf(kKitsuEmail) < 0);
+            // The TOKEN, by contrast, is stored — exactly once, on the access key inside the device-local
+            // carve-out, which is where a token is supposed to be.
+            int tokenHits = 0;
+            for (int p = 0; (p = ini.indexOf("KITSU-ACCESS-TOKEN-FIXTURE", p)) >= 0; ++p) ++tokenHits;
+            CHECK(tokenHits == 1);
+            const int at = ini.indexOf("KITSU-ACCESS-TOKEN-FIXTURE");
+            const int lineStart = ini.lastIndexOf('\n', at) + 1;
+            CHECK(ini.mid(lineStart, at - lineStart).contains("access"));
+            CHECK(isDeviceLocalKey(accessKey(Id::Kitsu)));
+            CHECK(isDeviceLocalKey(refreshKey(Id::Kitsu)));
+            CHECK(isDeviceLocalKey(queueKey(QString(), Id::Kitsu)));
+            CHECK(isBackgroundStateKey(accessKey(Id::Kitsu)));
+            CHECK(isBackgroundStateKey(queueKey(QString(), Id::Kitsu)));
+            // NOTHING WAS WRITTEN UNDER THE CLIENT KEYS. Kitsu has no client to register, so those two
+            // keys stay empty for it — asserted rather than assumed, because a copy-paste of MAL's
+            // accessors would fill them in and nothing else would notice.
+            CHECK(TrackerQueue::clientId(Id::Kitsu).isEmpty());
+            CHECK(TrackerQueue::clientSecret(Id::Kitsu).isEmpty());
+
+            // The artefacts that TRAVEL or get SHOWN carry neither the password nor the token.
+            const QByteArray kq = encodeQueue(TrackerQueue::load(Id::Kitsu));
+            CHECK(!kq.contains(kKitsuPassword));
+            CHECK(!kq.contains("KITSU-ACCESS-TOKEN-FIXTURE"));
+            const QByteArray kblob = TrackerLinks::encode(TrackerLinks::get(Id::Kitsu, kKey)).toUtf8();
+            CHECK(!kblob.contains(kKitsuPassword));
+            CHECK(!kblob.contains("KITSU-ACCESS-TOKEN-FIXTURE"));
+            CHECK(!TrackerQueue::lastError(Id::Kitsu).contains(QString::fromLatin1(kKitsuPassword)));
+            // The REQUESTS carry no credential at all: Kitsu authenticates with a header, by construction,
+            // and every URL is built from ids and filters only.
+            CHECK(!kitsu::searchUrl(api, QStringLiteral("Berserk"), 0, Kind::Manga, 8)
+                       .contains(QLatin1String(kKitsuPassword)));
+            CHECK(!kitsu::entryUrl(api, QStringLiteral("42"), QStringLiteral("1712"), Kind::Manga)
+                       .contains(QLatin1String(kKitsuPassword)));
+            CHECK(!kitsu::saveUrl(api, QStringLiteral("551")).contains(QLatin1String(kKitsuPassword)));
+            CHECK(!kitsu::saveBody(qu, 364, QStringLiteral("551"), QStringLiteral("42"))
+                       .contains(kKitsuPassword));
+            CHECK(!kitsu::saveBody(qu, 364, QStringLiteral("551"), QStringLiteral("42"))
+                       .contains("KITSU-ACCESS-TOKEN-FIXTURE"));
+
+            TrackerQueue::clearTokens(Id::Kitsu);
+            TrackerQueue::forgetAccount(Id::Kitsu);
+        }
+    }
+
+    // ===== §21  THREE TRACKERS AT ONCE, AND THE TWO THAT WERE ALREADY THERE ============================
+    // Decision 3 of the increment: three trackers configured at once must not fight or double-count, and
+    // one failing must not block the others — pinned with THREE, not two, because a loop that survives one
+    // bad element can still be written to give up on the second.
+    //
+    // Decision 5: AniList and MyAnimeList must be byte-identical to today when Kitsu is not configured.
+    // That is the regression that would matter, and it is the second half of this section.
+    {
+        const QString key = QStringLiteral("tt156c");
+        for (Id id : { Id::AniList, Id::MyAnimeList, Id::Kitsu }) TrackerLinks::clear(id, key);
+        // The SAME series under THREE ids on three accounts, which is exactly what the link store's
+        // (Id, itemKey) keying is for. Nothing in the fan-out ever hands one tracker another's media id.
+        TrackerLinks::set(Id::AniList, key, QStringLiteral("20605"), Kind::Anime,
+                          QStringLiteral("My Hero Academia"), 13);
+        TrackerLinks::set(Id::MyAnimeList, key, QStringLiteral("31964"), Kind::Anime,
+                          QStringLiteral("My Hero Academia"), 13);
+        TrackerLinks::set(Id::Kitsu, key, QStringLiteral("7442"), Kind::Anime,
+                          QStringLiteral("My Hero Academia"), 13);
+
+        FakeTracker a(Id::AniList), m(Id::MyAnimeList), k(Id::Kitsu);
+        const QVector<Tracker*> three{ &a, &m, &k };
+
+        TrackerFanout::Result r = TrackerFanout::push(three, key, Kind::Anime, 5, false);
+        CHECK(r.pushed == 3);
+        CHECK(r.unlinked == 0);
+        CHECK(r.needLink.isEmpty());
+        CHECK(a.got.size() == 1);
+        CHECK(m.got.size() == 1);
+        CHECK(k.got.size() == 1);
+        if (k.got.size() == 1)
+        {
+            CHECK(k.got[0].mediaId == QLatin1String("7442"));   // ITS OWN id, not one of the others'
+            CHECK(k.got[0].unit == 5);
+        }
+        CHECK(TrackerLinks::get(Id::Kitsu, key).localUnits == 5);
+
+        // ONE FAILING MUST NOT BLOCK THE OTHER TWO — in every position, because "it worked" can be an
+        // artefact of the order. The failing one first, in the middle, and last.
+        const QVector<QVector<Tracker*>> orders = { { &k, &a, &m }, { &a, &k, &m }, { &a, &m, &k } };
+        int unit = 6;
+        for (const QVector<Tracker*>& order : orders)
+        {
+            k.refuse = true;
+            const int aBefore = a.got.size(), mBefore = m.got.size(), kBefore = k.refusals;
+            r = TrackerFanout::push(order, key, Kind::Anime, unit++, false);
+            CHECK(r.pushed == 3);                    // all three were VISITED
+            CHECK(k.refusals == kBefore + 1);        // ...the broken one really did refuse
+            CHECK(a.got.size() == aBefore + 1);      // ...and BOTH healthy ones still landed
+            CHECK(m.got.size() == mBefore + 1);
+            k.refuse = false;
+        }
+        // TWO of the three failing still leaves the third delivering.
+        a.refuse = true;
+        m.refuse = true;
+        {
+            const int kBefore = k.got.size();
+            r = TrackerFanout::push(three, key, Kind::Anime, unit++, false);
+            CHECK(r.pushed == 3);
+            CHECK(k.got.size() == kBefore + 1);
+        }
+        a.refuse = false;
+        m.refuse = false;
+
+        // ONE OFF is skipped and says nothing about the other two. "Off" is not a failure.
+        k.on_ = false;
+        r = TrackerFanout::push(three, key, Kind::Anime, unit++, false);
+        CHECK(r.pushed == 2);
+        CHECK(TrackerFanout::active(three).size() == 2);
+        k.on_ = true;
+        CHECK(TrackerFanout::active(three).size() == 3);
+
+        // NO DOUBLE COUNTING: one progress event produces at most ONE update per tracker, and the prompt
+        // is offered for at most one of them — the others wait for the next event.
+        {
+            a.got.clear(); m.got.clear(); k.got.clear();
+            TrackerFanout::push(three, key, Kind::Anime, unit, false);
+            CHECK(a.got.size() == 1);
+            CHECK(m.got.size() == 1);
+            CHECK(k.got.size() == 1);
+            ++unit;
+        }
+        // Unlinked on TWO of the three: both are offered, and the caller prompts for one of them.
+        TrackerLinks::clear(Id::MyAnimeList, key);
+        TrackerLinks::clear(Id::Kitsu, key);
+        r = TrackerFanout::push(three, key, Kind::Anime, unit++, false);
+        CHECK(r.pushed == 1);
+        CHECK(r.unlinked == 2);
+        CHECK(r.needLink.size() == 2);
+        // ...and a decline on one of them takes it out of the offer, for ever, without touching the other.
+        TrackerLinks::decline(Id::Kitsu, key);
+        r = TrackerFanout::push(three, key, Kind::Anime, unit++, false);
+        CHECK(r.unlinked == 2);
+        CHECK(r.declined == 1);
+        CHECK(r.needLink.size() == 1);
+        if (r.needLink.size() == 1) CHECK(r.needLink[0]->id() == Id::MyAnimeList);
+
+        // THREE QUEUES, ONE IMPLEMENTATION. TrackerQueue is keyed by Id, so a chapter one account refused
+        // stays pending on that one alone — and three accounts do not share a rate limit either.
+        for (Id id : { Id::AniList, Id::MyAnimeList, Id::Kitsu }) TrackerQueue::forgetAccount(id);
+        Update u;
+        u.itemKey = QStringLiteral("marks:series:mha");
+        u.kind = Kind::Anime;
+        u.unit = 3;
+        u.atMs = 1'900'000'000'000LL;
+        for (const QPair<Id, QString>& p : QVector<QPair<Id, QString>>{
+                 { Id::AniList, QStringLiteral("20605") },
+                 { Id::MyAnimeList, QStringLiteral("31964") },
+                 { Id::Kitsu, QStringLiteral("7442") } })
+        {
+            Update x = u;
+            x.mediaId = p.second;
+            CHECK(TrackerQueue::enqueue(p.first, x));
+        }
+        CHECK(TrackerQueue::load(Id::AniList).first().mediaId == QLatin1String("20605"));
+        CHECK(TrackerQueue::load(Id::MyAnimeList).first().mediaId == QLatin1String("31964"));
+        CHECK(TrackerQueue::load(Id::Kitsu).first().mediaId == QLatin1String("7442"));
+        // A send on one starts THAT ONE'S debounce and nothing else's.
+        const qint64 now = 1'900'000'100'000LL;
+        TrackerQueue::noteSent(Id::Kitsu, u.itemKey, now);
+        qint64 wait = -1;
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::Kitsu), Id::Kitsu, now, &wait) == -1);
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::AniList), Id::AniList, now, &wait) == 0);
+        CHECK(TrackerQueue::nextSendable(TrackerQueue::load(Id::MyAnimeList), Id::MyAnimeList, now, &wait)
+              == 0);
+        // Disconnecting ONE account drops that one's pending progress and nothing else's.
+        TrackerQueue::setLastError(Id::Kitsu, QStringLiteral("K failed"));
+        TrackerQueue::forgetAccount(Id::Kitsu);
+        CHECK(TrackerQueue::count(Id::Kitsu) == 0);
+        CHECK(TrackerQueue::lastError(Id::Kitsu).isEmpty());
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 1);
+        for (Id id : { Id::AniList, Id::MyAnimeList }) TrackerQueue::forgetAccount(id);
+
+        // ---- AND THE TWO THAT WERE ALREADY THERE ARE UNTOUCHED ---------------------------------------
+        // The wire first: exact bodies, not shapes. A third provider must not have moved a byte of what
+        // the first two send, and a "cleaned up" shared helper is exactly how it would.
+        CHECK(anilist::defaultApiUrl() == QLatin1String("https://graphql.anilist.co"));
+        CHECK(mal::defaultApiUrl() == QLatin1String("https://api.myanimelist.net/v2"));
+        CHECK(anilist::tokenExchangeBody(QStringLiteral("cid"), QStringLiteral("sec"),
+                                         QStringLiteral("http://127.0.0.1:1"), QStringLiteral("code"))
+              == QByteArray(R"({"client_id":"cid","client_secret":"sec","code":"code",)"
+                            R"("grant_type":"authorization_code","redirect_uri":"http://127.0.0.1:1"})"));
+        CHECK(mal::tokenRefreshBody(QStringLiteral("cid"), QString(), QStringLiteral("rt"))
+              == QByteArray("client_id=cid&grant_type=refresh_token&refresh_token=rt"));
+        Update au;
+        au.itemKey = QStringLiteral("k");
+        au.mediaId = QStringLiteral("30002");
+        au.kind = Kind::Manga;
+        au.unit = 12;
+        CHECK(anilist::saveBody(au, 364)
+                  .contains(R"("variables":{"mediaId":30002,"progress":12,"status":"CURRENT"})"));
+        CHECK(mal::saveBody(au, 364) == QByteArray("status=reading&num_chapters_read=12"));
+        // ...and nothing of Kitsu's leaked into either: no JSON:API document, no ratingTwenty, no
+        // library-entries.
+        CHECK(!anilist::saveBody(au, 364).contains("ratingTwenty"));
+        CHECK(!anilist::saveBody(au, 364).contains("libraryEntries"));
+        CHECK(!mal::saveBody(au, 364).contains("ratingTwenty"));
+        CHECK(!mal::saveBody(au, 364).contains("progress"));
+        // The three policies stay three: AniList still refuses to call 422 permanent, which is the one
+        // difference #326 documented and the one a third provider could have flattened.
+        CHECK(!classifySend(anilist::sendPolicy(), 422, 0, 1).permanent);
+        CHECK(classifySend(mal::sendPolicy(), 422, 0, 1).permanent);
+        CHECK(classifySend(kitsu::sendPolicy(), 422, 0, 1).permanent);
+
+        // The state second: every key each tracker uses is distinct from the other two's, so nothing one
+        // stores can be read back as another's — the reason Tracker.h RESERVED Kitsu's id in increment 1
+        // rather than inventing it now.
+        CHECK(queueKey(QString(), Id::Kitsu).contains(QLatin1String("/kitsu/")));
+        CHECK(queueKey(QString(), Id::Kitsu) != queueKey(QString(), Id::AniList));
+        CHECK(queueKey(QString(), Id::Kitsu) != queueKey(QString(), Id::MyAnimeList));
+        CHECK(accessKey(Id::Kitsu) == QLatin1String("tracker/kitsu/access"));
+        CHECK(TrackerLinks::hashFor(Id::Kitsu, key) != TrackerLinks::hashFor(Id::AniList, key));
+        CHECK(TrackerLinks::hashFor(Id::Kitsu, key) != TrackerLinks::hashFor(Id::MyAnimeList, key));
+
+        // ---- the proof by construction: write EVERYTHING Kitsu owns, then read the other two back ----
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                    QSettings::IniFormat);
+        const QString bothKey = QStringLiteral("tt-before-kitsu");
+        for (Id id : { Id::AniList, Id::MyAnimeList, Id::Kitsu }) TrackerLinks::clear(id, bothKey);
+        s.setValue(clientIdKey(Id::AniList), QString::fromLatin1(kFixtureClientId));
+        s.setValue(accessKey(Id::AniList), QStringLiteral("ACCESS-TOKEN-FIXTURE"));
+        s.setValue(clientIdKey(Id::MyAnimeList), QString::fromLatin1(kMalClientId));
+        s.setValue(accessKey(Id::MyAnimeList), QStringLiteral("MAL-ACCESS-TOKEN-FIXTURE"));
+        TrackerLinks::set(Id::AniList, bothKey, QStringLiteral("30002"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        TrackerLinks::set(Id::MyAnimeList, bothKey, QStringLiteral("2"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        for (Id id : { Id::AniList, Id::MyAnimeList }) TrackerQueue::forgetAccount(id);
+        Update qu;
+        qu.itemKey = bothKey;
+        qu.kind = Kind::Manga;
+        qu.unit = 6;
+        qu.atMs = 1'700'000'000'000LL;
+        qu.mediaId = QStringLiteral("30002");
+        TrackerQueue::enqueue(Id::AniList, qu);
+        qu.mediaId = QStringLiteral("2");
+        TrackerQueue::enqueue(Id::MyAnimeList, qu);
+        s.sync();
+        const QString aLinkBefore = TrackerLinks::encode(TrackerLinks::get(Id::AniList, bothKey));
+        const QString mLinkBefore = TrackerLinks::encode(TrackerLinks::get(Id::MyAnimeList, bothKey));
+        const QByteArray aQueueBefore = encodeQueue(TrackerQueue::load(Id::AniList));
+        const QByteArray mQueueBefore = encodeQueue(TrackerQueue::load(Id::MyAnimeList));
+
+        // Now Kitsu arrives, in full: a token pair, a link on the SAME item, a queue and an error line.
+        TrackerQueue::storeTokens(Id::Kitsu, QStringLiteral("KITSU-ACCESS-TOKEN-FIXTURE"),
+                                  QStringLiteral("KITSU-REFRESH-TOKEN-FIXTURE"), 2592000, 1700000000);
+        TrackerLinks::set(Id::Kitsu, bothKey, QStringLiteral("1712"), Kind::Manga,
+                          QStringLiteral("Berserk"), 364);
+        qu.mediaId = QStringLiteral("1712");
+        qu.unit = 99;
+        TrackerQueue::enqueue(Id::Kitsu, qu);
+        TrackerQueue::setLastError(Id::Kitsu, QStringLiteral("Kitsu is unhappy"));
+        s.sync();
+
+        // ...and both of the others are byte-for-byte what they were.
+        CHECK(TrackerLinks::encode(TrackerLinks::get(Id::AniList, bothKey)) == aLinkBefore);
+        CHECK(TrackerLinks::encode(TrackerLinks::get(Id::MyAnimeList, bothKey)) == mLinkBefore);
+        CHECK(encodeQueue(TrackerQueue::load(Id::AniList)) == aQueueBefore);
+        CHECK(encodeQueue(TrackerQueue::load(Id::MyAnimeList)) == mQueueBefore);
+        CHECK(TrackerQueue::count(Id::AniList) == 1);
+        CHECK(TrackerQueue::count(Id::MyAnimeList) == 1);
+        CHECK(TrackerQueue::lastError(Id::AniList).isEmpty());
+        CHECK(TrackerQueue::lastError(Id::MyAnimeList).isEmpty());
+        CHECK(s.value(accessKey(Id::AniList)).toString() == QLatin1String("ACCESS-TOKEN-FIXTURE"));
+        CHECK(s.value(accessKey(Id::MyAnimeList)).toString() == QLatin1String("MAL-ACCESS-TOKEN-FIXTURE"));
+        CHECK(s.value(clientIdKey(Id::AniList)).toString() == QString::fromLatin1(kFixtureClientId));
+        CHECK(s.value(clientIdKey(Id::MyAnimeList)).toString() == QString::fromLatin1(kMalClientId));
+
+        for (Id id : { Id::AniList, Id::MyAnimeList, Id::Kitsu }) TrackerQueue::forgetAccount(id);
+        TrackerQueue::clearTokens(Id::Kitsu);
     }
 
     if (failures == 0) { std::puts("TRACKER-OK"); return 0; }
