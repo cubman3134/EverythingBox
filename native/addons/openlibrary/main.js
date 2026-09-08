@@ -110,6 +110,10 @@ function getMeta(argJson) {
     var facts = [];
     if (doc.author_name && doc.author_name.length) facts.push(metaFact("Author", doc.author_name[0]));
     if (doc.first_publish_year) facts.push(metaFact("Published", doc.first_publish_year));
+    // A PAGE COUNT IS EVIDENCE, not a field to show (issue #294): the host scores an answer over the title,
+    // the author, the year AND the length before it will fill anything in, and the median across a work's
+    // editions is the only length Open Library states at the work level.
+    if (doc.number_of_pages_median) facts.push(metaFact("Pages", doc.number_of_pages_median));
 
     var series = { name: "", index: "" };
     if (doc.series && doc.series.length) series = splitSeries(doc.series[0]);

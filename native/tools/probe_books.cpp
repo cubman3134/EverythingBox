@@ -1556,24 +1556,32 @@ int main(int argc, char** argv)
         }
 
         // ---- THE MERGE: only a blank is ever filled ----------------------------------------------------
+        // The answer now has to CORROBORATE before any of this is reached (issue #294) — a title alone no
+        // longer carries a fill — so every case below states the year both sides agree on. That is the
+        // second field the score is over, and without it these fixtures are refused outright, which §17
+        // asserts directly.
         BookLibrary::Fill answer;
         answer.title       = QStringLiteral("Foundation");
-        answer.author      = QStringLiteral("Somebody Else");
+        answer.author      = QStringLiteral("Isaac Asimov");
         answer.coverUrl    = QStringLiteral("https://example.invalid/cover.jpg");
         answer.description = QStringLiteral("A blurb.");
+        answer.year        = 1951;
 
         Book told;                                   // the file said everything
         told.key = QStringLiteral("t"); told.title = QStringLiteral("Foundation");
         told.author  = QStringLiteral("Isaac Asimov");
         told.summary = QStringLiteral("The Empire is falling.");
+        told.year    = 1951;
+        CHECK(BookLibrary::fillConfidence(told, answer) >= BookLibrary::kFillAcceptThreshold);
         const BookLibrary::Fill keptNothing = BookLibrary::acceptedFill(told, /*hasCover*/ true, answer);
         CHECK(keptNothing.isEmpty());                // NOT ONE FIELD of the answer may be used
         CHECK(keptNothing.author.isEmpty());
         CHECK(keptNothing.coverUrl.isEmpty());
         CHECK(keptNothing.description.isEmpty());
 
-        Book blank;                                  // the file said nothing but its own name
+        Book blank;                                  // the file said nothing but its own name and its year
         blank.key = QStringLiteral("b"); blank.title = QStringLiteral("Foundation");
+        blank.year = 1951;
         const BookLibrary::Fill keptAll = BookLibrary::acceptedFill(blank, /*hasCover*/ false, answer);
         CHECK(keptAll.author == answer.author);
         CHECK(keptAll.coverUrl == answer.coverUrl);
@@ -1594,6 +1602,147 @@ int main(int argc, char** argv)
         BookLibrary::Fill whitespace;
         whitespace.author = QStringLiteral("   ");
         CHECK(BookLibrary::acceptedFill(blank, false, whitespace).isEmpty());
+    }
+
+    // ---- §17: A SCORED MATCH, NOT A TITLE COMPARISON (issue #294) ---------------------------------------
+    // #134's title gate was necessary and is not sufficient: it rejects an INVENTION, because a catalogue
+    // asked about a book it does not hold answers with a book called something else. It cannot separate two
+    // REAL books that share a name, and the first answer wins. #198 solved this shape for audiobooks with a
+    // scored match and an explicit reject threshold; this is the same shape, over the fields a book actually
+    // has — the title (exactly, and how distinctive it is), the author, the publication year and the length.
+    {
+        // (a) THE FOUR INVENTIONS #134's LIVE RUN CAUGHT are still refused, and by the same term that caught
+        //     them: a title that does not corroborate scores ZERO, which no other field can lift over the
+        //     threshold. Only the first pair is recorded verbatim in the repository (the fixture "Alpha
+        //     Chronicle" answered with "The Long Afternoon of Earth"); the other three are the same shape —
+        //     an invented fixture title, a real and unrelated book back — and each is checked WITH a full
+        //     answer behind it, author and cover and blurb, which is exactly what would have been written
+        //     under somebody's scan.
+        struct Invention { const char* fixture; const char* answered; const char* by; };
+        const Invention inventions[] = {
+            { "Alpha Chronicle",        "The Long Afternoon of Earth", "Brian Aldiss"    },
+            { "The Bracken Inheritance","The Blackwater Lightship",    "Colm Toibin"     },
+            { "Nine Hours to Rama Bay", "Nine Coaches Waiting",        "Mary Stewart"    },
+            { "Winterhold Almanac",     "The Winter of Our Discontent","John Steinbeck"  },
+        };
+        for (const Invention& inv : inventions)
+        {
+            Book scanned;
+            scanned.key = QString::fromLatin1(inv.fixture);
+            scanned.title = QString::fromLatin1(inv.fixture);
+            BookLibrary::Fill wrong;
+            wrong.title       = QString::fromLatin1(inv.answered);
+            wrong.author      = QString::fromLatin1(inv.by);
+            wrong.coverUrl    = QStringLiteral("https://example.invalid/wrong.jpg");
+            wrong.description = QStringLiteral("A real blurb about a different book.");
+            wrong.year        = 1961;
+            wrong.pageCount   = 190;
+            CHECK(BookLibrary::fillConfidence(scanned, wrong) == 0);
+            CHECK(BookLibrary::acceptedFill(scanned, false, wrong).isEmpty());
+        }
+
+        // (b) THE CASE #294 IS ABOUT: two real books that share a name. The title is identical, so the old
+        //     gate admitted the first answer whole — and the author says they are different books.
+        Book foundation;
+        foundation.key = QStringLiteral("f1");
+        foundation.title = QStringLiteral("Foundation");
+        foundation.author = QStringLiteral("Isaac Asimov");
+        BookLibrary::Fill otherFoundation;
+        otherFoundation.title  = QStringLiteral("Foundation");
+        otherFoundation.author = QStringLiteral("Mercedes Lackey");
+        otherFoundation.coverUrl = QStringLiteral("https://example.invalid/lackey.jpg");
+        CHECK(BookLibrary::titleCorroborates(foundation.title, otherFoundation.title));  // the OLD gate says yes
+        CHECK(BookLibrary::fillConfidence(foundation, otherFoundation) < BookLibrary::kFillAcceptThreshold);
+        CHECK(BookLibrary::acceptedFill(foundation, /*hasCover*/ false, otherFoundation).isEmpty());
+        // ...and the RIGHT answer for the same book is applied, which is the half that makes the gate worth
+        // having rather than merely safe.
+        BookLibrary::Fill rightFoundation = otherFoundation;
+        rightFoundation.author = QStringLiteral("Isaac Asimov");
+        CHECK(BookLibrary::acceptedFill(foundation, /*hasCover*/ false, rightFoundation).coverUrl
+              == rightFoundation.coverUrl);
+
+        // (c) THE YEAR SETTLES IT when the file names no author — the untagged population this feature
+        //     serves. Same title, forty years apart: two books.
+        Book gift;
+        gift.key = QStringLiteral("g"); gift.title = QStringLiteral("The Gift"); gift.year = 1980;
+        BookLibrary::Fill wrongGift;
+        wrongGift.title = QStringLiteral("The Gift"); wrongGift.year = 2019;
+        wrongGift.author = QStringLiteral("Somebody Else");
+        wrongGift.coverUrl = QStringLiteral("https://example.invalid/gift.jpg");
+        CHECK(BookLibrary::fillConfidence(gift, wrongGift) < BookLibrary::kFillAcceptThreshold);
+        CHECK(BookLibrary::acceptedFill(gift, false, wrongGift).isEmpty());
+        BookLibrary::Fill rightGift = wrongGift;
+        rightGift.year = 1980;
+        CHECK(BookLibrary::acceptedFill(gift, false, rightGift).coverUrl == rightGift.coverUrl);
+        // A YEAR'S SLACK, because an EPUB stamps the edition it was made from and a catalogue answers with
+        // first publication. One year is a printing; forty is a different book.
+        BookLibrary::Fill nearGift = wrongGift;
+        nearGift.year = 1981;
+        CHECK(BookLibrary::fillConfidence(gift, nearGift) < BookLibrary::fillConfidence(gift, rightGift));
+
+        // (d) A SHORT TITLE ALONE IS NOT ENOUGH — the whole of #294 in one assertion. Nothing corroborates,
+        //     so NOTHING is applied: not the author, not the cover, not the blurb. Partial application of a
+        //     half-match is the failure this refuses.
+        Book bare;
+        bare.key = QStringLiteral("bare"); bare.title = QStringLiteral("Bluebird");
+        BookLibrary::Fill guess;
+        guess.title = QStringLiteral("Bluebird");
+        guess.author = QStringLiteral("Somebody Else");
+        guess.coverUrl = QStringLiteral("https://example.invalid/bluebird.jpg");
+        guess.description = QStringLiteral("A blurb about one of the Bluebirds.");
+        CHECK(BookLibrary::fillConfidence(bare, guess) < BookLibrary::kFillAcceptThreshold);
+        const BookLibrary::Fill nothing = BookLibrary::acceptedFill(bare, false, guess);
+        CHECK(nothing.isEmpty());
+        CHECK(nothing.author.isEmpty() && nothing.coverUrl.isEmpty() && nothing.description.isEmpty());
+
+        // (e) A DISTINCTIVE TITLE IS ITS OWN CORROBORATION. A catalogue does not produce an exact five-word
+        //     match for a title it does not hold — that is what the live run showed — so an untagged file
+        //     with a long, exact title is filled, and the feature stays alive for the scans it exists for.
+        Book distinct;
+        distinct.key = QStringLiteral("d");
+        distinct.title = QStringLiteral("The Left Hand of Darkness");
+        BookLibrary::Fill good;
+        good.title = QStringLiteral("The Left Hand of Darkness");
+        good.author = QStringLiteral("Ursula K. Le Guin");
+        good.coverUrl = QStringLiteral("https://example.invalid/lhod.jpg");
+        CHECK(BookLibrary::fillConfidence(distinct, good) >= BookLibrary::kFillAcceptThreshold);
+        CHECK(BookLibrary::acceptedFill(distinct, false, good).author == good.author);
+        // ...but a PREFIX of a distinctive title is not the same evidence as the title: "The Left Hand of
+        // Darkness" against "The Left Hand of Darkness and Other Stories" is as likely to be a different
+        // volume, so it needs a second field before anything is applied.
+        BookLibrary::Fill nearby = good;
+        nearby.title = QStringLiteral("The Left Hand of Darkness and Other Stories");
+        CHECK(BookLibrary::fillConfidence(distinct, nearby) < BookLibrary::kFillAcceptThreshold);
+        nearby.author = QStringLiteral("Ursula K. Le Guin");
+        Book distinctAuthored = distinct;
+        distinctAuthored.author = QStringLiteral("Ursula K. Le Guin");
+        CHECK(BookLibrary::fillConfidence(distinctAuthored, nearby) >= BookLibrary::kFillAcceptThreshold);
+
+        // (f) THE PAGE COUNT IS A NUDGE AND NEVER A PENALTY: this app's count is chapters for an EPUB and
+        //     page images for a comic, so a disagreement means two units far more often than two books.
+        Book paged = distinct;
+        paged.pageCount = 300;
+        BookLibrary::Fill agrees = good, disagrees = good;
+        agrees.pageCount = 310; disagrees.pageCount = 22;
+        CHECK(BookLibrary::fillConfidence(paged, agrees) > BookLibrary::fillConfidence(paged, disagrees));
+        CHECK(BookLibrary::fillConfidence(paged, disagrees) == BookLibrary::fillConfidence(distinct, good));
+        // ...and below kComparablePages our number is a chapter list, not a length: it contributes nothing
+        // either way rather than agreeing by coincidence.
+        Book chapters = distinct;
+        chapters.pageCount = 12;
+        BookLibrary::Fill twelve = good;
+        twelve.pageCount = 12;
+        CHECK(BookLibrary::fillConfidence(chapters, twelve) == BookLibrary::fillConfidence(distinct, good));
+
+        // (g) THE SCORE IS BOUNDED and an empty answer is worth nothing, both of which the threshold
+        //     comparison relies on.
+        CHECK(BookLibrary::fillConfidence(distinct, BookLibrary::Fill{}) == 0);
+        Book everything = distinctAuthored;
+        everything.year = 1969; everything.pageCount = 300;
+        BookLibrary::Fill perfect = good;
+        perfect.year = 1969; perfect.pageCount = 300;
+        const int best = BookLibrary::fillConfidence(everything, perfect);
+        CHECK(best <= 100 && best >= BookLibrary::kFillAcceptThreshold);
     }
 
     QDir(base).removeRecursively();
