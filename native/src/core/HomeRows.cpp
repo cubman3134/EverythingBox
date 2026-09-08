@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "ProfileStore.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
@@ -34,7 +35,10 @@ void fireChanged() { if (g_changeHook) g_changeHook(); }
 
 // The prefixed families. A rowId is either one of the bare ids below or "<family>:<value>".
 const char* const kBareIds[] = { "continue", "favorites", "downloads", "recents", "new", "requests" };
-const char* const kFamilies[] = { "trakt", "playlist", "preset", "category", "source" };
+// "jellyfin" is here because #83's shelf went into defaultShelfOrder() without ever being added to this
+// list, so the one build-wide "is this a rowId I know?" answer said NO about a shelf the classic home draws
+// every day -- and the editor's fallback label for an unknown id is "not on this device" (issue #314).
+const char* const kFamilies[] = { "trakt", "playlist", "preset", "category", "source", "jellyfin" };
 } // namespace
 
 namespace homerows
@@ -51,6 +55,49 @@ bool isKnownRowId(const QString& id)
     for (const char* f : kFamilies)
         if (fam == QLatin1String(f)) return true;
     return false;
+}
+
+// WHICH HOME DRAWS WHICH (issue #314). Read straight off the two producers, and it is a table rather than a
+// guess because both ends of it are in one file each:
+//
+//   * the CLASSIC home -- HomeView::renderRecents. It walks defaultShelfOrder() for the built-in shelves and
+//     the stored list for the opt-in ones (isOptInShelf), and every id below is one of its pushShelf calls.
+//   * the THEMED home  -- HomeView::categoryItems() and HomeView::systemItems(), the two lists MainWindow's
+//     showThemedXmb / showThemedHome hand the QML. Both run the row list through applyHomeRowList, and the
+//     only ids either of them can produce are "category:<key>" and "source:<navKey>".
+//
+// There is deliberately no third answer. A shelf of forty recently-played items has nowhere to sit on a home
+// whose rows ARE the catalogues, and a catalogue tile is not a shelf; giving either family a producer on the
+// other home is a redesign of one of the two homes, not a missing case here. What this function buys is that
+// the editor can SAY so -- see layoutNote.
+int layoutsFor(const QString& rowId)
+{
+    if (rowId.isEmpty()) return NoLayout;
+    // The classic home's shelves. Built-in and opt-in alike: the difference between those two is whether the
+    // row appears without being asked for, not which home draws it.
+    if (rowId == QLatin1String("continue") || rowId == QLatin1String("jellyfin:continue")
+        || rowId == QLatin1String("new") || rowId == QLatin1String("trakt:calendar")
+        || rowId == QLatin1String("favorites") || rowId == QLatin1String("requests")
+        || rowId == QLatin1String("downloads")
+        || rowId.startsWith(QLatin1String("playlist:")) || rowId.startsWith(QLatin1String("preset:")))
+        return ClassicHome;
+    // The themed home's rows.
+    if (rowId.startsWith(QLatin1String("category:")) || rowId.startsWith(QLatin1String("source:")))
+        return ThemedHome;
+    // "recents", "trakt:missed", and every id this build has never heard of. Accepted vocabulary, kept in the
+    // store, skipped at render -- and given no note by layoutNote, because the editor's "not on this device"
+    // is the truer sentence for a deleted preset or a peer device's row.
+    return NoLayout;
+}
+
+QString layoutNote(const QString& rowId, bool themedHomeActive)
+{
+    const int l = layoutsFor(rowId);
+    if (l == NoLayout) return QString();
+    const int here = themedHomeActive ? int(ThemedHome) : int(ClassicHome);
+    if (l & here) return QString();   // it draws here: say nothing
+    return (l & ThemedHome) ? QCoreApplication::translate("homerows", "only on the themed home")
+                            : QCoreApplication::translate("homerows", "only on the classic home");
 }
 
 const QStringList& defaultShelfOrder()

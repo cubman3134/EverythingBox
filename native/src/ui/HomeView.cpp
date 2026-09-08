@@ -2035,6 +2035,11 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
 
     // The classic home's built-in shelves, in the order it produces them.
     out.push_back({ QStringLiteral("continue"), tr("Continue watching"), true });
+    // #83's server shelf. It has been in homerows::defaultShelfOrder() since that issue but was never in this
+    // catalogue, so the editor -- which labels an id it cannot find here as "not on this device" -- said that
+    // about a shelf the classic home draws every day, and "Add row..." could not offer it back once removed
+    // (issue #314). Offered whether or not a server is connected, exactly like the empty Downloads row below.
+    out.push_back({ QStringLiteral("jellyfin:continue"), tr("Continue watching (media server)"), true });
     out.push_back({ QStringLiteral("new"), tr("New"), true });
     out.push_back({ QStringLiteral("trakt:calendar"), tr("Airing Soon"), true });
     out.push_back({ QStringLiteral("favorites"), tr("★ Favorites"), true });

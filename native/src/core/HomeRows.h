@@ -23,6 +23,7 @@
 // next sync, which is the one outcome a synced list must never produce.
 //
 //   continue            the recently-played shelf (this app's Continue Watching: RecentStore, with resume %)
+//   jellyfin:continue   what a connected media server says this profile is part-way through (#83)
 //   favorites           the ★ Favorites shelf
 //   downloads           the fully-downloaded items shelf
 //   new                 "New"           (#155): followed series' unseen children, UNIONED with #25's rows
@@ -37,6 +38,15 @@
 //                       accepted vocabulary with no producer in this build — kept and skipped (see above).
 //                       "trakt:missed" HAD one until #155: the New shelf absorbed those rows, so a stored
 //                       list that still names it keeps it and skips it like any other unrecognised id.
+//
+// WHICH HOME DRAWS WHICH (issue #314). The list above spans BOTH layouts, and almost every family belongs to
+// exactly one of them. That is by construction rather than by oversight: the classic home is a vertical list
+// of SHELVES, the themed home is a grid/cross whose rows ARE the catalogues, and neither shape can hold the
+// other's rows without turning into the other home. `layoutsFor()` below is that table written down -- the
+// classic home draws continue / jellyfin:continue / new / trakt:calendar / favorites / requests / downloads
+// / playlist: / preset:, the themed home draws category: / source:, and recents / trakt:missed are drawn by
+// neither. Nothing in the planner reads it; it exists so the EDITOR can say where a row will appear, rather
+// than accepting a row that then silently draws nothing on the layout the user is actually looking at.
 //
 // CAP: the maximum number of ITEMS the row may show; 0 means "no cap", which is what today does. A row whose
 // producer yields a single tile (category:/source:) stores a cap like any other and ignores it — the editor
@@ -128,6 +138,24 @@ namespace homerows
     // unknown id is skipped because no surface offers it, which is the same answer without a second list to
     // keep in step). The editor uses it to label a stale entry.
     bool isKnownRowId(const QString& id);
+
+    // ---- which home draws a row (issue #314) ----------------------------------------------------------------
+    // A bitmask of the homes that have a PRODUCER for `rowId` in this build. `NoLayout` covers both halves of
+    // "nothing draws this": the accepted-but-producerless ids (recents, trakt:missed) and anything this build
+    // has never heard of -- the editor has a better sentence for those two ("not on this device"), so it asks
+    // this question second.
+    //
+    // INFORMATIONAL, exactly like isKnownRowId, and for the same reason: plan() must not gate on it. A row
+    // this home cannot draw is KEPT in the stored list and skipped at render, because a device that pruned
+    // what it could not draw would erase a peer's row on the next sync -- the one outcome a synced list must
+    // never produce (see the top of this file). What this adds is honesty in the editor, not pruning.
+    enum Layouts { NoLayout = 0x0, ClassicHome = 0x1, ThemedHome = 0x2, BothHomes = 0x3 };
+    int layoutsFor(const QString& rowId);
+
+    // The editor's note for `rowId` on the home the user is looking at RIGHT NOW: EMPTY when the row draws
+    // here (there is nothing to warn about), otherwise the short phrase naming the home that does draw it. An
+    // id no home in this build produces gets no note either -- see above.
+    QString layoutNote(const QString& rowId, bool themedHomeActive);
 }
 
 // The per-profile store. Empty list == the default layout; the key is absent until the user edits.
