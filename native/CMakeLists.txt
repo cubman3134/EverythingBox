@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.211 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.212 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -841,6 +841,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Pad2KeyStore.cpp src/core/Pad2KeyStore.h               # per-game pad-to-keyboard enable + profile, synced (issue #105)
         src/input/Pad2KeyRuntime.cpp src/input/Pad2KeyRuntime.h         # SendInput keystroke injector for keyboard-only PC games (issue #105)
         src/core/ControllerSeats.h                                      # pure multi-seat controller model + per-emulator player-N INI mapping (issue #104, header-only)
+        src/core/ControllerWrite.h                                      # the per-emulator "manage controllers" switch + the ONE object every controller-config write goes through (issue #104, header-only)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
@@ -1585,10 +1586,12 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_deviceprofile PRIVATE Qt6::Core)
 
     # Multi-seat controller propagation (issue #104): the pure seat model + per-emulator player-N INI mapping
-    # (src/core/ControllerSeats.h, header-only). QtCore-only — no SDL, no disk, no live emulator: the seat
-    # assignment and each player's config edits are asserted against hand-authored shipped-P1 fixtures — so it
-    # links lean under offscreen QPA. Pins that seat 0 reproduces today's Player-1 block byte-for-byte.
-    add_executable(probe_seats tools/probe_seats.cpp src/core/ControllerSeats.h)
+    # (src/core/ControllerSeats.h) and the management switch + write choke point (src/core/ControllerWrite.h),
+    # both header-only. QtCore-only — no SDL, no live emulator: seat assignment, each player's config edits,
+    # the hotkey table and the unrecognized-pad rule are asserted against hand-authored shipped-P1 fixtures, and
+    # the four writers are driven against a QTemporaryDir — so it links lean under offscreen QPA. Pins that
+    # seat 0 reproduces today's Player-1 block byte-for-byte, on disk as well as in the model.
+    add_executable(probe_seats tools/probe_seats.cpp src/core/ControllerSeats.h src/core/ControllerWrite.h)
     target_include_directories(probe_seats PRIVATE src src/core)
     target_link_libraries(probe_seats PRIVATE Qt6::Core)
 

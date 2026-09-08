@@ -44,6 +44,15 @@ public:
     static bool launchFullscreen();          // launch emulators full screen (default true)
     static void setLaunchFullscreen(bool on);
 
+    // The management switch (issue #104): does EverythingBox set this emulator's controllers up, or does the
+    // user manage them themselves? DEFAULT TRUE — auto-setup is the feature — but when it is off, NOTHING in
+    // prepareControllerConfig writes input config for that emulator: no seats, no hotkeys, no migration. Enforced
+    // by ControllerSeats::Writer (every writer is one of its methods and refuses when this is off), not by a
+    // check at one call site. Per emulator, because the person with a hand-built Dolphin profile usually still
+    // wants the other five set up for them.
+    static bool manageControllers(const QString& emulatorId);
+    static void setManageControllers(const QString& emulatorId, bool on);
+
     // ensure installed, then boot + monitor. `extraArgs` (issue #51) are the game's per-game extra CLI args,
     // appended to the emulator's resolved argsTemplate at launch; empty => today's args exactly. `gfx` (issue
     // #103) is the resolved graphics quartet (per-game override already layered over the per-system default by

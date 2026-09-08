@@ -36,6 +36,7 @@
 #include "BiosCatalog.h"
 #include "LaunchOptionsStore.h"   // appendExtraArgs — the per-game extra-args lever (issue #51)
 #include "ControllerSeats.h"      // pure multi-seat controller model + per-emulator player-N INI mapping (issue #104)
+#include "ControllerWrite.h"      // the management switch + the ONE object every controller-config write goes through
 #include "AresInput.h"            // pure SDL-mapping -> ares settings.bml translation (ares ships unmapped)
 #include "Settings.h"             // ps3AutoUpdate() — gates ONLY the pre-boot PS3 *game* update; the firmware install is ungated
 #include "core/ps3/Ps3UpdateCoordinator.h" // orchestrates check→install for a PS3 game before RPCS3 boots
@@ -69,6 +70,10 @@ QString EmulatorManager::discToolName() { return QStringLiteral("EverythingBoxDi
 QString EmulatorManager::seedDiscTool(const QString&) { return QString(); }
 bool EmulatorManager::launchFullscreen() { return true; }
 void EmulatorManager::setLaunchFullscreen(bool) {}
+// No standalone emulator exists here to manage controllers FOR, so the switch answers the desktop default and
+// the setter is a no-op: callers (the Emulators settings panel) link and read the same value unchanged.
+bool EmulatorManager::manageControllers(const QString&) { return true; }
+void EmulatorManager::setManageControllers(const QString&, bool) {}
 void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&, const EmuGfx::Settings&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::install(const ExternalEmulator&)
@@ -134,6 +139,24 @@ void EmulatorManager::setLaunchFullscreen(bool on)
 {
     QSettings s = appIni();
     s.setValue(QStringLiteral("emulators/fullscreen"), on);
+    s.sync();
+}
+
+// The management switch (issue #104), per emulator id. Defaults to TRUE: setting controllers up is the feature,
+// and a fresh install has no hand-built profile to protect. Turning it off is a promise, and the promise is kept
+// by ControllerSeats::Writer — see prepareControllerConfig.
+bool EmulatorManager::manageControllers(const QString& emulatorId)
+{
+    if (emulatorId.isEmpty()) return true;
+    QSettings s = appIni();
+    return s.value(QStringLiteral("emulators/managecontrollers/") + emulatorId, true).toBool();
+}
+
+void EmulatorManager::setManageControllers(const QString& emulatorId, bool on)
+{
+    if (emulatorId.isEmpty()) return;
+    QSettings s = appIni();
+    s.setValue(QStringLiteral("emulators/managecontrollers/") + emulatorId, on);
     s.sync();
 }
 
@@ -911,15 +934,27 @@ void EmulatorManager::prepareGraphicsSettings(const QString& binDir)
 // session — carrying each pad's connection index, joystick GUID (reserved for future GUID pinning) and name.
 // Empty when SDL isn't compiled in or no controller is attached; the caller then falls back to seeding P1 only,
 // exactly as before this issue. This is the one non-headlessly-testable seam: it needs live SDL + real pads.
-static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
+//
+// BRAND-MATRIX HONESTY (issue #104 increment 2): the loop below only ever SEATED devices SDL has a gamepad
+// mapping for, and silently dropped the rest — so a pad SDL cannot map looked, from the couch, exactly like a
+// pad that was configured and then didn't work. It now returns BOTH lists: the seated pads, and the attached
+// devices SDL has no mapping for, which the caller names to the user instead of guessing a config for them.
+struct EnumeratedPads
 {
-    QVector<ControllerSeats::PadInfo> pads;
+    QVector<ControllerSeats::PadInfo> seated;   // SDL has a gamepad mapping: safe to write a config for
+    QVector<ControllerSeats::PadInfo> unmapped; // attached, but SDL cannot say which button is which
+};
+
+static EnumeratedPads enumerateConnectedPadsEx()
+{
+    EnumeratedPads out;
+    QVector<ControllerSeats::PadInfo>& pads = out.seated;
 #ifdef EVERYTHINGBOX_HAVE_SDL
     const bool alreadyInit = SDL_WasInit(SDL_INIT_GAMECONTROLLER) != 0;
     if (!alreadyInit)
     {
         SDL_SetMainReady();
-        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return pads;
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return out;
         if (char* base = SDL_GetBasePath())
         {
             const std::string db = std::string(base) + "gamecontrollerdb.txt";
@@ -929,14 +964,29 @@ static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
     }
     int seatIdx = 0;
     const int n = SDL_NumJoysticks();
-    for (int i = 0; i < n && seatIdx < ControllerSeats::kMaxSeats; ++i)
+    for (int i = 0; i < n; ++i)
     {
-        if (!SDL_IsGameController(i)) continue; // only real game controllers take a seat (skips HID-keyboard phantoms)
         ControllerSeats::PadInfo p;
-        p.index = seatIdx++;
         char guid[33] = {0};
         SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
         p.guid = QString::fromLatin1(guid);
+
+        // A device SDL has NO gamepad mapping for is not a pad we can configure: SDL_IsGameController is false
+        // for exactly the devices gamecontrollerdb.txt (and SDL's built-ins) do not cover. It takes no seat — we
+        // would be inventing which button is its A — and it is reported by name to the user instead. The joystick
+        // name, not the controller name, because the controller API has nothing to say about a device it cannot
+        // map. (This also catches the non-pad HID phantoms a machine reports; naming them beats a wrong config.)
+        if (!SDL_IsGameController(i))
+        {
+            const char* jn = SDL_JoystickNameForIndex(i);
+            p.name = jn ? QString::fromUtf8(jn) : QString();
+            p.index = -1;                       // unseated
+            out.unmapped.push_back(p);          // sdlMapping stays empty -> ControllerSeats::padIsUnrecognized
+            continue;
+        }
+        if (seatIdx >= ControllerSeats::kMaxSeats) continue;   // couch is full: seats 0..3 only
+
+        p.index = seatIdx++;
         const char* nm = SDL_GameControllerNameForIndex(i);
         p.name = nm ? QString::fromUtf8(nm) : QString();
         // The pad's SDL mapping string is what AresInput translates into ares bindings (ares needs the RAW
@@ -952,7 +1002,7 @@ static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
     }
     if (!alreadyInit) SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER); // leave SDL exactly as we found it
 #endif
-    return pads;
+    return out;
 }
 
 // Migrate EB's OWN prior Dolphin controller seed (the pre-SDL XInput block) up to the new SDL profile, so an
@@ -961,7 +1011,10 @@ static QVector<ControllerSeats::PadInfo> enumerateConnectedPads()
 // For each seat we're about to seed, if GCPadNew.ini's section is BYTE-IDENTICAL to EB's prior XInput seed we
 // replace it with the SDL body; a section that differs by any byte (a user's hand-edited mapping, or one Dolphin
 // itself rewrote) is left untouched. The file is only rewritten when a section actually changed.
-static void migrateDolphinGcPadIni(const QString& path, const QVector<ControllerSeats::Seat>& seats)
+// The rewrite goes through the Writer (issue #104 increment 2) so it obeys the management switch and snapshots
+// GCPadNew.ini before the first change, like every other write this feature makes.
+static void migrateDolphinGcPadIni(ControllerSeats::Writer& w, const QString& path,
+                                   const QVector<ControllerSeats::Seat>& seats)
 {
     QByteArray contents;
     { QFile r(path); if (!r.open(QIODevice::ReadOnly)) return; contents = r.readAll(); r.close(); }
@@ -975,8 +1028,7 @@ static void migrateDolphinGcPadIni(const QString& path, const QVector<Controller
             ControllerSeats::dolphinGcPadBody(seat.index, seat.pad.name));
     }
     if (updated == contents) return; // no EB-seed section present -> leave the file exactly as found
-    QFile f(path);
-    if (f.open(QIODevice::WriteOnly)) { f.write(updated); f.close(); }
+    w.replaceContents(path, updated);
 }
 
 // Auto-map the players' controllers inside each standalone emulator so a game boots with working input — the
@@ -995,6 +1047,67 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
 {
     const QString& id = em_.id;
 
+    // ---- THE MANAGEMENT SWITCH (issue #104 increment 2) -----------------------------------------------------
+    // Every input-config write below goes through this one object, constructed with the per-emulator choice. Set
+    // to "the emulator itself" it refuses all of them — seats, hotkeys, the Dolphin migration, ares, melonDS —
+    // because somebody's hand-built profile is not ours to improve. The early return is only a shortcut (it also
+    // skips enumerating pads for an emulator we are not going to configure); the INVARIANT is that there is no
+    // writer here that is not a ControllerSeats::Writer method, and every one of those refuses on its own.
+    ControllerSeats::Writer w(id, manageControllers(id));
+    if (!w.manages())
+    {
+        qInfo("EmulatorManager: %s — controllers are managed by the emulator, writing no input config",
+              qUtf8Printable(id));
+        return;
+    }
+
+    // The live pads, enumerated ONCE per launch and shared by every branch below.
+    const EnumeratedPads live = enumerateConnectedPadsEx();
+    // What we actually saw, in the log: which physical pad took which seat, and what SDL could not map. The one
+    // seam that cannot be tested headlessly is "what is plugged in right now", so it is at least recorded.
+    for (const ControllerSeats::PadInfo& p : live.seated)
+        qInfo("EmulatorManager: seat %d = \"%s\" (guid %s)", p.index,
+              qUtf8Printable(p.name), qUtf8Printable(p.guid));
+    for (const ControllerSeats::PadInfo& p : live.unmapped)
+        qInfo("EmulatorManager: unmapped device \"%s\" (guid %s) — no seat, no config",
+              qUtf8Printable(p.name), qUtf8Printable(p.guid));
+
+    // ---- BRAND-MATRIX HONESTY: say which pad we could not map, at the moment it matters --------------------
+    // A pad SDL has no mapping for gets NO config (ControllerSeats::controllerEdits refuses it), and the user is
+    // told in words rather than left with a config that is silently wrong for their pad. This rides the ordinary
+    // launch status stream, so it lands on the wait page the user is already looking at while the game starts.
+    // Said ONCE per device, not once per launch: see ControllerSeats::unreportedPads for why a permanently
+    // attached unmappable device must not carry this message into every game the user ever starts.
+    {
+        QSettings ini = appIni();
+        const QStringList reported =
+            ini.value(QStringLiteral("emulators/unmappedreported")).toStringList();
+        const QVector<ControllerSeats::PadInfo> fresh =
+            ControllerSeats::unreportedPads(live.unmapped, reported);
+        if (!fresh.isEmpty())
+        {
+            QStringList names, guids = reported;
+            for (const ControllerSeats::PadInfo& p : fresh)
+            {
+                names << (p.name.isEmpty() ? p.guid : p.name);
+                guids << p.guid;
+            }
+            const QString msg = ControllerSeats::unrecognizedPadMessage(names, em_.displayName);
+            qWarning("EmulatorManager: %s", qUtf8Printable(msg));
+            emit status(msg, -1);
+            ini.setValue(QStringLiteral("emulators/unmappedreported"), guids);
+            ini.sync();
+        }
+    }
+
+    // ---- HOTKEYS: the emulator's own save state / load state / screenshot, on the in-process tier's keys ----
+    // F2 save, F4 load, F12 screenshot — the same three RetroView reserves — so the muscle memory transfers
+    // between the in-process and standalone tiers. Key-level add-if-absent: a binding the emulator or the user
+    // already has is never replaced, and an emulator whose config cannot take these safely (Dolphin's
+    // all-or-nothing Hotkeys.ini, Cemu's fixed hotkeys) yields no edits at all. See ControllerSeats::hotkeyEdits.
+    for (const ControllerSeats::HotkeyEdit& h : ControllerSeats::hotkeyEdits(id))
+        w.addIniKeyIfAbsent(binDir + QLatin1Char('/') + h.file, h.section, h.key, h.value);
+
     // Only these four emulators are auto-seated; others (melonDS below) keep their own handling. Cemu and Dolphin
     // use Windows XInput device strings, so they are seated only on Windows (as before).
     bool multiSeat = (id == QStringLiteral("pcsx2") || id == QStringLiteral("duckstation"));
@@ -1003,14 +1116,13 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
 #endif
     if (multiSeat)
     {
-        QVector<ControllerSeats::Seat> seats =
-            ControllerSeats::assignSeats(enumerateConnectedPads());
+        QVector<ControllerSeats::Seat> seats = ControllerSeats::assignSeats(live.seated);
         if (seats.isEmpty()) seats.push_back(ControllerSeats::Seat{ 0, {} }); // no pad -> seed P1, as before
 
         // Update EB's own prior XInput seed to the SDL profile on an already-deployed install (append-if-absent
         // can't rewrite a section that is already present). Only touches sections byte-identical to EB's old seed.
         if (id == QStringLiteral("dolphin"))
-            migrateDolphinGcPadIni(binDir + QStringLiteral("/User/Config/GCPadNew.ini"), seats);
+            migrateDolphinGcPadIni(w, binDir + QStringLiteral("/User/Config/GCPadNew.ini"), seats);
 
         const QString appdata = (id == QStringLiteral("cemu")) ? qEnvironmentVariable("APPDATA") : QString();
         for (const ControllerSeats::Seat& seat : seats)
@@ -1018,12 +1130,12 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
             {
                 if (e.marker.isEmpty())
                 {
-                    seedFileIfAbsent(binDir + QLatin1Char('/') + e.file, e.body);          // whole-file seed (Cemu XML)
+                    w.seedIfAbsent(binDir + QLatin1Char('/') + e.file, e.body);            // whole-file seed (Cemu XML)
                     if (!appdata.isEmpty())                                                 // Cemu also reads %APPDATA%\Cemu
-                        seedFileIfAbsent(appdata + QStringLiteral("/Cemu/") + e.file, e.body);
+                        w.seedIfAbsent(appdata + QStringLiteral("/Cemu/") + e.file, e.body);
                 }
                 else
-                    appendIniSectionIfAbsent(binDir + QLatin1Char('/') + e.file, e.marker.toUtf8(), e.body);
+                    w.appendSectionIfAbsent(binDir + QLatin1Char('/') + e.file, e.marker.toUtf8(), e.body);
             }
         return;
     }
@@ -1045,8 +1157,7 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
     if (id == QStringLiteral("ares"))
     {
 #ifdef Q_OS_WIN
-        const QVector<ControllerSeats::Seat> seats =
-            ControllerSeats::assignSeats(enumerateConnectedPads());
+        const QVector<ControllerSeats::Seat> seats = ControllerSeats::assignSeats(live.seated);
         const QByteArray body = AresInput::settingsBml(seats);
         if (body.isEmpty()) return;   // no pad, or none SDL has a mapping for — leave ares' own config alone
         const QString path = binDir + QStringLiteral("/settings.bml");   // Windows ares is portable: beside its exe
@@ -1071,11 +1182,7 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
         // block would be ignored on load and overwritten on its next save. mergeSettingsBml drops any
         // pre-existing VirtualPad block and appends ours, preserving every other setting ares wrote.
         const QByteArray merged = AresInput::mergeSettingsBml(existing, body);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        {
-            f.write(merged);
-            f.close();
-        }
+        w.replaceContents(path, merged);   // through the switch, and snapshots settings.bml before the change
 #endif
         return;
     }
@@ -1124,7 +1231,7 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
                         else if (sec == QLatin1String("[Instance0.Joystick]")) l = QStringLiteral("%1 = %2").arg(key).arg(m.joy);
                     }
             }
-            if (f.open(QIODevice::WriteOnly)) { f.write(lines.join(QLatin1Char('\n')).toUtf8()); f.close(); }
+            w.replaceContents(tomlPath, lines.join(QLatin1Char('\n')).toUtf8()); // switch + snapshot
         }
         else
         {
@@ -1134,7 +1241,7 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
             for (const M& m : kMap) t += QStringLiteral("%1 = %2\n").arg(QLatin1String(m.k)).arg(m.kb);
             t += QStringLiteral("\n[Instance0.Joystick]\n");
             for (const M& m : kMap) t += QStringLiteral("%1 = %2\n").arg(QLatin1String(m.k)).arg(m.joy);
-            seedFileIfAbsent(tomlPath, t.toUtf8());
+            w.seedIfAbsent(tomlPath, t.toUtf8());
         }
         return;
     }

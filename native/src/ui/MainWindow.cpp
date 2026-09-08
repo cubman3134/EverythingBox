@@ -7962,12 +7962,26 @@ void MainWindow::openEmulatorManager()
         // classic builder below (GS_TWINS).
         { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.deviceprofile");
           r.label = tr("Tuned for"); r.value = DeviceProfileDetect::active().displayName; r.enabled = false; rows << r; }
+        // What the per-emulator controller switch below promises, and where the undo lives (issue #104). A user
+        // who dislikes what we did to their input config must be able to get their file back without us, so say
+        // that the copy exists and what it is called. Twin in the classic builder below.
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.ctrlbackup");
+          r.label = tr("Before the first controller change");
+          r.value = tr("A copy of the emulator's own input config is kept beside it as <name>.eb-orig");
+          r.enabled = false; rows << r; }
 
         for (const ExternalEmulator& em : EmulatorRegistry::all())
         {
             const QString bin = EmulatorManager::resolveBinary(em);
             { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("emu.sep:") + em.id;
               r.label = em.displayName; rows << r; }
+            // The management switch (issue #104). ON = EverythingBox seats pads and binds hotkeys in this
+            // emulator's own config at launch. OFF = it writes NO input config for it at all, for the person
+            // whose hand-built profile must never be touched. Per emulator, and the classic builder below
+            // constructs the same checkbox against the same setter.
+            { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("emu.controllers:") + em.id;
+              r.label = tr("Let EverythingBox set up controllers");
+              r.checked = EmulatorManager::manageControllers(em.id); rows << r; }
             { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + em.id; r.label = tr("Status");
               r.value = bin.isEmpty() ? tr("Not installed.") : bin; rows << r; }
             // A user-defined emulator (#52) points at a binary the user already has, so it has NO install
@@ -8000,6 +8014,10 @@ void MainWindow::openEmulatorManager()
             }
             else if (id == QStringLiteral("emu.fullscreen")) {
                 EmulatorManager::setLaunchFullscreen(val == QStringLiteral("1"));
+            }
+            else if (id.startsWith(QStringLiteral("emu.controllers:"))) {   // issue #104 management switch
+                const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);   // emulator ids carry no colon
+                EmulatorManager::setManageControllers(emId, val == QStringLiteral("1"));
             }
             else if (id.startsWith(QStringLiteral("emu.install:"))) {
                 const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);   // emulator ids carry no colon
@@ -8086,12 +8104,31 @@ void MainWindow::openEmulatorManager()
         tuned->setWordWrap(true);
         v->addWidget(tuned);
 
+        // Twin of the themed emu.ctrlbackup Info row above (issue #104): where the undo lives, said once.
+        auto* ctrlBackup = new QLabel(tr("Before the first controller change: a copy of the emulator's own "
+                                         "input config is kept beside it as <name>.eb-orig"));
+        ctrlBackup->setStyleSheet(QStringLiteral("color:#bbb;font-size:13px;"));
+        ctrlBackup->setWordWrap(true);
+        v->addWidget(ctrlBackup);
+
         v->addSpacing(10);
         for (const ExternalEmulator& em : EmulatorRegistry::all())
         {
             auto* name = new QLabel(QStringLiteral("<b>%1</b>").arg(em.displayName));
             name->setStyleSheet(QStringLiteral("font-size:16px;"));
             v->addWidget(name);
+
+            // The management switch (issue #104), twin of the themed emu.controllers:<id> Toggle above — same
+            // setting, same setter, one write path. Off = EverythingBox writes NO input config for this
+            // emulator: not seats, not hotkeys, not the migration.
+            auto* mc = new QCheckBox(tr("Let EverythingBox set up controllers"));
+            mc->setChecked(EmulatorManager::manageControllers(em.id));
+            mc->setToolTip(tr("Off: EverythingBox never writes this emulator's controller or hotkey config, so "
+                              "a profile you built by hand stays exactly as you left it."));
+            const QString mcId = em.id;
+            connect(mc, &QCheckBox::toggled, this,
+                    [mcId](bool on) { EmulatorManager::setManageControllers(mcId, on); });
+            v->addWidget(mc);
 
             const QString bin = EmulatorManager::resolveBinary(em);
             auto* st = new QLabel(bin.isEmpty() ? tr("Not installed.") : tr("Installed: %1").arg(bin));
