@@ -1753,6 +1753,61 @@ else
 fi
 echo
 
+# Release-archive manifest (issue #319). release.yml packages a Windows zip and a Linux AppImage, and
+# until now nothing anywhere opened either one. #317 was exactly that bug one layer in -- a data file that
+# existed in the tree, was correct, and simply never travelled -- and the two packaging lines that fixed
+# it are STILL reviewed-and-never-tested, because that workflow runs only on a tag.
+#
+# Two things are gated here, and neither of them is "the archives are fine": this suite has no release
+# build and no archive to open. What it can hold is (1) that the checker can still be SHOWN TO FAIL --
+# --selftest builds a synthetic archive of each kind, proves the complete one passes, then removes one
+# thing at a time and requires the matching complaint, including the AppImage-only case where the file IS
+# in the image but not in the directory the binary looks in; and (2) that release.yml still RUNS it, in
+# both packaging jobs, BEFORE the steps that upload and attach. A checker nobody calls is the same defect
+# as no checker, and a checker nobody has watched fail is the same defect as a green-looking gate.
+echo "=== release archive manifest ==="
+VERIFYARC_PY="$HERE/verify-release-archive.py"
+VERIFYARC_YML="$HERE/../../.github/workflows/release.yml"
+if [ ! -f "$VERIFYARC_PY" ]; then
+  echo "FAIL: release archive manifest (verify-release-archive.py not found at $VERIFYARC_PY)"; fail=1
+elif [ ! -f "$VERIFYARC_YML" ]; then
+  echo "FAIL: release archive manifest (release.yml not found at $VERIFYARC_YML)"; fail=1
+elif ! "$PY" "$VERIFYARC_PY" --selftest; then
+  echo "FAIL: release archive manifest -- verify-release-archive.py can no longer be shown to fail on an"
+  echo "  archive with something missing from it. Until it can, a release could ship a hole past a green"
+  echo "  check, which is the whole of issue #319 with an extra step in it."
+  fail=1
+else
+  arc_bad=""
+  for arc_job in windows:windows linux:appimage; do
+    arc_name="${arc_job%%:*}"; arc_kind="${arc_job##*:}"
+    # The job's own block: from its "  <name>:" header to the next top-level job header. Comment lines
+    # ("  # ---- macOS ---") are not job headers, so they do not end the block.
+    arc_block="$(awk -v want="  $arc_name:" '
+      { sub(/\r$/, "") }
+      $0 == want { on = 1; n = 0; next }
+      on && /^  [a-z_-]+:$/ { on = 0 }
+      on { n++; print n "\t" $0 }' "$VERIFYARC_YML")"
+    arc_v="$(printf '%s\n' "$arc_block" | grep -n "verify-release-archive\.py --kind $arc_kind" | head -1 | cut -d: -f1)"
+    arc_a="$(printf '%s\n' "$arc_block" | grep -n 'softprops/action-gh-release\|upload-artifact' | head -1 | cut -d: -f1)"
+    if [ -z "$arc_v" ]; then
+      arc_bad="$arc_bad  the $arc_name job never runs verify-release-archive.py --kind $arc_kind"$'\n'
+    elif [ -n "$arc_a" ] && [ "$arc_v" -gt "$arc_a" ]; then
+      arc_bad="$arc_bad  the $arc_name job checks the archive only AFTER uploading/attaching it"$'\n'
+    fi
+  done
+  if [ -n "$arc_bad" ]; then
+    printf '%s' "$arc_bad"
+    echo "FAIL: release archive manifest -- release.yml does not read back what it packaged before it"
+    echo "  goes out, so whatever the packaging step forgets is what users download."
+    fail=1
+  else
+    echo "the checker fails on a missing file, and both packaging jobs run it before they publish"
+    echo "PASS: release archive manifest"
+  fi
+fi
+echo
+
 # uitest.py UTF-8 output gate (issue #36). The UI-test harness is how every UI change gets verified, and the
 # app's labels are full of non-ASCII: "▶ Play" on a detail view, "☁"/"＋"/"✎"/"✕"/"★" on the settings rows,
 # emoji profile avatars, em-dashes in theme names, and media titles in any language. When uitest.py's stdout is
