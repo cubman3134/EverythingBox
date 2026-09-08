@@ -5,6 +5,8 @@
 #include "../core/EmulationTarget.h"   // Unified Emulation Picker: engine-tagged run-targets + per-system resolution
 #include "LibretroCore.h"
 #include "../emu/RetroParkOptions.h"   // Task B3: RetroPark-backed systems' options via live harvest + descriptor cache
+#include "../core/CustomCores.h"        // issue #98: the user-tier custom-core registry
+#include "../core/CustomCoreInstall.h"  // issue #98: a file, inspected, copied in and registered
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -18,6 +20,10 @@
 #include <QMessageBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QGroupBox>
 #include <vector>
 
 namespace {
@@ -140,6 +146,15 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
         this);
     note->setWordWrap(true);
     v->addWidget(note);
+
+    // Issue #98, the classic twin of the themed panel's "Custom cores..." row. A core the user supplies shows
+    // up in the combos above (candidateCoresFor appends it after every catalogue core, so no default moves);
+    // THIS is where it is loaded, listed and removed. Without this button the escape hatch would exist on the
+    // themed layout only.
+    auto* customBtn = new QPushButton(tr("Custom cores..."), mainPage);
+    customBtn->setToolTip(tr("Run a libretro core EverythingBox doesn't ship - one you built or downloaded yourself."));
+    connect(customBtn, &QPushButton::clicked, this, &SettingsDialog::editCustomCores);
+    v->addWidget(customBtn, 0, Qt::AlignLeft);
 
     status_ = new QLabel(mainPage);
     status_->setWordWrap(true);
@@ -315,6 +330,186 @@ void SettingsDialog::editOptions(const QString& systemId)
     });
     connect(box, &QDialogButtonBox::rejected, this, leave);
     connect(back, &QPushButton::clicked, this, leave);
+
+    stack_->addWidget(page);
+    stack_->setCurrentWidget(page);
+}
+
+// ---- Issue #98: the classic custom-core page ------------------------------------------------------------
+// The same content as the themed panel, in the classic idiom: where the cores live, a button to load one, a
+// button to pick up anything dropped in that folder, and a group box per registered core with what it opens,
+// where its file is, a Run button when it needs no content, and Remove. A transient page pushed onto the same
+// stack the per-core options editor uses, so nothing here opens a window.
+// One place every custom-core message goes: the page's own line AND page 0's, so it is legible whether the
+// user stays on the custom-core page or backs out to the emulation list.
+void SettingsDialog::sayCustomCore(const QString& text)
+{
+    if (customStatus_) { customStatus_->setText(text); customStatus_->setVisible(!text.isEmpty()); }
+    if (status_)       { status_->setText(text);       status_->setVisible(!text.isEmpty()); }
+}
+
+void SettingsDialog::loadCustomCorePicked()
+{
+    const QString sfx = CustomCoreInstall::librarySuffix();
+    const QString file = QFileDialog::getOpenFileName(
+        this, tr("Choose a libretro core"), QString(),
+        tr("libretro cores (*%1);;All files (*)").arg(sfx));
+    if (file.isEmpty()) return;
+
+    CustomCore rec;
+    QString err;
+    if (!CustomCoreInstall::loadFromFile(file, &rec, &err))
+    {
+        sayCustomCore(err.isEmpty() ? tr("Couldn't load %1 as a core.").arg(QFileInfo(file).fileName()) : err);
+        return;
+    }
+    // The warranty, once. The themed builder fires the same pair through MainWindow::notify; the RULE lives in
+    // CustomCores (noticeDue / acknowledgeNotice), so the two surfaces cannot disagree about whether the user
+    // has already been told.
+    QStringList said;
+    if (CustomCores::noticeDue(CustomCores::registry()))
+    {
+        said << CustomCores::noticeText();
+        CustomCores::acknowledgeNotice();
+    }
+    if (!rec.needs.isEmpty()) said << rec.needs;          // advisory, never a refusal
+    if (said.isEmpty()) said << tr("Loaded %1.").arg(rec.name);
+    const QString message = said.join(QStringLiteral(" "));
+    editCustomCores();   // rebuild the page so the new core is listed (this recreates customStatus_)
+    sayCustomCore(message);
+}
+
+void SettingsDialog::editCustomCores()
+{
+    // Rebuilt in place: a load or a removal re-enters this function, and the transient page is replaced.
+    while (stack_->count() > 1)
+    {
+        QWidget* old = stack_->widget(1);
+        stack_->removeWidget(old);
+        old->deleteLater();
+    }
+
+    auto* page = new QWidget(stack_);
+    auto* outer = new QVBoxLayout(page);
+
+    auto* back = new QPushButton(tr("Back"), page);
+    outer->addWidget(back, 0, Qt::AlignLeft);
+
+    auto* intro = new QLabel(
+        tr("Cores you supply yourself. EverythingBox doesn't curate these: one can crash, misbehave or corrupt "
+           "a save, and that is between you and the core. A custom core never replaces the core we would have "
+           "chosen for you - pick it for a system above, or for a single game from that game's Emulation row."),
+        page);
+    intro->setWordWrap(true);
+    outer->addWidget(intro);
+
+    auto* folder = new QLabel(tr("Folder: %1").arg(QDir::toNativeSeparators(CustomCores::customDir())), page);
+    folder->setWordWrap(true);
+    folder->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    outer->addWidget(folder);
+
+    auto* buttons = new QHBoxLayout();
+    auto* loadBtn = new QPushButton(tr("Load a core file..."), page);
+    connect(loadBtn, &QPushButton::clicked, this, &SettingsDialog::loadCustomCorePicked);
+    buttons->addWidget(loadBtn);
+    auto* scanBtn = new QPushButton(tr("Pick up cores dropped in that folder"), page);
+    connect(scanBtn, &QPushButton::clicked, this, [this] {
+        const QStringList found = CustomCoreInstall::unregisteredInCustomDir();
+        if (found.isEmpty()) { sayCustomCore(tr("Nothing new in that folder.")); return; }
+        int ok = 0;
+        QString lastErr;
+        for (const QString& f : found)
+        {
+            QString err;
+            if (CustomCoreInstall::loadFromFile(f, nullptr, &err)) ++ok; else lastErr = err;
+        }
+        QString message;
+        if (ok > 0 && CustomCores::noticeDue(CustomCores::registry()))
+        {
+            message = CustomCores::noticeText();
+            CustomCores::acknowledgeNotice();
+        }
+        else
+            message = ok > 0 ? tr("Loaded %1 core(s).").arg(ok)
+                             : (lastErr.isEmpty() ? tr("Nothing in that folder loaded as a core.") : lastErr);
+        editCustomCores();
+        sayCustomCore(message);
+    });
+    buttons->addWidget(scanBtn);
+    buttons->addStretch(1);
+    outer->addLayout(buttons);
+
+    customStatus_ = new QLabel(page);
+    customStatus_->setWordWrap(true);
+    customStatus_->hide();
+    outer->addWidget(customStatus_);
+
+    auto* scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    auto* inner = new QWidget(scroll);
+    auto* list = new QVBoxLayout(inner);
+
+    const QList<CustomCore> cores = CustomCores::all();
+    if (cores.isEmpty())
+        list->addWidget(new QLabel(tr("No custom cores loaded."), inner));
+    for (const CustomCore& c : cores)
+    {
+        auto* box = new QGroupBox(c.version.isEmpty() ? c.name : (c.name + QStringLiteral(" ") + c.version), inner);
+        auto* bv = new QVBoxLayout(box);
+        auto* opens = new QLabel(
+            c.extensions.isEmpty()
+                ? (c.supportsNoGame ? tr("Opens: nothing - it runs on its own")
+                                    : tr("Opens: it doesn't say"))
+                : tr("Opens: .%1").arg(c.extensions.join(QStringLiteral(", ."))), box);
+        opens->setWordWrap(true);
+        bv->addWidget(opens);
+        auto* file = new QLabel(tr("File: %1").arg(QDir::toNativeSeparators(c.path)), box);
+        file->setWordWrap(true);
+        file->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        bv->addWidget(file);
+        if (!c.needs.isEmpty())
+        {
+            auto* needs = new QLabel(c.needs, box);
+            needs->setWordWrap(true);
+            bv->addWidget(needs);
+        }
+        auto* row = new QHBoxLayout();
+        // A supports_no_game core has no content to be opened from, so this Run button is its ONLY way in.
+        // The dialog does not own a launcher, so it ASKS: MainWindow wires runCustomCoreRequested to
+        // GameLauncher::runCoreWithoutContent when it constructs the dialog.
+        if (c.supportsNoGame)
+        {
+            auto* runBtn = new QPushButton(tr("Run"), box);
+            const QString ref = CustomCores::refFor(c.id);
+            const QString name = c.name;
+            connect(runBtn, &QPushButton::clicked, this, [this, ref, name] {
+                emit runCustomCoreRequested(ref, name);
+                accept();
+            });
+            row->addWidget(runBtn);
+        }
+        else
+            bv->addWidget(new QLabel(tr("To use it: pick it for a system above, or for one game from that "
+                                        "game's Emulation row."), box));
+        auto* rmBtn = new QPushButton(tr("Remove"), box);
+        const QString cid = c.id;
+        connect(rmBtn, &QPushButton::clicked, this, [this, cid] {
+            // The REGISTRATION, not the file: the copy stays in the folder and the scan can pick it up again.
+            // A settings row must never destroy something on disk.
+            CustomCores::remove(cid);
+            editCustomCores();
+            sayCustomCore(tr("Removed."));
+        });
+        row->addWidget(rmBtn);
+        row->addStretch(1);
+        bv->addLayout(row);
+        list->addWidget(box);
+    }
+    list->addStretch(1);
+    scroll->setWidget(inner);
+    outer->addWidget(scroll, 1);
+
+    connect(back, &QPushButton::clicked, this, [this] { stack_->setCurrentIndex(0); });
 
     stack_->addWidget(page);
     stack_->setCurrentWidget(page);

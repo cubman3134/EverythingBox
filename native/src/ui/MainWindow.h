@@ -1013,6 +1013,10 @@ private:
 
     // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----
     void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
+    // ---- Custom cores (issue #98). Defined in MainWindowCustomCores.cpp, off this file's merge surface. ----
+    void presentCustomCores();                                   // the custom-core panel (nested under the picker)
+    void loadCustomCoreFromPicker();                             // native file dialog -> registerCustomCore
+    bool registerCustomCore(const QString& file);                // load+register one file; fires the one-time notice
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
     // Scope-aware overload (Task 3): in ThisGame scope (non-empty token) each row reads/writes the per-game
     // core-option DELTA layer (issue #95, Settings::gameOptionValue); Universal reads/writes the per-core

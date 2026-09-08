@@ -52,7 +52,9 @@ Everything lives under [`native/`](native/):
   [**Controllers in standalone emulators**](native/docs/controllers-in-standalone-emulators.md)
   (players 1–4 seated into Dolphin/PCSX2/DuckStation/Cemu at launch, the save/load/screenshot
   hotkey scheme, the per-emulator "let EverythingBox set up controllers" switch, the `.eb-orig`
-  copy that undoes it, and what happens to a pad SDL cannot recognise).
+  copy that undoes it, and what happens to a pad SDL cannot recognise), and
+  [**Custom cores**](native/docs/custom-cores.md) (running a libretro core the catalogue doesn't bless —
+  where it goes, the one-time notice, why it never displaces a default, and what isn't covered yet).
 
 Feature notes for things with a server on the other end live in [`docs/`](docs/) —
 see [**Audiobookshelf**](docs/audiobookshelf.md) for connecting an Audiobookshelf

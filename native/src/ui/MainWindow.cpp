@@ -27665,6 +27665,12 @@ void MainWindow::openEmulatorSettings()
     if (themedHomeEnabled() && themedPanelHost_) { presentEmulatorCorePicker(); return; }
 #endif
     auto* dlg = new SettingsDialog(this);
+    // Issue #98: the classic Custom cores page has a Run button for a supports_no_game core, and the dialog
+    // has no launcher of its own. It asks; we run it.
+    connect(dlg, &SettingsDialog::runCustomCoreRequested, this,
+            [this](const QString& ref, const QString& title) {
+                if (launcher_) launcher_->runCoreWithoutContent(ref, title);
+            });
     showDialogPanel(tr("Emulator Settings"), dlg, [this](int) { openSettingsHub(); },
                     [this] { openSettingsHub(); });
 }
@@ -27711,6 +27717,11 @@ void MainWindow::presentEmulatorCorePicker()
     QVector<PanelRow> rows;
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("intro");
       r.label = tr("Emulation per system"); r.value = tr("Auto-used on launch"); rows << r; }
+    // Issue #98: the escape hatch, one level down. A core the user supplies appears in the per-system rows
+    // below (candidateCoresFor puts it there) and on a game's own Emulation row; THIS is where it is loaded,
+    // listed and removed. Twin in SettingsDialog's classic builder.
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("customcores");
+      r.label = tr("Custom cores…"); rows << r; }
     for (const GameSystem& sys : SystemCatalog::systems())
     {
         // The row's current value is the resolved per-system default: fold NO per-game override over the
@@ -27749,6 +27760,8 @@ void MainWindow::presentEmulatorCorePicker()
             for (const EmulationTarget& t : emulationTargetsFor(sys, kRetroParkBuildAvailable, kStandaloneBuildAvailable))
                 if (t.displayName == val) { setSystemEmulationDefault(sysId, t); break; }
         }
+        else if (id == QStringLiteral("customcores"))
+            presentCustomCores();                             // issue #98: the custom-core panel, nested here
         else if (id.startsWith(QStringLiteral("opts:")))
             editCoreOptions(id.mid(5));                       // nested per-core options page
     };
