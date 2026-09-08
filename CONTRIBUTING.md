@@ -759,6 +759,30 @@ installs wrote, a deployed identifier that cannot be renamed without orphaning
 users — add it to that list **with its reason**. An unexplained exemption is
 indistinguishable from an oversight.
 
+### What a release archive ships is asserted, not assumed (issue #319)
+
+`release.yml` builds a Windows zip and a Linux AppImage, and for most of this
+repo's life nothing opened either one: the workflow runs on a tag, so a
+packaging line that was wrong stayed wrong until a user downloaded it. Issue
+#317 was that -- `gamecontrollerdb.txt` existed, was correct, and never
+travelled.
+
+`native/tools/verify-release-archive.py` now runs in both packaging jobs,
+after the archive is built and before anything is uploaded or attached. Most
+of what it asserts is **derived**: every file under `native/addons/` and
+`native/themes2/` has to be in the archive byte-for-byte, the controller
+database has to be beside the executable, and the runtime libraries come from
+the built binary's own import table (Windows) or `DT_NEEDED` (Linux). Adding a
+theme, an addon file or a linked library therefore needs no edit here -- and
+forgetting to package one fails the release.
+
+The literal half -- the executable's name, the Qt platform plugin, and which
+libraries the OS supplies -- lives in one block at the top of that script. Put
+anything new there, not in the workflow. If you change what the packaging step
+copies, `--selftest` is how you prove the check still fails when the new thing
+is missing; the `=== release archive manifest ===` gate runs it, and also
+checks that both jobs still call the checker before they publish.
+
 ## Commits
 
 Conventional prefixes:

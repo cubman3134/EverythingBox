@@ -145,6 +145,16 @@ jobs:
           # ~25 MB). Keep it to symbolize a crash report from this exact build: match the .pdb to a dump by GUID.
           if (Test-Path build/EverythingBox.pdb) { Compress-Archive -Path build/EverythingBox.pdb -DestinationPath EverythingBox-windows-x64-pdb.zip -Force }
 
+      # Read the zip back before anything is uploaded or attached (issue #319). Every line of the Package
+      # step above was, until this one, REVIEWED AND NEVER TESTED: this workflow runs on a tag, nothing
+      # opened what it produced, and #317 was a data file that existed, was correct, and simply never
+      # travelled. The check extracts the archive and asserts the manifest against THIS checkout -- the
+      # bundled trees file by file, the controller database byte for byte, and every DLL the executable
+      # import-links. A hole fails the release here instead of reaching a download.
+      - name: Verify the archive
+        shell: pwsh
+        run: python native/tools/verify-release-archive.py --kind windows --archive EverythingBox-windows-x64.zip --repo .
+
       - uses: actions/upload-artifact@v4
         with:
           name: EverythingBox-windows-x64
@@ -356,6 +366,14 @@ jobs:
             mv "$f" "$OUTPUT"
           fi
           ls -la "$OUTPUT"
+
+      # The same read-back for the AppImage (issue #319), which has to answer a second question the zip
+      # does not: a file inside the image at a path the binary never looks at is still missing. So this
+      # asserts both -- gamecontrollerdb.txt in the directory SDL_GetBasePath() resolves to, and the Qt
+      # platform plugin on the search path qt.conf actually establishes -- as well as the libraries the
+      # binary's own DT_NEEDED says it cannot start without.
+      - name: Verify the archive
+        run: python3 native/tools/verify-release-archive.py --kind appimage --archive EverythingBox-linux-x86_64.AppImage --repo .
 
       - uses: actions/upload-artifact@v4
         with:
