@@ -120,8 +120,13 @@ bool LibretroCore::loadGame(const std::string& gamePath, std::string* error)
         info.data = gameData_.data();
         info.size = gameData_.size();
     }
+    // NO CONTENT (a supports_no_game core — the game-engine cores #98 makes reachable): libretro says the
+    // frontend passes NULL, not a zeroed retro_game_info. Cores test `if (!info)` to detect the case, so a
+    // pointer to an empty struct reads to them as "content with an empty path" and they refuse it. Every
+    // existing launch passes a path and is unaffected.
+    retro_game_info* infoPtr = gamePath.empty() ? nullptr : &info;
     bool loaded = false;
-    if (!guardedCall([&] { loaded = retro_load_game_(&info); }))
+    if (!guardedCall([&] { loaded = retro_load_game_(infoPtr); }))
     { if (error) *error = "core crashed while loading the game"; return false; }
     if (!loaded) { if (error) *error = "core rejected the game"; return false; }
     gameLoaded_ = true;

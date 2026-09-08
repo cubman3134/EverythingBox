@@ -6,6 +6,7 @@
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
+#include "../core/CustomCores.h"   // #98: a custom core is labelled in the launch log
 #include "../core/ArchiveRom.h"
 #include "../core/RomPatch.h"
 #include "../core/EmulatorRegistry.h"
@@ -414,6 +415,13 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
               .arg(core, sys->id,
                    Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes"),
                    backendToString(rl.backend)));
+    // ISSUE #98: say in the log, once per launch, that this is a core we did not curate. The user was told
+    // once (the notice) and is not nagged again, so the LOG is where the fact has to live for anyone reading
+    // back a crash. `core` is already self-labelling ("custom:<id>"), but an explicit line means a reader does
+    // not have to know the ref convention to see it.
+    if (CustomCores::isCustomRef(core))
+        glLog(QStringLiteral("game: core '%1' is a CUSTOM core (not curated by EverythingBox) at \"%2\"")
+                  .arg(core, CustomCores::pathForRef(core)));
     if (core.isEmpty())
     {
         plan.error = tr("No core is available for %1.").arg(sys->name);
@@ -910,6 +918,42 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
         glLog(QStringLiteral("game: openGame failed: %1").arg(err));
         emit waitPageDone(); // clear the "Preparing…" page (no-op if it wasn't showing)
         emit notifyUser(tr("Can't run game: %1").arg(err), kFeedbackLong);
+    }
+}
+
+// Issue #98: the content-less launch. A supports_no_game core is handed NO ROM at all (LibretroCore passes
+// retro_load_game a NULL info, which is what the libretro spec says and what such cores test for), so this is
+// deliberately NOT a stripped-down prepareCore: there is no content to route, no system to resolve, no BIOS to
+// fetch and no archive to extract. What it DOES share with the ordinary tail is the screen handover —
+// superseding a pending external launch, aboutToLaunch, showRetroRequested — because a core that owns the
+// display must own it the same way whatever it is running.
+void GameLauncher::runCoreWithoutContent(const QString& coreRef, const QString& title)
+{
+    const QString corePath = CoreManager::corePath(coreRef);
+    if (corePath.isEmpty() || !CoreManager::isInstalled(coreRef))
+    {
+        glLog(QStringLiteral("game: core '%1' has no file to run").arg(coreRef));
+        emit notifyUser(tr("‘%1’ isn't available any more.").arg(title.isEmpty() ? coreRef : title), kFeedbackLong);
+        return;
+    }
+    if (CustomCores::isCustomRef(coreRef))
+        glLog(QStringLiteral("game: running CUSTOM core '%1' (not curated by EverythingBox) with no content")
+                  .arg(coreRef));
+
+    cancelPendingEmulatorLaunch();
+    emit aboutToLaunch();
+    QString err;
+    // gameKey = the core ref: a content-less core's per-game overrides (#95 core options) have to key off
+    // SOMETHING stable, and the core itself is the only identity there is.
+    if (retro_->openGame(corePath, QString(), coreRef, &err, title, QString(), coreRef))
+    {
+        glLog(QStringLiteral("game: running \"%1\" with no content").arg(title));
+        emit showRetroRequested();
+    }
+    else
+    {
+        glLog(QStringLiteral("game: openGame failed for content-less core '%1': %2").arg(coreRef, err));
+        emit notifyUser(tr("Can't run ‘%1’: %2").arg(title.isEmpty() ? coreRef : title, err), kFeedbackLong);
     }
 }
 

@@ -17,7 +17,10 @@ namespace CoreManager
     void setBiosProvider(AddonManager* addons);
 
     QString coresDir();                                  // <app>/cores (created if needed)
-    QString corePath(const QString& coreName);           // <coresDir>/<core>_libretro.<dll|dylib|so>
+    // <coresDir>/<core>_libretro.<dll|dylib|so> — EXCEPT for a "custom:<id>" ref (issue #98), which names a file
+    // the user supplied: its path comes out of the CustomCores registry and it is never downloaded (ensureCore /
+    // ensureCoreAsync refuse, with a sentence naming the file, rather than building a buildbot URL for it).
+    QString corePath(const QString& coreName);
     bool isInstalled(const QString& coreName);
 
     // Returns the core's .dll path, downloading + extracting it if absent. Empty on failure; when it fails

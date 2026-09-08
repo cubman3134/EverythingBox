@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "miniz.h"
+#include "CustomCores.h"           // issue #98: a "custom:<id>" ref resolves out of the user registry, never the buildbot
 #include "BiosCatalog.h"              // systemNeedsBios: which systems reach the server at all (zero-delay gate)
 #include "../addons/AddonManager.h"   // BIOS now comes from the EBS/Allarr file provider, not a hardcoded mirror
 
@@ -72,14 +73,32 @@ static QString coreFileName(const QString& coreName)
 #endif
 }
 
+// The sentence a custom core gets when its file is gone. Names the core the user chose AND the path it was
+// registered at, because the fix is theirs to make: put the file back, or load it again from where it now is.
+static QString customCoreMissingMessage(const QString& ref)
+{
+    const CustomCore* c = CustomCores::byRef(ref);
+    if (!c)
+        return QObject::tr("The custom core ‘%1’ isn't registered any more.").arg(CustomCores::idFromRef(ref));
+    return QObject::tr("The custom core ‘%1’ isn't at %2 any more. Load it again to point EverythingBox "
+                       "at the file.").arg(c->name.isEmpty() ? c->id : c->name, c->path);
+}
+
 QString CoreManager::corePath(const QString& coreName)
 {
+    // A CUSTOM core (issue #98) is a file the USER named, so its path comes out of the custom-core registry
+    // rather than being built from the buildbot's naming convention. Every existing caller — the launcher, the
+    // options editor, the split-pane branch — goes through here, which is why one branch is enough to make a
+    // custom core loadable everywhere a catalogue core is.
+    if (CustomCores::isCustomRef(coreName))
+        return CustomCores::pathForRef(coreName);
     return coresDir() + QStringLiteral("/") + coreFileName(coreName);
 }
 
 bool CoreManager::isInstalled(const QString& coreName)
 {
-    return QFile::exists(corePath(coreName));
+    const QString p = corePath(coreName);
+    return !p.isEmpty() && QFile::exists(p);
 }
 
 // Extract the first shared library (matching ext: .dll/.dylib/.so) from a zip (in memory) into destDir.
@@ -119,6 +138,15 @@ QString CoreManager::ensureCore(const QString& coreName, QString* error,
 {
     if (isInstalled(coreName))
         return corePath(coreName);
+
+    // A custom core is NEVER fetched. #98 loads a file the user already has; obtaining a core from a place they
+    // did not name is a different feature (the buildbot browser) and this path must not quietly become it. So a
+    // registered core whose file has since moved or been deleted fails HERE, in a sentence that names the file.
+    if (!CustomCores::mayDownload(coreName))
+    {
+        if (error) *error = customCoreMissingMessage(coreName);
+        return QString();
+    }
 
     // libretro nightly buildbot - the right build for the running OS/arch (Windows .dll, macOS .dylib,
     // Linux .so, Android _android.so).
@@ -273,6 +301,13 @@ void CoreManager::ensureCoreAsync(const QString& coreName, QObject* context,
     if (isInstalled(coreName))
     {
         if (onDone) onDone(corePath(coreName), QString());
+        return;
+    }
+
+    // The async twin of ensureCore's refusal: a custom core is loaded from the user's own file or not at all.
+    if (!CustomCores::mayDownload(coreName))
+    {
+        if (onDone) onDone(QString(), customCoreMissingMessage(coreName));
         return;
     }
 

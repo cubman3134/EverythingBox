@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.216 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.217 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -627,6 +627,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         # allocation-free by design; on non-Windows the installer compiles to an empty function.
         src/core/CrashReport.cpp  src/core/CrashReport.h
         src/core/CoreManager.cpp  src/core/CoreManager.h
+        # Issue #98 (load any core): the user-tier custom-core registry, the file->registration install step,
+        # and the inspector that reads a core's identity without running it. CoreManager resolves a
+        # "custom:<id>" ref through the registry and refuses to fetch one; EmulationTarget.h appends matching
+        # custom cores after each system's catalogue candidates.
+        src/core/CustomCores.cpp        src/core/CustomCores.h
+        src/core/CustomCoreInstall.cpp  src/core/CustomCoreInstall.h
+        src/libretro/CoreInspect.cpp    src/libretro/CoreInspect.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         # PS3 auto-update units: run for RPCS3 before boot to install a game's official Sony update PKG chain.
         src/core/ps3/Ps3Sfo.cpp              src/core/ps3/Ps3Sfo.h
@@ -922,6 +929,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowCustomCores.cpp                   # custom-core settings surface, same reason (#98)
         src/ui/MainWindowChannelGuide.cpp                  # the channel guide + interstitial MainWindow members (#179 inc 2)
         src/ui/MainWindowMusicServerScrobble.cpp           # one scrobble provider per music server (#193 inc 6)
         src/ui/MainWindowSendLibrary.cpp                   # "Send library to device" MainWindow members, same rule (#127)
@@ -1453,9 +1461,48 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_emutargets tools/probe_emutargets.cpp
         src/core/EmulationTarget.h
         src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        # issue #98: candidateCoresFor() reads the custom-core registry (empty here, so the model is unchanged)
+        src/core/CustomCores.cpp src/core/CustomCores.h
         src/core/SystemCatalog.h src/core/EmulatorRegistry.h src/core/EmuBackend.h)
     target_include_directories(probe_emutargets PRIVATE src src/core)
     target_link_libraries(probe_emutargets PRIVATE Qt6::Core)
+
+    # Issue #98 (load-any-core escape hatch): the custom-core tier - inspection (retro_get_system_info plus the
+    # SET_* a core declares during retro_set_environment), the registry, the candidate augmentation that appends
+    # a custom core AFTER the catalogue's defaults, the supports_no_game Run entry, the failure sentences, and
+    # the no-custom-core identity rail. Driven against a FIXTURE STUB CORE BUILT FROM SOURCE HERE, never a
+    # downloaded binary and nothing binary committed:
+    #   * probe_customcore_fixture  - a real, tiny libretro core with four behaviours, selected at RUN time by
+    #     the EB_FIXTURE_CORE_MODE environment variable (content / nogame / badapi / needs);
+    #   * probe_customcore_notacore - a library that loads and is NOT a libretro core.
+    # Both are MODULE libraries with the prefix cleared and their output pointed at the probe's own directory,
+    # so the probe finds them by name with no path baked into a macro (a generator's native separators inside a
+    # C string literal are escape sequences, not a path). Neither is an EXECUTABLE, so the data-dir isolation
+    # sweep at the end of this file correctly skips them - they hold no app state.
+    add_library(probe_customcore_fixture MODULE tools/fixtures/customcore_fixture.c)
+    target_include_directories(probe_customcore_fixture PRIVATE src/libretro)
+    set_target_properties(probe_customcore_fixture PROPERTIES PREFIX "" C_STANDARD 99)
+    add_library(probe_customcore_notacore MODULE tools/fixtures/customcore_notacore.c)
+    set_target_properties(probe_customcore_notacore PROPERTIES PREFIX "" C_STANDARD 99)
+
+    # LibretroCore.cpp links so the no-content CONTRACT is asserted against a real core rather than only against
+    # our model of it: a supports_no_game core must be handed NULL, not a zeroed retro_game_info. CoreInspect.cpp
+    # is the dlopen/LoadLibrary half, and LaunchOptionsStore.cpp links for probe_emutargets' reason - the
+    # EmulationTarget.h model delegates its resolution to those resolvers. QtCore-only, offscreen-QPA safe.
+    add_executable(probe_customcore tools/probe_customcore.cpp
+        src/core/CustomCores.cpp        src/core/CustomCores.h
+        src/core/CustomCoreInstall.cpp  src/core/CustomCoreInstall.h
+        src/libretro/CoreInspect.cpp    src/libretro/CoreInspect.h
+        src/libretro/LibretroCore.cpp   src/libretro/LibretroCore.h
+        src/core/EmulationTarget.h
+        src/core/LaunchOptionsStore.cpp src/core/LaunchOptionsStore.h
+        src/core/SystemCatalog.h src/core/EmulatorRegistry.h src/core/EmuBackend.h)
+    target_include_directories(probe_customcore PRIVATE src src/core src/libretro)
+    target_link_libraries(probe_customcore PRIVATE Qt6::Core)
+    add_dependencies(probe_customcore probe_customcore_fixture probe_customcore_notacore)
+    set_target_properties(probe_customcore_fixture probe_customcore_notacore PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:probe_customcore>"
+        RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:probe_customcore>")
 
     # Emulation Context Menu Task 1: the pure scope/context helper (src/core/EmulationScope.h, header-only) —
     # contextKind (game/console/none from browse-focus bools) + initialScope (which layer the Start panel opens on).
