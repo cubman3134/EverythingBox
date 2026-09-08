@@ -1,6 +1,11 @@
 // ANIME / MANGA TRACKERS (issue #156), the MainWindow half — a SEPARATE translation unit that defines
 // MainWindow's #156 members, the way MainWindowPlayOn.cpp defines #143's.
 //
+// INCREMENT 3 ADDED KITSU AND CHANGED NOTHING ELSE IN THIS FILE except one element of trackerList() and
+// one status line. That is the claim the increment exists to test, and it is visible here: the prompt,
+// the fan-out, the reconcile and the “Track…” verb all work off tracker::Tracker and never name a
+// service.
+//
 // WHY IT MOVED HERE IN INCREMENT 2. Increment 1 put this glue at the bottom of MainWindow.cpp, where one
 // tracker's worth of it was small enough not to matter. A SECOND tracker turned every "AniList" in it into
 // "each configured tracker", and MainWindow.cpp is the single busiest merge surface in the repository —
@@ -24,6 +29,7 @@
 
 #include "../core/AniListTracker.h"
 #include "../core/ItemMarks.h"
+#include "../core/KitsuTracker.h"
 #include "../core/MyAnimeListTracker.h"
 #include "../core/TrackerFanout.h"
 #include "../core/TrackerLinks.h"
@@ -31,14 +37,19 @@
 
 #include "nav/NavOverlay.h"   // NavMenu::pick
 
-// The trackers this window owns, in a STABLE order — AniList first because it shipped first, so a user with
-// both connected is asked about them in the same order every time rather than in whatever order a hash
+// The trackers this window owns, in a STABLE order — the order they shipped in, so a user with all three
+// connected is asked about them in the same order every time rather than in whatever order a hash
 // happened to produce. Nulls are tolerated: on an early path a member may not be constructed yet, and
 // TrackerFanout::active drops them.
+//
+// THIS LIST IS THE WHOLE OF WHAT A THIRD TRACKER COST THIS FILE (issue #156 increment 3). Everything
+// below works off the seam, over trackerList(), so adding Kitsu is one element here and one status
+// line — not a third branch in the fan-out, the prompt, the refresh or the detail verb.
 QVector<tracker::Tracker*> MainWindow::trackerList() const
 {
     return QVector<tracker::Tracker*>{ static_cast<tracker::Tracker*>(anilist_),
-                                       static_cast<tracker::Tracker*>(mal_) };
+                                       static_cast<tracker::Tracker*>(mal_),
+                                       static_cast<tracker::Tracker*>(kitsu_) };
 }
 
 tracker::Tracker* MainWindow::trackerById(tracker::Id id) const
@@ -70,6 +81,18 @@ QString MainWindow::anilistStatusLine()
     return trackerStatusLineFor(AniListTracker::isConfigured(), AniListTracker::isConnected(),
                                 AniListTracker::queuedCount(), AniListTracker::lastError(),
                                 tr("Not set up. Paste a Client ID and Secret to begin."));
+}
+
+// ...and Kitsu's (increment 3). The SAME builder again, which is the point: a third tracker added a row
+// to the list above and a hint to the line below, and nothing else in this file moved.
+QString MainWindow::kitsuStatusLine()
+{
+    // configured() and connected() are the same question on Kitsu - there is no client to register, so
+    // "set up but not signed in" is a state the user cannot be in. Passing the same fact twice is what
+    // makes the shared builder skip straight from the hint to the connected line.
+    return trackerStatusLineFor(KitsuTracker::isConfigured(), KitsuTracker::isConnected(),
+                                KitsuTracker::queuedCount(), KitsuTracker::lastError(),
+                                tr("Not signed in. Enter your Kitsu email and password to begin."));
 }
 
 QString MainWindow::malStatusLine()

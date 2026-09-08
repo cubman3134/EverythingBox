@@ -81,6 +81,7 @@
 #include "../core/TraktClient.h"
 #include "../core/AniListTracker.h"  // issue #156: the AniList tracker (increment 1)
 #include "../core/MyAnimeListTracker.h"  // ...and MyAnimeList behind the same seam (increment 2)
+#include "../core/KitsuTracker.h"        // ...and Kitsu behind it too (increment 3)
 #include "../core/TrackerLinks.h"    // ...and which tracker entry each item is (per-item, synced)
 #include "../core/TrackerRules.h"    // ...and the pure rules: chapter numbering, reconciliation
 #include "../core/Scrobbler.h"          // issue #192: music scrobbling, the orchestrator
@@ -619,6 +620,19 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(mal_, &MyAnimeListTracker::connectedChanged, this,
             [this](bool) { if (malStatusUpdate_) malStatusUpdate_(); });
     mal_->flushQueue();
+
+    // ...and the THIRD (increment 3), which is the test of the shared layer: everything above applies
+    // unchanged again. Kitsu is dormant until the user signs in with their Kitsu email and password —
+    // there is no client to register, so there is nothing to paste and nothing to configure — and its
+    // queue drains at startup on its own like the other two. All three are independent by construction:
+    // separate links, separate queues, separate rate limits.
+    kitsu_ = new KitsuTracker(this);
+    connect(kitsu_, &KitsuTracker::log, this, [this](const QString& l) { mwLog(l); });
+    connect(kitsu_, &KitsuTracker::queueChanged, this,
+            [this] { if (kitsuStatusUpdate_) kitsuStatusUpdate_(); });
+    connect(kitsu_, &KitsuTracker::connectedChanged, this,
+            [this](bool) { if (kitsuStatusUpdate_) kitsuStatusUpdate_(); });
+    kitsu_->flushQueue();
 
     // MUSIC SCROBBLING (issue #192). Constructed with its ListenBrainz provider already installed, so a launch
     // that follows an offline stretch delivers what is queued without anything else having to happen. Dormant
@@ -22671,6 +22685,28 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("mal.data"), tr("MyAnimeList"), malStatusLine());
         info(QStringLiteral("mal.status"), tr("Status"), MyAnimeListTracker::isConnected()
                    ? tr("Connected") : tr("Not connected"));
+        // --- Kitsu (issue #156, increment 3): the SAME rows again for the third tracker, and the
+        // shape is the same because the seam is. The ONE difference a user sees is that there is
+        // nothing to register: Kitsu signs in with the account's own email and password, so these two
+        // rows are credentials rather than a client id, and NEITHER is ever written to disk — they are
+        // held in memory for the length of one sign-in and cleared by it (see KitsuTracker.h). The
+        // password row is therefore built EMPTY every time: there is no stored value to read back.
+        // Every row has a twin in the QWidget builder below. ---
+        sep(tr("Kitsu (anime and manga)"));
+        info(QStringLiteral("kitsu.help"),
+             tr("Sync chapters read and episodes watched to your Kitsu list. There is nothing to "
+                "register: type the email and password of your Kitsu account below and press Sign in. "
+                "Your password is used once to sign in and is never stored on this device."), QString());
+        textf(QStringLiteral("kitsu.email"), tr("Kitsu email"), KitsuTracker::email());
+        // MASKED, and built from an EMPTY string rather than from a getter — there deliberately is no
+        // getter for it. A masked field that reads its own value back is one screenshot away from
+        // being read out loud on a television.
+        textf(QStringLiteral("kitsu.password"), tr("Kitsu password"), QString(), /*masked=*/true);
+        action(QStringLiteral("kitsu.connect"), KitsuTracker::isConnected()
+                   ? tr("Sign out of Kitsu") : tr("Sign in to Kitsu"));
+        info(QStringLiteral("kitsu.data"), tr("Kitsu"), kitsuStatusLine());
+        info(QStringLiteral("kitsu.status"), tr("Status"), KitsuTracker::isConnected()
+                   ? tr("Connected") : tr("Not connected"));
         // --- Music scrobbling (issue #192) ---
         // The twin of every row here lives in the QWidget builder below; a setting in one builder is simply
         // unreachable in the other mode. OFF by default and gated on a token: this sends what somebody listens
@@ -22807,6 +22843,9 @@ void MainWindow::openGeneralSettings()
         // ...and MyAnimeList's, which moves on its own for the same reason and on its own queue.
         malStatusUpdate_ = [this, setInfo] {
             setInfo(QStringLiteral("mal.data"), tr("MyAnimeList"), malStatusLine()); };
+        // ...and Kitsu's, third queue, same reason.
+        kitsuStatusUpdate_ = [this, setInfo] {
+            setInfo(QStringLiteral("kitsu.data"), tr("Kitsu"), kitsuStatusLine()); };
 
         // ...and the same for the scrobble line (#192), which moves on its own: a listen delivered by the
         // background pump while this panel is up must move the number the user is looking at.
@@ -23471,6 +23510,20 @@ void MainWindow::openGeneralSettings()
                             tr("Opening MyAnimeList in your browser…"));
                     mal_->connectAccount();
                 }
+                // --- Kitsu (#156 increment 3). The twin of the three arms above, with the one real
+                // difference: the two rows are the ACCOUNT's email and password, they go to statics
+                // that live in memory only, and no browser opens — Kitsu's grant is a single POST. ---
+                else if (id == QStringLiteral("kitsu.email"))    KitsuTracker::setEmail(val);
+                else if (id == QStringLiteral("kitsu.password")) KitsuTracker::setPassword(val);
+                else if (id == QStringLiteral("kitsu.connect")) {
+                    if (KitsuTracker::isConnected()) { kitsu_->disconnectAccount(); return; }
+                    if (!KitsuTracker::hasSignInCredentials()) {
+                        setInfo(QStringLiteral("kitsu.status"), tr("Status"),
+                                tr("Enter your Kitsu email and password first.")); return;
+                    }
+                    setInfo(QStringLiteral("kitsu.status"), tr("Status"), tr("Signing in to Kitsu…"));
+                    kitsu_->connectAccount();
+                }
                 // --- Music scrobbling (#192). Every arm re-reads the status line afterwards: the answer to
                 // "is this on and working" changes with each of them, and a line that still says "Scrobbling
                 // is off" after the toggle was flipped is the same silence the line exists to break.
@@ -23705,6 +23758,17 @@ void MainWindow::openGeneralSettings()
                 setAction(QStringLiteral("mal.connect"),
                           conn ? MainWindow::tr("Disconnect from MyAnimeList")
                                : MainWindow::tr("Connect to MyAnimeList")); });
+        // ...and Kitsu's two. There is no authUrlReady to connect: nothing opens a browser, so there
+        // is never a URL to put on screen.
+        genSettingsConns_ << connect(kitsu_, &KitsuTracker::connectError, this,
+            [setInfo](const QString& m) { setInfo(QStringLiteral("kitsu.status"), MainWindow::tr("Status"), m); });
+        genSettingsConns_ << connect(kitsu_, &KitsuTracker::connectedChanged, this,
+            [setInfo, setAction](bool conn) {
+                setInfo(QStringLiteral("kitsu.status"), MainWindow::tr("Status"),
+                        conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
+                setAction(QStringLiteral("kitsu.connect"),
+                          conn ? MainWindow::tr("Sign out of Kitsu")
+                               : MainWindow::tr("Sign in to Kitsu")); });
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
         updateBackgroundMusic();
@@ -25841,6 +25905,68 @@ void MainWindow::openGeneralSettings()
             { mlStatus->setText(tr("Enter your Client ID first.")); return; }
             mlStatus->setText(tr("Opening MyAnimeList in your browser\u2026"));
             mal_->connectAccount();
+        });
+
+        // --- Kitsu (issue #156, increment 3): the twins of the themed builder's kitsu.* rows. A
+        // user-facing setting has to exist in BOTH surfaces or it is simply unreachable in one mode. ---
+        v->addSpacing(12);
+        auto* ktHeading = new QLabel(tr("Kitsu (anime and manga)"));
+        ktHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(ktHeading);
+        auto* ktNote = new QLabel(tr("Sync chapters read and episodes watched to your Kitsu list. There "
+                                     "is nothing to register here: type the email and password of your "
+                                     "Kitsu account and press Sign in. The password is used once to sign "
+                                     "in and is never stored on this device; only the token it returns is "
+                                     "kept, and that stays on this machine and is never included in cloud "
+                                     "sync. AniList and MyAnimeList above and this one are independent: "
+                                     "connect all three and every finished chapter goes to all three "
+                                     "lists, each with its own link and its own queue, and none of them "
+                                     "failing stops the others."));
+        ktNote->setWordWrap(true);
+        ktNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(ktNote);
+        // Qualified with "Kitsu" for the reason the other two pairs are: the form now carries three
+        // credential blocks and the parity gate's twin patterns must name exactly one control each.
+        // The password row starts EMPTY and stays write-only - there is no getter for it.
+        addCredRow(tr("Kitsu email:"), KitsuTracker::email(), false,
+                   [](const QString& t) { KitsuTracker::setEmail(t); });
+        addCredRow(tr("Kitsu password:"), QString(), true,
+                   [](const QString& t) { KitsuTracker::setPassword(t); });
+
+        auto* ktStatus = new QLabel(KitsuTracker::isConnected()
+                                        ? tr("\u2713 Signed in to Kitsu.") : tr("Not signed in."));
+        ktStatus->setWordWrap(true);
+        ktStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* ktBtn = new QPushButton(KitsuTracker::isConnected() ? tr("Sign out")
+                                                                  : tr("Sign in to Kitsu"));
+        ktBtn->setMinimumHeight(32);
+        auto* ktRow = new QHBoxLayout(); ktRow->addWidget(ktBtn); ktRow->addStretch(1);
+        v->addLayout(ktRow);
+        v->addWidget(ktStatus);
+        // ...and the twin of "kitsu.data": the same line from the same builder, so the two surfaces
+        // cannot tell the user different things about the same queue.
+        auto* ktData = new QLabel(kitsuStatusLine());
+        ktData->setWordWrap(true);
+        ktData->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(ktData);
+        {
+            // QPointer-guarded so a delivery landing after the panel is destroyed writes nowhere.
+            QPointer<QLabel> ktGuard(ktData);
+            kitsuStatusUpdate_ = [ktGuard] { if (ktGuard) ktGuard->setText(MainWindow::kitsuStatusLine()); };
+        }
+        // The panel's own connections; they die with the labels, which are its children. There is no
+        // authUrlReady here - no browser opens, so there is never a URL to show.
+        connect(kitsu_, &KitsuTracker::connectError, ktStatus,
+                [ktStatus](const QString& m) { ktStatus->setText(m); });
+        connect(kitsu_, &KitsuTracker::connectedChanged, ktBtn, [ktBtn, ktStatus](bool on) {
+            ktBtn->setText(on ? tr("Sign out") : tr("Sign in to Kitsu"));
+            ktStatus->setText(on ? tr("\u2713 Signed in to Kitsu.") : tr("Not signed in.")); });
+        connect(ktBtn, &QPushButton::clicked, this, [this, ktStatus] {
+            if (KitsuTracker::isConnected()) { kitsu_->disconnectAccount(); return; }
+            if (!KitsuTracker::hasSignInCredentials())
+            { ktStatus->setText(tr("Enter your Kitsu email and password first.")); return; }
+            ktStatus->setText(tr("Signing in to Kitsu\u2026"));
+            kitsu_->connectAccount();
         });
 
         // --- Music scrobbling (issue #192): the twins of the themed builder's rows. A user-facing setting has

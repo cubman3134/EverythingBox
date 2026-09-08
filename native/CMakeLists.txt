@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.226 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.227 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -683,6 +683,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TrackerQueue.cpp  src/core/TrackerQueue.h        # the shared offline queue, per tracker
         src/core/TrackerFanout.cpp src/core/TrackerFanout.h       # push to every configured tracker
         src/core/MyAnimeListTracker.cpp src/core/MyAnimeListTracker.h  # OAuth+PKCE loopback, REST, backoff
+        # ...and increment 3's THIRD implementation, which is the test of what #326 hoisted: Kitsu
+        # supplies its status codes, its wire and its auth (an OAuth password grant - no browser, no
+        # client to register) and consumes the shared queue, credential store and drain loop unchanged.
+        src/core/KitsuTracker.cpp src/core/KitsuTracker.h        # password grant, JSON:API, no loopback
         # MUSIC SCROBBLING (#192). Scrobble.h / ScrobbleProvider.h are header-only (the pure rules and the
         # seam) and are listed so they show up in an IDE beside the two units that need a TU.
         src/core/Scrobble.h              # the threshold, what counts, the accumulator - pure (probe_scrobble)

@@ -1928,6 +1928,10 @@ private:
     // decision the glue makes is made through the seam, over trackerList().
     class AniListTracker* anilist_ = nullptr;
     class MyAnimeListTracker* mal_ = nullptr;
+    // ...and increment 3's third, which is the test of the shared layer #326 hoisted: Kitsu signs in
+    // with an OAuth PASSWORD grant (no browser, no client to register) and otherwise behaves exactly
+    // like the other two through this window - one seam, one fan-out, one queue implementation.
+    class KitsuTracker* kitsu_ = nullptr;
     // The trackers this window owns, in a STABLE order (AniList first, because it shipped first). Nulls are
     // tolerated - TrackerFanout::active drops them - so an early path that runs before construction is safe.
     QVector<tracker::Tracker*> trackerList() const;
@@ -1966,9 +1970,14 @@ private:
     // functions rather than one taking an Id because the settings surfaces have no instance to ask and the
     // per-service statics are what they can reach.
     static QString malStatusLine();
+    // ...and Kitsu's (increment 3). Same builder, Kitsu's three facts. Its "not set up" hint says to
+    // type an email and password rather than to paste a client id, because Kitsu has no client to
+    // register: configured() and connected() are the same question there (see KitsuTracker.h).
+    static QString kitsuStatusLine();
     // Re-read those lines into whichever settings surface is on screen; unset when neither is.
     std::function<void()> anilistStatusUpdate_;
     std::function<void()> malStatusUpdate_;
+    std::function<void()> kitsuStatusUpdate_;
 
     // ---- MUSIC scrobbling (issue #192) ------------------------------------------------------------
     // The counterpart to the Trakt block above, and deliberately NOT an extension of it: film and TV go to

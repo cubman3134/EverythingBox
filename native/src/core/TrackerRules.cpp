@@ -664,6 +664,376 @@ mal::Backoff mal::backoffFor(int httpStatus, qint64 retryAfterSec, int consecuti
     return b;
 }
 
+
+// ================= the Kitsu wire (issue #156, increment 3) ==============================================
+//
+// Written from Kitsu's published JSON:API reference. NOTHING IN THIS WORK CONTACTED KITSU: no account was
+// created, no API client was registered, and every byte the probe and the live drive saw came from a
+// fixture server stood up locally.
+//
+// The form encoding, the same-origin check on the paging link and the percent-encoding helper are MAL's —
+// literally the same static functions above — because there is nothing per-provider in any of them.
+
+QByteArray kitsu::passwordGrantBody(const QString& username, const QString& password)
+{
+    // THE WHOLE SIGN-IN. No client_id, no client_secret, no redirect_uri and no code: Kitsu's password
+    // grant is offered to ordinary users and the account's own credentials ARE the grant.
+    //
+    // formField percent-encodes by hand rather than through QUrlQuery for the reason MAL's does, and here
+    // it matters more: QUrlQuery leaves '+' alone, and a '+' in a password would decode on the far side as
+    // a SPACE — which presents as "wrong password" on a password that is perfectly right.
+    QVector<QByteArray> f;
+    f << formField("grant_type", QStringLiteral("password"));
+    f << formField("username", username.trimmed());
+    // NOT trimmed. Leading or trailing whitespace is legal in a password and trimming it would silently
+    // sign in as somebody else's guess of what the user typed.
+    f << formField("password", password);
+    return joinForm(f);
+}
+
+QByteArray kitsu::tokenRefreshBody(const QString& refreshToken)
+{
+    QVector<QByteArray> f;
+    f << formField("grant_type", QStringLiteral("refresh_token"));
+    f << formField("refresh_token", refreshToken);
+    return joinForm(f);
+}
+
+kitsu::TokenReply kitsu::parseTokenReply(const QByteArray& json)
+{
+    TokenReply r;
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return r;
+    const QJsonObject o = d.object();
+    const QString access = o.value(QStringLiteral("access_token")).toString();
+    // THE ONE GATE, the same one both other providers have: {"error":"invalid_grant",…} parses as an
+    // object and would otherwise be stored over the live tokens, unlinking the account permanently on a
+    // transient failure.
+    if (access.isEmpty()) return r;
+    r.ok = true;
+    r.accessToken = access;
+    r.refreshToken = o.value(QStringLiteral("refresh_token")).toString();
+    const QJsonValue exp = o.value(QStringLiteral("expires_in"));
+    r.expiresInSec = exp.isString() ? exp.toString().toLongLong() : static_cast<qint64>(exp.toDouble());
+    return r;
+}
+
+QString kitsu::selfUrl(const QString& apiBase)
+{
+    return apiBase + QStringLiteral("/users?filter%5Bself%5D=true");
+}
+
+QString kitsu::parseSelfId(const QByteArray& json)
+{
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return QString();
+    const QJsonArray data = d.object().value(QStringLiteral("data")).toArray();
+    if (data.isEmpty()) return QString();
+    // JSON:API ids are STRINGS. Read as one; a numeric id in a body that spelled it as a number would
+    // otherwise read back empty and take the whole feature down to "no user".
+    const QJsonObject o = data.first().toObject();
+    const QJsonValue id = o.value(QStringLiteral("id"));
+    const QString s = id.isString() ? id.toString() : QString::number(qint64(id.toDouble()));
+    return (s.isEmpty() || s == QLatin1String("0")) ? QString() : s;
+}
+
+bool kitsu::searchable(const QString& title)
+{
+    return title.trimmed().size() >= kMinQueryChars;
+}
+
+// The path segment and the unit-count attribute for one kind, spelled once each so a search, a read and a
+// write cannot disagree about what an anime is.
+static QString kitsuSegment(Kind kind)
+{
+    return kind == Kind::Manga ? QStringLiteral("manga") : QStringLiteral("anime");
+}
+
+static QString kitsuCountField(Kind kind)
+{
+    return kind == Kind::Manga ? QStringLiteral("chapterCount") : QStringLiteral("episodeCount");
+}
+
+// A filter[...] parameter, pre-encoded. The brackets are percent-encoded because QUrlQuery would leave
+// them raw and some proxies rewrite a raw '[' in a query; the VALUE goes through the same pctEnc the MAL
+// URLs use, so a title with a space or an ampersand cannot truncate the query.
+static QString kitsuFilter(const QString& name, const QString& value)
+{
+    return QStringLiteral("filter%5B") + name + QStringLiteral("%5D=") + pctEnc(value);
+}
+
+QString kitsu::searchUrl(const QString& apiBase, const QString& title, int year, Kind kind, int limit)
+{
+    if (!searchable(title)) return QString();   // shorter than Kitsu will answer usefully — see kMinQueryChars
+    QStringList q;
+    q << kitsuFilter(QStringLiteral("text"), title.trimmed());
+    // OMITTED when 0 rather than sent as 0: filter[year]=0 matches nothing, so a caller with no year would
+    // get an empty list instead of an unfiltered one.
+    if (year > 0) q << kitsuFilter(QStringLiteral("year"), QString::number(year));
+    q << QStringLiteral("page%5Blimit%5D=") + QString::number(qBound(1, limit, 20));
+    // Kitsu returns every attribute by default; asking for the ones we read keeps the reply small and, more
+    // to the point, makes the COUNT field part of the wire rather than an accident of the default set.
+    q << QStringLiteral("fields%5B") + kitsuSegment(kind) + QStringLiteral("%5D=")
+         + pctEnc(QStringLiteral("canonicalTitle,titles,startDate,posterImage,")
+                  + kitsuCountField(kind));
+    return apiBase + QLatin1Char('/') + kitsuSegment(kind) + QLatin1Char('?') + q.join(QLatin1Char('&'));
+}
+
+// The two titles Kitsu carries: `canonicalTitle` (whatever the community made canonical, usually romaji)
+// and `titles.en` (the English one, when there is one). Preferred the same way round AniList's and MAL's
+// are, so the picker reads the same on all three trackers.
+static void kitsuTitles(const QJsonObject& attrs, QString& title, QString& alt)
+{
+    const QString canon = attrs.value(QStringLiteral("canonicalTitle")).toString();
+    const QJsonObject titles = attrs.value(QStringLiteral("titles")).toObject();
+    QString en = titles.value(QStringLiteral("en")).toString();
+    if (en.isEmpty()) en = titles.value(QStringLiteral("en_us")).toString();
+    if (en.isEmpty()) en = titles.value(QStringLiteral("en_jp")).toString();
+    title = !en.isEmpty() ? en : canon;
+    alt = (!en.isEmpty() && !canon.isEmpty() && en != canon) ? canon : QString();
+}
+
+QVector<Match> kitsu::parseSearch(const QByteArray& json, Kind asked)
+{
+    QVector<Match> out;
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return out;
+    // A JSON:API error document has `errors` and no `data` array, so the chain below simply comes back
+    // empty and no special case can be forgotten.
+    const QJsonArray data = d.object().value(QStringLiteral("data")).toArray();
+    for (const QJsonValue& rv : data)
+    {
+        const QJsonObject row = rv.toObject();
+        const QJsonValue idv = row.value(QStringLiteral("id"));
+        const QString id = idv.isString() ? idv.toString()
+                                          : (idv.isDouble() ? QString::number(qint64(idv.toDouble()))
+                                                            : QString());
+        if (id.isEmpty() || id == QLatin1String("0")) continue;   // a row with no id names nothing linkable
+        const QJsonObject attrs = row.value(QStringLiteral("attributes")).toObject();
+        Match x;
+        x.mediaId = id;
+        kitsuTitles(attrs, x.title, x.altTitle);
+        if (x.title.isEmpty()) continue;       // nor does one with no title
+        // "2016-04-03", or occasionally just "2016". The leading four digits either way; a row with no
+        // startDate reads 0, which is what Match::year means by "the tracker gave no year".
+        x.year = attrs.value(QStringLiteral("startDate")).toString().left(4).toInt();
+        const int eps = attrs.value(QStringLiteral("episodeCount")).toInt();
+        const int chs = attrs.value(QStringLiteral("chapterCount")).toInt();
+        // WHICH COUNT the row carries is the media type, exactly as it is on the other two. A row carrying
+        // neither (an unreleased series Kitsu has no count for) is filed under what the caller ASKED for
+        // rather than guessed at, because the search endpoint itself is per-kind.
+        x.kind = (chs > 0 && eps <= 0) ? Kind::Manga : (eps > 0 ? Kind::Anime : asked);
+        x.totalUnits = (x.kind == Kind::Manga) ? chs : eps;
+        // JSON:API nests the images; `original` is the full-size one and `medium` the fallback, which is
+        // the same preference MAL's large/medium pair gets.
+        const QJsonObject pic = attrs.value(QStringLiteral("posterImage")).toObject();
+        x.coverUrl = pic.value(QStringLiteral("original")).toString();
+        if (x.coverUrl.isEmpty()) x.coverUrl = pic.value(QStringLiteral("medium")).toString();
+        out.push_back(x);
+    }
+    return out;
+}
+
+QString kitsu::nextPageUrl(const QByteArray& json, const QString& apiBase)
+{
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return QString();
+    const QString next = d.object().value(QStringLiteral("links")).toObject()
+                          .value(QStringLiteral("next")).toString();
+    if (next.isEmpty()) return QString();
+    const QUrl n(next);
+    const QUrl base(apiBase);
+    if (!n.isValid() || n.isRelative() || !base.isValid()) return QString();
+    // SAME ORIGIN ONLY, for mal::nextPageUrl's reason: `links.next` is an absolute URL out of a response
+    // body — attacker-controlled input by definition — and the request that follows it carries the
+    // account's bearer token. Scheme, host AND port.
+    if (n.scheme() != base.scheme() || n.host() != base.host() || n.port(-1) != base.port(-1))
+        return QString();
+    return n.toString(QUrl::FullyEncoded);
+}
+
+QString kitsu::entryUrl(const QString& apiBase, const QString& userId, const QString& mediaId, Kind kind)
+{
+    // EMPTY IN, EMPTY OUT. A request with a blank user filter would answer with somebody else's library
+    // rather than with nothing, and a blank media filter would answer with the whole of ours.
+    if (userId.isEmpty() || mediaId.isEmpty()) return QString();
+    QStringList q;
+    q << kitsuFilter(QStringLiteral("user_id"), userId);
+    q << kitsuFilter(QStringLiteral("kind"), kitsuSegment(kind));
+    q << kitsuFilter(QStringLiteral("media_id"), mediaId);
+    // The INCLUDE is what brings the unit count back with the entry. Without it the COMPLETED rule has no
+    // total to check the caller's claim against, and a series would be marked finished off our own guess.
+    q << QStringLiteral("include=") + kitsuSegment(kind);
+    q << QStringLiteral("page%5Blimit%5D=1");
+    return apiBase + QStringLiteral("/library-entries?") + q.join(QLatin1Char('&'));
+}
+
+bool kitsu::parseEntry(const QByteArray& json, const QString& mediaId, Kind kind, Entry& out,
+                       QString* entryIdOut)
+{
+    if (entryIdOut) entryIdOut->clear();
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return false;
+    const QJsonObject o = d.object();
+    if (o.contains(QStringLiteral("errors"))) return false;   // a JSON:API error document, at any status
+    const QJsonValue dv = o.value(QStringLiteral("data"));
+    if (!dv.isArray()) return false;                          // not a library-entries collection at all
+    out = Entry{};
+    out.mediaId = mediaId;
+    // THE UNIT COUNT comes off the INCLUDED media, not off the entry: an entry knows how far you are, the
+    // media knows how far there is to go.
+    for (const QJsonValue& iv : o.value(QStringLiteral("included")).toArray())
+    {
+        const QJsonObject inc = iv.toObject();
+        if (inc.value(QStringLiteral("type")).toString() != kitsuSegment(kind)) continue;
+        const int n = inc.value(QStringLiteral("attributes")).toObject().value(kitsuCountField(kind)).toInt();
+        if (n > 0) { out.totalUnits = n; break; }
+    }
+    const QJsonArray rows = dv.toArray();
+    // AN EMPTY ARRAY IS A SUCCESS: asked, answered, and the account has no row for this media. That is
+    // Entry::exists=false, which is a different statement from progress==0 and is the one that decides
+    // whether the push CREATES a row.
+    if (rows.isEmpty()) return true;
+    const QJsonObject row = rows.first().toObject();
+    const QJsonValue idv = row.value(QStringLiteral("id"));
+    const QString entryId = idv.isString() ? idv.toString()
+                                           : (idv.isDouble() ? QString::number(qint64(idv.toDouble()))
+                                                             : QString());
+    if (entryId.isEmpty()) return true;   // a row we cannot address is a row we must not pretend to have
+    const QJsonObject a = row.value(QStringLiteral("attributes")).toObject();
+    out.exists = true;
+    // ONE field for both kinds — Kitsu has none of MAL's read/write asymmetry to get the wrong way round.
+    out.progress = a.value(QStringLiteral("progress")).toInt();
+    out.status = statusFromToken(a.value(QStringLiteral("status")).toString());
+    out.score = scoreFromKitsu(a.value(QStringLiteral("ratingTwenty")).toInt());
+    if (entryIdOut) *entryIdOut = entryId;
+    return true;
+}
+
+QString kitsu::saveUrl(const QString& apiBase, const QString& entryId)
+{
+    // ONE emptiness test, shared with saveMethod, so the URL and the verb cannot disagree about whether
+    // this is a create or an update.
+    return entryId.isEmpty() ? apiBase + QStringLiteral("/library-entries")
+                             : apiBase + QStringLiteral("/library-entries/") + pctEnc(entryId);
+}
+
+QByteArray kitsu::saveMethod(const QString& entryId)
+{
+    return entryId.isEmpty() ? QByteArray("POST") : QByteArray("PATCH");
+}
+
+QByteArray kitsu::saveBody(const Update& u, int totalUnits, const QString& entryId, const QString& userId)
+{
+    // COMPLETED needs BOTH the caller's claim and Kitsu's own count, exactly as it does on the other two:
+    // a provider listing missing its final chapters would otherwise mark a running series finished, which
+    // is the one push that cannot be undone by simply pushing again.
+    const bool completed = u.completes && (totalUnits <= 0 || u.unit >= totalUnits);
+    QJsonObject attrs;
+    attrs.insert(QStringLiteral("status"),
+                 statusToken(completed ? Status::Completed : Status::Current));
+    // Never below 1: a 0 tells the account you have read nothing, which is a regression dressed as an
+    // update.
+    attrs.insert(QStringLiteral("progress"), qMax(1, u.unit));
+    // ABSENT unless the app really has a rating. Kitsu treats a present ratingTwenty as a rating the user
+    // gave, so sending one they did not give overwrites the one they did — the same damage AniList's
+    // scoreRaw and MAL's score do, arrived at from a third convention.
+    if (u.hasScore) attrs.insert(QStringLiteral("ratingTwenty"), scoreToKitsu(u.score));
+
+    QJsonObject data;
+    data.insert(QStringLiteral("type"), QStringLiteral("libraryEntries"));
+    if (!entryId.isEmpty())
+    {
+        // A PATCH. JSON:API requires the id IN the document as well as in the URL, and it carries NO
+        // relationships: re-stating them on an update is how an entry gets re-pointed at another user's
+        // library or at another series.
+        data.insert(QStringLiteral("id"), entryId);
+    }
+    else
+    {
+        // A CREATE, and the only place the user id is ever put on the wire. Reached only when the read
+        // said the account really has no row, which is what makes a replayed update idempotent: it finds
+        // the row it made last time and PATCHes it rather than creating a second one.
+        QJsonObject user;
+        user.insert(QStringLiteral("data"), QJsonObject{ { QStringLiteral("id"), userId },
+                                                         { QStringLiteral("type"), QStringLiteral("users") } });
+        QJsonObject media;
+        media.insert(QStringLiteral("data"),
+                     QJsonObject{ { QStringLiteral("id"), u.mediaId },
+                                  { QStringLiteral("type"), kitsuSegment(u.kind) } });
+        QJsonObject rels;
+        rels.insert(QStringLiteral("user"), user);
+        rels.insert(kitsuSegment(u.kind), media);
+        data.insert(QStringLiteral("relationships"), rels);
+    }
+    data.insert(QStringLiteral("attributes"), attrs);
+    QJsonObject doc;
+    doc.insert(QStringLiteral("data"), data);
+    return QJsonDocument(doc).toJson(QJsonDocument::Compact);
+}
+
+QString kitsu::statusToken(Status s)
+{
+    switch (s)
+    {
+        case Status::Current:   return QStringLiteral("current");
+        case Status::Planning:  return QStringLiteral("planned");
+        case Status::Completed: return QStringLiteral("completed");
+        case Status::Dropped:   return QStringLiteral("dropped");
+        case Status::Paused:    return QStringLiteral("on_hold");
+        // Kitsu has NO "repeating" status either — a rewatch is a boolean (`reconsuming`) beside an
+        // otherwise ordinary `current`. The seam never writes Repeating, and mapping it to `completed`
+        // would be a status change nobody asked for.
+        case Status::Repeating: return QStringLiteral("current");
+    }
+    return QStringLiteral("current");
+}
+
+Status kitsu::statusFromToken(const QString& token)
+{
+    const QString t = token.trimmed().toLower();
+    if (t == QLatin1String("completed")) return Status::Completed;
+    if (t == QLatin1String("dropped"))   return Status::Dropped;
+    if (t == QLatin1String("on_hold"))   return Status::Paused;
+    if (t == QLatin1String("planned"))   return Status::Planning;
+    // "current" / anything Kitsu adds later. Current is the safest wrong answer, being the one status a
+    // push overwrites with the same value.
+    return Status::Current;
+}
+
+int kitsu::scoreToKitsu(int hundred)
+{
+    // ROUNDED, not truncated: 85 is a 17. And clamped UP to 2, not down to 0 — Kitsu's scale starts at 2
+    // and refuses a 0, so a very low rating becomes the lowest rating rather than an error. This is never
+    // called for an update with no score at all; that case is the field's ABSENCE.
+    return qBound(2, (qBound(0, hundred, 100) + 2) / 5, 20);
+}
+
+int kitsu::scoreFromKitsu(int twenty)
+{
+    // 0 in means "no rating on the entry" and stays 0, which is what Entry::score means by unrated.
+    if (twenty <= 0) return 0;
+    return qBound(0, twenty, 20) * 5;
+}
+
+tracker::SendPolicy kitsu::sendPolicy()
+{
+    SendPolicy p;
+    // MAL's set, not AniList's, and for a structural reason rather than a coincidence: Kitsu is JSON:API
+    // over REST, so 422 is a status it really can answer with (a rejected attribute), where AniList's
+    // single GraphQL endpoint cannot. 400 is a document its schema refuses and 404 a media or entry that
+    // is gone; none of the three becomes acceptable by waiting.
+    //
+    // 403 is deliberately NOT here, for the reason it is absent from both others: a temporarily-refused
+    // client and a suspended account share it, and dropping a whole queue for the first is the worse
+    // mistake.
+    p.permanent = { 400, 404, 422 };
+    p.reauth    = { 401 };
+    p.throttle  = { 429 };
+    p.baseMs    = kBackoffBaseMs;
+    p.maxMs     = kBackoffMaxMs;
+    return p;
+}
 // ================= what an AniList push RESPONSE means (issue #326) ======================================
 
 bool anilist::saveAccepted(int httpStatus, const QByteArray& body)
