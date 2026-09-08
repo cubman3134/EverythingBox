@@ -16,6 +16,10 @@
 // mapping every available row through a lookup of the (empty) list — renders an EMPTY home for every
 // untouched profile in the world, and every other assertion in this file still passes.
 //
+// Also pinned (issue #314): WHICH HOME DRAWS WHICH ROW -- the per-layout producer table, and the sentence the
+// editor puts on a row that will not appear on the home the user is looking at. That table is informational
+// only, so the last assertions in that section are that the planner still ignores it entirely.
+//
 // Also pinned: reorder, hide, cap; an unknown rowId kept in the store and skipped at render; a surface that
 // cannot produce a listed row ignoring that entry (the "a theme that declares no Favourites shelf shows none
 // regardless of the list" rule); the store round-trip and per-profile isolation; and the merge — last-writer
@@ -208,6 +212,95 @@ static void testReorderHideCap()
           == QStringLiteral("favorites/3 continue"));
 }
 
+// ---- 2b. WHICH HOME DRAWS WHICH (issue #314) --------------------------------------------------------------
+// THE TABLE, and it is the point of this section: the row vocabulary spans both layouts, and a row the user
+// can add which then silently draws nothing on the home they are actually using is the failure #314 was
+// filed for. The answer is not "fix one shelf" -- nine of the eleven producing families are classic-home
+// only and two are themed-home only -- so what is pinned here is the table itself plus the sentence the
+// editor puts on a row that will not appear here.
+//
+// A new row family added WITHOUT a line in layoutsFor() fails this test rather than shipping as a shelf one
+// layout cannot draw, which is the regression that produced the issue in the first place.
+static void testWhichHomeDrawsWhat()
+{
+    // The classic home's shelves: HomeView::renderRecents builds every one of these, built-in and opt-in
+    // alike, and no themed home builds any of them.
+    for (const QString& id : { QStringLiteral("continue"), QStringLiteral("jellyfin:continue"),
+                               QStringLiteral("new"), QStringLiteral("trakt:calendar"),
+                               QStringLiteral("favorites"), QStringLiteral("requests"),
+                               QStringLiteral("downloads"), QStringLiteral("playlist:abc"),
+                               QStringLiteral("preset:Unplayed SNES RPGs") })
+        CHECK(layoutsFor(id) == ClassicHome);
+
+    // The themed home's rows: HomeView::categoryItems / systemItems run the list over these two families and
+    // the classic home has no place for either -- a catalogue tile is not a shelf.
+    CHECK(layoutsFor(QStringLiteral("category:video")) == ThemedHome);
+    CHECK(layoutsFor(QStringLiteral("category:photos")) == ThemedHome);
+    CHECK(layoutsFor(QStringLiteral("source:aio.games")) == ThemedHome);
+
+    // Accepted vocabulary with no producer anywhere, and ids this build has never heard of. Both answer the
+    // same thing, deliberately: the editor has a better sentence for them ("not on this device").
+    CHECK(layoutsFor(QStringLiteral("recents")) == NoLayout);
+    CHECK(layoutsFor(QStringLiteral("trakt:missed")) == NoLayout);
+    CHECK(layoutsFor(QStringLiteral("trakt:whatever")) == NoLayout);
+    CHECK(layoutsFor(QStringLiteral("nonsense")) == NoLayout);
+    CHECK(layoutsFor(QString()) == NoLayout);
+
+    // EVERY built-in shelf has a home that draws it. A row the app puts on the default home which no layout
+    // can produce would be the #314 bug shipping again, from the other end.
+    for (const QString& id : defaultShelfOrder()) CHECK(layoutsFor(id) == ClassicHome);
+    // ...and so does every opt-in one. These are the rows "Add row..." offers, so an unanswerable one here is
+    // exactly a row the user can add and never see.
+    CHECK(layoutsFor(QStringLiteral("downloads")) != NoLayout);
+    CHECK(layoutsFor(QStringLiteral("playlist:x")) != NoLayout);
+    CHECK(layoutsFor(QStringLiteral("preset:x")) != NoLayout);
+
+    // #83's shelf is part of the vocabulary rather than an id the build has never heard of. It was in
+    // defaultShelfOrder() from the day it shipped while isKnownRowId() had never been told about the family,
+    // so the editor labelled a shelf this device draws every day as one it does not have.
+    CHECK(isKnownRowId(QStringLiteral("jellyfin:continue")));
+
+    // ---- the editor's sentence -----------------------------------------------------------------------------
+    // On the THEMED home: a classic-only row says so, a themed row says nothing.
+    CHECK(layoutNote(QStringLiteral("requests"), true) == QStringLiteral("only on the classic home"));
+    CHECK(layoutNote(QStringLiteral("continue"), true) == QStringLiteral("only on the classic home"));
+    CHECK(layoutNote(QStringLiteral("preset:x"), true) == QStringLiteral("only on the classic home"));
+    CHECK(layoutNote(QStringLiteral("category:video"), true).isEmpty());
+    CHECK(layoutNote(QStringLiteral("source:aio.games"), true).isEmpty());
+
+    // On the CLASSIC home: the mirror image, and it must be a mirror -- a note that only ever appeared on one
+    // layout would leave the other layout's user exactly where #314 found them.
+    CHECK(layoutNote(QStringLiteral("category:video"), false) == QStringLiteral("only on the themed home"));
+    CHECK(layoutNote(QStringLiteral("source:aio.games"), false) == QStringLiteral("only on the themed home"));
+    CHECK(layoutNote(QStringLiteral("requests"), false).isEmpty());
+    CHECK(layoutNote(QStringLiteral("continue"), false).isEmpty());
+
+    // A row NO home in this build produces gets no note on either layout: "only on the themed home" would be
+    // a lie about a deleted preset or a peer's row, and the editor already marks that case as not on this
+    // device. Saying nothing is the honest answer here.
+    for (bool themed : { true, false })
+    {
+        CHECK(layoutNote(QStringLiteral("recents"), themed).isEmpty());
+        CHECK(layoutNote(QStringLiteral("trakt:missed"), themed).isEmpty());
+        CHECK(layoutNote(QStringLiteral("nonsense"), themed).isEmpty());
+        CHECK(layoutNote(QString(), themed).isEmpty());
+    }
+
+    // ---- and NONE of it reaches the planner ------------------------------------------------------------------
+    // The whole table is informational. plan() still renders anything the SURFACE says it can produce, even an
+    // id this build has never heard of -- that is how a peer device's row survives a round trip through a
+    // build that predates it, and gating the planner on layoutsFor() would break exactly that.
+    const QVector<Row> peer{ row(QStringLiteral("future:thing")), row(QStringLiteral("continue")) };
+    CHECK(layoutsFor(QStringLiteral("future:thing")) == NoLayout);
+    CHECK(spell(plan(avail({ QStringLiteral("future:thing"), QStringLiteral("continue") }), peer))
+          == QStringLiteral("future:thing continue"));
+    // ...and a classic-only row named by the list is still merely SKIPPED on the themed home, never dropped:
+    // the keep-and-skip rule is untouched by any of the above (test 3 checks the store side of it).
+    CHECK(spell(plan(avail({ QStringLiteral("category:video") }),
+                     { row(QStringLiteral("requests")), row(QStringLiteral("category:video")) }))
+          == QStringLiteral("category:video"));
+}
+
 // ---- 3. a row this surface cannot produce -----------------------------------------------------------------
 static void testUnproducibleRowsAreKeptAndSkipped()
 {
@@ -376,6 +469,7 @@ int main(int argc, char** argv)
 
     testDefaultIsToday();
     testReorderHideCap();
+    testWhichHomeDrawsWhat();
     testUnproducibleRowsAreKeptAndSkipped();
     testStore();
     testJson();
