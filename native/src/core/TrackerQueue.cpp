@@ -4,7 +4,10 @@
 #include "ProfileStore.h"
 #include "TrackerRules.h"
 
+#include <QDateTime>
 #include <QSettings>
+
+#include <utility>
 
 using namespace tracker;
 
@@ -97,4 +100,129 @@ void TrackerQueue::forgetAccount(Id id)
     store().remove(queueKey(ProfileStore::currentId(), id));
     store().remove(lastErrorKey(ProfileStore::currentId(), id));
     store().sync();
+}
+
+// ================= the credential store (issue #326) =====================================================
+//
+// Both trackers had written these out against the same five Tracker.h keys. One copy now, Id-parameterised.
+// Nothing here logs and nothing here is ever put in a message — see the header.
+
+QString TrackerQueue::clientId(Id id) { return store().value(clientIdKey(id)).toString(); }
+
+QString TrackerQueue::clientSecret(Id id) { return store().value(clientSecretKey(id)).toString(); }
+
+void TrackerQueue::setClientId(Id id, const QString& v)
+{
+    store().setValue(clientIdKey(id), v.trimmed());
+    store().sync();
+}
+
+void TrackerQueue::setClientSecret(Id id, const QString& v)
+{
+    store().setValue(clientSecretKey(id), v.trimmed());
+    store().sync();
+}
+
+QString TrackerQueue::accessToken(Id id) { return store().value(accessKey(id)).toString(); }
+
+bool TrackerQueue::hasAccessToken(Id id) { return !accessToken(id).isEmpty(); }
+
+QString TrackerQueue::refreshToken(Id id) { return store().value(refreshKey(id)).toString(); }
+
+bool TrackerQueue::tokenFresh(Id id, qint64 nowSec, qint64 skewSec)
+{
+    const qint64 expiry = store().value(expiryKey(id), 0).toLongLong();
+    // 0 = unknown expiry (see storeTokens). The skew keeps a token that expires mid-flight from being used
+    // for the request it would fail.
+    return expiry <= 0 || expiry - skewSec > nowSec;
+}
+
+void TrackerQueue::storeTokens(Id id, const QString& access, const QString& refresh,
+                               qint64 expiresInSec, qint64 nowSec)
+{
+    store().setValue(accessKey(id), access);
+    // A refresh reply may legitimately omit the refresh token; keeping the old one is correct, blanking it
+    // would unlink the account on the next expiry.
+    if (!refresh.isEmpty()) store().setValue(refreshKey(id), refresh);
+    store().setValue(expiryKey(id), expiresInSec > 0 ? nowSec + expiresInSec : 0);
+    store().sync();
+}
+
+void TrackerQueue::clearTokens(Id id)
+{
+    store().remove(accessKey(id));
+    store().remove(refreshKey(id));
+    store().remove(expiryKey(id));
+    store().sync();
+}
+
+// ================= the drain loop (issue #326) ===========================================================
+
+TrackerQueue::Sender::Sender(SendSpec spec) : spec_(std::move(spec))
+{
+    if (!spec_.now) spec_.now = [] { return QDateTime::currentMSecsSinceEpoch(); };
+}
+
+void TrackerQueue::Sender::reset() { failures_ = 0; lastWaitMs_ = 0; }
+
+void TrackerQueue::Sender::arm(qint64 delayMs)
+{
+    lastWaitMs_ = delayMs > 0 ? delayMs : 0;
+    if (spec_.wait) spec_.wait(int(lastWaitMs_));
+}
+
+void TrackerQueue::Sender::drain()
+{
+    if (sending_ || !spec_.send) return;
+    if (!spec_.ready || !spec_.ready()) return;
+    QVector<Update> q = load(spec_.id);
+    if (q.isEmpty()) { arm(0); return; }   // nothing pending: stop the timer rather than wake for nothing
+
+    const qint64 now = spec_.now();
+    qint64 soonest = -1;
+    const int idx = nextSendable(q, spec_.id, now, &soonest);
+    if (idx < 0)
+    {
+        // Everything queued is inside its item's debounce window. Wake exactly when the earliest one opens,
+        // rather than polling: a binge-reader would otherwise have a timer firing every second.
+        arm(qBound<qint64>(1000, soonest, kDebounceMs));
+        return;
+    }
+
+    const Update u = q[idx];
+    sending_ = true;
+    spec_.send(u, [this, u](Reply r) {
+        sending_ = false;
+        if (r.accepted)
+        {
+            failures_ = 0;
+            // Removed by IDENTITY, not by index — see TrackerQueue::removeDelivered.
+            removeDelivered(spec_.id, u);
+            noteSent(spec_.id, u.itemKey, spec_.now());
+            setLastError(spec_.id, QString());
+            if (spec_.pushed) spec_.pushed(u.itemKey, u.unit);
+            if (spec_.changed) spec_.changed();
+            drain();   // keep going; the next item's debounce is checked afresh
+            return;
+        }
+
+        ++failures_;
+        const SendVerdict v = classifySend(spec_.policy, r.status, r.retryAfterSec, failures_);
+        if (v.permanent)
+        {
+            // THE UNWEDGE. This provider will never accept this row, so it is DROPPED rather than left to
+            // block the head of an ordered queue for ever — every later chapter behind it would be lost
+            // too. Said out loud in the status line, because a queue that quietly discards somebody's
+            // progress is worse than one that wedges: at least a wedge is eventually noticed.
+            removeDelivered(spec_.id, u);
+            setLastError(spec_.id, spec_.droppedMessage ? spec_.droppedMessage(u) : QString());
+            if (spec_.changed) spec_.changed();
+            drain();   // ...and the rows behind it go out now, which is the whole point of dropping it
+            return;
+        }
+        // A message ABOUT the failure, never the request — see both tracker headers.
+        setLastError(spec_.id, v.reauth ? spec_.reauthMessage : spec_.retryMessage);
+        arm(qBound<qint64>(1000, v.delayMs, spec_.policy.maxMs));
+        if (spec_.changed) spec_.changed();
+    });
 }

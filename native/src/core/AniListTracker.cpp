@@ -1,9 +1,6 @@
 #include "AniListTracker.h"
-#include "AppBrand.h"
-#include "AppPaths.h"
-#include "ProfileStore.h"
 #include "TrackerLinks.h"
-#include "TrackerQueue.h"   // the ONE offline queue, now shared with MyAnimeList (increment 2)
+#include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with MyAnimeList
 
 #include <QDateTime>
 #include <QDesktopServices>
@@ -11,7 +8,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -20,16 +16,8 @@
 
 using namespace tracker;
 
-static QSettings& store()
-{
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                       QSettings::IniFormat);
-    return s;
-}
-
-// How long to wait before retrying a queued update whose send failed. Deliberately long: a failure here is
-// almost always "no network" or "rate limited", and both are answered by waiting, not by trying harder.
-static constexpr int kRetryMs = 60000;
+// The ini lives in TrackerQueue now (#326): this file had its own `static QSettings& store()` and its own
+// five credential accessors, and MyAnimeListTracker had the identical pair. Both call the shared ones.
 
 AniListTracker::AniListTracker(QObject* parent) : QObject(parent)
 {
@@ -37,6 +25,50 @@ AniListTracker::AniListTracker(QObject* parent) : QObject(parent)
     retry_ = new QTimer(this);
     retry_->setSingleShot(true);
     connect(retry_, &QTimer::timeout, this, [this] { drain(); });
+
+    // THE SHARED DRAIN LOOP (#326). Everything below is what is genuinely AniList's: whether the tracker is
+    // usable, how one row is put on the wire, what its answer MEANS, and three sentences that name it. The
+    // loop itself — read the queue, respect the debounce, remove on success, drop what can never succeed,
+    // back off on what can — is TrackerQueue::Sender, and MyAnimeList runs the same one.
+    TrackerQueue::SendSpec spec;
+    spec.id = Id::AniList;
+    // 400/404 drop; 401 refreshes; 429 backs off honouring Retry-After; everything else waits. The base is
+    // the 60 seconds increment 1 already waited, to the millisecond — see anilist::sendPolicy().
+    spec.policy = anilist::sendPolicy();
+    spec.ready = [] { return isConfigured() && isConnected(); };
+    spec.send = [this](const Update& u, std::function<void(TrackerQueue::Reply)> done) {
+        // The COMPLETED decision uses the tracker's OWN unit count, captured when the link was made — see
+        // anilist::saveBody. Reading it from the link rather than from the app's chapter list is what keeps
+        // a partial provider listing from marking a running series finished.
+        const int total = TrackerLinks::get(Id::AniList, u.itemKey).totalUnits;
+        post(anilist::saveBody(u, total),
+             [done](bool netOk, int status, qint64 retryAfterSec, QByteArray body) {
+            TrackerQueue::Reply r;
+            // A GraphQL error arrives as HTTP 200 with an `errors` array and no `data`, so transport
+            // success is not acceptance. Anything that is not a SaveMediaListEntry payload is a failure,
+            // and the status the POLICY judges is then the one AniList put inside that error object.
+            r.accepted      = netOk && anilist::saveAccepted(status, body);
+            r.status        = anilist::effectiveStatus(status, body);
+            r.retryAfterSec = retryAfterSec;
+            if (done) done(r);
+        });
+    };
+    spec.droppedMessage = [](const Update& u) {
+        // WHICH update, by the title the link store already holds — no request, and nothing out of a
+        // response body. An unlinked or untitled row falls back to the sentence increment 2 shipped.
+        const QString title = TrackerLinks::get(Id::AniList, u.itemKey).title;
+        return title.isEmpty()
+            ? tr("AniList refused one update and it has been dropped; the rest are still queued.")
+            : tr("AniList refused the update for %1 and it has been dropped; "
+                 "the rest are still queued.").arg(title);
+    };
+    spec.reauthMessage = tr("AniList needs signing in again; updates are queued.");
+    // A message ABOUT the failure. Never the body, never the request — see the file header.
+    spec.retryMessage = tr("AniList did not accept the update; it is queued and will be retried.");
+    spec.pushed = [this](const QString& itemKey, int unit) { emit progressPushed(itemKey, unit); };
+    spec.changed = [this] { emit queueChanged(); };
+    spec.wait = [this](int delayMs) { if (delayMs > 0) retry_->start(delayMs); else retry_->stop(); };
+    sender_ = std::make_unique<TrackerQueue::Sender>(std::move(spec));
 }
 
 AniListTracker::~AniListTracker() { closeLoopback(); }
@@ -47,32 +79,20 @@ QString AniListTracker::clientId()
 {
     // THE #81 SEAM. The zero-config follow-up replaces this body with "typed value, else the embedded
     // BuiltinSecrets slot" and touches nothing else in the feature. See tracker::builtinSecretIdSlot().
-    return store().value(clientIdKey(Id::AniList)).toString();
+    // The ini access underneath moved to TrackerQueue in #326; the SEAM did not move, because this is still
+    // the one place in the app that decides what "the AniList client id" means.
+    return TrackerQueue::clientId(Id::AniList);
 }
 
-QString AniListTracker::clientSecret()
-{
-    return store().value(clientSecretKey(Id::AniList)).toString();
-}
+QString AniListTracker::clientSecret() { return TrackerQueue::clientSecret(Id::AniList); }
 
-void AniListTracker::setClientId(const QString& v)
-{
-    store().setValue(clientIdKey(Id::AniList), v.trimmed());
-    store().sync();
-}
+void AniListTracker::setClientId(const QString& v) { TrackerQueue::setClientId(Id::AniList, v); }
 
-void AniListTracker::setClientSecret(const QString& v)
-{
-    store().setValue(clientSecretKey(Id::AniList), v.trimmed());
-    store().sync();
-}
+void AniListTracker::setClientSecret(const QString& v) { TrackerQueue::setClientSecret(Id::AniList, v); }
 
 bool AniListTracker::isConfigured() { return !clientId().isEmpty() && !clientSecret().isEmpty(); }
 
-bool AniListTracker::isConnected()
-{
-    return !store().value(accessKey(Id::AniList)).toString().isEmpty();
-}
+bool AniListTracker::isConnected() { return TrackerQueue::hasAccessToken(Id::AniList); }
 
 QString AniListTracker::apiUrl()
 {
@@ -114,24 +134,14 @@ void AniListTracker::connectAccount()
         QTcpSocket* sock = loopback_->nextPendingConnection();
         if (!sock) return;
         connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
-            const QByteArray req = sock->readAll();
-            const QByteArray line = req.left(req.indexOf('\r'));
-            const int sp1 = line.indexOf(' '), sp2 = line.indexOf(' ', sp1 + 1);
-            const QString target = QString::fromUtf8(line.mid(sp1 + 1, sp2 - sp1 - 1));
-            const QUrlQuery q(QUrl::fromEncoded(("http://localhost" + target.toUtf8())).query());
-            const QString err = q.queryItemValue(QStringLiteral("error"));
-            const QString code = q.queryItemValue(QStringLiteral("code"));
+            // The request parsing and the reply bytes are tracker::parseLoopbackRequest /
+            // tracker::loopbackResponse (#326) — both trackers had written them out identically, and the
+            // Referer/Cache-Control posture they encode is now stated in one place a probe can read.
+            const LoopbackCallback cb = parseLoopbackRequest(sock->readAll());
+            const QString err = cb.error;
+            const QString code = cb.code;
 
-            // A plain body rather than a redirect to the project website: unlike the Drive flow there is no
-            // branded landing page for this, and sending the browser anywhere would hand a third party a
-            // request whose Referer names this loopback port. Content-Length is explicit so the browser does
-            // not sit waiting on a connection close.
-            const QByteArray page = err.isEmpty() && !code.isEmpty()
-                ? QByteArray("Signed in. You can close this tab and go back to the app.")
-                : QByteArray("Sign-in was not completed. You can close this tab.");
-            sock->write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                        "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n"
-                        "Content-Length: " + QByteArray::number(page.size()) + "\r\n\r\n" + page);
+            sock->write(loopbackResponse(err.isEmpty() && !code.isEmpty()));
             sock->flush();
             sock->disconnectFromHost();
             closeLoopback();
@@ -177,27 +187,22 @@ void AniListTracker::exchangeCode(const QString& code)
 void AniListTracker::storeTokenReply(const anilist::TokenReply& r)
 {
     if (!r.ok) return;   // never write an unsuccessful reply over live tokens — see TrackerRules
-    store().setValue(accessKey(Id::AniList), r.accessToken);
-    // A refresh reply may legitimately omit the refresh token; keeping the old one is correct, blanking it
-    // would unlink the account on the next expiry.
-    if (!r.refreshToken.isEmpty()) store().setValue(refreshKey(Id::AniList), r.refreshToken);
     // AniList's access tokens are long-lived (a year). A missing expires_in stores 0, and 0 means "assume
-    // valid" below rather than "expired": treating an unknown expiry as expired would refresh on every
-    // request against a token that is fine.
-    store().setValue(expiryKey(Id::AniList),
-                     r.expiresInSec > 0 ? QDateTime::currentSecsSinceEpoch() + r.expiresInSec : 0);
-    store().sync();
+    // valid" rather than "expired": treating an unknown expiry as expired would refresh on every request
+    // against a token that is fine. The omitted-refresh-token guard is TrackerQueue's, for both trackers.
+    TrackerQueue::storeTokens(Id::AniList, r.accessToken, r.refreshToken, r.expiresInSec,
+                              QDateTime::currentSecsSinceEpoch());
 }
 
 void AniListTracker::disconnectAccount()
 {
     closeLoopback();
-    store().remove(accessKey(Id::AniList));
-    store().remove(refreshKey(Id::AniList));
-    store().remove(expiryKey(Id::AniList));
-    store().sync();
+    TrackerQueue::clearTokens(Id::AniList);
     // The pending queue is this account's progress; the next account has not agreed to receive it.
     TrackerQueue::forgetAccount(Id::AniList);
+    // ...and the consecutive-failure count goes with it: a fresh link is exactly the moment it is worth
+    // trying again immediately rather than half an hour from now.
+    if (sender_) sender_->reset();
     emit connectedChanged(false);
     emit queueChanged();
 }
@@ -205,11 +210,11 @@ void AniListTracker::disconnectAccount()
 void AniListTracker::ensureValidToken(std::function<void(bool ok)> done)
 {
     if (!isConfigured() || !isConnected()) { if (done) done(false); return; }
-    const qint64 expiry = store().value(expiryKey(Id::AniList), 0).toLongLong();
     // 0 = unknown expiry (see storeTokenReply). A 60-second skew keeps a token that expires mid-flight from
     // being used for the request it would fail.
-    if (expiry <= 0 || expiry - 60 > QDateTime::currentSecsSinceEpoch()) { if (done) done(true); return; }
-    const QString refresh = store().value(refreshKey(Id::AniList)).toString();
+    if (TrackerQueue::tokenFresh(Id::AniList, QDateTime::currentSecsSinceEpoch(), 60))
+    { if (done) done(true); return; }
+    const QString refresh = TrackerQueue::refreshToken(Id::AniList);
     if (refresh.isEmpty()) { if (done) done(false); return; }
 
     if (!tokenRefresh_.join(std::move(done))) return;   // one refresh in flight; this caller joined it
@@ -228,20 +233,25 @@ void AniListTracker::ensureValidToken(std::function<void(bool ok)> done)
 
 // ---- requests ---------------------------------------------------------------------------------------
 
-void AniListTracker::post(const QByteArray& body, std::function<void(bool ok, QByteArray)> cb)
+void AniListTracker::post(const QByteArray& body,
+                          std::function<void(bool ok, int status, qint64 retryAfterSec, QByteArray)> cb)
 {
     ensureValidToken([this, body, cb](bool ok) {
-        if (!ok) { if (cb) cb(false, QByteArray()); return; }
+        if (!ok) { if (cb) cb(false, 0, 0, QByteArray()); return; }
         QNetworkRequest req{ QUrl(apiUrl()) };
         req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         req.setRawHeader("Accept", "application/json");
         req.setRawHeader("Authorization",
-                         "Bearer " + store().value(accessKey(Id::AniList)).toString().toUtf8());
+                         "Bearer " + TrackerQueue::accessToken(Id::AniList).toUtf8());
         QNetworkReply* rep = nam_->post(req, body);
         connect(rep, &QNetworkReply::finished, this, [rep, cb] {
             rep->deleteLater();
             const bool netOk = rep->error() == QNetworkReply::NoError;
-            if (cb) cb(netOk, rep->readAll());
+            // The STATUS and the Retry-After are carried rather than collapsed into ok/fail, because since
+            // #326 the retry decision is a decision about WHICH failure this was. `ok` is untouched, so
+            // search() and fetchEntry() below read exactly what they always did.
+            const int status = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (cb) cb(netOk, status, retryAfterSeconds(rep->rawHeader("Retry-After")), rep->readAll());
         });
     });
 }
@@ -251,7 +261,7 @@ void AniListTracker::search(const QString& title, int year, Kind kind,
 {
     if (title.trimmed().isEmpty() || !isConfigured() || !isConnected())
     { if (cb) cb({}); return; }   // the tracker being off is not a failure — an empty result covers both
-    post(anilist::searchBody(title, year, kind), [cb](bool ok, QByteArray body) {
+    post(anilist::searchBody(title, year, kind), [cb](bool ok, int, qint64, QByteArray body) {
         if (cb) cb(ok ? anilist::parseSearch(body) : QVector<Match>{});
     });
 }
@@ -259,7 +269,7 @@ void AniListTracker::search(const QString& title, int year, Kind kind,
 void AniListTracker::fetchEntry(const QString& mediaId, Kind, std::function<void(bool, Entry)> cb)
 {
     if (mediaId.isEmpty() || !isConfigured() || !isConnected()) { if (cb) cb(false, Entry{}); return; }
-    post(anilist::entryBody(mediaId), [cb, mediaId](bool ok, QByteArray body) {
+    post(anilist::entryBody(mediaId), [cb, mediaId](bool ok, int, qint64, QByteArray body) {
         Entry e;
         const bool parsed = ok && anilist::parseEntry(body, mediaId, e);
         if (cb) cb(parsed, e);
@@ -269,20 +279,11 @@ void AniListTracker::fetchEntry(const QString& mediaId, Kind, std::function<void
 // ---- the queue --------------------------------------------------------------------------------------
 
 // The queue plumbing moved to TrackerQueue in increment 2 and is now SHARED with MyAnimeList - the same
-// keys, the same rules, one implementation. These five stayed as thin forwarders so nothing else in this
-// file (or in the settings surfaces, which call queuedCount/lastError) had to learn a new name.
-QVector<Update> AniListTracker::loadQueue() { return TrackerQueue::load(Id::AniList); }
-
-void AniListTracker::saveQueue(const QVector<Update>& q) { TrackerQueue::save(Id::AniList, q); }
-
+// keys, the same rules, one implementation. #326 moved the DRAIN LOOP up beside it, which left the three
+// private forwarders here with no callers; these two stayed, because the settings surfaces call them.
 int AniListTracker::queuedCount() { return TrackerQueue::count(Id::AniList); }
 
 QString AniListTracker::lastError() { return TrackerQueue::lastError(Id::AniList); }
-
-void AniListTracker::setLastError(const QString& message)
-{
-    TrackerQueue::setLastError(Id::AniList, message);
-}
 
 void AniListTracker::pushProgress(const Update& in)
 {
@@ -297,48 +298,9 @@ void AniListTracker::pushProgress(const Update& in)
 
 void AniListTracker::flushQueue() { drain(); }
 
-void AniListTracker::drain()
-{
-    if (sending_ || !isConfigured() || !isConnected()) return;
-    QVector<Update> q = loadQueue();
-    if (q.isEmpty()) { retry_->stop(); return; }
-
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    qint64 soonest = -1;
-    const int idx = TrackerQueue::nextSendable(q, Id::AniList, now, &soonest);
-    if (idx < 0)
-    {
-        // Everything queued is inside its item's debounce window. Wake exactly when the earliest one opens,
-        // rather than polling: a binge-reader would otherwise have a timer firing every second.
-        retry_->start(int(qBound<qint64>(1000, soonest, kDebounceMs)));
-        return;
-    }
-
-    const Update u = q[idx];
-    // The COMPLETED decision uses the tracker's OWN unit count, captured when the link was made — see
-    // anilist::saveBody. Reading it from the link rather than from the app's chapter list is what keeps a
-    // partial provider listing from marking a running series finished.
-    const int total = TrackerLinks::get(Id::AniList, u.itemKey).totalUnits;
-    sending_ = true;
-    post(anilist::saveBody(u, total), [this, u](bool ok, QByteArray body) {
-        sending_ = false;
-        // A GraphQL error arrives as HTTP 200 with an `errors` array and no `data`, so transport success is
-        // not acceptance. Anything that is not a SaveMediaListEntry payload leaves the row queued.
-        const bool accepted = ok && body.contains("SaveMediaListEntry");
-        if (!accepted)
-        {
-            // A message ABOUT the failure. Never the body, never the request — see the file header.
-            setLastError(tr("AniList did not accept the update; it is queued and will be retried."));
-            retry_->start(kRetryMs);
-            emit queueChanged();
-            return;
-        }
-        // Removed by IDENTITY, not by index - see TrackerQueue::removeDelivered.
-        TrackerQueue::removeDelivered(Id::AniList, u);
-        TrackerQueue::noteSent(Id::AniList, u.itemKey, QDateTime::currentMSecsSinceEpoch());
-        setLastError(QString());
-        emit progressPushed(u.itemKey, u.unit);
-        emit queueChanged();
-        drain();   // keep going; the next item's debounce is checked afresh
-    });
-}
+// THE LOOP MOVED (#326). What used to be thirty lines here — and thirty near-identical lines in
+// MyAnimeListTracker — is TrackerQueue::Sender, built in the constructor out of the four things that really
+// are AniList's. The bug this fixes lived in the removed lines: every failure took the `!accepted` branch
+// and was retried for ever, so a row AniList would never accept sat at the head of an ordered queue and
+// blocked every update behind it. The shared loop drops that row, says which one it was, and carries on.
+void AniListTracker::drain() { if (sender_) sender_->drain(); }

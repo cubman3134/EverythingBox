@@ -1,8 +1,6 @@
 #include "MyAnimeListTracker.h"
-#include "AppBrand.h"
-#include "AppPaths.h"
 #include "TrackerLinks.h"
-#include "TrackerQueue.h"
+#include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with AniList
 
 #include <QDateTime>
 #include <QDesktopServices>
@@ -11,7 +9,6 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
-#include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -20,12 +17,8 @@
 
 using namespace tracker;
 
-static QSettings& store()
-{
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                       QSettings::IniFormat);
-    return s;
-}
+// The ini lives in TrackerQueue now (#326): this file and AniListTracker had the identical
+// `static QSettings& store()` and the identical five credential accessors. Both call the shared ones.
 
 MyAnimeListTracker::MyAnimeListTracker(QObject* parent) : QObject(parent)
 {
@@ -33,6 +26,46 @@ MyAnimeListTracker::MyAnimeListTracker(QObject* parent) : QObject(parent)
     retry_ = new QTimer(this);
     retry_->setSingleShot(true);
     connect(retry_, &QTimer::timeout, this, [this] { drain(); });
+
+    // THE SHARED DRAIN LOOP (#326) — the same one AniList runs. What is supplied here is only what is
+    // really MyAnimeList's: whether the tracker is usable, how one row is PATCHed, and three sentences that
+    // name it. The classification that increment 2 wrote as mal::backoffFor is now the policy below, asked
+    // by tracker::classifySend, so the two trackers cannot drift apart on what a failure means.
+    TrackerQueue::SendSpec spec;
+    spec.id = Id::MyAnimeList;
+    spec.policy = mal::sendPolicy();
+    spec.ready = [] { return isConfigured() && isConnected(); };
+    spec.send = [this](const Update& u, std::function<void(TrackerQueue::Reply)> done) {
+        // The COMPLETED decision uses the TRACKER'S OWN unit count, captured when the link was made.
+        // Reading it from the link rather than from the app's chapter list is what keeps a partial provider
+        // listing from marking a running series finished.
+        const int total = TrackerLinks::get(Id::MyAnimeList, u.itemKey).totalUnits;
+        patch(mal::saveUrl(apiUrl(), u.mediaId, u.kind), mal::saveBody(u, total),
+              [done](int status, qint64 retryAfterSec, QByteArray body) {
+            Q_UNUSED(body);   // deliberately unread: nothing MAL echoes is worth quoting back at the user
+            TrackerQueue::Reply r;
+            r.accepted      = status >= 200 && status < 300;
+            r.status        = status;
+            r.retryAfterSec = retryAfterSec;
+            if (done) done(r);
+        });
+    };
+    spec.droppedMessage = [](const Update& u) {
+        // WHICH update, by the title the link store already holds — no request, and nothing out of a
+        // response body. An unlinked or untitled row falls back to the sentence increment 2 shipped.
+        const QString title = TrackerLinks::get(Id::MyAnimeList, u.itemKey).title;
+        return title.isEmpty()
+            ? tr("MyAnimeList refused one update and it has been dropped; the rest are still queued.")
+            : tr("MyAnimeList refused the update for %1 and it has been dropped; "
+                 "the rest are still queued.").arg(title);
+    };
+    spec.reauthMessage = tr("MyAnimeList needs signing in again; updates are queued.");
+    // A message ABOUT the failure, never the request — see the file header.
+    spec.retryMessage = tr("MyAnimeList did not accept the update; it is queued and will be retried.");
+    spec.pushed = [this](const QString& itemKey, int unit) { emit progressPushed(itemKey, unit); };
+    spec.changed = [this] { emit queueChanged(); };
+    spec.wait = [this](int delayMs) { if (delayMs > 0) retry_->start(delayMs); else retry_->stop(); };
+    sender_ = std::make_unique<TrackerQueue::Sender>(std::move(spec));
 }
 
 MyAnimeListTracker::~MyAnimeListTracker() { closeLoopback(); }
@@ -42,25 +75,21 @@ MyAnimeListTracker::~MyAnimeListTracker() { closeLoopback(); }
 QString MyAnimeListTracker::clientId()
 {
     // THE #81 SEAM, the AniList one's twin: the zero-config follow-up replaces this body with "typed value,
-    // else the embedded BuiltinSecrets slot" and touches nothing else in the feature.
-    return store().value(clientIdKey(Id::MyAnimeList)).toString();
+    // else the embedded BuiltinSecrets slot" and touches nothing else in the feature. The ini access
+    // underneath moved to TrackerQueue in #326; the seam did not.
+    return TrackerQueue::clientId(Id::MyAnimeList);
 }
 
-QString MyAnimeListTracker::clientSecret()
-{
-    return store().value(clientSecretKey(Id::MyAnimeList)).toString();
-}
+QString MyAnimeListTracker::clientSecret() { return TrackerQueue::clientSecret(Id::MyAnimeList); }
 
 void MyAnimeListTracker::setClientId(const QString& v)
 {
-    store().setValue(clientIdKey(Id::MyAnimeList), v.trimmed());
-    store().sync();
+    TrackerQueue::setClientId(Id::MyAnimeList, v);
 }
 
 void MyAnimeListTracker::setClientSecret(const QString& v)
 {
-    store().setValue(clientSecretKey(Id::MyAnimeList), v.trimmed());
-    store().sync();
+    TrackerQueue::setClientSecret(Id::MyAnimeList, v);
 }
 
 // THE ID ALONE. MAL issues public clients with no secret at all, and demanding one would lock out exactly
@@ -68,10 +97,7 @@ void MyAnimeListTracker::setClientSecret(const QString& v)
 // issues no public clients.
 bool MyAnimeListTracker::isConfigured() { return !clientId().isEmpty(); }
 
-bool MyAnimeListTracker::isConnected()
-{
-    return !store().value(accessKey(Id::MyAnimeList)).toString().isEmpty();
-}
+bool MyAnimeListTracker::isConnected() { return TrackerQueue::hasAccessToken(Id::MyAnimeList); }
 
 QString MyAnimeListTracker::apiUrl()
 {
@@ -116,27 +142,18 @@ void MyAnimeListTracker::connectAccount()
         QTcpSocket* sock = loopback_->nextPendingConnection();
         if (!sock) return;
         connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
-            const QByteArray req = sock->readAll();
-            const QByteArray line = req.left(req.indexOf('\r'));
-            const int sp1 = line.indexOf(' '), sp2 = line.indexOf(' ', sp1 + 1);
-            const QString target = QString::fromUtf8(line.mid(sp1 + 1, sp2 - sp1 - 1));
-            const QUrlQuery q(QUrl::fromEncoded(("http://localhost" + target.toUtf8())).query());
-            const QString err = q.queryItemValue(QStringLiteral("error"));
-            const QString code = q.queryItemValue(QStringLiteral("code"));
-            // THE CSRF CHECK. A callback that does not carry our own state back is not our callback, and a
-            // code from it is somebody else's — redeeming it would link the user's app to another account.
-            const bool stateOk = !state_.isEmpty()
-                              && q.queryItemValue(QStringLiteral("state")) == state_;
+            // The request parsing and the reply bytes are tracker::parseLoopbackRequest /
+            // tracker::loopbackResponse (#326) — both trackers had written them out identically. THE CSRF
+            // CHECK STAYED HERE, because it is not shared: AniList's flow carries no state, and a rule the
+            // shared parser enforced would be a rule about a value one of the two providers never sends.
+            const LoopbackCallback cb = parseLoopbackRequest(sock->readAll());
+            const QString err = cb.error;
+            const QString code = cb.code;
+            // A callback that does not carry our own state back is not our callback, and a code from it is
+            // somebody else's — redeeming it would link the user's app to another account.
+            const bool stateOk = !state_.isEmpty() && cb.state == state_;
 
-            // A plain body rather than a redirect: sending the browser anywhere would hand a third party a
-            // request whose Referer names this loopback port. Content-Length is explicit so the browser does
-            // not sit waiting on a connection close.
-            const QByteArray page = err.isEmpty() && !code.isEmpty() && stateOk
-                ? QByteArray("Signed in. You can close this tab and go back to the app.")
-                : QByteArray("Sign-in was not completed. You can close this tab.");
-            sock->write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
-                        "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n"
-                        "Content-Length: " + QByteArray::number(page.size()) + "\r\n\r\n" + page);
+            sock->write(loopbackResponse(err.isEmpty() && !code.isEmpty() && stateOk));
             sock->flush();
             sock->disconnectFromHost();
             closeLoopback();
@@ -196,16 +213,14 @@ void MyAnimeListTracker::exchangeCode(const QString& code)
 void MyAnimeListTracker::storeTokenReply(const mal::TokenReply& r)
 {
     if (!r.ok) return;   // never write an unsuccessful reply over live tokens — see TrackerRules
-    store().setValue(accessKey(Id::MyAnimeList), r.accessToken);
-    // MAL ROTATES the refresh token on every refresh, so this is normally present and normally NEW. It is
-    // still guarded: a reply that omits it must leave the old one alone rather than blanking it, which
-    // would unlink the account at the next expiry.
-    if (!r.refreshToken.isEmpty()) store().setValue(refreshKey(Id::MyAnimeList), r.refreshToken);
+    // MAL ROTATES the refresh token on every refresh, so it is normally present and normally NEW. The
+    // omitted-refresh-token guard is TrackerQueue's, for both trackers: a reply that omits it must leave the
+    // old one alone rather than blanking it, which would unlink the account at the next expiry.
+    //
     // MAL's access tokens last about a month. A missing expires_in stores 0, and 0 means "assume valid"
-    // below rather than "expired": treating an unknown expiry as expired would refresh on every request.
-    store().setValue(expiryKey(Id::MyAnimeList),
-                     r.expiresInSec > 0 ? QDateTime::currentSecsSinceEpoch() + r.expiresInSec : 0);
-    store().sync();
+    // rather than "expired": treating an unknown expiry as expired would refresh on every request.
+    TrackerQueue::storeTokens(Id::MyAnimeList, r.accessToken, r.refreshToken, r.expiresInSec,
+                              QDateTime::currentSecsSinceEpoch());
 }
 
 void MyAnimeListTracker::disconnectAccount()
@@ -213,12 +228,11 @@ void MyAnimeListTracker::disconnectAccount()
     closeLoopback();
     codeVerifier_.clear();
     state_.clear();
-    store().remove(accessKey(Id::MyAnimeList));
-    store().remove(refreshKey(Id::MyAnimeList));
-    store().remove(expiryKey(Id::MyAnimeList));
-    store().sync();
+    TrackerQueue::clearTokens(Id::MyAnimeList);
     TrackerQueue::forgetAccount(Id::MyAnimeList);
-    failures_ = 0;
+    // ...and the consecutive-failure count goes with it: a fresh link is exactly the moment it is worth
+    // trying again immediately rather than half an hour from now.
+    if (sender_) sender_->reset();
     emit connectedChanged(false);
     emit queueChanged();
 }
@@ -226,9 +240,9 @@ void MyAnimeListTracker::disconnectAccount()
 void MyAnimeListTracker::ensureValidToken(std::function<void(bool ok)> done)
 {
     if (!isConfigured() || !isConnected()) { if (done) done(false); return; }
-    const qint64 expiry = store().value(expiryKey(Id::MyAnimeList), 0).toLongLong();
-    if (expiry <= 0 || expiry - 60 > QDateTime::currentSecsSinceEpoch()) { if (done) done(true); return; }
-    const QString refresh = store().value(refreshKey(Id::MyAnimeList)).toString();
+    if (TrackerQueue::tokenFresh(Id::MyAnimeList, QDateTime::currentSecsSinceEpoch(), 60))
+    { if (done) done(true); return; }
+    const QString refresh = TrackerQueue::refreshToken(Id::MyAnimeList);
     if (refresh.isEmpty()) { if (done) done(false); return; }
 
     // SINGLE-FLIGHT, and on MAL it matters more than it does on AniList: MAL rotates the refresh token, so
@@ -257,13 +271,11 @@ static int statusOf(QNetworkReply* rep)
     return rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 }
 
-// Retry-After, in seconds, or 0 when it was absent or was the HTTP-date form (which this does not parse:
-// answering an unparsed date with 0 falls back to our own base wait, which is never shorter than a minute).
+// Retry-After, in seconds. The PARSING is tracker::retryAfterSeconds (#326) — both trackers read the
+// delta-seconds form and neither parses the HTTP-date one, so there is one reader rather than two.
 static qint64 retryAfterOf(QNetworkReply* rep)
 {
-    bool ok = false;
-    const qint64 secs = QString::fromLatin1(rep->rawHeader("Retry-After")).trimmed().toLongLong(&ok);
-    return (ok && secs > 0) ? secs : 0;
+    return retryAfterSeconds(rep->rawHeader("Retry-After"));
 }
 
 void MyAnimeListTracker::get(const QString& url, std::function<void(int, qint64, QByteArray)> cb)
@@ -274,7 +286,7 @@ void MyAnimeListTracker::get(const QString& url, std::function<void(int, qint64,
         QNetworkRequest req{ QUrl(url) };
         req.setRawHeader("Accept", "application/json");
         req.setRawHeader("Authorization",
-                         "Bearer " + store().value(accessKey(Id::MyAnimeList)).toString().toUtf8());
+                         "Bearer " + TrackerQueue::accessToken(Id::MyAnimeList).toUtf8());
         QNetworkReply* rep = nam_->get(req);
         connect(rep, &QNetworkReply::finished, this, [rep, cb] {
             rep->deleteLater();
@@ -294,7 +306,7 @@ void MyAnimeListTracker::patch(const QString& url, const QByteArray& form,
                       QStringLiteral("application/x-www-form-urlencoded"));
         req.setRawHeader("Accept", "application/json");
         req.setRawHeader("Authorization",
-                         "Bearer " + store().value(accessKey(Id::MyAnimeList)).toString().toUtf8());
+                         "Bearer " + TrackerQueue::accessToken(Id::MyAnimeList).toUtf8());
         // MAL's list write is a PATCH; QNetworkAccessManager has no convenience for it.
         QNetworkReply* rep = nam_->sendCustomRequest(req, "PATCH", form);
         connect(rep, &QNetworkReply::finished, this, [rep, cb] {
@@ -357,63 +369,7 @@ void MyAnimeListTracker::pushProgress(const Update& in)
 
 void MyAnimeListTracker::flushQueue() { drain(); }
 
-void MyAnimeListTracker::drain()
-{
-    if (sending_ || !isConfigured() || !isConnected()) return;
-    QVector<Update> q = TrackerQueue::load(Id::MyAnimeList);
-    if (q.isEmpty()) { retry_->stop(); return; }
-
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    qint64 soonest = -1;
-    const int idx = TrackerQueue::nextSendable(q, Id::MyAnimeList, now, &soonest);
-    if (idx < 0)
-    {
-        // Everything queued is inside its item's debounce window. Wake exactly when the earliest one opens
-        // rather than polling: a binge-reader would otherwise have a timer firing every second.
-        retry_->start(int(qBound<qint64>(1000, soonest, kDebounceMs)));
-        return;
-    }
-
-    const Update u = q[idx];
-    // The COMPLETED decision uses the TRACKER'S OWN unit count, captured when the link was made. Reading it
-    // from the link rather than from the app's chapter list is what keeps a partial provider listing from
-    // marking a running series finished.
-    const int total = TrackerLinks::get(Id::MyAnimeList, u.itemKey).totalUnits;
-    sending_ = true;
-    patch(mal::saveUrl(apiUrl(), u.mediaId, u.kind), mal::saveBody(u, total),
-          [this, u](int status, qint64 retryAfterSec, QByteArray body) {
-        sending_ = false;
-        Q_UNUSED(body);   // deliberately unread: nothing MAL echoes is worth quoting back at the user
-        if (status >= 200 && status < 300)
-        {
-            failures_ = 0;
-            TrackerQueue::removeDelivered(Id::MyAnimeList, u);
-            TrackerQueue::noteSent(Id::MyAnimeList, u.itemKey, QDateTime::currentMSecsSinceEpoch());
-            TrackerQueue::setLastError(Id::MyAnimeList, QString());
-            emit progressPushed(u.itemKey, u.unit);
-            emit queueChanged();
-            drain();   // keep going; the next item's debounce is checked afresh
-            return;
-        }
-
-        ++failures_;
-        const mal::Backoff b = mal::backoffFor(status, retryAfterSec, failures_);
-        if (b.permanent)
-        {
-            // MAL will never accept this row. DROPPED rather than left to wedge the head of the queue for
-            // ever — every later chapter behind it would be lost too. Said out loud in the status line.
-            TrackerQueue::removeDelivered(Id::MyAnimeList, u);
-            TrackerQueue::setLastError(Id::MyAnimeList,
-                tr("MyAnimeList refused one update and it has been dropped; the rest are still queued."));
-            emit queueChanged();
-            drain();
-            return;
-        }
-        // A message ABOUT the failure, never the request — see the file header.
-        TrackerQueue::setLastError(Id::MyAnimeList,
-            b.reauth ? tr("MyAnimeList needs signing in again; updates are queued.")
-                     : tr("MyAnimeList did not accept the update; it is queued and will be retried."));
-        retry_->start(int(qBound<qint64>(1000, b.delayMs, mal::kBackoffMaxMs)));
-        emit queueChanged();
-    });
-}
+// THE LOOP MOVED (#326). Increment 2 wrote these thirty lines here and AniList had thirty near-identical
+// ones; both are now TrackerQueue::Sender, built in the constructor. Nothing MAL answers changed: the same
+// policy, the same doubling, the same drop-and-carry-on — it is simply the only copy of them now.
+void MyAnimeListTracker::drain() { if (sender_) sender_->drain(); }

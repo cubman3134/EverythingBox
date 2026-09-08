@@ -15,10 +15,21 @@
 // PUSHING is debounced (one mutation per item per 30 s) and QUEUED on disk, so an offline session syncs when
 // the app comes back rather than dropping the progress. The queue is a tracker::Update list — see
 // TrackerRules — and it coalesces per item, so a fast reader does not grow a row per page turn.
+//
+// WHAT ISSUE #326 CHANGED. This file used to own its own drain loop, its own credential accessors and its
+// own copy of the loopback request parser, and it RETRIED EVERY FAILURE FOR EVER — so a single row AniList
+// would never accept (a deleted list entry is enough) sat at the head of an ordered queue and blocked every
+// update behind it, with no signal beyond a sync that quietly never landed. All three now come from the
+// shared layer: TrackerQueue::Sender is the drain loop, TrackerQueue's credential accessors are the ini, and
+// tracker::classifySend answers "what does this failure mean?" for both trackers at once. What is still
+// AniList's own is what genuinely differs — GraphQL instead of REST, no PKCE, and anilist::sendPolicy().
 #pragma once
 #include "SingleFlight.h"   // ensureValidToken's one-refresh-many-waiters queue, shared with TraktClient
 #include "Tracker.h"
+#include "TrackerQueue.h"   // the shared queue, credential store and drain loop (#326)
 #include "TrackerRules.h"
+
+#include <memory>
 
 #include <QObject>
 #include <QString>
@@ -104,29 +115,33 @@ private:
     void storeTokenReply(const tracker::anilist::TokenReply& r);
     void closeLoopback();
 
-    // One authenticated GraphQL POST. `cb` receives the raw body and whether the transport succeeded; it is
-    // NEVER called with a body when the token gate refused, so no caller has to distinguish "off" from
-    // "empty reply" by inspecting bytes.
-    void post(const QByteArray& body, std::function<void(bool ok, QByteArray)> cb);
+    // One authenticated GraphQL POST. `cb` receives whether the TRANSPORT succeeded, the HTTP status (0 for
+    // "no reply at all"), the Retry-After header in seconds (0 when absent) and the raw body. It is NEVER
+    // called with a body when the token gate refused, so no caller has to distinguish "off" from "empty
+    // reply" by inspecting bytes.
+    //
+    // `ok` is exactly what it always was, and search()/fetchEntry() still read only that. The status and
+    // the header were added by #326 for the PUSH, because the retry decision is a decision about which
+    // failure this was and a GraphQL 200 does not answer it.
+    void post(const QByteArray& body,
+              std::function<void(bool ok, int status, qint64 retryAfterSec, QByteArray)> cb);
 
     // The endpoints, read from the environment ONCE per call so a fixture stub can stand in during a live
     // drive (EB_ANILIST_ENDPOINT / EB_ANILIST_AUTH). Absent, both are the real AniList hosts.
     static QString apiUrl();
     static QString authBase();
 
-    // Queue persistence (this profile, this tracker).
-    static QVector<tracker::Update> loadQueue();
-    static void saveQueue(const QVector<tracker::Update>& q);
-    static void setLastError(const QString& message);
-
     // Send the first queued update whose item passes the debounce; re-arm the timer for the rest. Called on
-    // every push, on connect, and when the retry timer fires. Re-entrant-safe through `sending_`.
+    // every push, on connect, and when the retry timer fires. THE LOOP ITSELF is TrackerQueue::Sender (#326)
+    // — this is the one line that starts it, kept so nothing else in the app learned a new name.
     void drain();
 
     QNetworkAccessManager* nam_ = nullptr;
     QTcpServer*            loopback_ = nullptr;
     QString                redirectUri_;
     QTimer*                retry_ = nullptr;
-    bool                   sending_ = false;
+    // THE ONE DRAIN LOOP, shared with MyAnimeList. It holds the consecutive-failure count the backoff
+    // doubles on, and it owns the re-entrancy guard this class used to spell `sending_`.
+    std::unique_ptr<TrackerQueue::Sender> sender_;
     SingleFlight           tokenRefresh_;
 };

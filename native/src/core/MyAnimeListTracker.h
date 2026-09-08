@@ -19,11 +19,15 @@
 // the URL, and a MAL request URL carries the media id and — on the token endpoint — would sit one edit away
 // from carrying the grant. The `log` signal and the last-error line are fed sentences of our own.
 //
-// PUSHING is debounced and QUEUED through TrackerQueue, exactly as AniList's is; what is MAL-specific is
-// the BACKOFF. MAL publishes a rate limit and answers a breach with 429; that, 5xx and a dead socket are
-// answered by waiting (doubling, capped at 30 minutes, honouring Retry-After when it asks for longer), 401
-// by refreshing the token, and 400/404/422 by DROPPING the row — see tracker::mal::backoffFor for why a
-// permanently-refused row cannot be left to wedge the head of the queue.
+// PUSHING is debounced and QUEUED through TrackerQueue, exactly as AniList's is — and since issue #326 the
+// DRAIN LOOP is shared too (TrackerQueue::Sender), along with the credential store and the loopback request
+// parser this file used to keep its own copy of. The BACKOFF that increment 2 wrote here turned out to be
+// the thing AniList was missing rather than a MAL speciality, so it moved up as well: 429/5xx/a dead socket
+// are answered by waiting (doubling, capped at 30 minutes, honouring Retry-After when it asks for longer),
+// 401 by refreshing the token, and 400/404/422 by DROPPING the row — see tracker::classifySend for why a
+// permanently-refused row cannot be left to wedge the head of the queue. What is still MAL's own is the
+// STATUS SET (mal::sendPolicy(); 422 is the one code AniList's GraphQL endpoint cannot answer with), PKCE,
+// and REST.
 //
 // NO MYANIMELIST ACCOUNT WAS CREATED and no API client was registered for this work. Every shape here is
 // written from MAL's published API v2 reference, and the probe and live drive were answered by a local
@@ -31,7 +35,10 @@
 #pragma once
 #include "SingleFlight.h"   // ensureValidToken's one-refresh-many-waiters queue, shared with TraktClient
 #include "Tracker.h"
+#include "TrackerQueue.h"   // the shared queue, credential store and drain loop (#326)
 #include "TrackerRules.h"
+
+#include <memory>
 
 #include <QObject>
 #include <QString>
@@ -108,6 +115,7 @@ private:
     static QString apiUrl();
     static QString authBase();
 
+    // THE LOOP ITSELF is TrackerQueue::Sender (#326); this is the one line that starts it.
     void drain();
 
     QNetworkAccessManager* nam_ = nullptr;
@@ -119,9 +127,9 @@ private:
     QString                codeVerifier_;
     QString                state_;
     QTimer*                retry_ = nullptr;
-    bool                   sending_ = false;
-    // How many sends in a row have failed, for the doubling backoff. In memory, not on disk: a restart is
-    // exactly the moment it is worth trying again immediately.
-    int                    failures_ = 0;
+    // THE ONE DRAIN LOOP, shared with AniList. It holds the re-entrancy guard this class used to spell
+    // `sending_` and the consecutive-failure count it used to spell `failures_` — both still in memory and
+    // not on disk, because a restart is exactly the moment it is worth trying again immediately.
+    std::unique_ptr<TrackerQueue::Sender> sender_;
     SingleFlight           tokenRefresh_;
 };

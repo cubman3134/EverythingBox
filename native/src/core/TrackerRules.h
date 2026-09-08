@@ -22,6 +22,87 @@
 
 namespace tracker
 {
+    // ================= THE ONE SEND POLICY (issue #326) ==================================================
+    //
+    // WHAT A FAILED PUSH MEANS, decided ONCE for every tracker. Increment 2 gave MyAnimeList a rule AniList
+    // never had — 400/404/422 is a refusal that can never become a success, so the row is DROPPED rather than
+    // left at the head of an ORDERED queue where it blocks every update behind it for ever. AniList retried
+    // everything, so one deleted list entry stopped that account syncing altogether and said nothing about
+    // it. #326 is that rule, moved out of `mal` into one place both providers ask, because two answers to
+    // "is this row deliverable?" is exactly one too many.
+    //
+    // A RESPONSE IS ONE OF THREE THINGS and never two of them:
+    //   * ACCEPTED   — the provider really applied the write. The row goes, the debounce stamp is set, the
+    //                  status line clears. What "really applied" MEANS stays with the provider: AniList
+    //                  answers a refused mutation with HTTP 200 (see anilist::saveAccepted), MAL does not.
+    //   * RETRYABLE  — waiting could fix it. The row STAYS. The delay doubles from `baseMs`, is capped at
+    //                  `maxMs`, and a Retry-After asking for LONGER wins. `reauth` is the retryable case
+    //                  where the token is the problem and refreshing is part of the waiting.
+    //   * PERMANENT  — waiting can never fix it. The row is dropped AND SAID OUT LOUD. A queue that quietly
+    //                  discards somebody's progress is worse than one that wedges, because at least a wedge
+    //                  is eventually noticed.
+    //
+    // WHAT EACH PROVIDER SUPPLIES is the SendPolicy below and nothing else: the status codes its own API
+    // actually uses. The arithmetic, the cap, the Retry-After comparison and the drop/keep decision are
+    // shared, because there is no version of them that is right for one service and wrong for the other.
+    // The Retry-After READING stays per provider by construction — each tracker's transport hands the number
+    // in — and both services happen to spell it the same way today, so neither of them writes it twice.
+    //
+    // THE DEFAULT IS RETRY. A status no policy names is retried, never dropped: nobody's progress is thrown
+    // away on a status nobody has thought about.
+    struct SendPolicy
+    {
+        QVector<int> permanent;   // never becomes a success — DROP the row, and say so
+        QVector<int> reauth;      // the token is the problem — refresh, keep the row, retry
+        QVector<int> throttle;    // rate limited — retry, honouring a longer Retry-After
+        qint64 baseMs = 60000;    // the first wait, and the floor under every later one
+        qint64 maxMs  = 1800000;  // the ceiling on the doubling
+    };
+
+    struct SendVerdict
+    {
+        bool   retry = false;      // leave the row queued and try again after delayMs
+        bool   reauth = false;     // ...and refresh the token before that attempt
+        bool   permanent = false;  // the provider will never accept this row; drop it
+        qint64 delayMs = 0;
+    };
+
+    // `retryAfterSec` is the Retry-After header in seconds, or 0 when it was absent or was the HTTP-date
+    // form (unparsed, and answering it with 0 falls back to `baseMs`, which is never shorter than a minute).
+    // `consecutiveFailures` is 1 for the first failure. A 2xx decides nothing and comes back all-false, so a
+    // caller may ask about any response without classifying it first.
+    SendVerdict classifySend(const SendPolicy& p, int httpStatus, qint64 retryAfterSec,
+                             int consecutiveFailures);
+
+    // ================= THE OAUTH LOOPBACK CALLBACK (issue #326) ==========================================
+    //
+    // Both trackers redeem their authorization code through the app's loopback listener, and each had its
+    // OWN copy of the four lines that pick the query out of a raw HTTP request and the seven that answer it.
+    // The bytes were identical and there is nothing per-provider in either, so they are here — where a probe
+    // can drive them with no socket, and where the Referer/Cache-Control posture is written once.
+    struct LoopbackCallback
+    {
+        QString code;    // the authorization code, or "" when the callback carried none
+        QString error;   // the error CODE the provider named, or ""
+        QString state;   // whatever `state` came back, or "". COMPARED by the caller; never trusted here.
+    };
+    // TOTAL: a truncated read, a request with no query, or bytes that are not an HTTP request at all give an
+    // empty result rather than a partly-built one.
+    LoopbackCallback parseLoopbackRequest(const QByteArray& httpRequest);
+
+    // The whole reply, headers and body. A PLAIN PAGE rather than a redirect to a landing page: sending the
+    // browser anywhere would hand a third party a request whose Referer names this loopback port.
+    // Content-Length is explicit so the browser does not sit waiting on a connection close.
+    QByteArray loopbackResponse(bool signedIn);
+
+    // Retry-After, in SECONDS, or 0 when the header was absent, unparseable, not positive, or was the
+    // HTTP-date form (which this deliberately does not parse: answering an unparsed date with 0 falls back
+    // to the policy's base wait, which is never shorter than a minute). Each tracker's transport reads the
+    // header off its own reply and hands the number to classifySend — that is the seam a service which
+    // spells its rate limit differently would use — but AniList and MyAnimeList both send the delta-seconds
+    // form, so today they share this one reader instead of writing it twice.
+    qint64 retryAfterSeconds(const QByteArray& headerValue);
+
     // ================= the AniList wire =================================================================
     namespace anilist
     {
@@ -89,6 +170,37 @@ namespace tracker
         // safest wrong answer, because it is the one status a push would overwrite with the same value.
         QString statusToken(Status s);
         Status  statusFromToken(const QString& token);
+
+        // ---- what a push RESPONSE means (issue #326) ---------------------------------------------------
+        //
+        // ANILIST ANSWERS A REFUSED MUTATION WITH HTTP 200. GraphQL carries its failures in an `errors`
+        // array beside a null `data`, so transport success is not acceptance and never was: the only proof
+        // the write landed is a SaveMediaListEntry payload in the body. This is increment 1's test, moved
+        // here so the shared drain loop can ask it — not a new one.
+        bool saveAccepted(int httpStatus, const QByteArray& body);
+
+        // The status the send policy should judge. Normally the HTTP one; but when the transport succeeded
+        // and the body was NOT an acceptance, it is the `status` AniList puts inside its own error object
+        // (a media the account cannot write answers 404 there). 0 when there is none — and 0 is RETRYABLE,
+        // which is exactly what this tracker did with every unrecognised failure before #326, so an error
+        // shape we cannot read costs nobody their queue.
+        int effectiveStatus(int httpStatus, const QByteArray& body);
+
+        // The retry curve, spelled for AniList. THE BASE IS THE 60 SECONDS INCREMENT 1 ALREADY WAITED, kept
+        // to the millisecond: the first retry after a failed push is the one it always was. What #326 adds
+        // is the SECOND one — AniList publishes a per-minute rate limit and answers a breach with 429, and a
+        // flat 60-second retry against that is the tight loop MAL's backoff exists to prevent.
+        constexpr qint64 kBackoffBaseMs = 60000;      // 1 minute
+        constexpr qint64 kBackoffMaxMs  = 1800000;    // 30 minutes — the ceiling on the doubling
+
+        // THE POLICY. 400 and 404 are the two AniList really uses for a write it will never accept: 400 for
+        // a mutation its schema refuses (a retry sends the identical bytes and gets the identical answer)
+        // and 404 for a media or a list entry that is gone. 422 is NOT here, and that is the one genuine
+        // difference from MAL's set — 422 is a REST validation status and this GraphQL endpoint does not
+        // emit it, so naming it would be a rule about a response that cannot arrive. 403 is absent for the
+        // reason MAL's is: a temporarily-refused client and a suspended account share it, and dropping a
+        // whole queue for the first of those is the worse mistake.
+        SendPolicy sendPolicy();
     }
 
     // ================= the MyAnimeList wire (issue #156, increment 2) ====================================
@@ -246,7 +358,16 @@ namespace tracker
         // entry) never becomes acceptable by waiting. Leaving it queued wedges the head of the queue
         // FOREVER, and every later chapter behind it is lost — a worse outcome than losing the one row that
         // could not be delivered. It is recorded in the last-error line rather than dropped silently.
+        //
+        // MOVED, NOT REWRITTEN (#326). The arithmetic and every verdict now live in tracker::classifySend,
+        // which both providers ask; this stays the MAL-shaped forwarder it always was, so every increment-2
+        // assertion about it still reads the same function and still reads the same answer.
         Backoff backoffFor(int httpStatus, qint64 retryAfterSec, int consecutiveFailures);
+
+        // THE SAME POLICY, in the shared shape. MAL adds 422 to AniList's 400/404 because its REST
+        // endpoints really do answer a rejected field with it; everything else about the two is identical
+        // and is therefore not written twice.
+        SendPolicy sendPolicy();
     }
 
     // ================= how sure we are of a match (issue #156's conservatism rule) =======================

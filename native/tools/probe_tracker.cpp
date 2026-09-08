@@ -51,8 +51,10 @@
 #include <QSet>
 #include <QSettings>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 #include <cstdio>
+#include <functional>
 
 using namespace tracker;
 
@@ -193,6 +195,111 @@ namespace
 static QJsonObject varsOf(const QByteArray& body)
 {
     return QJsonDocument::fromJson(body).object().value(QStringLiteral("variables")).toObject();
+}
+
+// ---- §19's apparatus: the drain loop as it was, and the drain loop as it is -----------------------------
+
+// The sentence increment 1's AniList drain wrote into the status line on ANY failure. Spelled out here
+// rather than referenced, so §19's identity assertion is against the old text and not against whatever the
+// new code happens to say.
+static const char* kLegacyRetryLine =
+    "AniList did not accept the update; it is queued and will be retried.";
+
+// One scripted answer for the fake transport.
+struct ScriptedReply
+{
+    int    status = 200;
+    qint64 retryAfterSec = 0;
+    bool   accepted = true;
+};
+
+// A LITERAL TRANSCRIPTION of AniListTracker::drain() as issue #156 increment 1 shipped it — the version
+// this issue replaced. It is here so the "a run with no permanently-refused response behaves exactly as it
+// did" claim is checked against the real old loop rather than against a description of one.
+//
+// The only edits are the ones a probe forces: the clock is passed in, the transport is the script, and
+// `retry_->start(ms)` is a push onto `waits`. Every decision is the old decision, including the one that
+// was the bug — EVERY failure lands in the same branch and the row stays queued for ever.
+static void legacyDrain(const QVector<ScriptedReply>& script, int& at, QStringList& sent,
+                        qint64 nowMs, QVector<qint64>& waits)
+{
+    QVector<Update> q = TrackerQueue::load(Id::AniList);
+    if (q.isEmpty()) { waits.push_back(0); return; }   // retry_->stop()
+
+    qint64 soonest = -1;
+    const int idx = TrackerQueue::nextSendable(q, Id::AniList, nowMs, &soonest);
+    if (idx < 0) { waits.push_back(qBound<qint64>(1000, soonest, kDebounceMs)); return; }
+
+    const Update u = q[idx];
+    sent << (u.itemKey + QStringLiteral("@") + QString::number(u.unit));
+    const ScriptedReply r = at < script.size() ? script[at++] : ScriptedReply{ 0, 0, false };
+    if (!r.accepted)
+    {
+        TrackerQueue::setLastError(Id::AniList, QString::fromLatin1(kLegacyRetryLine));
+        waits.push_back(60000);   // kRetryMs — flat, for ever
+        return;
+    }
+    TrackerQueue::removeDelivered(Id::AniList, u);
+    TrackerQueue::noteSent(Id::AniList, u.itemKey, nowMs);
+    TrackerQueue::setLastError(Id::AniList, QString());
+    legacyDrain(script, at, sent, nowMs, waits);
+}
+
+// The SAME run through TrackerQueue::Sender. Returns nothing: everything it is asked about is either in the
+// out-parameters or in the ini the two runs share.
+static void senderDrain(Id id, const SendPolicy& policy, const QVector<ScriptedReply>& script, int& at,
+                        QStringList& sent, QStringList& pushed, qint64 nowMs, QVector<qint64>& waits,
+                        const QString& droppedFmt = QString())
+{
+    TrackerQueue::SendSpec spec;
+    spec.id = id;
+    spec.policy = policy;
+    spec.ready = [] { return true; };
+    spec.now = [nowMs] { return nowMs; };
+    spec.send = [&script, &at, &sent](const Update& u, std::function<void(TrackerQueue::Reply)> done) {
+        sent << (u.itemKey + QStringLiteral("@") + QString::number(u.unit));
+        const ScriptedReply s = at < script.size() ? script[at++] : ScriptedReply{ 0, 0, false };
+        TrackerQueue::Reply r;
+        r.status = s.status;
+        r.retryAfterSec = s.retryAfterSec;
+        r.accepted = s.accepted;
+        // SYNCHRONOUS, which is the point: the real transport answers off a QNetworkReply, and Sender is
+        // written so that either is correct. A synchronous answer is what makes the whole drain — including
+        // the continue-after-a-drop — reachable in a probe with no socket and no event loop.
+        if (done) done(r);
+    };
+    spec.droppedMessage = [droppedFmt](const Update& u) {
+        const QString title = TrackerLinks::get(Id::AniList, u.itemKey).title;
+        return droppedFmt.isEmpty() ? QStringLiteral("dropped:") + u.itemKey
+                                    : droppedFmt.arg(title.isEmpty() ? u.itemKey : title);
+    };
+    spec.reauthMessage = QStringLiteral("reauth");
+    // BYTE-FOR-BYTE the sentence increment 1 wrote, so the identity assertion can compare the status line.
+    spec.retryMessage = QString::fromLatin1(kLegacyRetryLine);
+    spec.pushed = [&pushed](const QString& itemKey, int unit) {
+        pushed << (itemKey + QStringLiteral("@") + QString::number(unit));
+    };
+    spec.wait = [&waits](int delayMs) { waits.push_back(delayMs); };
+    TrackerQueue::Sender sender(std::move(spec));
+    sender.drain();
+}
+
+// Seed `id`'s queue with one row per (itemKey, unit) pair, in order.
+static void seedQueue(Id id, const QVector<QPair<QString, int>>& rows, qint64 atMs)
+{
+    TrackerQueue::forgetAccount(id);
+    QVector<Update> q;
+    for (const QPair<QString, int>& r : rows)
+    {
+        Update u;
+        u.itemKey = r.first;
+        u.mediaId = QStringLiteral("m") + r.first.right(1);
+        u.kind = Kind::Anime;
+        u.unit = r.second;
+        u.atMs = atMs;
+        q.push_back(u);
+    }
+    TrackerQueue::save(id, q);
 }
 
 int main(int argc, char** argv)
@@ -1558,6 +1665,337 @@ int main(int argc, char** argv)
                             QStringLiteral("2"), Kind::Manga).contains(QLatin1String(kMalSecret)));
         CHECK(!mal::saveBody(mu, 364).contains(kMalSecret));
         CHECK(!mal::saveBody(mu, 364).contains("MAL-ACCESS-TOKEN-FIXTURE"));
+
+        TrackerQueue::forgetAccount(Id::AniList);
+        TrackerQueue::forgetAccount(Id::MyAnimeList);
+    }
+
+    // ===== §19  ONE RETRY POLICY, BOTH TRACKERS (issue #326) ==========================================
+    // The bug: increment 2 taught MyAnimeList that 400/404/422 is a refusal that can never become a success
+    // and dropped the row; AniList retried EVERYTHING, so one such row at the head of an ordered queue
+    // blocked every update behind it for ever, with no signal beyond a sync that quietly never landed.
+    //
+    // Four things are pinned here, in this order: the classification table for both providers, AniList's
+    // "a refused mutation is an HTTP 200" reading, the drain loop actually UNWEDGING, and — the regression
+    // that would matter — a run with no permanently-refused response behaving exactly as it did before.
+    {
+        // ---- the table. One function, two policies, and only the codes differ. -------------------------
+        const SendPolicy al = anilist::sendPolicy();
+        const SendPolicy ml = mal::sendPolicy();
+
+        // The base is the flat 60 seconds increment 1 already waited, to the millisecond, on both.
+        CHECK(anilist::kBackoffBaseMs == 60000);
+        CHECK(anilist::kBackoffMaxMs == 1800000);
+        CHECK(al.baseMs == 60000);
+        CHECK(ml.baseMs == 60000);
+        CHECK(al.maxMs == 1800000);
+        CHECK(ml.maxMs == 1800000);
+
+        // PERMANENT on both: a request the account can never make succeed.
+        for (int code : { 400, 404 })
+        {
+            CHECK(classifySend(al, code, 0, 1).permanent);
+            CHECK(!classifySend(al, code, 0, 1).retry);
+            CHECK(classifySend(ml, code, 0, 1).permanent);
+            CHECK(!classifySend(ml, code, 0, 1).retry);
+        }
+        // THE ONE GENUINE DIFFERENCE. 422 is a REST validation status: MAL really answers a rejected field
+        // with it, and AniList's GraphQL endpoint cannot. Naming it on AniList would be a rule about a
+        // response that cannot arrive, and the safe reading of a status we have no rule for is RETRY.
+        CHECK(classifySend(ml, 422, 0, 1).permanent);
+        CHECK(!classifySend(al, 422, 0, 1).permanent);
+        CHECK(classifySend(al, 422, 0, 1).retry);
+
+        // 401 is the TOKEN on both: refresh, keep the row, and do NOT let a Retry-After lengthen it.
+        for (const SendPolicy& p : { al, ml })
+        {
+            const SendVerdict v = classifySend(p, 401, 300, 1);
+            CHECK(v.retry);
+            CHECK(v.reauth);
+            CHECK(!v.permanent);
+            CHECK(v.delayMs == 60000);
+        }
+        // 429 on both: a minute at least, Retry-After honoured UPWARD only.
+        for (const SendPolicy& p : { al, ml })
+        {
+            CHECK(classifySend(p, 429, 0, 1).delayMs == 60000);
+            CHECK(classifySend(p, 429, 300, 1).delayMs == 300000);
+            CHECK(classifySend(p, 429, 1, 1).delayMs == 60000);
+            CHECK(classifySend(p, 429, -5, 1).delayMs == 60000);
+            // Doubling, capped, and an exponent that cannot overflow into a negative delay.
+            CHECK(classifySend(p, 429, 0, 2).delayMs == 120000);
+            CHECK(classifySend(p, 429, 0, 3).delayMs == 240000);
+            CHECK(classifySend(p, 429, 0, 30).delayMs == 1800000);
+            CHECK(classifySend(p, 429, 0, 1000).delayMs == 1800000);
+            CHECK(classifySend(p, 429, 0, 0).delayMs >= 60000);
+            // 5xx, a dead socket, and a 4xx nobody has a rule for: all the same waiting problem, and none
+            // of them costs anybody their queue.
+            for (int code : { 500, 503, 0, 403, 418 })
+            {
+                CHECK(classifySend(p, code, 0, 1).retry);
+                CHECK(!classifySend(p, code, 0, 1).permanent);
+            }
+            // A success decides nothing.
+            CHECK(!classifySend(p, 200, 0, 1).retry);
+            CHECK(!classifySend(p, 200, 0, 1).permanent);
+            CHECK(classifySend(p, 204, 0, 1).delayMs == 0);
+        }
+
+        // MOVED, NOT REWRITTEN: mal::backoffFor is now a forwarder, and §14's numbers are these numbers.
+        for (int code : { 200, 204, 0, 400, 401, 403, 404, 418, 422, 429, 500, 503 })
+        {
+            for (int n : { 1, 2, 7, 1000 })
+            {
+                const mal::Backoff b = mal::backoffFor(code, 45, n);
+                const SendVerdict v = classifySend(ml, code, 45, n);
+                CHECK(b.retry == v.retry);
+                CHECK(b.reauth == v.reauth);
+                CHECK(b.permanent == v.permanent);
+                CHECK(b.delayMs == v.delayMs);
+            }
+        }
+
+        // ---- AniList answers a REFUSED MUTATION with HTTP 200 ------------------------------------------
+        const QByteArray okBody = QByteArray(
+            "{\"data\":{\"SaveMediaListEntry\":{\"id\":1,\"progress\":3}}}");
+        const QByteArray goneBody = QByteArray(
+            "{\"errors\":[{\"message\":\"Not Found.\",\"status\":404}],\"data\":null}");
+        const QByteArray voiceless = QByteArray("{\"errors\":[{\"message\":\"Internal.\"}]}");
+
+        CHECK(anilist::saveAccepted(200, okBody));
+        CHECK(!anilist::saveAccepted(200, goneBody));
+        CHECK(!anilist::saveAccepted(200, voiceless));
+        CHECK(!anilist::saveAccepted(404, okBody));   // the status has to agree too
+        CHECK(!anilist::saveAccepted(0, QByteArray()));
+        // The status the POLICY judges: the transport's when there was one, else AniList's own.
+        CHECK(anilist::effectiveStatus(404, goneBody) == 404);
+        CHECK(anilist::effectiveStatus(429, QByteArray()) == 429);
+        CHECK(anilist::effectiveStatus(0, QByteArray()) == 0);
+        CHECK(anilist::effectiveStatus(200, goneBody) == 404);
+        // AN ERROR SHAPE WE CANNOT READ IS RETRYABLE, never a drop. This is the safety net under the whole
+        // change: 0 falls through classifySend's default, which is exactly what increment 1 did with every
+        // failure it could not name.
+        CHECK(anilist::effectiveStatus(200, voiceless) == 0);
+        CHECK(anilist::effectiveStatus(200, QByteArray("not json at all")) == 0);
+        CHECK(!classifySend(al, anilist::effectiveStatus(200, voiceless), 0, 1).permanent);
+        CHECK(classifySend(al, anilist::effectiveStatus(200, goneBody), 0, 1).permanent);
+
+        // ---- the loopback callback, shared by both trackers --------------------------------------------
+        const LoopbackCallback good = parseLoopbackRequest(
+            "GET /?code=AUTHCODE-1&state=abc123 HTTP/1.1\r\nHost: 127.0.0.1:1234\r\n\r\n");
+        CHECK(good.code == QLatin1String("AUTHCODE-1"));
+        CHECK(good.state == QLatin1String("abc123"));
+        CHECK(good.error.isEmpty());
+        const LoopbackCallback denied = parseLoopbackRequest(
+            "GET /?error=access_denied HTTP/1.1\r\nHost: x\r\n\r\n");
+        CHECK(denied.error == QLatin1String("access_denied"));
+        CHECK(denied.code.isEmpty());
+        // TOTAL: bytes that are not a request line cost nothing.
+        CHECK(parseLoopbackRequest(QByteArray()).code.isEmpty());
+        CHECK(parseLoopbackRequest("garbage").code.isEmpty());
+        CHECK(parseLoopbackRequest("GET").code.isEmpty());
+        // The reply is a PLAIN page with no redirect and no referrer, and its Content-Length agrees with
+        // the body it carries — the browser must not sit waiting on a connection close.
+        for (bool signedIn : { true, false })
+        {
+            const QByteArray rep = loopbackResponse(signedIn);
+            CHECK(rep.startsWith("HTTP/1.1 200 OK\r\n"));
+            CHECK(rep.contains("Referrer-Policy: no-referrer"));
+            CHECK(rep.contains("Cache-Control: no-store"));
+            CHECK(!rep.contains("Location:"));
+            const int sep = rep.indexOf("\r\n\r\n");
+            CHECK(sep > 0);
+            CHECK(rep.contains("Content-Length: " + QByteArray::number(rep.size() - sep - 4)));
+        }
+
+        // ---- THE UNWEDGE ------------------------------------------------------------------------------
+        // A permanently-refused row at the HEAD of the queue no longer blocks the rows behind it. This is
+        // the issue, stated as a property: the ones behind it must actually land.
+        const qint64 T = 1'800'000'000'000LL;
+        TrackerLinks::set(Id::AniList, QStringLiteral("326:a"), QStringLiteral("ma"), Kind::Anime,
+                          QStringLiteral("A Deleted Series"), 12);
+        seedQueue(Id::AniList, { { QStringLiteral("326:a"), 3 },
+                                 { QStringLiteral("326:b"), 5 },
+                                 { QStringLiteral("326:c"), 7 } }, T - 1000);
+        {
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::AniList, al,
+                        { { 404, 0, false }, { 200, 0, true }, { 200, 0, true } }, at, sent, pushed, T,
+                        waits, QStringLiteral("AniList refused the update for %1 and it has been dropped; "
+                                              "the rest are still queued."));
+            // All three were attempted, in order, in ONE drain: the drop does not stop the loop.
+            CHECK(sent.size() == 3);
+            CHECK(sent.value(0) == QLatin1String("326:a@3"));
+            CHECK(sent.value(1) == QLatin1String("326:b@5"));
+            CHECK(sent.value(2) == QLatin1String("326:c@7"));
+            // THE ROWS BEHIND IT LANDED. Not "were retried" — landed.
+            CHECK(pushed.size() == 2);
+            CHECK(pushed.value(0) == QLatin1String("326:b@5"));
+            CHECK(pushed.value(1) == QLatin1String("326:c@7"));
+            CHECK(TrackerQueue::count(Id::AniList) == 0);
+            // ...and the refused one is not still sitting there, and did not get a sent stamp.
+            CHECK(TrackerQueue::lastSentMs(Id::AniList, QStringLiteral("326:a")) == 0);
+            CHECK(TrackerQueue::lastSentMs(Id::AniList, QStringLiteral("326:b")) == T);
+        }
+
+        // THE BUG ITSELF, kept as a property so it cannot come back by another route: with no permanent
+        // codes at all — which is literally what AniList's policy was — the same run wedges. One attempt,
+        // nothing delivered, three rows still queued.
+        seedQueue(Id::AniList, { { QStringLiteral("326:a"), 3 },
+                                 { QStringLiteral("326:b"), 5 },
+                                 { QStringLiteral("326:c"), 7 } }, T - 1000);
+        {
+            SendPolicy retryEverything = al;
+            retryEverything.permanent.clear();
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::AniList, retryEverything,
+                        { { 404, 0, false }, { 200, 0, true }, { 200, 0, true } }, at, sent, pushed, T,
+                        waits);
+            CHECK(sent.size() == 1);                      // it never got past the head
+            CHECK(pushed.isEmpty());                      // ...so nothing behind it landed
+            CHECK(TrackerQueue::count(Id::AniList) == 3); // ...and the whole queue is still there
+            CHECK(waits.value(0) == 60000);               // waiting for a 404 that will never change
+        }
+
+        // ---- the drop is VISIBLE, and it says which one ------------------------------------------------
+        seedQueue(Id::AniList, { { QStringLiteral("326:a"), 3 } }, T - 1000);
+        {
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(Id::AniList, al, { { 400, 0, false } }, at, sent, pushed, T, waits,
+                        QStringLiteral("AniList refused the update for %1 and it has been dropped; "
+                                       "the rest are still queued."));
+            const QString line = TrackerQueue::lastError(Id::AniList);
+            CHECK(!line.isEmpty());
+            CHECK(line.contains(QLatin1String("A Deleted Series")));   // WHICH item
+            CHECK(line.contains(QLatin1String("dropped")));            // ...and what happened to it
+            // Never a credential, never a request, never a response body — the rule both tracker headers
+            // carry, held against the one message this change adds.
+            CHECK(!line.contains(QString::fromLatin1(kFixtureSecret)));
+            CHECK(!line.contains(QLatin1String("Bearer")));
+            CHECK(!line.contains(QLatin1String("http")));
+        }
+
+        // ---- every other arm, driven through the loop, on BOTH trackers --------------------------------
+        // 422 is the arm that separates them: MAL drops it, AniList keeps it.
+        struct Arm { Id id; SendPolicy p; int status; qint64 retryAfter; bool drops; qint64 wait; };
+        const QVector<Arm> arms = {
+            { Id::AniList,     al, 400, 0,   true,  0 },
+            { Id::AniList,     al, 404, 0,   true,  0 },
+            { Id::AniList,     al, 422, 0,   false, 60000 },
+            { Id::AniList,     al, 429, 0,   false, 60000 },
+            { Id::AniList,     al, 429, 900, false, 900000 },
+            { Id::AniList,     al, 500, 0,   false, 60000 },
+            { Id::AniList,     al, 401, 0,   false, 60000 },
+            { Id::AniList,     al, 0,   0,   false, 60000 },
+            { Id::MyAnimeList, ml, 400, 0,   true,  0 },
+            { Id::MyAnimeList, ml, 404, 0,   true,  0 },
+            { Id::MyAnimeList, ml, 422, 0,   true,  0 },
+            { Id::MyAnimeList, ml, 429, 0,   false, 60000 },
+            { Id::MyAnimeList, ml, 429, 900, false, 900000 },
+            { Id::MyAnimeList, ml, 503, 0,   false, 60000 },
+            { Id::MyAnimeList, ml, 401, 0,   false, 60000 },
+            { Id::MyAnimeList, ml, 0,   0,   false, 60000 },
+        };
+        for (const Arm& a : arms)
+        {
+            seedQueue(a.id, { { QStringLiteral("326:one"), 4 } }, T - 1000);
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(a.id, a.p, { { a.status, a.retryAfter, false } }, at, sent, pushed, T, waits);
+            CHECK(sent.size() == 1);
+            CHECK(pushed.isEmpty());
+            if (a.drops)
+            {
+                // Gone from the queue, and the loop carried on to find it empty (so the timer was stopped).
+                CHECK(TrackerQueue::count(a.id) == 0);
+                CHECK(waits.value(0) == 0);
+            }
+            else
+            {
+                // Still queued, and the wait is the documented one.
+                CHECK(TrackerQueue::count(a.id) == 1);
+                CHECK(waits.size() == 1);
+                CHECK(waits.value(0) == a.wait);
+            }
+            // Either way the user is told something.
+            CHECK(!TrackerQueue::lastError(a.id).isEmpty());
+        }
+        // ...and a SUCCESS clears the line and empties the queue, on both.
+        for (Id id : { Id::AniList, Id::MyAnimeList })
+        {
+            TrackerQueue::setLastError(id, QStringLiteral("something old"));
+            seedQueue(id, { { QStringLiteral("326:two"), 9 } }, T - 1000);
+            QStringList sent, pushed;
+            QVector<qint64> waits;
+            int at = 0;
+            senderDrain(id, id == Id::AniList ? al : ml, { { 200, 0, true } }, at, sent, pushed,
+                        T + kDebounceMs * 4, waits);
+            CHECK(pushed.value(0) == QLatin1String("326:two@9"));
+            CHECK(TrackerQueue::count(id) == 0);
+            CHECK(TrackerQueue::lastError(id).isEmpty());
+        }
+
+        // ---- THE IDENTITY ASSERTION -------------------------------------------------------------------
+        // A run with NO permanently-refused response must behave exactly as increment 1's loop did. The
+        // comparison is against legacyDrain above — a transcription of the code this issue deleted — not
+        // against a description of it: same rows attempted in the same order, same queue left behind, same
+        // status line, same first wait.
+        //
+        // The two runs use the SAME item keys and are separated in time by four debounce windows, so the
+        // sent-stamps the first run wrote cannot suppress a row in the second.
+        const QVector<QPair<QString, int>> rows = { { QStringLiteral("326:i1"), 2 },
+                                                    { QStringLiteral("326:i2"), 4 },
+                                                    { QStringLiteral("326:i3"), 6 } };
+        // A script with a FAILURE in it, because the retry path is the half that could have drifted. 500 is
+        // retryable under both the old rule (everything was) and the new one.
+        const QVector<ScriptedReply> mixed = { { 200, 0, true }, { 500, 0, false }, { 200, 0, true } };
+
+        seedQueue(Id::AniList, rows, T - 1000);
+        QStringList legacySent;
+        QVector<qint64> legacyWaits;
+        int legacyAt = 0;
+        legacyDrain(mixed, legacyAt, legacySent, T, legacyWaits);
+        const QByteArray legacyQueue = encodeQueue(TrackerQueue::load(Id::AniList));
+        const QString legacyLine = TrackerQueue::lastError(Id::AniList);
+
+        seedQueue(Id::AniList, rows, T - 1000);
+        QStringList nowSent, nowPushed;
+        QVector<qint64> nowWaits;
+        int nowAt = 0;
+        senderDrain(Id::AniList, al, mixed, nowAt, nowSent, nowPushed, T + kDebounceMs * 4, nowWaits);
+        const QByteArray nowQueue = encodeQueue(TrackerQueue::load(Id::AniList));
+
+        CHECK(nowSent == legacySent);                       // the same rows, in the same order
+        CHECK(nowSent.size() == 2);                         // ...and the run really did do something
+        CHECK(nowQueue == legacyQueue);                     // the same queue left on disk, byte for byte
+        CHECK(!nowQueue.isEmpty());
+        CHECK(TrackerQueue::lastError(Id::AniList) == legacyLine);   // the same sentence
+        CHECK(legacyLine == QString::fromLatin1(kLegacyRetryLine));
+        CHECK(nowWaits == legacyWaits);                     // ...and the same first wait: 60 seconds
+        CHECK(nowWaits.value(0) == 60000);
+
+        // The same, with no failure at all: both drain to empty and both stop the timer.
+        const QVector<ScriptedReply> allGood = { { 200, 0, true }, { 200, 0, true }, { 200, 0, true } };
+        seedQueue(Id::AniList, rows, T - 1000);
+        QStringList lSent; QVector<qint64> lWaits; int lAt = 0;
+        legacyDrain(allGood, lAt, lSent, T + kDebounceMs * 8, lWaits);
+        const QByteArray lQueue = encodeQueue(TrackerQueue::load(Id::AniList));
+        seedQueue(Id::AniList, rows, T - 1000);
+        QStringList nSent, nPushed; QVector<qint64> nWaits; int nAt = 0;
+        senderDrain(Id::AniList, al, allGood, nAt, nSent, nPushed, T + kDebounceMs * 12, nWaits);
+        CHECK(nSent == lSent);
+        CHECK(nSent.size() == 3);
+        CHECK(encodeQueue(TrackerQueue::load(Id::AniList)) == lQueue);
+        CHECK(nWaits == lWaits);
+        CHECK(nWaits.value(0) == 0);   // nothing pending: the timer is STOPPED, not re-armed
+        CHECK(TrackerQueue::lastError(Id::AniList).isEmpty());
 
         TrackerQueue::forgetAccount(Id::AniList);
         TrackerQueue::forgetAccount(Id::MyAnimeList);
