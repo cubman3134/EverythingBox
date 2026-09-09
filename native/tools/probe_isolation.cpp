@@ -12,6 +12,12 @@
 // when it works, which is exactly why it needs a test: if it silently stopped applying, every probe would go
 // back to sharing build/Release and nothing would go red.
 //
+// Sections 7-10 (issue #341) are the other half of the same question: WHERE the platform puts the user's
+// data when nothing is redirecting it. Linux gained a real answer there - the XDG data dir, because an
+// AppImage's own folder is a read-only mount - so this probe now pins each platform's answer, the XDG rules
+// including the empty-value case, the one-time migration out of an old portable install, and, most
+// importantly, that EB_ISOLATED_DATA_DIR still beats all of it.
+//
 // Prints ISOLATION-OK; ISOLATION-FAIL <what> + non-zero on failure.
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -40,6 +46,15 @@ static QByteArray fileBytes(const QString& path)
 {
     QFile f(path);
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+// Fixture writer for the migration checks (issue #341): makes the parent, then the file.
+static void writeFile(const QString& path, const QByteArray& bytes)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(bytes);
 }
 
 int main(int argc, char** argv)
@@ -151,6 +166,190 @@ int main(int argc, char** argv)
         // waitForFinished() returned it must be gone. Without this the suite would silently accrete a
         // directory per probe per run.
         CHECK(!QFileInfo::exists(childDir), "the child probe's data dir survived the process");
+    }
+
+    // ---- 7. Each platform's own answer, from inside an isolated build --------------------------------
+    // AppPaths::platformDataDir() is the platform branch alone - no isolation, no directory creation - and
+    // dataDir() calls it rather than repeating it, so these assertions are about the real thing. Without
+    // this split "Windows and macOS did not change" would be a claim nothing here could test, because
+    // dataDir() in a probe is always the scratch dir.
+    {
+#if defined(Q_OS_LINUX)
+        // Issue #341. The Linux answer is the XDG data dir, NOT the executable's folder: inside an AppImage
+        // that folder is a read-only mount and nothing the app owns can be written at all.
+        const QString platform = AppPaths::platformDataDir();
+        CHECK(platform == AppPaths::UserData::xdgDataDir(),
+              "platformDataDir() on Linux is not the XDG user data dir");
+        CHECK(platform.endsWith(QLatin1Char('/') + QString::fromLatin1(AppBrand::kDisplayName)),
+              "the Linux user data dir is not named after the app");
+        CHECK(QDir::cleanPath(platform) != canonExe && !QDir::cleanPath(platform).startsWith(canonExe + QLatin1Char('/')),
+              "the Linux user data dir resolves into applicationDirPath() - an AppImage cannot write there");
+#else
+        // The pin the brief asks for: this branch is the one that must be byte-identical. If it ever stops
+        // being applicationDirPath(), every Windows and macOS install's portable data directory has moved
+        // and nothing else would say so.
+        CHECK(AppPaths::platformDataDir() == QCoreApplication::applicationDirPath(),
+              "platformDataDir() is no longer applicationDirPath() - the portable desktop data dir moved");
+#endif
+    }
+
+    // ---- 8. The XDG rules, as a table -----------------------------------------------------------------
+    // xdgDataDirFor() is a pure function and is compiled on every platform on purpose, so the Windows gate
+    // tests the same code the Linux build runs. The empty case is the one worth spelling out: the spec says
+    // an EMPTY XDG_DATA_HOME means unset, and honouring it as a path would answer "/EverythingBox" - the
+    // filesystem root, which a normal user cannot write, i.e. issue #341 again in a new place.
+    {
+        const QString appFolder = QString::fromLatin1(AppBrand::kDisplayName);
+        const QString home      = QStringLiteral("/home/eb");
+        const QString fallback  = home + QStringLiteral("/.local/share/") + appFolder;
+
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral("/xdg/data"), home, appFolder)
+                  == QStringLiteral("/xdg/data/") + appFolder,
+              "a set XDG_DATA_HOME was not honoured");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QString(), home, appFolder) == fallback,
+              "an unset XDG_DATA_HOME did not fall back to ~/.local/share");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral(""), home, appFolder) == fallback,
+              "an EMPTY XDG_DATA_HOME was treated as a path - the spec says empty means unset");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral("/xdg/data/"), home, appFolder)
+                  == QStringLiteral("/xdg/data/") + appFolder,
+              "a trailing slash in XDG_DATA_HOME produced a second, different directory");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral("/xdg/data//"), home, appFolder)
+                  == QStringLiteral("/xdg/data/") + appFolder,
+              "repeated trailing slashes in XDG_DATA_HOME produced a doubled separator");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral("relative/dir"), home, appFolder) == fallback,
+              "a RELATIVE XDG_DATA_HOME was honoured - the library would follow the working directory");
+        CHECK(AppPaths::UserData::xdgDataDirFor(QStringLiteral("/"), home, appFolder)
+                  == QStringLiteral("/") + appFolder,
+              "XDG_DATA_HOME=/ produced a doubled leading slash");
+
+        // ...and reading the environment answers WHERE, without creating anything. A lookup with a side
+        // effect would mean any tool that merely asks leaves a directory in the user's home.
+        const bool       hadXdg   = qEnvironmentVariableIsSet("XDG_DATA_HOME");
+        const QByteArray savedXdg = qgetenv("XDG_DATA_HOME");
+        const QByteArray probeXdg = "/eb341-xdg-that-does-not-exist";
+        qputenv("XDG_DATA_HOME", probeXdg);
+        CHECK(AppPaths::UserData::xdgDataDir()
+                  == QString::fromLatin1(probeXdg) + QLatin1Char('/') + appFolder,
+              "xdgDataDir() did not read XDG_DATA_HOME from the environment");
+        CHECK(!QFileInfo::exists(QString::fromLatin1(probeXdg)),
+              "asking where the user data dir is CREATED it");
+        if (hadXdg) qputenv("XDG_DATA_HOME", savedXdg); else qunsetenv("XDG_DATA_HOME");
+    }
+
+    // ---- 9. The one-time migration out of an old portable install -------------------------------------
+    // Everything here runs on every platform (the fixture is two directories under this probe's own scratch
+    // dir), because the migration is where the data is at risk and the Windows gate is the only gate that
+    // runs before CI.
+    {
+        const QString root = data + QStringLiteral("/migration");
+        const QString from = root + QStringLiteral("/portable");
+        const QString to   = root + QStringLiteral("/userdata");
+        const QString ini  = QString::fromLatin1(AppBrand::kIniFile);
+
+        QDir().mkpath(from + QStringLiteral("/saves/nes"));
+        QDir().mkpath(from + QStringLiteral("/roms"));
+        writeFile(from + QLatin1Char('/') + ini, QByteArrayLiteral("[probe]\nmigrated=yes\n"));
+        writeFile(from + QStringLiteral("/saves/nes/game.srm"), QByteArrayLiteral("SAVE"));
+        writeFile(from + QStringLiteral("/roms/big.rom"), QByteArrayLiteral("ROM"));
+        writeFile(from + QStringLiteral("/unrelated.bin"), QByteArrayLiteral("NOPE"));
+
+        // The AppImage case, staged: the source files are READ-ONLY, exactly as they are on a squashfs
+        // payload. QFile::copy carries the source's permissions to the destination, so without the explicit
+        // re-permission in copyFileIfAbsent the migrated ini would land unwritable and the fix would have
+        // moved the failure rather than removed it.
+        QFile::setPermissions(from + QLatin1Char('/') + ini, QFile::ReadOwner);
+        QFile::setPermissions(from + QStringLiteral("/saves/nes/game.srm"), QFile::ReadOwner);
+
+        const QString prepared = AppPaths::UserData::prepare(to, from);
+        CHECK(prepared == to, "prepare() did not return the directory it was asked for");
+        CHECK(QFileInfo(to).isDir(), "prepare() did not create the user data directory");
+        {
+            QFile f(to + QStringLiteral("/prepare-write-test"));
+            CHECK(f.open(QIODevice::WriteOnly), "the prepared user data directory is not writable");
+            f.write("x"); f.close();
+            QFile::remove(f.fileName());
+        }
+
+        CHECK(fileBytes(to + QLatin1Char('/') + ini) == QByteArrayLiteral("[probe]\nmigrated=yes\n"),
+              "the settings file did not migrate out of the portable directory");
+        CHECK(fileBytes(to + QStringLiteral("/saves/nes/game.srm")) == QByteArrayLiteral("SAVE"),
+              "a nested save did not migrate (the copy is not recursive)");
+        // Bulk content is deliberately NOT copied: it can be tens of gigabytes and this runs synchronously
+        // during startup. An entry outside the list is not copied either.
+        CHECK(!QFileInfo::exists(to + QStringLiteral("/roms/big.rom")),
+              "bulk content was copied - first launch would stall duplicating the user's library");
+        CHECK(!QFileInfo::exists(to + QStringLiteral("/unrelated.bin")),
+              "an entry outside the migration list was copied");
+
+        // A copy out of a read-only source must be writable where it lands.
+        {
+            QFile f(to + QLatin1Char('/') + ini);
+            CHECK(f.open(QIODevice::Append),
+                  "the migrated settings file is READ-ONLY at its destination - a copy out of an AppImage's "
+                  "read-only payload kept the source's permissions");
+            f.close();
+        }
+
+        // NEVER DELETES. The source is often the only copy, and inside an AppImage it cannot be touched
+        // anyway; a migration that removes is a migration that can lose.
+        CHECK(fileBytes(from + QLatin1Char('/') + ini) == QByteArrayLiteral("[probe]\nmigrated=yes\n"),
+              "the migration modified or removed the SOURCE settings file");
+        CHECK(QFileInfo::exists(from + QStringLiteral("/saves/nes/game.srm")),
+              "the migration removed the source save");
+
+        // ONCE, and by the stamp rather than by "is it empty?" - otherwise the next launch resurrects a file
+        // the user deliberately deleted.
+        CHECK(QFileInfo::exists(AppPaths::UserData::migrationStampPath(to)),
+              "no migration stamp was written - the migration would run again on every launch");
+        QFile::remove(to + QLatin1Char('/') + ini);
+        CHECK(AppPaths::UserData::migrateFromPortableDir(from, to) == 0,
+              "the migration ran a SECOND time");
+        CHECK(!QFileInfo::exists(to + QLatin1Char('/') + ini),
+              "the second migration resurrected a file the user had deleted");
+
+        // The same directory spelled twice is not two directories, and must not be stamped as migrated.
+        {
+            const QString same = root + QStringLiteral("/same");
+            QDir().mkpath(same);
+            CHECK(AppPaths::UserData::migrateFromPortableDir(same, same + QStringLiteral("/.")) == 0,
+                  "a directory was migrated into itself");
+            CHECK(!QFileInfo::exists(AppPaths::UserData::migrationStampPath(same)),
+                  "a self-migration wrote a stamp claiming a migration had happened");
+        }
+
+        // No source at all (a fresh install, or an app dir this process cannot read) still has to yield a
+        // working writable data directory - the whole point of the change.
+        {
+            const QString to2 = root + QStringLiteral("/nosource");
+            AppPaths::UserData::prepare(to2, root + QStringLiteral("/there-is-no-such-dir"));
+            CHECK(QFileInfo(to2).isDir(), "prepare() with an absent source did not create the data dir");
+            QFile f(to2 + QStringLiteral("/write-test"));
+            CHECK(f.open(QIODevice::WriteOnly), "prepare() with an absent source produced an unwritable dir");
+            f.write("x"); f.close();
+        }
+
+        // Leave nothing read-only behind: on Windows a read-only file survives removeRecursively(), and the
+        // scratch directory this probe was handed would then outlive the process it belongs to.
+        QFile::setPermissions(from + QLatin1Char('/') + ini, QFile::ReadOwner | QFile::WriteOwner);
+        QFile::setPermissions(from + QStringLiteral("/saves/nes/game.srm"),
+                              QFile::ReadOwner | QFile::WriteOwner);
+    }
+
+    // ---- 10. Isolation still beats the platform answer -------------------------------------------------
+    // The single most dangerous regression available in this file. dataDir()'s EB_ISOLATED_DATA_DIR branch
+    // sits ahead of the platform branch; if it ever stopped doing so, every probe in the suite would write
+    // into the REAL user data directory - on Linux that branch also creates directories in the user's home
+    // and migrates files into them. Check 1 above says the probe's dir is not the exe folder, which was the
+    // whole answer while the exe folder WAS the platform answer; on Linux it no longer is, so the precedence
+    // needs its own assertion or it would go unchecked on exactly the platform that just gained a new path.
+    {
+        const QString platform = AppPaths::platformDataDir();
+        CHECK(data != platform,
+              "dataDir() returned the PLATFORM data dir - EB_ISOLATED_DATA_DIR has stopped winning");
+        CHECK(!QDir::cleanPath(data).startsWith(QDir::cleanPath(platform) + QLatin1Char('/')),
+              "the probe's data dir lives INSIDE the real user data dir");
+        CHECK(!QFileInfo::exists(platform + QStringLiteral("/isolation-write-test")),
+              "this probe's write landed in the real user data dir");
     }
 
     if (failures == 0) { std::puts("ISOLATION-OK"); return 0; }
