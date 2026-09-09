@@ -67,14 +67,24 @@ owner:
 | `checkingDumps` | a plausible dump is here and its digests are not in the cache yet |
 | `installedTag` | `NativePorts::readInstalledTag` — `eb-port-release.txt` inside the install folder |
 | `catalogueTag` | the entry's `release.tag` |
+| `building` / `builtNotLaunched` | a local compile is running, or one finished and its program has not run yet |
+| `updateAvailable` | `recompupdate::compareBuild` — the self-compiled tier's update, from the build's own stamp |
+| `previousKept` | the build that worked before the last rebuild is still on disk (see *Updates*) |
 
 ```
+building                                     ->  building...
+installed && updateAvailable                 ->  update available
+installed && builtNotLaunched                ->  built - ready to play
 installed && both tags known && they differ  ->  update available
 installed                                    ->  installed
 !installed && libraryMatch                   ->  not installed
 !installed && checkingDumps                  ->  checking dumps...
 !installed                                   ->  needs ROM
 ```
+
+`updateAvailable` outranks *built - ready to play* deliberately: a copy that was built and never launched can
+still be out of date — the catalogue moves on its own schedule, not the user's — and *ready to play* would
+hide the one fact on the row with a button attached to it.
 
 Two rules are worth stating because getting either wrong is invisible:
 
@@ -324,15 +334,94 @@ this feature and somebody's game file. No step in any plan copies it, no plan's 
 folder it lives in, and the probe asserts both — and asserts that after a full run the fixture dump is
 byte-for-byte what it was and that no copy of its bytes exists anywhere the build wrote.
 
+## Updates (#248, increment d)
+
+A recomp built here can go out of date, and rebuilding one used to mean destroying the copy that worked.
+`src/core/RecompUpdates.h` is the whole of the answer; `RecompUpdates.cpp` is the handful of functions that
+move directories.
+
+### What a build records about itself
+
+Every successful build writes `eb-recomp-build.json` into its own install folder — beside the program it
+describes, so Remove takes it away with everything else, exactly as `eb-port-release.txt` works for the
+pre-built tier. It holds the **engine version** (`build.sdk.version`, or `build.generate.engine_version`
+where an entry spells it that way) and the **recipe**: engine, source repo, source ref, SDK id, generate
+config and out dir, cmake dir, target and config. It also holds `built_at_ms` and `launched`.
+
+`built_at_ms` is written for a person reading the file and is **read by nothing**. That is the point: a
+catalogue is republished whenever anybody's submission is approved, so a build is not out of date because
+somebody else's entry changed. The feed's own `release_tag` and `catalog_date` are not in the stamp at all.
+
+### The comparison
+
+| the catalogue says | verdict | row |
+| --- | --- | --- |
+| a higher engine version | `EngineNewer` | update available |
+| a different engine version that cannot be ordered (a date, a codename) | `EngineChanged` | update available |
+| the same engine, a changed recipe field | `RecipeChanged` | update available |
+| the same entry, republished | `UpToDate` | installed / ready |
+| an **older** engine version | `CatalogueBehind` | *not* an update — and the card says why |
+| nothing (no stamp) | `Unknown` | installed — never "out of date" |
+
+Two rules carry it, and both are the rule the rest of this feature already runs on:
+
+* **An unknown is not a difference.** A field either side leaves empty is compared with nothing. That is also
+  why the comparison walks the recipe **field by field** instead of hashing it: a digest would mean the first
+  release of this app to add a tenth recipe field declared every recomp on every machine out of date on
+  upgrade day.
+* **A catalogue that went backwards is not an update.** Releases get yanked and pins revert; presenting that
+  as an update spends twenty minutes of somebody's processor going downhill.
+
+### A rebuild is explicit
+
+Nothing starts a build because a catalogue changed. The row's label moves and the card offers *Rebuild it with
+the newer version*; a person presses it. `probe_recompbuild` asserts that structurally as well as
+behaviourally: the feed's own translation units do not so much as name `RecompBuildJob`, and the single call
+that starts a build is in `MainWindowRecomps.cpp`'s verb switch and nowhere else under `src/`.
+
+### The previous build is kept until the new one runs
+
+This is the safety property of the increment: **a rebuild that produces something broken must never have
+destroyed the build that worked.**
+
+A rebuild **moves** the installed copy to `<emulators>/.eb-previous/<id>` — a rename, not a copy, so it is
+atomic and cannot half-succeed, and a sibling folder so it is guaranteed to be on the same volume. The new
+build is staged into the empty place. If the installed copy cannot be moved (it is running, a file is locked)
+the rebuild is **refused** before anything is staged, rather than built over something that cannot be put
+back.
+
+From then on:
+
+* the new program **runs** → the stamp's `launched` is set and the kept copy is removed. "Ran" means a
+  process existed and either the user closed it themselves or it stayed up for four seconds —
+  `GameLauncher`'s own threshold for *closed immediately = a failed boot*, reused rather than re-chosen. The
+  judgement is conservative on purpose: keeping a dead copy costs disk, dropping a live one costs somebody
+  their working program;
+* the new program **does not run** → nothing is dropped. The row offers *Go back to the previous build*,
+  which removes the replacement and renames the kept copy back. Its stamp travels with the folder, so the row
+  returns to saying exactly what it said before the rebuild;
+* the rebuild **fails** → nothing changed. Every failure before staging never reached the move at all; the
+  one window where it did (the compile worked, the artefact was not there — the Defender case) restores the
+  previous build immediately.
+
+### The disk cost
+
+Two builds of one title are on the machine between a rebuild and its first run, and that is said rather than
+discovered: the row carries *previous build kept* beside its state, and the card and the build's own ending
+sentence give the size and the path. Only **one** kept copy per title ever exists — `keepAside` drops the
+older one before making a new one, so five rebuilds do not leave five dead builds behind.
+
 ## What is not here yet
 
-* **(b, part)** the live release lookup that fills `release.tag` for a feed entry, so *update available* can
-  fire on one. The feed and the ROM gate themselves are done (above).
+* **(b, part)** the live release lookup that fills `release.tag` for a feed entry, so the PRE-BUILT tier's tag
+  comparison can fire on one. The feed and the ROM gate themselves are done (above), and the self-compiled
+  tier's update does not depend on it.
 * **(c, part)** SNES and GBA generate recipes (PSX is wired up; the other two are refused with a sentence),
   and a separately downloaded `build.sdk` tools pack — today the recompiler is harvested from the source tree,
   which is what SCHEMA.md says is preferred.
-* **(d)** the rebuild-on-update flow: explicit, never automatic, keeping the previous build until the new one
-  has launched once.
+* **the compile-to-gameplay leg**, end to end, against a real `psxrecomp` and a real dump. There are no ROM
+  files on the machine this was written on and none was obtained, so every layer around the build is driven
+  and probe-covered while the build itself has only ever run against the in-tree stub engine.
 
 ## Probes
 
@@ -348,6 +437,12 @@ function so the behaviour change is visible in the probe), the narrowing, the no
 and the last-good-copy surviving a broken publish **byte for byte**. Fixture catalogues are written with miniz
 in the probe process, so each malformed case differs from the good one by exactly the byte it is about.
 
+Section 25 is increment (d)'s row half: the order the derivation reads its inputs in (an update outranking
+*ready*, a build in flight outranking both, the pre-built tag comparison untouched), the kept-copy qualifier
+reaching the row, the catalogue adapter — including a republish that changes the name, the licence and the
+release tag and still compares as up to date — and the two spellings of the engine version off real catalogue
+documents.
+
 `probe_recompbuild` (`native/tools/probe_recompbuild.cpp`) is increment (c)'s, and it is a separate target
 because its subject is a **child process** rather than a document: it drives the toolchain decision table over
 all sixteen combinations of (MSVC, clang, gcc, CMake) on all three operating systems, the state machine's whole
@@ -357,3 +452,13 @@ cleanly, exiting non-zero, dying rather than exiting, being **cancelled mid-run*
 is set from the line callback on the child's third line), and finishing successfully while leaving no artefact
 behind. It also asserts that the fixture dump it points the plan at is untouched afterwards, that no copy of
 its bytes reached the workspace, and that this repository holds no engine binary.
+
+Section 13 is increment (d): version ordering, the stamp's round trip and its refusal of a schema from the
+future, the comparison case by case (newer engine, changed recipe, an unchanged entry republished, a
+catalogue that went backwards, an unknown on either side), what proves a build, and then the
+keep-until-launched rule **on real directories** — a rebuild that runs (the old copy goes, exactly one build
+is left), a rebuild that never starts (the old copy is still there, whole, and still a program, and going
+back puts it where the launcher looks), a rebuild that starts and dies in 300 ms (also not a launch), a
+failed staging restoring the previous build byte for byte, a restore with nothing kept leaving the install
+untouched, five rebuilds leaving one kept copy, and two hundred wildly different catalogues compared against
+the stamp without writing a byte or starting anything.

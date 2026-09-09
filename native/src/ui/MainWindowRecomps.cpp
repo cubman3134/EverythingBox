@@ -38,12 +38,15 @@
 #include "../core/ArchiveRom.h"
 #include "../core/DownloadsStore.h"
 #include "../core/HashVerify.h"
+#include "../core/EmulatorManager.h"
 #include "../core/RecompBuild.h"
 #include "../core/RecompBuildJob.h"
 #include "../core/RecompFeed.h"
 #include "../core/RecompRows.h"
+#include "../core/RecompUpdates.h"
 #include "../core/RomLibrary.h"
 #include "../core/Toolchain.h"
+#include "../launch/GameLauncher.h"
 #include "HomeView.h"
 #include "nav/NavOverlay.h"
 
@@ -155,6 +158,45 @@ void MainWindow::ensureRecompBuildWiring()
                 notify(message, 12000);
                 if (home_) home_->refreshRecompsIfShown();
             });
+
+    // ---- #248 (d): THE MOMENT A NEW BUILD PROVES ITSELF ------------------------------------------------
+    // A rebuild leaves TWO builds on the disk — the new one, and the one that worked before it — and the old
+    // one is not removed until the new one has actually run. This is where "has actually run" is decided, and
+    // it is the only place the kept copy is ever dropped.
+    //
+    // ON THE LAUNCHER'S OWN SIGNAL rather than on a timer or on a guess: it reports whether a process existed
+    // at all, how long it was up and whether the user closed it themselves, which are exactly the three facts
+    // recompupdate::launchProvesBuild needs. A run that does not prove the build changes NOTHING — the kept
+    // copy stays and the row offers to go back to it.
+    if (launcher_)
+        connect(launcher_, &GameLauncher::externalRunEnded, this,
+                [this](const QString& emulatorId, bool started, qint64 upMs, bool userClosed) {
+                    if (emulatorId.isEmpty()) return;
+                    const ExternalEmulator* p = NativePorts::byId(emulatorId);
+                    ExternalEmulator feedPort;
+                    if (!p && RecompFeed::findById(emulatorId, &feedPort)) p = &feedPort;
+                    if (!p) return;
+                    const QString installDir = EmulatorManager::installDir(*p);
+                    const QString title = p->port.name.isEmpty() ? p->displayName : p->port.name;
+                    if (!recompupdate::launchProvesBuild(started, upMs, userClosed))
+                    {
+                        // Only worth saying when there is something to go back TO. A recomp that has always
+                        // been the only build on this machine crashing is increment (c)'s territory.
+                        if (recompupdate::hasKept(installDir))
+                            notify(recompupdate::keptSurvivedSentence(title), 14000);
+                        return;
+                    }
+                    // It ran. The stamp records that (so a restart does not undo it), and the copy that was
+                    // being held in case it did not is removed.
+                    recompupdate::markLaunched(installDir);
+                    if (recompupdate::hasKept(installDir))
+                    {
+                        const qint64 freed = recompupdate::keptBytes(installDir);
+                        if (recompupdate::dropKept(installDir))
+                            notify(recompupdate::keptRemovedSentence(title, freed), 8000);
+                    }
+                    if (home_) home_->refreshRecompsIfShown();
+                });
 }
 
 void MainWindow::showSelfCompiledPort(const ExternalEmulator& port)
@@ -192,6 +234,34 @@ void MainWindow::showSelfCompiledPort(const ExternalEmulator& port)
                 "finished program. It is made from your own copy of the game by a separate recompiler, and it "
                 "is not made by EverythingBox.")
                  .arg(heading, port.port.name);
+
+    // ---- #248 (d): where this copy stands against the catalogue ----------------------------------------
+    // SECOND, ahead of the standing explanation of what a recomp is, and that position is deliberate: these
+    // two lines are about the state of this machine RIGHT NOW, and a live drive showed why it matters. The
+    // card is long enough on a 1280x760 window that its last paragraph is clipped by the button row — with
+    // the disk statement written last, the one sentence saying two builds are taking up space was the one
+    // sentence nobody could read.
+    //
+    // Read off what the BUILD recorded about itself, never off a timestamp and never off the catalogue's own
+    // revision — a catalogue is republished whenever anybody's entry is approved, and this one may not have
+    // changed at all. RecompUpdates.h holds the comparison and the wording.
+    const QString installDir = EmulatorManager::installDir(port);
+    const bool installedHere = EmulatorManager::isInstalled(port);
+    const recompupdate::BuildStamp stamp = recompupdate::readStamp(installDir);
+    const recompupdate::CatalogueBuild wanted = recomps::catalogueBuildOf(port);
+    const recompupdate::Update verdict =
+        installedHere ? recompupdate::compareBuild(stamp, wanted) : recompupdate::Update::Unknown;
+    const bool updateHere = recompupdate::updateAvailable(verdict);
+    const bool keptHere = recompupdate::hasKept(installDir);
+
+    if (installedHere && verdict != recompupdate::Update::Unknown)
+        lines << recompupdate::updateSentence(verdict, stamp, wanted);
+    // THE DISK COST (#248 d item 5). Two builds of one title exist between a rebuild and its first run, and
+    // that is said with a size and a path rather than left to be discovered.
+    if (keptHere)
+        lines << recompupdate::keptCopySentence(heading, recompupdate::keptBytes(installDir),
+                                                recompupdate::keptDirFor(installDir));
+
     if (!port.port.description.isEmpty()) lines << port.port.description;
 
     // The engine, and its terms. Only what has been checked: an engine this build does not know keeps an
@@ -228,14 +298,33 @@ void MainWindow::showSelfCompiledPort(const ExternalEmulator& port)
     const RecompBuildJob::Snapshot last = job.snapshot();
     if (last.portId == port.id && !last.message.isEmpty()) lines << last.message;
 
-    enum class Verb { Cancel, Build, Install, Recheck, Engine, Homepage };
+    enum class Verb { Cancel, Build, Install, Recheck, Engine, Homepage, Play, GoBack };
     QStringList buttons{ tr("Cancel") };
     QVector<Verb> verbs{ Verb::Cancel };
     const bool canBuild = tc.canBuild() && !rom.isEmpty();
+    // PLAY, and this is where the self-compiled tier finally reaches the launch seam #233 built. It is the
+    // SAME verb, the same EmulatorManager install folder and the same process supervision a downloaded port
+    // gets — a built recomp is not a second kind of program.
+    if (installedHere)
+    {
+        buttons << tr("Play (native)");
+        verbs << Verb::Play;
+    }
     if (canBuild)
     {
-        buttons << tr("Build it on this computer");
+        // A REBUILD IS EXPLICIT AND IT IS THIS BUTTON. Nothing anywhere else in this feature starts one:
+        // a feed refresh moves the label on the row and stops there (#248 d, decision 2).
+        buttons << (installedHere ? (updateHere ? tr("Rebuild it with the newer version")
+                                                : tr("Build it again on this computer"))
+                                  : tr("Build it on this computer"));
         verbs << Verb::Build;
+    }
+    // GOING BACK. Offered whenever the previous build is still being held, which is exactly the window in
+    // which a rebuild might have produced something that does not work.
+    if (keptHere)
+    {
+        buttons << tr("Go back to the previous build");
+        verbs << Verb::GoBack;
     }
     if (!tc.canBuild())
     {
@@ -249,14 +338,49 @@ void MainWindow::showSelfCompiledPort(const ExternalEmulator& port)
     if (!engine.homepage.isEmpty()) { buttons << tr("Open %1").arg(engine.id); verbs << Verb::Engine; }
     if (!port.homepage.isEmpty())   { buttons << tr("Open homepage");          verbs << Verb::Homepage; }
 
+    // WHAT THE CARD OPENS ON, in the order somebody would want it: the rebuild when there is an update to
+    // take, otherwise playing what is already there, otherwise building it for the first time. Resolved
+    // through the verb list rather than by index, because the button set is conditional and a hardcoded 1 is
+    // how the focus lands on Cancel the first time a verb is added above it.
+    const Verb preferred = (canBuild && updateHere) ? Verb::Build
+                                                    : (installedHere ? Verb::Play
+                                                                     : (canBuild ? Verb::Build : Verb::Cancel));
+    const int focusIdx = qMax(0, int(verbs.indexOf(preferred)));
+
     const int choice = NavConfirm::ask(heading, lines.join(QStringLiteral("\n\n")), buttons,
-                                       /*focusIndex*/ canBuild ? 1 : 0, /*cancelIndex*/ 0, this);
+                                       focusIdx, /*cancelIndex*/ 0, this);
     if (choice < 0 || choice >= verbs.size()) return;
 
     switch (verbs.at(choice))
     {
         case Verb::Cancel:
             return;
+
+        case Verb::Play:
+        {
+            // No ROM argument, exactly as the pre-built tier's launch: a recomp IS the game — the dump was
+            // consumed at generate time and the program does not take one.
+            if (!launcher_) return;
+            launcher_->runEmulator(port, QString(), heading, QString(), QString(), port.port.platform);
+            return;
+        }
+
+        case Verb::GoBack:
+        {
+            const int sure = NavConfirm::ask(
+                tr("Go back to the previous build of %1?").arg(heading),
+                tr("This puts back the build that was working before the last rebuild, and removes the one "
+                   "that replaced it. Your saved games are the port's own and are not touched."),
+                { tr("Cancel"), tr("Go back") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (sure != 1) return;
+            QString why;
+            if (recompupdate::restoreKept(installDir, &why))
+                notify(recompupdate::restoredSentence(heading), 9000);
+            else
+                notify(tr("Couldn't put the previous build of %1 back — %2.").arg(heading, why), 10000);
+            if (home_) home_->refreshRecompsIfShown();
+            return;
+        }
 
         case Verb::Engine:
             QDesktopServices::openUrl(QUrl(engine.homepage));

@@ -130,6 +130,11 @@ struct NativePortBinding
     QString buildSourceRepo;                    // build.source.github (defaults to release.github)
     QString buildSourceRef;                     // build.source.ref — a tag, a branch or a commit
     QString buildSdkId;                         // build.sdk.id
+    // build.sdk.version, with build.generate.engine_version accepted as the other spelling. THE ENGINE'S OWN
+    // VERSION, and it is the field #248 (d) compares a built copy against: a recomp is produced by that
+    // recompiler, so a newer one is the thing that makes a build worth doing again. Empty is honest — the
+    // catalogue makes no claim — and an unknown never presents as `update available` (RecompUpdates.h).
+    QString buildEngineVersion;
     QString buildToolchainId;                   // build.toolchain.id — see above
     QString buildGenerateConfig;                // build.generate.config (PSX: game.toml)
     QString buildGenerateOutDir;                // build.generate.out_dir

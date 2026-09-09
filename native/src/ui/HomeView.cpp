@@ -39,6 +39,7 @@
 #include "../core/RecompBuild.h"    // issue #248 (c): the build's progress line, for a building row
 #include "../core/RecompBuildJob.h" // issue #248 (c): is a build of this entry running right now
 #include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
+#include "../core/RecompUpdates.h" // issue #248 (d): what a build recorded about itself, and the kept copy
 #include "../core/RecompFeed.h"  // issue #248 (b): the RetComM catalogue as a second feed
 #include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
 #include "../core/RomLibrary.h"
@@ -6132,6 +6133,26 @@ void HomeView::populateRecomps()
             f.building         = (build.portId == e.id) && build.running();
             f.builtNotLaunched = (build.portId == e.id) && (build.phase == recompbuild::Phase::Succeeded);
             f.installed    = EmulatorManager::isInstalled(e);
+            // #248 (d). The build's own record of itself, beside the install: what engine version and what
+            // recipe it was built from, and whether it has ever run. Read here — not from the session — so a
+            // `built, not run yet` row survives a restart, and so a newer catalogue can move a row that was
+            // built weeks ago. Only for an install that exists; asking otherwise reads a folder that is not
+            // there.
+            if (f.installed)
+            {
+                const QString dir = EmulatorManager::installDir(e);
+                f.installedTag = NativePorts::readInstalledTag(dir);
+                const recompupdate::BuildStamp stamp = recompupdate::readStamp(dir);
+                if (stamp.valid)
+                {
+                    f.updateAvailable =
+                        recompupdate::updateAvailable(recompupdate::compareBuild(stamp,
+                                                                                recomps::catalogueBuildOf(e)));
+                    if (!stamp.launched) f.builtNotLaunched = true;
+                }
+                // Two builds of this title are on the disk until the new one runs. The row says so.
+                f.previousKept = recompupdate::hasKept(dir);
+            }
             // THE ROM-IDENTITY GATE (#248 b). `libraryMatch` still means "a dump on this machine is this
             // entry's game", but what backs it is now the published digests where there are any.
             const recomps::DumpMatch m = recomps::dumpMatch(e, library);
@@ -6144,8 +6165,6 @@ void HomeView::populateRecomps()
                     if (!needHash.contains(path)) needHash << path;
                     hashHints.insert(path, e.port.platform);
                 }
-            // Only meaningful for an install that exists; asking otherwise would read a folder that is not there.
-            if (f.installed) f.installedTag = NativePorts::readInstalledTag(EmulatorManager::installDir(e));
             f.catalogueTag = e.port.releaseTag;
             return f;
         },
@@ -6199,6 +6218,10 @@ void HomeView::populateRecomps()
         // row says "not installed" on the strength of a filename, and the qualifier is the least droppable
         // thing on the line. It was originally last, where the themed row's elision ate it at 1280 px.
         if (r.dumpUnverified)          bits << tr("dump not verified");
+        // #248 (d), and it is next to the state for the same reason `dump not verified` is: it QUALIFIES the
+        // state. This row is using twice the disk it looks like it is, and it stops doing so the first time
+        // the new build runs.
+        if (r.previousKept)            bits << tr("previous build kept");
         if (!r.creditedName.isEmpty()) bits << r.creditedName;
         // The ENGINE, on every self-compiled row (#248 b). A recomp built here is the recompiler's program as
         // much as the port author's, and the licence beside it is the engine's.

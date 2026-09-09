@@ -376,6 +376,10 @@ namespace NativePorts
                 str(g, "engine", e.port.buildEngine);
                 str(g, "config", e.port.buildGenerateConfig);
                 str(g, "out_dir", e.port.buildGenerateOutDir);
+                // #248 (d). Read here as well as off `sdk` below because two spellings of the engine's
+                // version exist in the wild and neither is documented as canonical; `sdk.version` wins when
+                // both are present, being the one that sits beside the id it versions.
+                str(g, "engine_version", e.port.buildEngineVersion);
             }
             if (b.value(QStringLiteral("source")).isObject())
             {
@@ -384,7 +388,13 @@ namespace NativePorts
                 str(src, "ref", e.port.buildSourceRef);
             }
             if (b.value(QStringLiteral("sdk")).isObject())
-                str(b.value(QStringLiteral("sdk")).toObject(), "id", e.port.buildSdkId);
+            {
+                const QJsonObject sdk = b.value(QStringLiteral("sdk")).toObject();
+                str(sdk, "id", e.port.buildSdkId);
+                // Overwrites `generate.engine_version` deliberately — see the note there. `str` leaves the
+                // field alone when the key is absent, so an entry that only spells it the other way keeps it.
+                str(sdk, "version", e.port.buildEngineVersion);
+            }
             if (b.value(QStringLiteral("toolchain")).isObject())
                 str(b.value(QStringLiteral("toolchain")).toObject(), "id", e.port.buildToolchainId);
             if (b.value(QStringLiteral("cmake")).isObject())
