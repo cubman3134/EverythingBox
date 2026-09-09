@@ -27,6 +27,7 @@
 // success; on any failure prints RECOMPBUILD-FAIL <cond> and exits non-zero.
 #include "RecompBuild.h"
 #include "RecompBuildRunner.h"
+#include "RecompUpdates.h"
 #include "Toolchain.h"
 
 #include <QAtomicInt>
@@ -707,6 +708,425 @@ int main(int argc, char** argv)
                             QDir::Files, QDirIterator::Subdirectories);
         while (repoIt.hasNext()) { repoIt.next(); ++enginesInRepo; }
         CHECK(enginesInRepo == 0);
+    }
+
+    // ---- 13. UPDATES (issue #248, increment d) ---------------------------------------------------------
+    // The comparison that puts `update available` on a row, and the rule that keeps the build that WORKED
+    // until the one that replaced it has actually run. The second half is the whole point of the increment,
+    // and it is here rather than in a live drive because a live drive cannot stage the case that matters: a
+    // rebuild that compiles cleanly and produces something that does not start.
+    {
+        // ORDERING VERSIONS. Three different projects publish these and none of them promised semver, so the
+        // rules are stated rather than assumed — and "not orderable" is a first-class answer.
+        auto cmp = [](const char* a, const char* b) {
+            return recompupdate::compareVersions(QString::fromLatin1(a), QString::fromLatin1(b));
+        };
+        CHECK(cmp("1.4.0", "1.4.1") < 0);
+        CHECK(cmp("1.4.1", "1.4.0") > 0);
+        CHECK(cmp("1.4.0", "1.4.0") == 0);
+        CHECK(cmp("1.4", "1.4.0") == 0);            // a missing component is a zero
+        CHECK(cmp("v1.4.0", "1.4.0") == 0);         // the leading v is decoration
+        CHECK(cmp("1.9.0", "1.10.0") < 0);          // NUMERIC, not lexicographic: 10 comes after 9
+        CHECK(cmp("2024.01.15", "2024.2.1") < 0);   // date-shaped versions order too
+        CHECK(cmp("1.4.0-rc1", "1.4.0") < 0);       // a pre-release precedes its release
+        CHECK(cmp("1.4.0", "1.4.0-rc1") > 0);
+        CHECK(cmp("1.4.0-rc1", "1.4.0-rc2") < 0);
+        CHECK(recompupdate::versionsOrderable(QStringLiteral("1.4.0"), QStringLiteral("1.5.0")));
+        CHECK(!recompupdate::versionsOrderable(QStringLiteral("nightly"), QStringLiteral("1.5.0")));
+        CHECK(!recompupdate::versionsOrderable(QString(), QStringLiteral("1.5.0")));
+        // A digit run nobody could mean as a number does not silently become zero.
+        CHECK(recompupdate::parseVersion(QStringLiteral("123456789012345678901234567890")).ok);
+    }
+    {
+        // THE STAMP a build writes about itself: every field survives the round trip, and a document from a
+        // later version of this app is refused rather than half-read.
+        recompupdate::BuildStamp s;
+        s.portId = QStringLiteral("tm4");
+        s.engineVersion = QStringLiteral("1.4.0");
+        s.recipe.engine = QStringLiteral("psxrecomp");
+        s.recipe.sourceRepo = QStringLiteral("owner/repo");
+        s.recipe.sourceRef = QStringLiteral("v1");
+        s.recipe.sdkId = QStringLiteral("psx-sdk-1");
+        s.recipe.generateConfig = QStringLiteral("game.toml");
+        s.recipe.generateOutDir = QStringLiteral("gen");
+        s.recipe.cmakeDir = QStringLiteral("build");
+        s.recipe.cmakeTarget = QStringLiteral("game");
+        s.recipe.cmakeConfig = QStringLiteral("Release");
+        s.builtAtMs = 1700000000000LL;
+        s.valid = true;
+
+        const recompupdate::BuildStamp back = recompupdate::decodeStamp(recompupdate::encodeStamp(s));
+        CHECK(back.valid);
+        CHECK(back.portId == s.portId);
+        CHECK(back.engineVersion == s.engineVersion);
+        CHECK(back.builtAtMs == s.builtAtMs);
+        CHECK(!back.launched);
+        CHECK(!recompupdate::recipeChanged(back.recipe, s.recipe));
+        // ...and every one of those fields really did survive: move any of them and it is seen.
+        for (int field = 0; field < 9; ++field)
+        {
+            recompupdate::BuildRecipe moved = s.recipe;
+            QString* target[] = { &moved.engine, &moved.sourceRepo, &moved.sourceRef, &moved.sdkId,
+                                  &moved.generateConfig, &moved.generateOutDir, &moved.cmakeDir,
+                                  &moved.cmakeTarget, &moved.cmakeConfig };
+            *target[field] = QStringLiteral("moved");
+            CHECK(recompupdate::recipeChanged(back.recipe, moved));
+        }
+        CHECK(!recompupdate::decodeStamp(QByteArray()).valid);
+        CHECK(!recompupdate::decodeStamp(QByteArray("not json at all")).valid);
+        QJsonObject future = QJsonDocument::fromJson(recompupdate::encodeStamp(s)).object();
+        future[QStringLiteral("schema")] = 99;
+        CHECK(!recompupdate::decodeStamp(QJsonDocument(future).toJson()).valid);
+    }
+    {
+        // THE COMPARISON, case by case. Every expected value is written out here rather than derived from the
+        // code under test.
+        auto stampOf = [](const char* ver, const char* ref) {
+            recompupdate::BuildStamp s;
+            s.portId = QStringLiteral("tm4");
+            s.engineVersion = QString::fromLatin1(ver);
+            s.recipe.engine = QStringLiteral("psxrecomp");
+            s.recipe.sourceRepo = QStringLiteral("owner/repo");
+            s.recipe.sourceRef = QString::fromLatin1(ref);
+            s.recipe.cmakeConfig = QStringLiteral("Release");
+            s.builtAtMs = 1000;
+            s.valid = true;
+            return s;
+        };
+        auto catOf = [](const char* ver, const char* ref) {
+            recompupdate::CatalogueBuild c;
+            c.engineVersion = QString::fromLatin1(ver);
+            c.recipe.engine = QStringLiteral("psxrecomp");
+            c.recipe.sourceRepo = QStringLiteral("owner/repo");
+            c.recipe.sourceRef = QString::fromLatin1(ref);
+            c.recipe.cmakeConfig = QStringLiteral("Release");
+            return c;
+        };
+
+        // A NEWER ENGINE.
+        CHECK(recompupdate::compareBuild(stampOf("1.4.0", "v1"), catOf("1.5.0", "v1"))
+              == recompupdate::Update::EngineNewer);
+        CHECK(recompupdate::updateAvailable(recompupdate::Update::EngineNewer));
+
+        // A NEWER RECIPE, same engine.
+        CHECK(recompupdate::compareBuild(stampOf("1.4.0", "v1"), catOf("1.4.0", "v2"))
+              == recompupdate::Update::RecipeChanged);
+        CHECK(recompupdate::updateAvailable(recompupdate::Update::RecipeChanged));
+
+        // THE SAME ENTRY, REPUBLISHED, and this is the case the whole design turns on: the catalogue is
+        // rebuilt and redated whenever anybody's submission is approved, and this row did not change.
+        CHECK(recompupdate::compareBuild(stampOf("1.4.0", "v1"), catOf("1.4.0", "v1"))
+              == recompupdate::Update::UpToDate);
+        CHECK(!recompupdate::updateAvailable(recompupdate::Update::UpToDate));
+
+        // ...and it stays UpToDate however far apart the two build times are. `builtAtMs` is written for a
+        // person reading the file and is read by nothing.
+        {
+            recompupdate::BuildStamp old = stampOf("1.4.0", "v1");
+            old.builtAtMs = 1;
+            recompupdate::BuildStamp recent = stampOf("1.4.0", "v1");
+            recent.builtAtMs = 4102444800000LL;
+            CHECK(recompupdate::compareBuild(old, catOf("1.4.0", "v1"))
+                  == recompupdate::Update::UpToDate);
+            CHECK(recompupdate::compareBuild(recent, catOf("1.4.0", "v1"))
+                  == recompupdate::Update::UpToDate);
+        }
+
+        // A CATALOGUE THAT WENT BACKWARDS. It happens — a release is yanked and the pin reverts — and it must
+        // never present as an update, because pressing that button spends twenty minutes going downhill. Note
+        // the recipe changed in that same publish and it still is not one.
+        CHECK(recompupdate::compareBuild(stampOf("1.5.0", "v2"), catOf("1.4.0", "v1"))
+              == recompupdate::Update::CatalogueBehind);
+        CHECK(!recompupdate::updateAvailable(recompupdate::Update::CatalogueBehind));
+
+        // NO STAMP AT ALL is "nobody knows", never "out of date".
+        CHECK(recompupdate::compareBuild(recompupdate::BuildStamp{}, catOf("9.9.9", "v9"))
+              == recompupdate::Update::Unknown);
+        CHECK(!recompupdate::updateAvailable(recompupdate::Update::Unknown));
+
+        // AN UNKNOWN ON EITHER SIDE of the engine version falls back to the recipe rather than guessing.
+        CHECK(recompupdate::compareBuild(stampOf("", "v1"), catOf("2.0.0", "v1"))
+              == recompupdate::Update::UpToDate);
+        CHECK(recompupdate::compareBuild(stampOf("1.4.0", "v1"), catOf("", "v2"))
+              == recompupdate::Update::RecipeChanged);
+
+        // A FIELD THE CATALOGUE STOPPED PINNING is unknown, not a difference. This is the upgrade-day rule:
+        // it is also what stops a stamp written by an older build of this app from reading as out of date.
+        CHECK(recompupdate::compareBuild(stampOf("1.4.0", "v1"), catOf("1.4.0", ""))
+              == recompupdate::Update::UpToDate);
+
+        // Two engine versions that cannot be ordered are `changed`, never `newer`.
+        CHECK(recompupdate::compareBuild(stampOf("nightly-a", "v1"), catOf("nightly-b", "v1"))
+              == recompupdate::Update::EngineChanged);
+        CHECK(recompupdate::compareBuild(stampOf("nightly-a", "v1"), catOf("nightly-a", "v1"))
+              == recompupdate::Update::UpToDate);
+
+        // The sentences name both versions, and the backwards one says so out loud rather than going quiet.
+        CHECK(recompupdate::updateSentence(recompupdate::Update::EngineNewer, stampOf("1.4.0", "v1"),
+                                           catOf("1.5.0", "v1"))
+                  .contains(QStringLiteral("1.5.0")));
+        CHECK(recompupdate::updateSentence(recompupdate::Update::CatalogueBehind, stampOf("1.5.0", "v1"),
+                                           catOf("1.4.0", "v1"))
+                  .contains(QStringLiteral("OLDER")));
+
+        // WHAT CHANGED, in words — one line per field, and it is the same walk the predicate makes.
+        const QStringList ch = recompupdate::recipeChanges(stampOf("1.4.0", "v1").recipe,
+                                                           catOf("1.4.0", "v2").recipe);
+        CHECK(ch.size() == 1);
+        CHECK(ch.value(0).contains(QStringLiteral("source version")));
+        CHECK(ch.value(0).contains(QStringLiteral("v2")));
+    }
+    {
+        // WHAT PROVES A BUILD. Conservative on purpose: keeping a dead copy costs disk, dropping a live one
+        // costs somebody the program that worked.
+        CHECK(!recompupdate::launchProvesBuild(false, 0, false));           // never became a process
+        CHECK(!recompupdate::launchProvesBuild(false, 600000, true));       // ...however it is dressed up
+        CHECK(recompupdate::launchProvesBuild(true, 10, true));             // the user closed it: it ran
+        CHECK(!recompupdate::launchProvesBuild(true, 300, false));          // up for 300 ms is a failed boot
+        CHECK(!recompupdate::launchProvesBuild(true, recompupdate::kLaunchProvesMs - 1, false));
+        CHECK(recompupdate::launchProvesBuild(true, recompupdate::kLaunchProvesMs, false));
+        CHECK(recompupdate::kLaunchProvesMs == 4000);   // GameLauncher's own failed-boot threshold
+    }
+    {
+        // ---- THE KEEP-UNTIL-LAUNCHED RULE, on real directories -----------------------------------------
+        // Both directions, which is what #248 (d) asks for: the new build running (the old one goes) and the
+        // new build failing to start (the old one is still there AND still launchable).
+        auto putFile = [](const QString& path, const QByteArray& bytes) {
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            QFile f(path);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            const bool ok = f.write(bytes) == bytes.size();
+            f.close();
+            return ok;
+        };
+        auto slurp = [](const QString& path) {
+            QFile f(path);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        };
+
+        const QString emuRoot = scratch + QStringLiteral("/emulators");
+        const QString install = emuRoot + QStringLiteral("/tm4");
+        const QString exe = install + QStringLiteral("/tm4.exe");
+        QString why;
+
+        recompupdate::BuildStamp s1;
+        s1.portId = QStringLiteral("tm4");
+        s1.engineVersion = QStringLiteral("1.4.0");
+        s1.recipe.engine = QStringLiteral("psxrecomp");
+        s1.recipe.sourceRepo = QStringLiteral("owner/repo");
+        s1.recipe.sourceRef = QStringLiteral("v1");
+        s1.builtAtMs = 1;
+        s1.valid = true;
+
+        // ---- the FIRST build. There is nothing to keep, and that is a success with no kept copy.
+        CHECK(recompupdate::keepAside(install, &why));
+        CHECK(!recompupdate::hasKept(install));
+        CHECK(putFile(exe, QByteArray("BUILD-ONE")));
+        CHECK(putFile(install + QStringLiteral("/data/shader.glsl"), QByteArray("SHADER-ONE")));
+        CHECK(recompupdate::writeStamp(install, s1));
+        CHECK(recompupdate::readStamp(install).valid);
+        CHECK(recompupdate::readStamp(install).engineVersion == QStringLiteral("1.4.0"));
+        CHECK(!recompupdate::readStamp(install).launched);
+        CHECK(recompupdate::markLaunched(install));
+        CHECK(recompupdate::readStamp(install).launched);
+        CHECK(recompupdate::markLaunched(install));   // idempotent: a second run is not a second promotion
+
+        // ---- the catalogue moves, and the row would now say `update available`.
+        recompupdate::CatalogueBuild moved;
+        moved.engineVersion = QStringLiteral("1.5.0");
+        moved.recipe = s1.recipe;
+        CHECK(recompupdate::compareBuild(recompupdate::readStamp(install), moved)
+              == recompupdate::Update::EngineNewer);
+
+        // ---- REBUILD ONE: it works.
+        CHECK(recompupdate::keepAside(install, &why));
+        CHECK(recompupdate::hasKept(install));
+        CHECK(!QFileInfo::exists(exe));                                     // the place is empty for the new one
+        CHECK(slurp(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe")) == QByteArray("BUILD-ONE"));
+        CHECK(slurp(recompupdate::keptDirFor(install) + QStringLiteral("/data/shader.glsl"))
+              == QByteArray("SHADER-ONE"));                                 // everything came with it
+        CHECK(putFile(exe, QByteArray("BUILD-TWO")));
+        recompupdate::BuildStamp s2 = s1;
+        s2.engineVersion = QStringLiteral("1.5.0");
+        s2.launched = false;
+        s2.builtAtMs = 2;
+        CHECK(recompupdate::writeStamp(install, s2));
+        // TWO BUILDS ON THE DISK, and the size of the kept one is knowable — which is what the sentence on
+        // the card and the qualifier on the row are made of.
+        CHECK(recompupdate::hasKept(install));
+        CHECK(recompupdate::keptBytes(install) > 0);
+        CHECK(recompupdate::dirBytes(install) > 0);
+
+        // ...the new one runs, so the old one goes, and EXACTLY ONE build is left.
+        CHECK(recompupdate::launchProvesBuild(true, 9000, false));
+        CHECK(recompupdate::markLaunched(install));
+        CHECK(recompupdate::dropKept(install));
+        CHECK(!recompupdate::hasKept(install));
+        CHECK(recompupdate::keptBytes(install) == -1);
+        CHECK(slurp(exe) == QByteArray("BUILD-TWO"));
+        CHECK(!QDir(recompupdate::keptDirFor(install)).exists());
+
+        // ---- REBUILD TWO: it compiles and the program does not start.
+        CHECK(recompupdate::keepAside(install, &why));
+        CHECK(putFile(exe, QByteArray("BUILD-THREE-BROKEN")));
+        recompupdate::BuildStamp s3 = s2;
+        s3.engineVersion = QStringLiteral("1.6.0");
+        s3.launched = false;
+        CHECK(recompupdate::writeStamp(install, s3));
+        CHECK(!recompupdate::launchProvesBuild(false, 0, false));           // it never became a process
+        // NOTHING IS DROPPED. The build that worked is still there, whole, and still a program.
+        CHECK(recompupdate::hasKept(install));
+        CHECK(slurp(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe")) == QByteArray("BUILD-TWO"));
+        CHECK(QFileInfo(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe")).isFile());
+        // ...and going back puts it where the launcher looks for it, with its own stamp intact — including
+        // the fact that it had already run, so it is not offered as `ready` all over again.
+        CHECK(recompupdate::restoreKept(install, &why));
+        CHECK(slurp(exe) == QByteArray("BUILD-TWO"));
+        CHECK(!recompupdate::hasKept(install));
+        CHECK(recompupdate::readStamp(install).engineVersion == QStringLiteral("1.5.0"));
+        CHECK(recompupdate::readStamp(install).launched);
+
+        // ---- REBUILD THREE: it starts and dies instantly, which is not a launch either.
+        CHECK(recompupdate::keepAside(install, &why));
+        CHECK(putFile(exe, QByteArray("BUILD-FOUR-BROKEN")));
+        CHECK(!recompupdate::launchProvesBuild(true, 300, false));
+        CHECK(recompupdate::hasKept(install));
+        CHECK(recompupdate::restoreKept(install, &why));
+        CHECK(slurp(exe) == QByteArray("BUILD-TWO"));
+
+        // ---- A FAILED REBUILD CHANGES NOTHING, in the one window where it could: the compile worked, the
+        // staging did not, and the previous build was already moved aside. RecompBuildJob restores it there;
+        // this is that restore, and what it has to leave behind is the byte-for-byte install.
+        const QByteArray liveExe = slurp(exe);
+        const QByteArray liveStamp = slurp(recompupdate::stampPath(install));
+        CHECK(!liveExe.isEmpty());
+        CHECK(!liveStamp.isEmpty());
+        CHECK(recompupdate::keepAside(install, &why));
+        CHECK(recompupdate::restoreKept(install, &why));
+        CHECK(slurp(exe) == liveExe);
+        CHECK(slurp(recompupdate::stampPath(install)) == liveStamp);
+        CHECK(!recompupdate::hasKept(install));
+
+        // ---- RESTORING WHEN THERE IS NOTHING KEPT must not touch the install. This is the ordering guard:
+        // a restore that deleted first and looked afterwards would delete the only build on the machine.
+        QString whyNone;
+        CHECK(!recompupdate::restoreKept(install, &whyNone));
+        CHECK(!whyNone.isEmpty());
+        CHECK(slurp(exe) == liveExe);
+
+        // ---- NO ACCUMULATION. Rebuild three more times; ONE kept copy exists, and it is the one from the
+        // last rebuild rather than a museum of every build this machine ever made.
+        for (int i = 0; i < 3; ++i)
+        {
+            CHECK(recompupdate::keepAside(install, &why));
+            CHECK(putFile(exe, QByteArray("REBUILD-") + QByteArray::number(i)));
+            CHECK(recompupdate::writeStamp(install, s2));
+        }
+        const QStringList kept = QDir(emuRoot + QStringLiteral("/.eb-previous"))
+                                     .entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        CHECK(kept.size() == 1);
+        CHECK(slurp(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe"))
+              == QByteArray("REBUILD-1"));
+        CHECK(slurp(exe) == QByteArray("REBUILD-2"));
+
+        // ---- A FEED REFRESH THAT CHANGES EVERYTHING STARTS NOTHING AND WRITES NOTHING. The comparison is
+        // asked two hundred times about catalogues that share no field with the one this was built from; the
+        // stamp on disk is byte-for-byte what it was and the kept copy is exactly where it was.
+        const QByteArray stampBefore = slurp(recompupdate::stampPath(install));
+        const QByteArray keptBefore = slurp(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe"));
+        CHECK(!stampBefore.isEmpty());
+        for (int i = 0; i < 200; ++i)
+        {
+            recompupdate::CatalogueBuild wild;
+            wild.engineVersion = QStringLiteral("%1.%2.0").arg(i).arg(i);
+            wild.recipe.engine = QStringLiteral("engine-%1").arg(i);
+            wild.recipe.sourceRepo = QStringLiteral("owner/repo-%1").arg(i);
+            wild.recipe.sourceRef = QStringLiteral("ref-%1").arg(i);
+            wild.recipe.sdkId = QStringLiteral("sdk-%1").arg(i);
+            wild.recipe.cmakeTarget = QStringLiteral("target-%1").arg(i);
+            (void)recompupdate::compareBuild(recompupdate::readStamp(install), wild);
+        }
+        CHECK(slurp(recompupdate::stampPath(install)) == stampBefore);
+        CHECK(slurp(recompupdate::keptDirFor(install) + QStringLiteral("/tm4.exe")) == keptBefore);
+        CHECK(slurp(exe) == QByteArray("REBUILD-2"));
+    }
+    {
+        // PATH SAFETY. Every one of these functions can end in a recursive delete, and the directory they act
+        // on is named after a catalogue id. Nothing without a name and a parent is acted on at all.
+        CHECK(recompupdate::stampPath(QString()).isEmpty());
+        CHECK(recompupdate::keptDirFor(QString()).isEmpty());
+        CHECK(recompupdate::keptDirFor(QStringLiteral("/")).isEmpty());
+        CHECK(recompupdate::keptDirFor(QStringLiteral("   ")).isEmpty());
+        // A kept copy is not itself something to keep: the dot folder they live in is refused by name.
+        CHECK(recompupdate::keptDirFor(scratch + QStringLiteral("/emulators/.eb-previous")).isEmpty());
+        QString whyBad;
+        CHECK(!recompupdate::keepAside(QString(), &whyBad));
+        CHECK(!whyBad.isEmpty());
+        CHECK(!recompupdate::restoreKept(QString(), &whyBad));
+        CHECK(!recompupdate::writeStamp(QString(), recompupdate::BuildStamp{}));
+        CHECK(!recompupdate::readStamp(QString()).valid);
+        CHECK(!recompupdate::markLaunched(scratch + QStringLiteral("/emulators/never-built")));
+        // Keeping nothing is a success with no kept copy — the first build of an entry.
+        CHECK(recompupdate::keepAside(scratch + QStringLiteral("/emulators/never-built"), &whyBad));
+        CHECK(!recompupdate::hasKept(scratch + QStringLiteral("/emulators/never-built")));
+        CHECK(recompupdate::dirBytes(scratch + QStringLiteral("/emulators/never-built")) == -1);
+    }
+    {
+        // THE DISK COST, SAID OUT LOUD (#248 d item 5). A number and a path, or an honest sentence with
+        // neither — never "0 MB".
+        CHECK(recompupdate::megabytes(-1).isEmpty());
+        CHECK(recompupdate::megabytes(52428800) == QStringLiteral("50 MB"));
+        CHECK(recompupdate::megabytes(1572864) == QStringLiteral("1.5 MB"));
+        const QString kept = recompupdate::keptCopySentence(QStringLiteral("Klonoa"), 52428800,
+                                                            QStringLiteral("D:/emulators/.eb-previous/klonoa"));
+        CHECK(kept.contains(QStringLiteral("50 MB")));
+        CHECK(kept.contains(QStringLiteral("D:/emulators/.eb-previous/klonoa")));
+        CHECK(kept.contains(QStringLiteral("first time the new one runs")));
+        CHECK(recompupdate::keptCopySentence(QStringLiteral("Klonoa"), -1, QString())
+                  .contains(QStringLiteral("still on this computer")));
+        CHECK(recompupdate::keptRemovedSentence(QStringLiteral("Klonoa"), 52428800)
+                  .contains(QStringLiteral("50 MB")));
+        CHECK(recompupdate::keptSurvivedSentence(QStringLiteral("Klonoa"))
+                  .contains(QStringLiteral("Go back to the previous build")));
+        CHECK(recompupdate::cannotKeepSentence(QStringLiteral("Klonoa"))
+                  .contains(QStringLiteral("will not build over one it cannot put back")));
+        CHECK(recompupdate::restoredSentence(QStringLiteral("Klonoa"))
+                  .contains(QStringLiteral("nothing else was changed")));
+    }
+    {
+        // ---- A REBUILD IS EXPLICIT, AND NOTHING ON THE REFRESH PATH CAN START ONE ----------------------
+        // #248 (d) decision 2, asserted where it can actually be broken. The behavioural half is above (the
+        // comparison writes nothing, however wildly the catalogue moves); this is the structural half: the
+        // feed's own translation units do not so much as NAME the build job, and the single call that starts
+        // a build lives in the card that has a button on it.
+        const QString repo = QStringLiteral(EB_RECOMP_SOURCE_DIR);
+        auto text = [](const QString& p) {
+            QFile f(p);
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+        };
+        for (const QString& rel : { QStringLiteral("/src/core/RecompFeed.cpp"),
+                                    QStringLiteral("/src/core/RecompFeedFetch.cpp"),
+                                    QStringLiteral("/src/core/RecompUpdates.cpp") })
+        {
+            const QString body = text(repo + rel);
+            CHECK(!body.isEmpty());
+            CHECK(!body.contains(QStringLiteral("RecompBuildJob")));
+        }
+        int startersInCard = 0, startersElsewhere = 0;
+        QDirIterator srcIt(repo + QStringLiteral("/src"), QStringList{ QStringLiteral("*.cpp") },
+                           QDir::Files, QDirIterator::Subdirectories);
+        while (srcIt.hasNext())
+        {
+            const QString path = srcIt.next();
+            const QString body = text(path);
+            const int calls = body.count(QStringLiteral("job.start("))
+                              + body.count(QStringLiteral("RecompBuildJob::instance().start("));
+            if (calls == 0) continue;
+            if (QFileInfo(path).fileName() == QStringLiteral("MainWindowRecomps.cpp")) startersInCard += calls;
+            else startersElsewhere += calls;
+        }
+        CHECK(startersInCard == 1);
+        CHECK(startersElsewhere == 0);
     }
 
     QDir(scratch).removeRecursively();

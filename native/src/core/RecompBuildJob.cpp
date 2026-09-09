@@ -12,6 +12,8 @@
 #include "EmulatorManager.h"
 #include "RecompBuildRunner.h"
 #include "RecompFeed.h"
+#include "RecompRows.h"      // #248 (d): catalogueBuildOf — the recipe a build records about itself
+#include "RecompUpdates.h"
 #include "Toolchain.h"
 
 using namespace recompbuild;
@@ -168,11 +170,16 @@ void RecompBuildJob::runOnWorker(ExternalEmulator port, QString romPath)
     ctx.logPath = logPath(port.id);
     ctx.os = toolchain::hostOs();
 
+    // #248 (d): what else the ending has to say. Today that is the kept-copy sentence — two builds are on the
+    // disk between a rebuild and its first run, and the moment the build ends is the moment to say so.
+    QString extraNote;
+
     auto finish = [&]() {
         QString message;
         if (m.phase == Phase::Succeeded) message = succeededSentence(ctx.title, ctx.artefactPath);
         else if (m.phase == Phase::Cancelled) message = cancelledSentence(ctx.title);
         else message = failureSentence(m, ctx);
+        if (!extraNote.isEmpty()) message += QStringLiteral("\n\n") + extraNote;
         {
             QMutexLocker lock(&mutex_);
             snap_.phase = m.phase;
@@ -333,12 +340,39 @@ void RecompBuildJob::runOnWorker(ExternalEmulator port, QString romPath)
     prog.phase = m.phase;
     publish(m, prog, runner.tail.lines());
     const QString built = findArtefact(in.buildDir, launchRelativeForThisOs(port.port));
+    const QString installDir = EmulatorManager::installDir(port);
     ctx.artefactPath = built.isEmpty()
                            ? QDir(in.buildDir).filePath(QFileInfo(launchRelativeForThisOs(port.port)).fileName())
                            : built;
+    // #248 (d). True once the build that was already installed has been MOVED out of the way and is waiting
+    // to be either dropped (the new one ran) or put back (the new one did not land).
+    bool keptPrevious = false;
     if (!built.isEmpty())
     {
-        const QString installDir = EmulatorManager::installDir(port);
+        // THE BUILD THAT WORKED IS MOVED, NOT OVERWRITTEN, and this is the whole of increment (d)'s safety
+        // property. Until this existed, staging copied the new binary over the old one: a rebuild that
+        // produced something broken had already destroyed the program that worked, and the only way back was
+        // another compile against a catalogue that had moved on.
+        //
+        // A REFUSAL, NOT A WARNING, when it cannot be done. If the installed copy will not move — it is
+        // running, a file is locked — this app does not build over it. Nothing has been staged at this point,
+        // so refusing here leaves the machine exactly as it was, which is what a person who pressed Rebuild
+        // and got a sentence is entitled to.
+        QString keepWhy;
+        if (!recompupdate::keepAside(installDir, &keepWhy))
+        {
+            QFile log(ctx.logPath);
+            if (log.open(QIODevice::WriteOnly | QIODevice::Append))
+                log.write((QStringLiteral("\n[EverythingBox] the previous build could not be kept: ") + keepWhy
+                           + QLatin1Char('\n'))
+                              .toUtf8());
+            ctx.internalReason = recompupdate::cannotKeepSentence(ctx.title);
+            m.fail(Fault::Internal);
+            publish(m, prog, runner.tail.lines());
+            finish();
+            return;
+        }
+        keptPrevious = recompupdate::hasKept(installDir);
         const QString dest = QDir(installDir).filePath(launchRelativeForThisOs(port.port));
         QDir().mkpath(QFileInfo(dest).absolutePath());
         QFile::remove(dest);
@@ -365,6 +399,33 @@ void RecompBuildJob::runOnWorker(ExternalEmulator port, QString romPath)
     // THE ARTEFACT CHECK, and on Windows this is the Defender case: every step exited 0 and the file the
     // linker wrote a moment ago is not there any more.
     applyArtefactCheck(m, QFileInfo::exists(ctx.artefactPath));
+
+    if (m.phase == Phase::Succeeded)
+    {
+        // WHAT THIS BUILD IS, written down beside it (#248 d). Not a version string somebody might find in
+        // the port's own files — no upstream agrees on where those live — but this app's own record of the
+        // engine version and the recipe fields it built from, which is exactly what the update comparison
+        // reads. `launched` starts false: the previous copy stays until this one has actually run.
+        recompupdate::BuildStamp stamp;
+        stamp.portId = port.id;
+        stamp.engineVersion = port.port.buildEngineVersion;
+        stamp.recipe = recomps::catalogueBuildOf(port).recipe;
+        stamp.builtAtMs = QDateTime::currentMSecsSinceEpoch();
+        stamp.launched = false;
+        stamp.valid = true;
+        recompupdate::writeStamp(installDir, stamp);
+        if (keptPrevious)
+            extraNote = recompupdate::keptCopySentence(ctx.title, recompupdate::keptBytes(installDir),
+                                                       recompupdate::keptDirFor(installDir));
+    }
+    else if (keptPrevious)
+    {
+        // A FAILED REBUILD CHANGES NOTHING (#248 d, decision 4). Every earlier failure never reached the move
+        // at all; this is the narrow window where it did — the compile worked, the staging did not — and the
+        // previous build goes straight back where it was. The row then reads exactly as it did before the
+        // rebuild was pressed, on a program that still launches.
+        recompupdate::restoreKept(installDir, nullptr);
+    }
     publish(m, prog, runner.tail.lines());
     finish();
 }

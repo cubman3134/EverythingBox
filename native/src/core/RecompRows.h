@@ -73,9 +73,29 @@
 #include <functional>
 
 #include "NativePorts.h"
+#include "RecompUpdates.h"
 
 namespace recomps
 {
+    // #248 (d): the catalogue's side of the update comparison, lifted off an entry. Here rather than in
+    // RecompUpdates.h because that header is deliberately free of the catalogue types — it is linked into a
+    // probe that has no EmulatorRegistry — and this one already carries them.
+    inline recompupdate::CatalogueBuild catalogueBuildOf(const ExternalEmulator& port)
+    {
+        recompupdate::CatalogueBuild c;
+        c.engineVersion         = port.port.buildEngineVersion;
+        c.recipe.engine         = port.port.buildEngine;
+        c.recipe.sourceRepo     = port.port.buildSourceRepo;
+        c.recipe.sourceRef      = port.port.buildSourceRef;
+        c.recipe.sdkId          = port.port.buildSdkId;
+        c.recipe.generateConfig = port.port.buildGenerateConfig;
+        c.recipe.generateOutDir = port.port.buildGenerateOutDir;
+        c.recipe.cmakeDir       = port.port.buildCmakeDir;
+        c.recipe.cmakeTarget    = port.port.buildCmakeTarget;
+        c.recipe.cmakeConfig    = port.port.buildCmakeConfig;
+        return c;
+    }
+
     // Where this machine stands with one catalogue entry. Ordered as the derivation reads them, not as a UI
     // would sort them.
     enum class State
@@ -117,6 +137,14 @@ namespace recomps
         // hashed. They are session facts (RecompBuildJob), stored nowhere, exactly like the other four.
         bool building = false;
         bool builtNotLaunched = false;
+        // #248 (d), the SELF-COMPILED tier's update. The pre-built tier compares release tags (above); a
+        // compiled port has no release to compare, so the caller asks RecompUpdates::compareBuild what the
+        // build recorded about itself against what the catalogue lists today, and hands the answer down as a
+        // boolean. Same rule as the tags: an UNKNOWN (no stamp, nothing published) is false, never true.
+        bool updateAvailable = false;
+        // ...and whether the build that worked BEFORE the current one is still on this machine, waiting for
+        // the current one to prove itself. Purely for the row's label — the state is unaffected by it.
+        bool previousKept = false;
     };
 
     // THE DERIVATION. Read top to bottom; each clause is the reason the next one is reachable.
@@ -127,9 +155,14 @@ namespace recomps
         // a REBUILD runs against an entry that is already installed, and a row that said `installed` while a
         // compile of it was running would be describing the wrong minute.
         if (f.building) return State::Building;
-        if (f.builtNotLaunched) return State::Ready;
         if (f.installed)
         {
+            // #248 (d), AND IT OUTRANKS `Ready`. A copy that was built but never launched can still be out of
+            // date — the catalogue moves on its own schedule, not on the user's — and `ready to play` would
+            // hide the one fact that has anything to do with pressing a button. `Ready` is still below,
+            // because "built and not yet run" is the right thing to say about a build nothing has superseded.
+            if (f.updateAvailable) return State::UpdateAvailable;
+            if (f.builtNotLaunched) return State::Ready;
             // Both tags must be known before a difference means anything — see the header note on unknowns.
             const QString a = f.installedTag.trimmed();
             const QString b = f.catalogueTag.trimmed();
@@ -137,6 +170,10 @@ namespace recomps
                 return State::UpdateAvailable;
             return State::Installed;
         }
+        // A build that finished this session whose binary does not resolve as an install. It should not
+        // happen — staging is what makes `installed` true — but a `Ready` that only exists inside the
+        // `installed` branch would turn a staging that half-landed into `needs ROM`.
+        if (f.builtNotLaunched) return State::Ready;
         // NOT installed. Whether that is worth doing anything about depends on whether the user has the game:
         // a port is not a game, it is a way of running one you already own, and "install" on a machine with no
         // matching dump ends in the port's own "give me the ROM" screen with nothing to give it.
@@ -181,6 +218,10 @@ namespace recomps
         // The entry published no digest, so `not installed` rests on the dump's NAME. Surfaced because the
         // difference between "these are the bytes" and "this is what it is called" is the user's to judge.
         bool    dumpUnverified = false;
+        // #248 (d): two builds of this title are on the machine — the new one and the one that worked before
+        // it — until the new one has run once. On the ROW because the disk cost is not allowed to be
+        // something you have to open a card to discover.
+        bool    previousKept = false;
     };
 
     // The system label a header shows. Resolved by the caller (SystemCatalog is not QtCore-only), falling back
@@ -264,6 +305,7 @@ namespace recomps
                 // Only ever true on a row that actually rests on the title match — an installed port, or one
                 // with no match at all, is not "unverified", it is simply not the question there.
                 r.dumpUnverified = (r.state == State::NotInstalled) && f.dumpUnverified;
+                r.previousKept = f.previousKept;
                 out.push_back(r);
             }
         }

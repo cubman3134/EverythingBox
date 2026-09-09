@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.242 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.243 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1022,6 +1022,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RecompBuild.cpp src/core/RecompBuild.h
         src/core/RecompBuildRunner.cpp src/core/RecompBuildRunner.h
         src/core/RecompBuildJob.cpp src/core/RecompBuildJob.h
+        # #248 (d): what a build records about itself, and the copy of the build that worked kept
+        # beside it until the new one has run once. QtCore only and path-parameterised, so the two
+        # recomp probes below link exactly this file rather than a second implementation of it.
+        src/core/RecompUpdates.cpp src/core/RecompUpdates.h
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -2016,6 +2020,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # network half (RecompFeedFetch.cpp) is deliberately NOT here: this probe links Qt6::Core only, and a
         # probe that could make a request is a probe that can fail because somebody's DNS did.
         src/core/RecompFeed.cpp src/core/RecompFeed.h
+        # #248 (d): the update comparison and the kept-copy files. RecompRows.h includes it, and the
+        # probe drives the catalogue-side adapter (catalogueBuildOf) against it.
+        src/core/RecompUpdates.cpp src/core/RecompUpdates.h
         third_party/miniz.c
         ${EB_PORTS_RCC_PROBE})
     target_include_directories(probe_ports PRIVATE src src/core third_party)
@@ -2042,7 +2049,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_recompbuild tools/probe_recompbuild.cpp
         src/core/Toolchain.cpp src/core/Toolchain.h
         src/core/RecompBuild.cpp src/core/RecompBuild.h
-        src/core/RecompBuildRunner.cpp src/core/RecompBuildRunner.h)
+        src/core/RecompBuildRunner.cpp src/core/RecompBuildRunner.h
+        src/core/RecompUpdates.cpp src/core/RecompUpdates.h)
     add_dependencies(probe_recompbuild stub_recomp_engine)
     target_include_directories(probe_recompbuild PRIVATE src src/core)
     target_link_libraries(probe_recompbuild PRIVATE Qt6::Core)

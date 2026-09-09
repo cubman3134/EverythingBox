@@ -1095,6 +1095,11 @@ void GameLauncher::ensureEmu()
                 emit notifyUser(tr("%1 closed immediately — the game may be missing files it needs to boot, or the "
                                    "emulator needs firmware set up.").arg(emuName), 9000);
         }
+        // #248 (d). AFTER the sentences above and before the clock is thrown away, because the elapsed time is
+        // the whole of what "did that program actually run" rests on. `started` is true here by construction:
+        // this handler only exists because a process finished.
+        emit externalRunEnded(pendingEmuId_, true,
+                              emuRunClock_.isValid() ? emuRunClock_.elapsed() : 0, emuUserClosing_);
         emuRunClock_.invalidate();
     });
     connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {
@@ -1108,6 +1113,9 @@ void GameLauncher::ensureEmu()
         emit statusMessage(msg, kFeedbackLong);
         emit waitPageDone();
         emit emulatorInstallFailed(msg);
+        // #248 (d): the run that never became a process. Reported with started=false so a freshly built
+        // recomp that could not even be launched is never mistaken for one that ran.
+        emit externalRunEnded(pendingEmuId_, false, 0, false);
     });
 }
 
@@ -1243,6 +1251,7 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
     pendingEmuSource_ = sourceRom.isEmpty() ? rom : sourceRom; // Recent stores the reopenable source, not the boot file
+    pendingEmuId_ = em.id;   // #248 (d): which catalogue entry this run is, reported back when it ends
     // Tell the emulator's SDL to ignore any phantom controller (e.g. a Keychron HE keyboard that presents a
     // gamepad interface). Otherwise it can take the first device slot and the emulator, bound to "SDL-0", listens
     // to the keyboard instead of the real pad. The child QProcess inherits these; we set both the SDL2 and SDL3

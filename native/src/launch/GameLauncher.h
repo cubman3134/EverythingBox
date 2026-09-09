@@ -180,6 +180,13 @@ signals:
     void emulatorInstallProgress(const QString& text, int pct);
     void emulatorInstallFinished(const QString& displayName); // install-only completed (the binary is now present)
     void emulatorInstallFailed(const QString& message);       // download/extract failed
+    // #248 (d): a standalone-emulator run ENDED, with the catalogue id of the entry it was, whether a process
+    // ever existed, how long it was actually up, and whether the user closed it themselves. The recomps
+    // feature is the one consumer: a recomp built here keeps the previous build until the new one has run,
+    // and "has run" is a judgement that needs all four of these. Emitted from BOTH tails — the process's own
+    // exit and the failure path where there never was one — because "it never started" is the case that must
+    // not be read as success.
+    void externalRunEnded(const QString& emulatorId, bool started, qint64 upMs, bool userClosed);
 
 private:
     // The libretro launch tail — stop playback, load the core into RetroView, record the Recent entry and
@@ -236,6 +243,7 @@ private:
     LaunchContexts contexts_{this};
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     QString pendingEmuSource_; // the reopenable source path (archive) recorded in Recent — NOT the extracted boot file
+    QString pendingEmuId_;     // #248 (d): the catalogue id of the entry this external run is, for externalRunEnded
     // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select
     // on a pad, or Esc on the keyboard — and close it back to the app. Runs only between the emulator's launched
     // and finished signals (the app is minimized then, so Qt can't see the input itself).

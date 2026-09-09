@@ -1306,6 +1306,163 @@ int main(int argc, char** argv)
         QDir(RecompFeed::cacheDir()).removeRecursively();
     }
 
+    // ---- 25. UPDATES: the row's side (issue #248, increment d) ------------------------------------------
+    // The self-compiled tier has no release tag to compare against, so `update available` for it is decided
+    // by RecompUpdates.h — against what the BUILD recorded about itself, never against a timestamp and never
+    // against the catalogue's own revision — and handed down here as one boolean. What this section asserts
+    // is the ORDER the row reads its inputs in, which is where a wrong answer would actually be seen, plus
+    // the catalogue adapter that feeds the comparison and the field the parser has to carry for any of it to
+    // mean anything.
+    {
+        recomps::Facts f;
+        f.installed = true;
+
+        // An installed build with nothing said about it is `installed`, exactly as before.
+        CHECK(recomps::deriveState(f) == recomps::State::Installed);
+
+        // A NEWER ENGINE OR A CHANGED RECIPE. The caller has already asked RecompUpdates; the row says it.
+        f.updateAvailable = true;
+        CHECK(recomps::deriveState(f) == recomps::State::UpdateAvailable);
+
+        // ...AND IT OUTRANKS `ready`. A copy that was built and never launched can still be out of date, and
+        // "built — ready to play" would hide the only fact on the row with a button attached to it.
+        f.builtNotLaunched = true;
+        CHECK(recomps::deriveState(f) == recomps::State::UpdateAvailable);
+
+        // With no update, a built-but-never-launched copy is `ready` rather than `installed`. That input now
+        // comes off the stamp on disk rather than off the session, so the state survives a restart.
+        f.updateAvailable = false;
+        CHECK(recomps::deriveState(f) == recomps::State::Ready);
+
+        // A BUILD IN FLIGHT still outranks both: it is the only input about the present moment.
+        f.building = true;
+        CHECK(recomps::deriveState(f) == recomps::State::Building);
+
+        // The PRE-BUILT tier's tag comparison is untouched by any of this, including its unknown rule.
+        recomps::Facts tags;
+        tags.installed = true;
+        tags.installedTag = QStringLiteral("1.2.2");
+        tags.catalogueTag = QStringLiteral("1.2.3");
+        CHECK(recomps::deriveState(tags) == recomps::State::UpdateAvailable);
+        tags.catalogueTag = QStringLiteral("1.2.2");
+        CHECK(recomps::deriveState(tags) == recomps::State::Installed);
+        tags.installedTag.clear();
+        tags.catalogueTag = QStringLiteral("9.9.9");
+        CHECK(recomps::deriveState(tags) == recomps::State::Installed);
+
+        // NOT INSTALLED is unaffected by an update flag that could not mean anything there.
+        recomps::Facts none;
+        none.updateAvailable = true;
+        none.libraryMatch = true;
+        CHECK(recomps::deriveState(none) == recomps::State::NotInstalled);
+    }
+    {
+        // THE KEPT COPY REACHES THE ROW. Two builds of one title sit on the disk between a rebuild and its
+        // first run, and #248 (d) says that is not allowed to be something you must open a card to discover.
+        ExternalEmulator e;
+        e.id = QStringLiteral("tm4");
+        e.displayName = QStringLiteral("Twisted Metal 4 PC");
+        e.port.name = QStringLiteral("Twisted Metal 4");
+        e.port.platform = QStringLiteral("psx");
+        e.port.buildEngine = QStringLiteral("psxrecomp");
+
+        recomps::Facts f;
+        f.installed = true;
+        f.previousKept = true;
+        bool sawPort = false;
+        for (const recomps::Row& r : recomps::buildRows({ e }, [&f](const ExternalEmulator&) { return f; }))
+            if (r.kind == recomps::Row::Kind::Port) { sawPort = true; CHECK(r.previousKept); }
+        CHECK(sawPort);
+
+        f.previousKept = false;
+        for (const recomps::Row& r : recomps::buildRows({ e }, [&f](const ExternalEmulator&) { return f; }))
+            if (r.kind == recomps::Row::Kind::Port) CHECK(!r.previousKept);
+    }
+    {
+        // THE CATALOGUE ADAPTER. Every field the comparison reads comes off the entry — and the fields it
+        // deliberately does NOT read cannot reach it, which is the whole reason a republished catalogue does
+        // not mark anything out of date.
+        ExternalEmulator e;
+        e.id = QStringLiteral("tm4");
+        e.port.name = QStringLiteral("Twisted Metal 4");
+        e.port.platform = QStringLiteral("psx");
+        e.port.license = QStringLiteral("PolyForm-Noncommercial-1.0.0");
+        e.port.releaseTag = QStringLiteral("9.9.9");
+        e.port.buildEngine = QStringLiteral("psxrecomp");
+        e.port.buildEngineVersion = QStringLiteral("1.5.0");
+        e.port.buildSourceRepo = QStringLiteral("owner/repo");
+        e.port.buildSourceRef = QStringLiteral("v1.5.0");
+        e.port.buildSdkId = QStringLiteral("psx-sdk-1");
+        e.port.buildGenerateConfig = QStringLiteral("game.toml");
+        e.port.buildGenerateOutDir = QStringLiteral("gen");
+        e.port.buildCmakeDir = QStringLiteral("build");
+        e.port.buildCmakeTarget = QStringLiteral("game");
+        e.port.buildCmakeConfig = QStringLiteral("Release");
+
+        const recompupdate::CatalogueBuild c = recomps::catalogueBuildOf(e);
+        CHECK(c.engineVersion == QStringLiteral("1.5.0"));
+        CHECK(c.recipe.engine == QStringLiteral("psxrecomp"));
+        CHECK(c.recipe.sourceRepo == QStringLiteral("owner/repo"));
+        CHECK(c.recipe.sourceRef == QStringLiteral("v1.5.0"));
+        CHECK(c.recipe.sdkId == QStringLiteral("psx-sdk-1"));
+        CHECK(c.recipe.generateConfig == QStringLiteral("game.toml"));
+        CHECK(c.recipe.generateOutDir == QStringLiteral("gen"));
+        CHECK(c.recipe.cmakeDir == QStringLiteral("build"));
+        CHECK(c.recipe.cmakeTarget == QStringLiteral("game"));
+        CHECK(c.recipe.cmakeConfig == QStringLiteral("Release"));
+
+        // A build made from exactly this entry is up to date against it...
+        recompupdate::BuildStamp s;
+        s.portId = e.id;
+        s.engineVersion = c.engineVersion;
+        s.recipe = c.recipe;
+        s.valid = true;
+        CHECK(recompupdate::compareBuild(s, c) == recompupdate::Update::UpToDate);
+
+        // ...and stays up to date when the entry is republished with its name, its licence and its RELEASE
+        // TAG all different. The tag is the pre-built tier's comparison and is deliberately not in this one.
+        e.port.releaseTag = QStringLiteral("1.0.0");
+        e.port.license = QStringLiteral("MIT");
+        e.port.name = QStringLiteral("Twisted Metal IV");
+        e.port.description = QStringLiteral("rewritten blurb");
+        CHECK(recompupdate::compareBuild(s, recomps::catalogueBuildOf(e)) == recompupdate::Update::UpToDate);
+
+        // The engine version moving IS the update, and the source ref moving is the other one.
+        e.port.buildEngineVersion = QStringLiteral("1.6.0");
+        CHECK(recompupdate::compareBuild(s, recomps::catalogueBuildOf(e))
+              == recompupdate::Update::EngineNewer);
+        e.port.buildEngineVersion = QStringLiteral("1.5.0");
+        e.port.buildSourceRef = QStringLiteral("v1.5.1");
+        CHECK(recompupdate::compareBuild(s, recomps::catalogueBuildOf(e))
+              == recompupdate::Update::RecipeChanged);
+    }
+    {
+        // THE TWO SPELLINGS OF THE ENGINE VERSION, off real catalogue documents. `sdk.version` wins where
+        // both are present; an entry carrying neither leaves it empty, which the comparison reads as "the
+        // catalogue makes no claim" and never as "you are out of date".
+        const ExternalEmulator a = titleFromJson(QJsonDocument::fromJson(
+            "{\"id\":\"a\",\"name\":\"A\",\"kind\":\"recomp\",\"platform\":\"psx\","
+            "\"build\":{\"generate\":{\"engine\":\"psxrecomp\",\"engine_version\":\"1.4.0\"}}}").object());
+        const ExternalEmulator b = titleFromJson(QJsonDocument::fromJson(
+            "{\"id\":\"b\",\"name\":\"B\",\"kind\":\"recomp\",\"platform\":\"psx\","
+            "\"build\":{\"generate\":{\"engine\":\"psxrecomp\",\"engine_version\":\"1.4.0\"},"
+            "\"sdk\":{\"id\":\"psx-sdk-1\",\"version\":\"1.6.0\"}}}").object());
+        const ExternalEmulator c = titleFromJson(QJsonDocument::fromJson(
+            "{\"id\":\"c\",\"name\":\"C\",\"kind\":\"recomp\",\"platform\":\"psx\","
+            "\"build\":{\"generate\":{\"engine\":\"psxrecomp\"}}}").object());
+        CHECK(a.port.buildEngineVersion == QStringLiteral("1.4.0"));
+        CHECK(b.port.buildEngineVersion == QStringLiteral("1.6.0"));
+        CHECK(b.port.buildSdkId == QStringLiteral("psx-sdk-1"));
+        CHECK(c.port.buildEngineVersion.isEmpty());
+        // An entry that names no version cannot make a build of it look out of date, however much the
+        // catalogue is republished around it.
+        recompupdate::BuildStamp s;
+        s.recipe = recomps::catalogueBuildOf(c).recipe;
+        s.valid = true;
+        CHECK(recompupdate::compareBuild(s, recomps::catalogueBuildOf(c))
+              == recompupdate::Update::UpToDate);
+    }
+
     if (failures == 0) std::printf("PORTS-OK\n");
     else               std::fprintf(stderr, "PORTS had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
