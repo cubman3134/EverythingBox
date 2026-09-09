@@ -51,6 +51,7 @@
 #include "LastFmClient.h"
 #include "BuiltinSecretBlob.h"
 #include "ScrobbleProvider.h"
+#include "ScrobbleRemoval.h"            // what a removal TELLS the user (#337) - pure, so it is assertable
 #include "Subsonic.h"                   // the protocol the third provider speaks (#193 increment 6)
 #include "SubsonicScrobbleProvider.h"
 #include "SubsonicServerStore.h"
@@ -316,6 +317,10 @@ class FakeSubsonic : public QObject
 public:
     QTcpServer server;
     QByteArray answerWith;              // the envelope to reply with; empty == a plain ok
+    // ...and a SCRIPT, consumed one entry per request before answerWith is consulted (issue #337). It exists
+    // for the one outcome a single fixed answer cannot express: a submission that PARTLY succeeded, which is
+    // the batch that landed followed by the batch that did not. An empty entry means "a plain ok".
+    QVector<QByteArray> scripted;
     QStringList methods;                // "scrobble", "star", "unstar" ... in arrival order
     QVector<QUrlQuery> queries;         // every request's query, in arrival order
 
@@ -356,9 +361,11 @@ private:
         methods << method;
         queries << QUrlQuery(u.query());
 
-        const QByteArray body = answerWith.isEmpty()
+        QByteArray chosen = answerWith;
+        if (!scripted.isEmpty()) chosen = scripted.takeFirst();
+        const QByteArray body = chosen.isEmpty()
             ? QByteArray("<subsonic-response status=\"ok\" version=\"1.16.1\"/>")
-            : answerWith;
+            : chosen;
         const QByteArray out = "HTTP/1.1 200 OK\r\n"                  // ALWAYS 200 - see the note above
                                "Content-Type: text/xml\r\n"
                                "Content-Length: " + QByteArray::number(body.size()) + "\r\n"
@@ -1789,6 +1796,307 @@ int main(int argc, char** argv)
             Settings::setListenBrainzToken(QString());
             ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
             ScrobbleQueue::setLastError(QStringLiteral("listenbrainz"), QString());
+        }
+
+        // ---- 8j. A REMOVED SERVER'S UNSENT LISTENS ARE NOT ORPHANED (issue #337) ----------------------
+        // #299 took the provider away and left the queue alone, deliberately — deleting somebody's unsent
+        // history is not a decision a leak fix gets to make. What that left behind is this issue: the queue
+        // is filed under an id built from the server's UUID, a re-added server mints a NEW UUID, and the
+        // rows can therefore never be matched to a destination again. Undeliverable, undrainable, invisible.
+        //
+        // Three things are pinned here and they are three because they fail in three different ways:
+        //
+        //   * THE STORE, where "orphaned" is four keys and not one. clear() empties the queue and leaves the
+        //     delivered counter, the dropped counter and the last error behind for ever.
+        //   * THE FLUSH, whose whole reason to exist is the one moment before the sign-in is forgotten.
+        //     All three endings, because a flush that half worked is the one a careless implementation
+        //     reports as either "sent" or "failed" and is neither — and because a failure must not veto the
+        //     removal the user asked for.
+        //   * THE WORDS. The rule this issue turns on is that nothing is discarded without the user being
+        //     told first, in the same interaction. That is a property of a SENTENCE, so the sentences are
+        //     pure functions and the invariant is asserted over the whole matrix of outcomes.
+        {
+            const QString pA = SubsonicScrobbleProvider::idFor(sidA);
+            const QString pB = SubsonicScrobbleProvider::idFor(sidB);
+            const QString serverName = QStringLiteral("Fake Navidrome");
+            Settings::setScrobbleEnabled(true);
+            Settings::setScrobbleServerForwards(false);
+            ScrobbleQueue::forget(pA);
+            ScrobbleQueue::forget(pB);
+
+            // Queue `n` listens for `pid` without a network in the middle: what is under test below is the
+            // draining, and playing them through a Scrobbler would drain some of them on the way in.
+            auto queueUp = [&](const QString& pid, int n) {
+                for (int i = 0; i < n; ++i)
+                {
+                    Scrobble::Play p;
+                    p.track      = subsonicTrack(trackA, QStringLiteral("Waiting"), 300);
+                    p.listenedAt = 1700000000LL + i;
+                    ScrobbleQueue::append(pid, p);
+                }
+            };
+
+            // -- WHAT IS ON DISK, AND WHAT FORGETTING IT MEANS ------------------------------------------
+            {
+                queueUp(pA, 1);
+                ScrobbleQueue::noteDelivered(pA, 7);
+                ScrobbleQueue::setLastError(pA, QStringLiteral("something went wrong once"));
+                CHECK(ScrobbleQueue::providerIdsOnDisk().contains(pA),
+                      "#337: a queue on disk NAMES its destination - the only way to find one whose server "
+                      "is gone, since nothing installs a provider for a server that is not configured, "
+                      "which is exactly why these rows became invisible");
+                ScrobbleQueue::clear(pA);
+                CHECK(ScrobbleQueue::delivered(pA) == 7 && !ScrobbleQueue::lastError(pA).isEmpty(),
+                      "#337: emptying the QUEUE leaves the counter and the error line behind - which is why "
+                      "forgetting a destination is a different operation and not a synonym");
+                ScrobbleQueue::forget(pA);
+                CHECK(ScrobbleQueue::count(pA) == 0 && ScrobbleQueue::delivered(pA) == 0
+                          && ScrobbleQueue::dropped(pA) == 0 && ScrobbleQueue::lastError(pA).isEmpty(),
+                      "#337: forgetting a destination takes ALL FOUR keys with it");
+                CHECK(!ScrobbleQueue::providerIdsOnDisk().contains(pA),
+                      "#337: ...and nothing on disk names that destination any more");
+            }
+
+            // -- THE SWEEP'S RULE: which queues on disk belong to no configured server ------------------
+            // The same pure predicate #299 already answers about INSTALLED providers, asked about what is on
+            // disk. Deliberately the same function: it names our own ids only, so a Last.fm or ListenBrainz
+            // queue - owed to a service that is still perfectly reachable - can never be swept up by it.
+            {
+                queueUp(pA, 2);                       // sidA is configured
+                queueUp(pB, 3);                       // sidB was removed in 8i: the orphan
+                ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+                Scrobble::Play lb;
+                lb.track      = musicTrack(QStringLiteral("Amber"), QStringLiteral("Owed upstream"), 300);
+                lb.listenedAt = 1700000000LL;
+                ScrobbleQueue::append(QStringLiteral("listenbrainz"), lb);
+
+                QStringList serverIds;
+                for (const SubsonicServer& row : SubsonicServerStore::list()) serverIds.push_back(row.id);
+                const QStringList onDisk  = ScrobbleQueue::providerIdsOnDisk();
+                const QStringList orphans = SubsonicScrobbleProvider::staleIds(onDisk, serverIds);
+                CHECK(onDisk.contains(pA) && onDisk.contains(pB)
+                          && onDisk.contains(QStringLiteral("listenbrainz")),
+                      "#337: every destination with state on disk is found, whoever is installed");
+                CHECK(orphans.contains(pB),
+                      "#337: a queue whose server is no longer configured is named - unreachable by "
+                      "construction, and the whole of what this issue is about");
+                CHECK(!orphans.contains(pA),
+                      "#337: ...and a queue whose server is STILL configured is never touched");
+                CHECK(!orphans.contains(QStringLiteral("listenbrainz")),
+                      "#337: ...and never another service's queue, which is owed to something that is still "
+                      "perfectly reachable");
+                ScrobbleQueue::forget(pB);
+                ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
+            }
+
+            // -- THE COUNT THE USER IS TOLD, at the moment they are told it -----------------------------
+            {
+                ScrobbleQueue::forget(pA);
+                queueUp(pA, 3);
+                queueUp(pB, 5);
+                CHECK(ScrobbleQueue::count(pA) == 3,
+                      "#337: the number in the confirmation is the number waiting for THAT server - a count "
+                      "summed over destinations would offer to send another server's listens");
+                ScrobbleQueue::forget(pB);
+            }
+
+            // -- THE FLUSH, ENDING 1: EVERYTHING LANDS --------------------------------------------------
+            {
+                fake.forget(); fake.answerWith.clear(); fake.scripted.clear();
+                ScrobbleQueue::forget(pA);
+                queueUp(pA, 3);
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                int calls = 0;
+                ScrobbleFlush got;
+                s.flushProvider(pA, [&](ScrobbleFlush f) { ++calls; got = f; });
+                CHECK(calls == 0,
+                      "#337: the answer never arrives inside the caller's own frame - the one call site "
+                      "opens a nav-kit card in it, and doing that inside the press is the #28/#211 family");
+                spinUntil([&] { return calls > 0; }, 8000);
+                CHECK(calls == 1, "#337: ...and it arrives exactly once");
+                CHECK(got.sent == 3 && got.left == 0,
+                      "#337: a flush that succeeds reports everything sent and nothing left");
+                CHECK(got.message.isEmpty(),
+                      "#337: ...and says nothing went wrong, because nothing did");
+                CHECK(ScrobbleQueue::count(pA) == 0, "#337: ...and the queue is empty");
+            }
+
+            // ...AND IT DRAINS PAST THE FIRST BATCH. Sixty listens is two batches (kBatchSize == 50), and a
+            // goodbye that stopped at the end of the first would report "sent" while ten listens were about
+            // to be deleted — the same silent loss this issue is about, one batch further along.
+            {
+                fake.forget(); fake.answerWith.clear(); fake.scripted.clear();
+                ScrobbleQueue::forget(pA);
+                queueUp(pA, 60);
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                int calls = 0;
+                ScrobbleFlush got;
+                s.flushProvider(pA, [&](ScrobbleFlush f) { ++calls; got = f; });
+                spinUntil([&] { return calls > 0; }, 10000);
+                CHECK(calls == 1 && got.sent == 60 && got.left == 0,
+                      "#337: a flush keeps going until the QUEUE is empty, not until a batch is");
+                CHECK(ScrobbleQueue::count(pA) == 0, "#337: ...leaving nothing behind to be discarded");
+            }
+
+            // -- THE FLUSH, ENDING 2: SOME LAND AND SOME DO NOT ----------------------------------------
+            // Sixty listens is two batches (kBatchSize == 50). The first is accepted and the second is
+            // refused, which is the ending a single fixed answer cannot produce and the one that gets
+            // reported wrongly in both directions: "sent" loses ten listens silently all over again, and
+            // "failed" tells the user nothing arrived when fifty did.
+            {
+                fake.forget(); fake.answerWith.clear();
+                fake.scripted = { QByteArray(),                       // batch one: a plain ok
+                                  QByteArray("<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                                             "<error code=\"40\" message=\"Wrong username or password.\"/>"
+                                             "</subsonic-response>") };
+                ScrobbleQueue::forget(pA);
+                queueUp(pA, 60);
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                int calls = 0;
+                ScrobbleFlush got;
+                s.flushProvider(pA, [&](ScrobbleFlush f) { ++calls; got = f; });
+                spinUntil([&] { return calls > 0; }, 10000);
+                CHECK(calls == 1, "#337: a partly-successful flush answers once");
+                CHECK(got.sent == ScrobbleQueue::kBatchSize,
+                      "#337: ...reporting the batch that LANDED");
+                CHECK(got.left == 60 - ScrobbleQueue::kBatchSize,
+                      "#337: ...and the ones that did not, which are what the user is about to lose");
+                CHECK(got.message == QStringLiteral("Wrong username or password."),
+                      "#337: ...in the server's own words, which is the only account of it anybody gets");
+                fake.scripted.clear();
+            }
+
+            // -- THE FLUSH, ENDING 3: NOTHING LANDS, AND THE REMOVAL IS NOT VETOED ----------------------
+            // A box that is asleep. The listens stay on disk (the caller discards them, and only after
+            // saying so) and - the point - the flush ANSWERS rather than climbing the retry ladder. There
+            // is no later: the sign-in is about to be forgotten.
+            {
+                SubsonicServer live;
+                SubsonicServerStore::get(sidA, live);
+                const QString liveUrl = live.url;
+                live.url = QStringLiteral("http://127.0.0.1:1");     // nobody is listening
+                SubsonicServerStore::update(live);
+
+                ScrobbleQueue::forget(pA);
+                queueUp(pA, 3);
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                int calls = 0;
+                ScrobbleFlush got;
+                s.flushProvider(pA, [&](ScrobbleFlush f) { ++calls; got = f; });
+                spinUntil([&] { return calls > 0; }, 10000);
+                CHECK(calls == 1,
+                      "#337: a flush that fails entirely still ANSWERS - a removal held open waiting for a "
+                      "callback that never comes is a confirmation the user never sees");
+                CHECK(got.sent == 0 && got.left == 3,
+                      "#337: ...saying nothing landed and three are still waiting");
+                CHECK(!got.message.isEmpty() && !got.message.contains(QStringLiteral("/rest/")),
+                      "#337: ...with a reason, and never a url - for this protocol the url IS the "
+                      "credential");
+                CHECK(ScrobbleQueue::count(pA) == 3,
+                      "#337: ...and nothing has been deleted yet: the discard belongs to the surface that "
+                      "tells the user about it, not to the attempt");
+
+                // THE DESTINATION GOING AWAY MID-FLUSH answers the caller too. In the ordinary order the
+                // flush finishes first and the removal follows it, but a server can also be taken away
+                // underneath one, and the waiting confirmation must not be stranded.
+                {
+                    ScrobbleQueue::forget(pA);
+                    queueUp(pA, 2);
+                    Scrobbler s2;
+                    s2.setProvider(new SubsonicScrobbleProvider(sidA));
+                    int calls2 = 0;
+                    s2.flushProvider(pA, [&](ScrobbleFlush) { ++calls2; });
+                    s2.removeProvider(pA);
+                    spinUntil([&] { return calls2 > 0; }, 4000);
+                    CHECK(calls2 == 1,
+                          "#337: a destination removed mid-flush answers its flush exactly once");
+                }
+
+                live.url = liveUrl;
+                SubsonicServerStore::update(live);
+            }
+
+            // -- THE FLUSH WITH NOTHING TO DO, AND WITH NOWHERE TO SEND --------------------------------
+            {
+                ScrobbleQueue::forget(pA);
+                Scrobbler s;
+                s.setProvider(new SubsonicScrobbleProvider(sidA));
+                int calls = 0;
+                ScrobbleFlush got;
+                s.flushProvider(pA, [&](ScrobbleFlush f) { ++calls; got = f; });
+                spinUntil([&] { return calls > 0; }, 4000);
+                CHECK(calls == 1 && got.sent == 0 && got.left == 0 && got.message.isEmpty(),
+                      "#337: a flush with nothing waiting answers immediately and claims nothing");
+
+                // A queue for a destination this orchestrator does not hold at all - the shape the sweep
+                // finds. It cannot be sent and the answer says so rather than hanging.
+                queueUp(pB, 4);
+                int calls2 = 0;
+                ScrobbleFlush got2;
+                s.flushProvider(pB, [&](ScrobbleFlush f) { ++calls2; got2 = f; });
+                spinUntil([&] { return calls2 > 0; }, 4000);
+                CHECK(calls2 == 1 && got2.sent == 0 && got2.left == 4 && !got2.message.isEmpty(),
+                      "#337: a queue with no installed destination is answered, not hung - nothing sent, "
+                      "four still waiting, and a reason");
+                ScrobbleQueue::forget(pB);
+            }
+
+            // -- THE WORDS: NOTHING IS DISCARDED WITHOUT THE USER BEING TOLD ---------------------------
+            {
+                const QString offer = ScrobbleRemoval::offerMessage(serverName, 3);
+                CHECK(offer.contains(QStringLiteral("3")) && offer.contains(serverName),
+                      "#337: the offer names the server and how many listens are at stake");
+                CHECK(offer.contains(QStringLiteral("deleted")),
+                      "#337: ...and says, BEFORE the removal, that what is not sent is deleted - the whole "
+                      "rule this issue turns on is that the loss is stated first, not discovered later");
+                CHECK(ScrobbleRemoval::sendLabel(3).contains(QStringLiteral("3"))
+                          && ScrobbleRemoval::discardLabel(3).contains(QStringLiteral("3")),
+                      "#337: ...and so do the buttons, so somebody who read only those still knows the "
+                      "cost of the one on the right");
+
+                // THE INVARIANT, over every outcome a flush can have. A message that describes a discard
+                // NAMES THE NUMBER discarded; a message that describes no discard never says one happened;
+                // and no outcome is left with nothing to show at all.
+                bool told = true, quiet = true, never = true, reason = true;
+                const QString why = QStringLiteral("Wrong username or password.");
+                for (int sent : { 0, 1, 7, 50 })
+                    for (int left : { 0, 1, 7, 50 })
+                        for (const QString& w : { QString(), why })
+                        {
+                            const QString m = ScrobbleRemoval::outcomeMessage(serverName, sent, left, w);
+                            if (m.trimmed().isEmpty()) never = false;
+                            if (left > 0 && !(m.contains(QString::number(left))
+                                              && m.contains(QStringLiteral("discard")))) told = false;
+                            if (left <= 0 && m.contains(QStringLiteral("discard"))) quiet = false;
+                            if (left > 0 && !w.isEmpty() && !m.contains(w)) reason = false;
+                        }
+                CHECK(told,
+                      "#337: EVERY outcome that discards listens says so and names how many - the one "
+                      "thing this issue forbids is data going away with nobody being told");
+                CHECK(quiet,
+                      "#337: ...and an outcome that discarded nothing never claims it did, which is the "
+                      "same lie in the other direction");
+                CHECK(reason,
+                      "#337: ...and when the service said why, the user is given its words");
+                CHECK(never, "#337: ...and no outcome leaves the user with an empty card");
+
+                const QString sweep = ScrobbleRemoval::sweepMessage(1, 9);
+                CHECK(sweep.contains(QStringLiteral("9")),
+                      "#337: the sweep of the orphans that ALREADY exist names what it found");
+                CHECK(sweep.contains(QStringLiteral("no longer set up")),
+                      "#337: ...and says why nothing can be sent, rather than leaving somebody hunting for "
+                      "the button that would send them");
+                CHECK(ScrobbleRemoval::sweepDiscardLabel(9).contains(QStringLiteral("9")),
+                      "#337: ...and its delete button names the number too");
+            }
+
+            ScrobbleQueue::forget(pA);
+            ScrobbleQueue::forget(pB);
+            ScrobbleQueue::clear(QStringLiteral("listenbrainz"));
         }
 
         SubsonicServerStore::remove(sidA);

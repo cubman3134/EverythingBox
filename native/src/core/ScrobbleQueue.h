@@ -32,6 +32,7 @@
 #include "Scrobble.h"
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <functional>
 
@@ -62,6 +63,26 @@ namespace ScrobbleQueue
 
     int  count(const QString& providerId);
     void clear(const QString& providerId);
+
+    // EVERY DESTINATION THIS PROFILE HAS STATE ON DISK FOR (issue #337), whether or not anything installed a
+    // provider for it this session. The orphan sweep's only possible input: a queue belonging to a music
+    // server the user removed can never be named by the INSTALLED set, precisely because nothing installs a
+    // provider for a server that is no longer configured — which is the whole of #337's complaint. Ids come
+    // back exactly as they were written, so SubsonicScrobbleProvider::staleIds answers "which of these
+    // belong to no server" over this list unchanged, and answers it for our own ids only.
+    QStringList providerIdsOnDisk();
+
+    // FORGET A DESTINATION ENTIRELY (issue #337) — the queue, the delivered counter, the dropped counter and
+    // the last error. Four keys and not one, which is the point: clear() empties the queue and leaves the
+    // other three behind for ever, and "an ini that still carries rows for a server deleted eighteen months
+    // ago" is most of what being orphaned on disk means.
+    //
+    // THIS DELETES LISTENS SOMEBODY ACTUALLY PLAYED AND NOTHING BRINGS THEM BACK. There are exactly two
+    // callers, and in both the user has already been told, in the same interaction, how many are about to
+    // go: the removal offer (HomeView::removeMusicServerInteractive) and the orphan sweep
+    // (MainWindow::sweepOrphanScrobbleQueues). A third caller that does not say so first is precisely the
+    // bug this change exists to prevent, and is worse than the orphan it would be replacing.
+    void forget(const QString& providerId);
 
     // How many listens this queue has thrown away to stay under the cap, ever, for this profile. The settings
     // surface says so: a queue that silently ate a week of listening looks identical to one that delivered it.

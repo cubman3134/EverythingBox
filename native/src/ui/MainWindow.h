@@ -2060,6 +2060,12 @@ private:
     // store by its change hook so adding a server makes it a destination without a restart. Defined in
     // MainWindowMusicServerScrobble.cpp; SubsonicScrobbleProvider.h says why the set is per server.
     void syncSubsonicScrobbleProviders();
+    // WHAT HAPPENS TO A REMOVED SERVER'S UNSENT LISTENS (issue #337). Two duties, armed once at startup and
+    // defined beside the sync above: lend HomeView the one-last-chance flush (it owns the confirmation, this
+    // window owns the Scrobbler), and sweep the queues left behind by servers removed before any of this
+    // existed. Nothing either of them does deletes anything the user has not been told about first.
+    void armScrobbleRemovalOffers();
+    void sweepOrphanScrobbleQueues();
     // Tell the scrobbler a track began, from the ONE signal that crosses a gapless boundary.
     void noteScrobbleTrack(const QString& path);
 

@@ -158,6 +158,29 @@ public:
     // stack two sticky notices and then two menus.
     void setChooseSourceBusy(bool busy);
 
+    // ONE LAST CHANCE TO SEND A REMOVED MUSIC SERVER'S UNSENT LISTENS (issue #337). Set by MainWindow,
+    // which owns the Scrobbler; this class owns the confirmation and must not own the orchestrator.
+    //
+    // A std::function rather than a signal because the answer comes BACK: the removal confirmation has to
+    // say what landed and what was discarded, and a signal would leave this class to invent a second
+    // channel for the reply. `done(sent, left, why)` is called exactly once, a turn past any network
+    // reply's emission (Scrobbler::flushProvider guarantees both), so the card it opens is safe.
+    //
+    // UNSET is a legitimate state — a host with no scrobbler, and every headless probe. The offer is then
+    // simply not made, and the confirmation still says plainly that the unsent plays are discarded, which
+    // is the half of #337 that must be true whatever else is.
+    void setMusicServerFlushHook(
+        std::function<void(const QString& serverId,
+                           std::function<void(int sent, int left, const QString& why)> done)> hook);
+
+    // The saved MUSIC SERVER the browse cursor is standing on, or false. `themedIndex` is the themed
+    // column's own index; -1 asks the classic grid. Shaped like browseNativePort beside it, and resolved
+    // before a menu opens for the same reason. See the definition for why the themed layout needs it.
+    bool browseMusicServer(int themedIndex, QString* serverIdOut, QString* nameOut) const;
+    // ...and the removal itself, reachable from MainWindow's Start/Options menu. The classic grid reaches
+    // the private one directly through its right-click; the themed layout has no such gesture.
+    void removeMusicServerFromMenu(const QString& serverId, const QString& name);
+
     // For the themed (QML) home: the media-type catalogs as data, and a way to open one by its navKey.
     QVariantList systemItems();
     void activateNav(const QString& navKey); // open a catalog (or Home) by navKey
@@ -1237,6 +1260,10 @@ private:
     // Fired once when a crawl drains, with whether it queued anything. The romhack flow needs to know a base
     // ROM download actually STARTED before it arms an install to run when that download lands.
     std::function<void(bool anyQueued)> dlDone_;
+    // #337: how a music server about to be removed gets its unsent listens sent. See the setter.
+    std::function<void(const QString& serverId,
+                       std::function<void(int sent, int left, const QString& why)> done)>
+        musicServerFlush_;
     // The romhack verb's leaf, captured when it was PRESSED and shaped as a crawl node — a game leaf resolves
     // by QUERY (its title plus the console), not by its own id, so reaching the base ROM means running the
     // ordinary download crawl rather than resolving a stream directly. Mutable because the verb is also
