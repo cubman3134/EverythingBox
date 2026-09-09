@@ -256,6 +256,21 @@ those three classes; use it.
 recover from deleted rows, overlays stack and unwind restoring focus, Back
 always routes, the OSK works) and gates CI.
 
+**A confirmation never loses a sentence.** `NavConfirm` gives its title and its
+message the height their text needs *at the width they are painted at* — which
+the layout cannot work out for itself, because `QLayout::heightForWidth`
+measures at the panel's full width (the 1px stylesheet border is invisible to
+it) and because a label capped by `maximumWidth` is narrower still than the item
+it sits in. When the message needs more room than the window allows, it moves
+into a scrolling viewport sized to whatever the title and the buttons leave: the
+scrollbar is always shown while it scrolls, Up/Down scroll it with the pad
+(Left/Right stay the buttons', which is all a one-row button set needs), and the
+buttons stay on the card at every size. A title long enough to starve the
+message scrolls with it rather than being clipped. A message that FITS builds no
+viewport at all and renders exactly as it always has — that identity is pinned,
+with the overflow behaviour, by `probe_nav` §10b (issue \#347). Write the
+message the confirmation needs; do not trim it to fit the card.
+
 **A QML scene is never a ring stop.** `NavRing` refuses `QQuickWidget`s whatever
 focus policy they carry. That is not a special case bolted on — it is how the app
 already routes QML: a themed page owns its own focus, `MainWindow` hands it

@@ -14,6 +14,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollArea>  // #347: the confirm card's message viewport
 #include <QScrollBar>
 #include <QStyle>     // PM_ScrollBarExtent, when a long NavMenu has to scroll
 #include <QTimer>
@@ -25,6 +26,12 @@ int NavOverlay::s_panelFontPx = 14;  // desktop identity (see setPanelFontPx)
 int NavOverlay::s_listFontPx  = 16;  // desktop identity
 
 void NavOverlay::setThemeColors(const QVariantMap& colors) { s_themeColors = colors; }
+
+QString NavOverlay::themeColor(const char* key, const char* fallback)
+{
+    const QString v = s_themeColors.value(QString::fromLatin1(key)).toString();
+    return v.isEmpty() ? QString::fromLatin1(fallback) : v;
+}
 
 void NavOverlay::setPanelFontPx(int panelFontPx, int listFontPx)
 {
@@ -46,10 +53,7 @@ NavOverlay::NavOverlay(QWidget* window)
     // Themed palette from the active theme's settingsPanel block (hard fallbacks = the original darks). The
     // selection highlight uses `rowSelected` paired with `text` (both defined per theme so the selected row is
     // legible on light AND dark themes — accent alone can be low-contrast under dark text on the light themes).
-    auto navCol = [](const char* key, const char* fallback) -> QString {
-        const QString v = s_themeColors.value(QString::fromLatin1(key)).toString();
-        return v.isEmpty() ? QString::fromLatin1(fallback) : v;
-    };
+    auto navCol = [](const char* key, const char* fallback) { return themeColor(key, fallback); };
     const QString panelBg = navCol("panel", "#14161d");
     const QString border  = navCol("separator", "#2c2f3a");
     const QString text    = navCol("text", "#e8eaf0");
@@ -271,12 +275,21 @@ void NavOverlay::relayoutPanel()
         panel_->setFixedWidth(w);
         lay->invalidate();
         lay->activate();
+        // #347: the width is settled and the children are at their real widths, so this is the moment a
+        // subclass can bound its own content to the height the card may have — measured at the width the
+        // text is painted at, which is the thing heightForWidth below cannot see (see the declaration).
+        fitPanelContent(qMax(200, height() - 80));
+        lay->invalidate();
+        lay->activate();
         int h = lay->hasHeightForWidth() ? lay->heightForWidth(w) : panel_->sizeHint().height();
         panel_->setFixedHeight(qMin(h + 6, qMax(200, height() - 80)));
     }
     else panel_->adjustSize();
     panel_->move((width() - panel_->width()) / 2, (height() - panel_->height()) / 2);
 }
+
+// Default: the panel sizes to its content exactly as it always has. NavConfirm overrides it (#347).
+void NavOverlay::fitPanelContent(int /*heightBudget*/) {}
 
 // Walk the panel and report any text that doesn't fully fit its widget. This is the CI-probed contract
 // behind "no dialog text is ever cut off": labels (plain + word-wrapped), buttons, and list rows.
@@ -461,6 +474,7 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
     t->setWordWrap(true);       // long questions wrap, never clip
     t->setMaximumWidth(560);
     v->addWidget(t);
+    title_ = t;                 // #347: fitPanelContent measures it at the width it is painted at
     if (!message.isEmpty())
     {
         message_ = new QLabel(message, panel());
@@ -469,6 +483,7 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
         v->addWidget(message_);
     }
     auto* row = new QHBoxLayout;
+    buttonRow_ = row;           // #347: the pinned height the message has to fit around
     row->setSpacing(10);
     row->addStretch(1);
     QPushButton* focusBtn = nullptr;
@@ -481,6 +496,215 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
     }
     v->addLayout(row);
     if (focusBtn) QTimer::singleShot(0, this, [focusBtn] { if (focusBtn->isVisible()) focusBtn->setFocus(); });
+}
+
+
+// ---------------------------------------------------------------- #347: nothing is cut off in silence
+//
+// The card's contract is that the message is either wholly on screen or wholly REACHABLE, and that the
+// buttons are on the card either way. This is where both are made true, once per relayout:
+//
+//   1. every item gets the height its text needs AT THE WIDTH IT IS PAINTED AT. The layout could not work
+//      that out for itself — see fitPanelContent's declaration — and nine shipped confirmations were
+//      losing between one and seventeen lines to it at every window size, 1920x1080 included;
+//   2. when that is more than the card may have, the message moves into a scrolling viewport sized to
+//      what is left over once the title and the buttons have taken theirs. The scrollbar is ALWAYS shown
+//      while it scrolls, so the card says there is more, and Up/Down scroll it with the pad.
+//
+// A message that fits builds no scroll area at all: the widget tree, the panel's size and every child's
+// geometry are what they have always been. That is deliberate — this widget is on the path of every
+// confirmation in the app, including the ones that delete things.
+void NavConfirm::fitPanelContent(int heightBudget)
+{
+    auto* v = qobject_cast<QVBoxLayout*>(panel()->layout());
+    if (!v || !title_) return;
+
+    // Measure the TEXT, never the previous measurement: a card that is relabelled (NavCountdown every
+    // second, #137's lookup card when the answer lands) would otherwise re-fit around its own old height.
+    auto unfix = [](QWidget* w) {
+        if (!w) return;
+        w->setMinimumHeight(0);
+        w->setMaximumHeight(QWIDGETSIZE_MAX);
+    };
+    unfix(title_); unfix(message_); unfix(body_); unfix(scroll_);
+
+    const QMargins cm = v->contentsMargins();
+    const int sp   = qMax(0, v->spacing());
+    const int rowH = buttonRow_ ? buttonRow_->sizeHint().height() : 0;
+    const int line = qMax(1, title_->fontMetrics().lineSpacing());
+    // relayoutPanel adds 6px of headroom for the panel's border before it clamps; budget for it here too,
+    // or the panel it builds from these numbers is 6px past the clamp and gets squeezed after all.
+    const int budget = heightBudget - 6;
+
+    if (!message_)                     // a message-less card is a title and buttons; give the title its due
+    {
+        title_->setMinimumHeight(title_->heightForWidth(title_->width()));
+        scrollable_ = false;
+        return;
+    }
+
+    const int titleW = titleInBody_ && body_ ? body_->width() : title_->width();
+    const int titleH = title_->heightForWidth(titleW);
+    const int pinnedWithTitle = cm.top() + cm.bottom() + 2 * sp + titleH + rowH;
+    int avail = budget - pinnedWithTitle;
+
+    // A TITLE LONG ENOUGH TO EAT THE CARD. Clipping it would be the very defect this exists to remove, and
+    // shrinking the message to nothing is the same defect wearing a different hat — so the title goes into
+    // the scrolling area with the message and only the buttons stay pinned. Real titles never reach this;
+    // a user-named playlist or a 40-line game title on a 480px screen can.
+    const bool titleScrolls = avail < 2 * line;
+    const int pinned = titleScrolls ? (cm.top() + cm.bottom() + sp + rowH) : pinnedWithTitle;
+    if (titleScrolls) avail = budget - pinned;
+
+    // The width the message is painted at today: the label's own when it is still in the panel, the
+    // viewport's when it has already been moved into one.
+    const int outerW = scroll_ ? scroll_->width() : message_->width();
+    const int flatH  = message_->heightForWidth(outerW);
+
+    if (!titleScrolls && flatH <= avail)
+    {
+        // IT FITS. Exactly the card this has always been — with the height the text actually needs.
+        // A MINIMUM, not a fixed height: the layout still hands out the panel's spare pixels exactly as
+        // it always did (one shipped card has a label 3px taller than its text and keeps it), it simply
+        // can no longer hand out FEWER than the text needs.
+        title_->setMinimumHeight(titleH);
+        if (scroll_)   // a card that scrolled once and has since been relabelled shorter
+        {
+            setTitleScrolls(false);
+            message_->setFixedWidth(outerW);
+            message_->setFixedHeight(flatH);
+            body_->setFixedWidth(outerW);
+            body_->setFixedHeight(flatH);
+            scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            scroll_->setFixedHeight(flatH);
+        }
+        else
+            message_->setMinimumHeight(flatH);
+        scrollable_ = false;
+        return;
+    }
+
+    // IT DOES NOT FIT: scroll it.
+    ensureScrollArea();
+    setTitleScrolls(titleScrolls);
+    const int sb    = scroll_->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, scroll_);
+    const int viewW = qMax(40, scroll_->width() - sb);   // the bar takes its width from the text, always
+
+    int bodyH = 0;
+    if (titleScrolls)
+    {
+        title_->setFixedWidth(viewW);
+        title_->setFixedHeight(title_->heightForWidth(viewW));
+        bodyH += title_->height() + sp;
+    }
+    else title_->setMinimumHeight(titleH);
+    message_->setFixedWidth(viewW);
+    message_->setFixedHeight(message_->heightForWidth(viewW));
+    bodyH += message_->height();
+    body_->setFixedWidth(viewW);
+    body_->setFixedHeight(bodyH);
+
+    // What is left over, and never more: this is the number that keeps the buttons on the card.
+    const int viewH = qBound(line, avail, qMax(line, budget - pinned));
+    scroll_->setFixedHeight(viewH);
+    scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    scroll_->verticalScrollBar()->setSingleStep(qMax(1, line));
+    scroll_->verticalScrollBar()->setPageStep(qMax(line, viewH - line));
+    scrollable_ = bodyH > viewH;
+}
+
+// The viewport, built the first time a message overflows and kept for the life of the card. Not resizable:
+// QScrollArea's own widgetResizable path sizes its widget to minimumSizeHint(), which for a word-wrapped
+// QLabel is a couple of lines — it would clip the very text this is here to show. We set the body's size
+// ourselves, from a measurement, every relayout.
+void NavConfirm::ensureScrollArea()
+{
+    if (scroll_) return;
+    auto* v = qobject_cast<QVBoxLayout*>(panel()->layout());
+    if (!v || !message_) return;
+    const int idx = v->indexOf(message_);
+    const int w   = message_->width();
+
+    body_ = new QWidget(panel());
+    body_->setAutoFillBackground(false);
+    auto* bv = new QVBoxLayout(body_);
+    bv->setContentsMargins(0, 0, 0, 0);
+    bv->setSpacing(qMax(0, v->spacing()));
+    v->removeWidget(message_);
+    message_->setParent(body_);
+    bv->addWidget(message_);
+    message_->show();
+
+    scroll_ = new QScrollArea(panel());
+    scroll_->setObjectName(QStringLiteral("navConfirmScroll"));
+    scroll_->setFrameShape(QFrame::NoFrame);
+    scroll_->setWidgetResizable(false);
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll_->setFocusPolicy(Qt::NoFocus);   // the overlay drives it; no Qt focus fights (as NavMenu's list)
+    scroll_->viewport()->setAutoFillBackground(false);
+    // Scoped to this object name so a long NavMenu's list keeps the scrollbar it has always had. Wide and
+    // in the theme's accent because the reader of this card is ten feet away with a pad in their hands.
+    scroll_->setStyleSheet(QStringLiteral(
+        "#navConfirmScroll, #navConfirmScroll > QWidget > QWidget { background: transparent; }"
+        "#navConfirmScroll { border: none; }"
+        "QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }"
+        "QScrollBar::handle:vertical { background: %1; border-radius: 5px; min-height: 30px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
+        .arg(themeColor("accent", "#4a79e8")));
+    scroll_->setWidget(body_);
+    scroll_->setFixedWidth(w);              // the width the message already had: the card does not move
+    v->insertWidget(idx, scroll_);
+    scroll_->show();
+    body_->show();
+}
+
+void NavConfirm::setTitleScrolls(bool inside)
+{
+    if (!body_ || !title_ || titleInBody_ == inside) return;
+    auto* v  = qobject_cast<QVBoxLayout*>(panel()->layout());
+    auto* bv = qobject_cast<QVBoxLayout*>(body_->layout());
+    if (!v || !bv) return;
+    if (inside)
+    {
+        v->removeWidget(title_);
+        title_->setParent(body_);
+        bv->insertWidget(0, title_);
+    }
+    else
+    {
+        bv->removeWidget(title_);
+        title_->setParent(panel());
+        title_->setMinimumWidth(0);
+        title_->setMaximumWidth(560);   // the ctor's cap, restored
+        v->insertWidget(0, title_);
+    }
+    title_->show();
+    titleInBody_ = inside;
+}
+
+// Up/Down scroll the message while it is scrolling. They are free to: every button on this card lives in
+// ONE horizontal row, so Left/Right — which the ring keeps — are the keys the buttons need, and Up/Down
+// have never moved the selection here. Back/Escape and Enter are untouched, so a card that scrolls is
+// still dismissed and still answered the way every other one is.
+bool NavConfirm::handleNavKey(int key)
+{
+    if (scrollable_ && scroll_ && (key == Qt::Key_Up || key == Qt::Key_Down))
+    {
+        QScrollBar* bar = scroll_->verticalScrollBar();
+        const int step = qMax(1, bar->singleStep());
+        bar->setValue(bar->value() + (key == Qt::Key_Down ? step : -step));
+        return true;
+    }
+    return NavOverlay::handleNavKey(key);
+}
+
+QString NavConfirm::describe() const
+{
+    const QString base = NavOverlay::describe();
+    if (!scrollable_ || !scroll_ || !scroll_->verticalScrollBar()) return base;
+    const QScrollBar* bar = scroll_->verticalScrollBar();
+    return base + QStringLiteral(" [scroll %1/%2]").arg(bar->value()).arg(bar->maximum());
 }
 
 int NavConfirm::ask(const QString& title, const QString& message, const QStringList& buttons,

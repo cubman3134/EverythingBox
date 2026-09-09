@@ -424,6 +424,210 @@ int main(int argc, char** argv)
         pump();
     }
 
+
+    // --------------------------------------------- 10b. a confirmation never loses a line (issue #347)
+    //
+    // A confirm card used to render its message in whatever height its LAYOUT worked out, and the layout
+    // works that out at a width the text is never painted at:
+    //
+    //   * QLayout::heightForWidth measures at the panel's full width, but the panel's 1px stylesheet border
+    //     is invisible to it, so the text is wrapped 2px wider than the label ever is — one line lost on any
+    //     message whose last line was close to full; and
+    //   * the message label is capped at 560px while the panel is as wide as its BUTTON ROW, so the #248
+    //     rebuild card measured its message at 1552px and then painted it at 560px — and lost 17 lines.
+    //
+    // Both are silent: no ellipsis, no scrollbar, nothing. The button row simply sits where the rest of the
+    // sentence should have been. Nine shipped confirmations were doing this at EVERY window size, 1920x1080
+    // included; the audit is in the issue. What follows pins the three things that make it not happen:
+    // the message gets the height its own text needs, an overflow is reachable with the pad AND says so,
+    // and the buttons stay on the card at every size — while a message that fits builds nothing new at all.
+    {
+        // The card from the issue: #248's rebuild confirmation. Its button row is what makes the panel wide.
+        const QString kLongMsg = QStringLiteral(
+            "A newer version of this port is available: the catalogue offers build 1.2.0 and the copy on "
+            "this computer is 1.1.1.\n\nThe build that was working before the last rebuild is still being "
+            "kept, at 2.1 GB, in the \u201ckept\u201d folder beside the new one. It is removed the first time "
+            "the new build launches.\n\nA recompilation of the retail game into a native program for this "
+            "computer, with widescreen, high frame rates and gyro aiming.\n\nIt is built with the "
+            "recompilation engine, which is licensed MIT. EverythingBox does not include or redistribute "
+            "the recompilation engine \u2014 it comes from the project's own release, onto this computer, "
+            "when you ask for a build.\n\nBuild tools found. Visual Studio 2022 (v143), CMake 3.31 and "
+            "Ninja are all present.\n\nIt would be built from your own copy at C:/Games/ROMs/Nintendo 64/"
+            "The Legend of Zelda - Majora's Mask (USA).z64. That file is read where it is; it is never "
+            "copied, moved or changed.");
+        const QStringList kBuildButtons = { QStringLiteral("Cancel"), QStringLiteral("Play (native)"),
+                                            QStringLiteral("Rebuild it with the newer version"),
+                                            QStringLiteral("Go back to the previous build"),
+                                            QStringLiteral("Open homepage") };
+
+        auto labelWith = [](NavOverlay* o, const QString& text) -> QLabel* {
+            for (QLabel* l : o->findChildren<QLabel*>()) if (l->text() == text) return l;
+            return nullptr;
+        };
+        auto panelOf = [](NavOverlay* o) {
+            return o->findChild<QFrame*>(QStringLiteral("navOverlayPanel"));
+        };
+
+        // The size this was found at, and two smaller ones (a 1024x600 set-top panel, a 800x480 handheld).
+        const QVector<QPair<int, int>> sizes = { { 1280, 760 }, { 1024, 600 }, { 800, 480 } };
+        int scrolledAt = 0;   // a probe that never reaches the scrolling path would pass on nothing
+        for (const QPair<int, int>& sz : sizes)
+        {
+            auto* host = new QWidget;
+            host->resize(sz.first, sz.second);
+            host->show();
+            host->activateWindow();   // offscreen QPA does not auto-activate subsequent windows
+            pump();
+
+            auto* card = new NavConfirm(QStringLiteral("Zelda 64: Recompiled"), kLongMsg,
+                                        kBuildButtons, 2, host);
+            pump(); pump();
+            QLabel* msg = labelWith(card, kLongMsg);
+            QFrame* panel = panelOf(card);
+            CHECK(msg && panel, "the long confirm card has a message and a panel");
+            if (msg && panel)
+            {
+                // (1) THE DEFECT ITSELF. The label is at least as tall as its own text at its own width.
+                CHECK(msg->height() >= msg->heightForWidth(msg->width()),
+                      "the message label is as tall as the text it has to paint");
+
+                // (2) THE BUTTONS ARE ON THE CARD. A card that grew until its actions left the screen would
+                // have replaced one bug with a worse one.
+                bool allIn = true;
+                for (QPushButton* b : card->findChildren<QPushButton*>())
+                    if (!panel->rect().contains(b->geometry())) allIn = false;
+                CHECK(allIn, "every button is inside the card");
+                CHECK(card->rect().contains(panel->geometry()), "the card is inside the window");
+
+                // (3) THE WHOLE MESSAGE IS REACHABLE. Either it all fits, or it scrolls — and when it
+                // scrolls the scrollbar is SHOWN (that is the "there is more" the issue asks for) and the
+                // pad reaches the last line. Pressing Down is the only way offered; if it did not work the
+                // text would be exactly as lost as it was before.
+                auto* area = card->findChild<QScrollArea*>();
+                if (area)
+                {
+                    ++scrolledAt;
+                    CHECK(area->verticalScrollBar() && area->verticalScrollBar()->isVisible(),
+                          "a scrolling message shows its scrollbar");
+                    const int bottomBefore = msg->mapTo(area->viewport(), QPoint(0, msg->height() - 1)).y();
+                    CHECK(bottomBefore > area->viewport()->height(),
+                          "the case is real: the last line is off the viewport to start with");
+                    for (int i = 0; i < 400 && area->verticalScrollBar()->value()
+                                                   < area->verticalScrollBar()->maximum(); ++i)
+                        ctx.routeKey(Qt::Key_Down);
+                    pump();
+                    const int bottomAfter = msg->mapTo(area->viewport(), QPoint(0, msg->height() - 1)).y();
+                    CHECK(bottomAfter <= area->viewport()->height() + 1,
+                          "the pad scrolls the message to its last line");
+                    // Back up again: a reader who overshot must be able to return to the first line.
+                    for (int i = 0; i < 400 && area->verticalScrollBar()->value() > 0; ++i)
+                        ctx.routeKey(Qt::Key_Up);
+                    pump();
+                    CHECK(area->verticalScrollBar()->value() == 0, "Up scrolls back to the first line");
+
+                    // (4) THE SCROLL DOES NOT STEAL THE BUTTONS' KEYS. Every button is in one horizontal
+                    // row, so Left/Right are the keys the buttons need and they still move the selection;
+                    // Enter still answers the card.
+                    QWidget* was = QApplication::focusWidget();
+                    ctx.routeKey(Qt::Key_Left);
+                    pump();
+                    CHECK(QApplication::focusWidget() != was && qobject_cast<QPushButton*>(
+                              QApplication::focusWidget()) != nullptr,
+                          "Left still moves between the buttons of a scrolling card");
+                }
+                else
+                    CHECK(msg->height() >= msg->heightForWidth(msg->width()),
+                          "a message that is not scrolled is shown whole");
+            }
+            int answered = -2;
+            QObject::connect(card, &NavOverlay::closed, card, [&answered](int r) { answered = r; });
+            ctx.routeKey(Qt::Key_Return);
+            pump();
+            CHECK(answered >= 0, "Enter still answers a card whose message scrolls");
+            delete host;
+            pump();
+        }
+        CHECK(scrolledAt >= 1, "at least one tested size really had to scroll (this is not vacuous)");
+
+        // A TITLE LONG ENOUGH TO EAT THE CARD. Clipping it would be the same defect, and starving the
+        // message to two lines is that defect wearing a hat — so the title scrolls with the message and the
+        // buttons stay pinned. Unreachable with today's strings; a user-named playlist can get there.
+        {
+            auto* host = new QWidget;
+            host->resize(800, 480);
+            host->show();
+            host->activateWindow();
+            pump();
+            QString hugeTitle;
+            for (int i = 0; i < 40; ++i)
+                hugeTitle += QStringLiteral("Delete the playlist named after my very favourite "
+                                           "childhood memories, part %1? ").arg(i + 1);
+            auto* card = new NavConfirm(hugeTitle, kLongMsg,
+                                        { QStringLiteral("Delete"), QStringLiteral("Cancel") }, 1, host);
+            pump(); pump();
+            QFrame* panel = panelOf(card);
+            CHECK(panel != nullptr, "the huge-title card has a panel");
+            if (panel)
+            {
+                bool allIn = true;
+                for (QPushButton* b : card->findChildren<QPushButton*>())
+                    if (!panel->rect().contains(b->geometry())) allIn = false;
+                CHECK(allIn, "the buttons stay on the card even under a title that fills it");
+                CHECK(card->rect().contains(panel->geometry()),
+                      "the huge-title card is still inside the window");
+                QLabel* t = labelWith(card, hugeTitle);
+                CHECK(t && t->height() >= t->heightForWidth(t->width()),
+                      "the title is as tall as the text it has to paint");
+            }
+            card->dismiss(-1);
+            delete host;
+            pump();
+        }
+
+        // THE REGRESSION THAT WOULD MATTER: a short message must render exactly as it always has. No
+        // viewport is built, the label is still a child of the panel, the card is no taller than its own
+        // content, and Up/Down are still the ring's (they move nothing on a one-row button set) rather than
+        // a scroll's. Every confirmation in the app is this shape, including the ones that delete files.
+        {
+            const QString shortMsg = QStringLiteral("This removes the downloaded game file.");
+            auto* card = new NavConfirm(QStringLiteral("Uninstall game"), shortMsg,
+                                        { QStringLiteral("Yes"), QStringLiteral("No") }, 1, &win);
+            pump(); pump();
+            QLabel* msg = labelWith(card, shortMsg);
+            QFrame* panel = panelOf(card);
+            CHECK(card->findChild<QScrollArea*>() == nullptr,
+                  "a message that fits builds no scroll area");
+            CHECK(msg && msg->parentWidget() == panel,
+                  "a message that fits is still a direct child of the card");
+            CHECK(card->clippedTexts().isEmpty(), "nothing on the short card is clipped");
+            if (msg && panel)
+            {
+                CHECK(msg->height() >= msg->heightForWidth(msg->width()),
+                      "the short message is shown whole");
+                // No slack invented: the card is its content plus the border headroom relayoutPanel adds.
+                int content = 0;
+                if (QLayout* pl = panel->layout())
+                {
+                    const QMargins m = pl->contentsMargins();
+                    content = m.top() + m.bottom() + 2 * qMax(0, pl->spacing());
+                    for (QWidget* c : { static_cast<QWidget*>(msg) })
+                        content += c->height();
+                    if (QLabel* t = labelWith(card, QStringLiteral("Uninstall game"))) content += t->height();
+                    if (QPushButton* b = card->findChild<QPushButton*>()) content += b->height();
+                }
+                CHECK(panel->height() <= content + 8,
+                      "the card is no taller than the content it holds");
+                QWidget* was = QApplication::focusWidget();
+                ctx.routeKey(Qt::Key_Down);
+                pump();
+                CHECK(QApplication::focusWidget() == was,
+                      "Down on a card that fits is still the ring's, not a scroll's");
+            }
+            card->dismiss(-1);
+            pump();
+        }
+    }
+
     // ---------------------------------------------------------------- 11. rows "act right" under the ring
     {
         auto* page = new QWidget(&win);
