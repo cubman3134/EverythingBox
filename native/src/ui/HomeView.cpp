@@ -36,6 +36,8 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/NativePorts.h" // issue #233: the native-port catalog + the game binding
+#include "../core/RecompBuild.h"    // issue #248 (c): the build's progress line, for a building row
+#include "../core/RecompBuildJob.h" // issue #248 (c): is a build of this entry running right now
 #include "../core/RecompRows.h"  // issue #248: the Recomps section's pure row/state model
 #include "../core/RecompFeed.h"  // issue #248 (b): the RetComM catalogue as a second feed
 #include "../core/EmulatorManager.h" // issue #248: is this port installed, and where (the install-state input)
@@ -6063,10 +6065,11 @@ static QString recompStateLabel(recomps::State s)
         case recomps::State::CheckingDumps:   return HomeView::tr("checking dumps…");
         case recomps::State::Installed:       return HomeView::tr("installed");
         case recomps::State::UpdateAvailable: return HomeView::tr("update available");
-        // Reserved for the self-compiled tier (#248 increment c). deriveState never returns them today; the
-        // cases exist so adding that tier is a compile error here rather than a silent blank label.
+        // #248 (c), the self-compiled tier. `building…` is replaced on the row itself by the live progress
+        // line whenever there is one; this is what it says in the moment between pressing Build and the
+        // first thing the tools print.
         case recomps::State::Building:        return HomeView::tr("building…");
-        case recomps::State::Ready:           return HomeView::tr("ready");
+        case recomps::State::Ready:           return HomeView::tr("built — ready to play");
     }
     return QString();
 }
@@ -6110,6 +6113,11 @@ void HomeView::populateRecomps()
     QString feedError;
     const QList<ExternalEmulator> catalogue = RecompFeed::catalogue(&feedError);
 
+    // #248 (c): a build in flight. Read ONCE, here, so every row in this pass agrees about which entry is
+    // building and how far along it is — a per-row read could straddle a phase change and put a percentage
+    // from one moment beside a phase from another.
+    const RecompBuildJob::Snapshot build = RecompBuildJob::instance().snapshot();
+
     // What still needs hashing, gathered while the rows are derived so the file list and the states can never
     // disagree about which rows are `checking`.
     QStringList needHash;
@@ -6119,6 +6127,10 @@ void HomeView::populateRecomps()
         catalogue,
         [&](const ExternalEmulator& e) {
             recomps::Facts f;
+            // #248 (c). Ahead of everything else because they are the only inputs about the present moment;
+            // deriveState reads them first for the same reason.
+            f.building         = (build.portId == e.id) && build.running();
+            f.builtNotLaunched = (build.portId == e.id) && (build.phase == recompbuild::Phase::Succeeded);
             f.installed    = EmulatorManager::isInstalled(e);
             // THE ROM-IDENTITY GATE (#248 b). `libraryMatch` still means "a dump on this machine is this
             // entry's game", but what backs it is now the published digests where there are any.
@@ -6177,7 +6189,12 @@ void HomeView::populateRecomps()
         // machine stands, who made it, under what terms, and which tier it is. The upstream is credited by its
         // OWN name — never the recompilation toolchain's brand, whose developers asked exactly that of a
         // third-party launcher (#233).
-        QStringList bits{ recompStateLabel(r.state) };
+        // A BUILDING row carries the live progress line instead of the bare label: this is the
+        // Downloads-style surface #248 asks for, on the row itself, so a build that is running is visible
+        // from the section without opening anything.
+        QStringList bits{ r.state == recomps::State::Building && build.portId == r.portId
+                              ? recompbuild::progressLine(build.progress)
+                              : recompStateLabel(r.state) };
         // IMMEDIATELY after the state, because it QUALIFIES the state rather than describing the project: this
         // row says "not installed" on the strength of a filename, and the qualifier is the least droppable
         // thing on the line. It was originally last, where the themed row's elision ate it at 1280 px.

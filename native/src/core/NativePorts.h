@@ -362,13 +362,38 @@ namespace NativePorts
         e.port.romDelivery = e.port.romDelivery.toLower();
         str(o, "license", e.port.license);               // OUR extension: the licence the row shows
 
-        // RetComM `build.generate.engine`. Read but NOT acted on: its presence is what makes an entry the
-        // self-compiled tier, and this build says so on the row instead of pretending it can compile one.
+        // RetComM `build`. `generate.engine`'s PRESENCE is what makes an entry the self-compiled tier; the
+        // rest of the recipe is what increment (c) plans a build from. `toolchain` is read and never acted on
+        // — see the note on NativePortBinding::buildToolchainId.
         if (o.value(QStringLiteral("build")).isObject())
         {
             const QJsonObject b = o.value(QStringLiteral("build")).toObject();
+            if (b.contains(QStringLiteral("enabled")))
+                e.port.buildEnabled = b.value(QStringLiteral("enabled")).toBool();
             if (b.value(QStringLiteral("generate")).isObject())
-                str(b.value(QStringLiteral("generate")).toObject(), "engine", e.port.buildEngine);
+            {
+                const QJsonObject g = b.value(QStringLiteral("generate")).toObject();
+                str(g, "engine", e.port.buildEngine);
+                str(g, "config", e.port.buildGenerateConfig);
+                str(g, "out_dir", e.port.buildGenerateOutDir);
+            }
+            if (b.value(QStringLiteral("source")).isObject())
+            {
+                const QJsonObject src = b.value(QStringLiteral("source")).toObject();
+                str(src, "github", e.port.buildSourceRepo);
+                str(src, "ref", e.port.buildSourceRef);
+            }
+            if (b.value(QStringLiteral("sdk")).isObject())
+                str(b.value(QStringLiteral("sdk")).toObject(), "id", e.port.buildSdkId);
+            if (b.value(QStringLiteral("toolchain")).isObject())
+                str(b.value(QStringLiteral("toolchain")).toObject(), "id", e.port.buildToolchainId);
+            if (b.value(QStringLiteral("cmake")).isObject())
+            {
+                const QJsonObject c = b.value(QStringLiteral("cmake")).toObject();
+                str(c, "build_dir", e.port.buildCmakeDir);
+                str(c, "target", e.port.buildCmakeTarget);
+                str(c, "config", e.port.buildCmakeConfig);
+            }
         }
 
         if (o.value(QStringLiteral("release")).isObject())
@@ -421,6 +446,10 @@ namespace NativePorts
         // ---- derive the ExternalEmulator half. Everything below is a PROJECTION of the fields above onto
         // the standalone tier's vocabulary, recomputed on every overlay so a corrected `release.github` also
         // corrects the update URL and the credited name rather than leaving a stale pair behind.
+        // SCHEMA.md: build.source.github "defaults to release.github". Resolved here rather than where the
+        // `build` object is read, because that object comes first in the document and the release it defaults
+        // to may only have been named by the `release` object below it.
+        if (e.port.buildSourceRepo.isEmpty()) e.port.buildSourceRepo = e.port.releaseRepo;
         if (!e.port.releaseRepo.isEmpty())
         {
             e.updateJsonUrl = releaseApiUrl(e.port.releaseRepo);
