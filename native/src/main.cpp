@@ -44,7 +44,7 @@
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.238";
+static constexpr const char* kAppVersion = "0.6.239";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -380,6 +380,21 @@ int main(int argc, char** argv)
     // iOS: the stock themes2/ + addons are staged at the bundle root as eb/ (see the if(IOS) CMake block);
     // extract them into the writable data dir exactly like the Android assets:/eb flow.
     AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/eb"),
+                        AppPaths::dataDir(), QString::fromLatin1(kAppVersion));
+#elif defined(Q_OS_LINUX)
+    // Linux desktop (issue #341). Until now this was the same no-op as Windows and macOS, and correctly so:
+    // AppPaths::dataDir() WAS applicationDirPath(), so the stock themes2/ and first-party addons/ that ship
+    // beside the binary (#339) were already in the data dir and nothing had to be extracted. dataDir() is now
+    // the user's XDG directory, which on a fresh install is empty - so the bundled assets have to be seeded
+    // out of the (read-only, inside an AppImage) application directory exactly like the APK's assets:/eb.
+    // AssetBootstrap is the right mechanism rather than a one-shot copy: its version stamp means a later
+    // release's stock themes still reach an install that already has an older copy, and its addons are
+    // copy-if-absent, so an add-on the user configured or removed is never clobbered by an upgrade.
+    // EB_TEST_BOOTSTRAP_SRC keeps winning where it is set, so probe_bootstrap's desktop-verifiable pipeline
+    // is unchanged.
+    AssetBootstrap::run(qEnvironmentVariableIsSet("EB_TEST_BOOTSTRAP_SRC")
+                            ? qEnvironmentVariable("EB_TEST_BOOTSTRAP_SRC")
+                            : QCoreApplication::applicationDirPath(),
                         AppPaths::dataDir(), QString::fromLatin1(kAppVersion));
 #else
     if (qEnvironmentVariableIsSet("EB_TEST_BOOTSTRAP_SRC"))

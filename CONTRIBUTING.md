@@ -141,8 +141,10 @@ and runs new code against real data.
 
 ### 2. Seed the data directory, or you will be driving the first-run wizard
 
-The desktop build is portable: **its data directory is the folder the exe is in**
-(`build/Release`), so a fresh build starts factory-new. Two things then stand
+The desktop build is portable on Windows and macOS: **its data directory is the
+folder the exe is in** (`build/Release`), so a fresh build starts factory-new.
+(On Linux it is not -- see below -- but the seeding below is a Windows/macOS
+workflow, so the paths in it are the exe's folder.) Two things then stand
 between you and the screen you wanted, and both eat your keystrokes:
 
 * the profile picker (and, on a fresh install, the onboarding choice);
@@ -533,10 +535,21 @@ outcomes to still be told apart. Add a behaviour to the driver, add its case.
 ### A probe's data directory is its own — you get that for free
 
 `AppPaths::dataDir()` is where the app keeps `everythingbox.ini`, `addons/`,
-`metadata/`, `saves/` and the rest. On desktop the app is portable, so that is
-the executable's own folder — which is also `build/Release`, where every probe
-binary is built next to the GUI exe. One ini, shared between the app, the
+`metadata/`, `saves/` and the rest. On Windows and macOS the app is portable, so
+that is the executable's own folder — which is also `build/Release`, where every
+probe binary is built next to the GUI exe. One ini, shared between the app, the
 probes, and anything a developer dropped in that folder.
+
+**Linux is the exception** (issue #341): there `dataDir()` is
+`$XDG_DATA_HOME/EverythingBox`, falling back to `~/.local/share/EverythingBox`,
+because the released Linux artefact is an AppImage whose payload is mounted
+read-only — a portable data dir inside one cannot be written at all. The app's
+*bundled* files (`themes2/`, `addons/`, `gamecontrollerdb.txt`) still live beside
+the binary, read-only, and `AssetBootstrap::run()` seeds them into the user's dir
+on first run; an old portable install's settings, saves and states are copied
+across once, and the originals are never deleted. `AppPaths::platformDataDir()`
+is the platform answer on its own, and `probe_isolation` pins all of it —
+including that Windows and macOS still answer `applicationDirPath()`.
 
 Every target named `probe_*` is therefore compiled with `EB_ISOLATED_DATA_DIR`,
 which points `dataDir()` at a scratch directory created **per process** and
@@ -776,10 +789,12 @@ the built binary's own import table (Windows) or `DT_NEEDED` (Linux). Adding a
 theme, an addon file or a linked library therefore needs no edit here -- and
 forgetting to package one fails the release.
 
-**In the archive is not the same as findable** (issue #339). `AppPaths::dataDir()`
-is `QCoreApplication::applicationDirPath()` on every desktop platform, so
-`themes2/` and `addons/` are read from the executable's OWN directory and
-nowhere else -- the zip root on Windows, `usr/bin` inside the AppDir on Linux.
+**In the archive is not the same as findable** (issue #339). The app's bundled
+files are read from `QCoreApplication::applicationDirPath()`, so `themes2/` and
+`addons/` are read from the executable's OWN directory and nowhere else -- the
+zip root on Windows, `usr/bin` inside the AppDir on Linux. (On Windows and macOS
+that directory is also `AppPaths::dataDir()`; on Linux, since #341, it is not,
+and `AssetBootstrap::run()` seeds the user's data dir from it on first run.)
 An AppImage that stashed them at the image root, or under `usr/share` where a
 distro package would put them, would ship two trees the app never opens. Until
 #339 it shipped neither at all, and Linux users got the classic home and no
