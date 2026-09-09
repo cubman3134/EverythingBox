@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.239 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.240 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -692,6 +692,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Scrobble.h              # the threshold, what counts, the accumulator - pure (probe_scrobble)
         src/core/ScrobbleProvider.h      # the seam Last.fm slots into in increment 2
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h        # the offline queue + the delivered counter
+        src/core/ScrobbleRemoval.cpp src/core/ScrobbleRemoval.h   # (#337) what a removal tells the user
         src/core/Scrobbler.cpp     src/core/Scrobbler.h            # the orchestrator the window talks to
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h  # ...and its first provider
         src/core/LastFmClient.cpp       src/core/LastFmClient.h        # ...and its second (#192 inc 2):
@@ -2365,6 +2366,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrobbleProvider.h                           # the seam the fake endpoint is reached through
         src/core/ScrobbleQueue.cpp src/core/ScrobbleQueue.h
         src/core/Scrobbler.cpp     src/core/Scrobbler.h
+        # issue #337: the sentences a removal owes are PURE and are asserted here, because a message
+        # that forgot to name what it was deleting is the whole bug and no compiler could ever catch it.
+        src/core/ScrobbleRemoval.cpp src/core/ScrobbleRemoval.h
         src/core/ListenBrainzClient.cpp src/core/ListenBrainzClient.h
         src/core/LastFmClient.cpp  src/core/LastFmClient.h    # the second provider (#192 increment 2)
         src/core/ProfileStore.cpp  src/core/ProfileStore.h    # the queue is namespaced by the active profile

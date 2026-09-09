@@ -15,6 +15,12 @@ namespace {
 constexpr int kRetryFirstSec = 15;
 constexpr int kRetryMaxSec   = 300;
 
+// HOW LONG A GOODBYE FLUSH IS GIVEN (issue #337). Not a network timeout — the Subsonic path sets none, and a
+// server that has gone to sleep answers nothing at all — but a bound on how long a user who pressed "Remove"
+// is left looking at a screen that has not changed. Twenty seconds is long enough for a LAN box to wake and
+// far short of the minutes TCP would otherwise take to give up.
+constexpr int kFlushBudgetMs = 20000;
+
 } // namespace
 
 // One provider plus the delivery state that belongs to it alone. See Scrobbler.h for why the backoff and the
@@ -27,6 +33,11 @@ struct Scrobbler::Slot
                                 // overlapping submissions could drop the wrong prefix off the front
     int     retrySec = 0;       // current backoff, 0 == not backing off
     QTimer* retry    = nullptr; // owned by the Scrobbler (parented), stopped and dropped with the slot
+    // THE GOODBYE FLUSH (issue #337), armed only while one is running. Non-null means "keep pumping past the
+    // end of this batch and tell this callback what happened"; it is moved out before it is called, so the
+    // three ways a flush can end cannot answer twice between them.
+    std::function<void(ScrobbleFlush)> flushDone;
+    int     flushSent = 0;      // accepted during THIS flush, not since the beginning of time
 };
 
 Scrobbler::Scrobbler(QObject* parent) : QObject(parent)
@@ -87,6 +98,12 @@ bool Scrobbler::removeProvider(const QString& id)
         if (!s || !s->provider || s->provider->id() != id) continue;
         // ONE SLOT. Every other slot keeps its backoff, its in-flight submission and its retry timer - see
         // the header for why a rebuild is not an option (an authorisation poll abandoned mid-flight).
+        //
+        // A FLUSH IN PROGRESS IS ANSWERED FIRST (issue #337). The ordinary order is the other way round -
+        // the flush finishes and the caller then removes the server - but a destination can also go away
+        // underneath one, and a caller left waiting for a callback that will never come is a confirmation
+        // that never appears and a removal the user watches do nothing.
+        finishFlush(s, tr("That destination was removed before the rest could be sent."));
         if (s->retry) s->retry->stop();
         slots_.remove(i);
         delete s->provider;      // its network callbacks are context-connected to it and go with it
@@ -214,6 +231,67 @@ void Scrobbler::retryNow()
     pump();
 }
 
+void Scrobbler::flushProvider(const QString& id, std::function<void(ScrobbleFlush)> done)
+{
+    if (!done) return;
+    Slot* s = slotById(id);
+    const int waiting = ScrobbleQueue::count(id);
+
+    // THE ARMS THAT ANSWER IMMEDIATELY, and they are answered THROUGH THE EVENT LOOP rather than here. A
+    // callback that fires inside the caller's own frame makes the caller's code correct only by accident:
+    // the one call site opens a nav-kit card in it, and doing that inside the press that asked for the flush
+    // is the nested-loop family the whole app avoids. So every path out of here is deferred, and the caller
+    // has one shape to write rather than two.
+    if (!s || !s->provider || !s->provider->configured() || waiting == 0)
+    {
+        ScrobbleFlush f;
+        f.left = waiting;
+        if (waiting > 0)
+            // Not an error and not blamed on the network: there is simply no working destination to hand
+            // them to. The user is about to be told they are being discarded, and this is the reason why.
+            f.message = s && s->provider
+                            ? tr("%1 is not connected.").arg(s->provider->displayName())
+                            : tr("That destination is no longer set up.");
+        QTimer::singleShot(0, this, [done, f] { done(f); });
+        return;
+    }
+    // A second flush while one is running would answer the first with the second's state. There is exactly
+    // one call site and it cannot produce that, but the invariant is cheap to keep.
+    if (s->flushDone) finishFlush(s, tr("Another attempt to send took over."));
+
+    s->flushSent = 0;
+    s->flushDone = std::move(done);
+    // The BUDGET. Looked up by id when it fires, never through a captured Slot*: the destination can be gone
+    // by then, and #299's whole lesson is that a pointer held across a network round trip is a freed one.
+    QTimer::singleShot(kFlushBudgetMs, this, [this, id] {
+        finishFlush(slotById(id), tr("That server did not answer in time."));
+    });
+    // The backoff earned before the user pressed Remove is not a reason to skip their one chance to send.
+    s->retry->stop();
+    s->retrySec = 0;
+    pumpSlot(s);
+}
+
+void Scrobbler::finishFlush(Slot* s, const QString& message)
+{
+    if (!s || !s->flushDone || !s->provider) return;
+    ScrobbleFlush f;
+    f.sent = s->flushSent;
+    f.left = ScrobbleQueue::count(s->provider->id());
+    // The reason belongs to a flush that did not finish the job. Saying "the server did not answer" beside
+    // "all 6 sent" would be a lie in the direction that costs trust.
+    if (f.left > 0) f.message = message;
+    // TAKEN OFF THE SLOT BEFORE IT IS CALLED. That is what makes "exactly once" structural rather than a
+    // rule three call sites have to remember, and it is why the budget timer can fire harmlessly after a
+    // flush that already succeeded.
+    auto done = std::move(s->flushDone);
+    s->flushDone = nullptr;
+    s->flushSent = 0;
+    // Deferred for the same reason the immediate arms above are: this runs inside a network reply's
+    // emission, and the caller opens a nav-kit card.
+    QTimer::singleShot(0, this, [done, f] { done(f); });
+}
+
 void Scrobbler::pump()
 {
     for (Slot* s : slots_) pumpSlot(s);
@@ -259,6 +337,13 @@ void Scrobbler::recordResult(Slot* s, const ScrobbleResult& r, int submitted)
             ScrobbleQueue::setLastError(pid, QString());
             s->retrySec = 0;
             emit statusChanged();
+            if (s->flushDone)
+            {
+                s->flushSent += submitted;
+                // The flush is finished when the QUEUE is empty, not when a batch is: a goodbye that stopped
+                // after the first fifty would report "sent" and leave the rest to be discarded unmentioned.
+                if (ScrobbleQueue::count(pid) == 0) { finishFlush(s, QString()); return; }
+            }
             pumpSlot(s);     // there may be more behind this batch, for THIS service
             return;
 
@@ -269,6 +354,10 @@ void Scrobbler::recordResult(Slot* s, const ScrobbleResult& r, int submitted)
             ScrobbleQueue::dropFront(pid, submitted);
             ScrobbleQueue::setLastError(pid, r.message);
             emit statusChanged();
+            // A REJECTED BATCH IS NOT A DELIVERED ONE, and a flush must not count it as sent. The rows are
+            // gone either way (the jam rule above), so what the user is told is the truth: these did not
+            // land, and here is what the server said about them.
+            finishFlush(s, r.message);
             return;
 
         case ScrobbleResult::Outcome::Auth:
@@ -277,12 +366,18 @@ void Scrobbler::recordResult(Slot* s, const ScrobbleResult& r, int submitted)
             // amount of waiting makes a wrong token right. The next pump comes from a settings change.
             ScrobbleQueue::setLastError(pid, r.message);
             emit statusChanged();
+            finishFlush(s, r.message);   // no later, and no amount of waiting makes a wrong token right
             return;
 
         case ScrobbleResult::Outcome::Retryable:
             ScrobbleQueue::setLastError(pid, r.message);
             scheduleRetry(s);
             emit statusChanged();
+            // THE FLUSH DOES NOT WAIT OUT THE LADDER. Ordinarily a retryable failure means "in fifteen
+            // seconds"; for a goodbye there is no in-fifteen-seconds, because the sign-in is about to be
+            // forgotten. Answer with what landed and let the removal proceed — the user asked to remove a
+            // server, and a box that is asleep does not get a veto over that.
+            finishFlush(s, r.message);
             return;
     }
 }

@@ -192,6 +192,46 @@ void ScrobbleQueue::clear(const QString& providerId)
     fireChanged();
 }
 
+// Read back the ids out of the KEYS, because nothing else knows them. The group is written by exactly one
+// spelling (groupFor above), so the id is whatever sits between this profile's group and the leaf key —
+// taken with lastIndexOf so a leaf can never be mistaken for part of an id.
+QStringList ScrobbleQueue::providerIdsOnDisk()
+{
+    // Another QSettings object on the same file may have written since this one last read. Cheap, and the
+    // sweep runs once a launch.
+    store().sync();
+    const QString prefix = groupFor(ProfileStore::currentId(), QString());
+    // groupFor() substitutes "unknown" for an empty provider, so trim that placeholder back off to get the
+    // bare "<state>/<profile>/" this walk needs. Built through groupFor on purpose: a second spelling of the
+    // profile carve-out here is a second thing to keep in step with Scrobble::stateKeyPrefix().
+    const QString base = prefix.left(prefix.size() - QStringLiteral("unknown/").size());
+    QStringList out;
+    for (const QString& key : store().allKeys())
+    {
+        if (!key.startsWith(base)) continue;
+        const QString rest = key.mid(base.size());
+        const int cut = rest.lastIndexOf(QLatin1Char('/'));
+        if (cut <= 0) continue;                       // a stray key with no provider group: not ours
+        const QString pid = rest.left(cut);
+        if (!pid.isEmpty() && !out.contains(pid)) out.push_back(pid);
+    }
+    return out;
+}
+
+// The one operation that destroys unsent listening history. See the header for the two callers it has and
+// for the rule both of them obey.
+void ScrobbleQueue::forget(const QString& providerId)
+{
+    if (providerId.isEmpty()) return;
+    const QString profile = ProfileStore::currentId();
+    store().remove(queueKey(profile, providerId));
+    store().remove(counterKey(profile, providerId));
+    store().remove(droppedKey(profile, providerId));
+    store().remove(errorKey(profile, providerId));
+    store().sync();
+    fireChanged();
+}
+
 int ScrobbleQueue::dropped(const QString& providerId)
 { return store().value(droppedKey(ProfileStore::currentId(), providerId)).toInt(); }
 

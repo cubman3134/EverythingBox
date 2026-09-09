@@ -964,6 +964,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // lend it: the picker's choice and the automatic resolves must read the SAME memory.
     home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
+    // #337: the browse surface owns the "remove this music server" confirmation and this window owns the
+    // Scrobbler, so the last chance to send that server's unsent listens is lent across. One call, in its
+    // own translation unit, and it also runs the sweep for the orphans that already exist on disk.
+    armScrobbleRemovalOffers();
     // #179: a channel row was activated -> tune it. The view names the channel; this window owns the clock,
     // the join and the surfing.
     connect(home_, &HomeView::tuneChannelRequested, this, &MainWindow::tuneChannel);
@@ -5601,7 +5605,17 @@ void MainWindow::openBrowseContextMenu()
     const bool atGuide = home_ && home_->atChannelGuideLevel()
                          && (themedBrowseIndex() >= 0 || stack_->currentWidget() == home_);
 
-    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow };
+    // #337: the saved MUSIC SERVER the cursor is standing on. Removing one had exactly one door — a
+    // right-click or long-press on the CLASSIC grid — and the themed layout has neither gesture, so a server
+    // added there could never be removed there. That matters here beyond tidiness: this issue's one chance
+    // to send a removed server's unsent listens lives inside that removal, so without this row the whole fix
+    // is unreachable on the layout most people are looking at. Surface-gated exactly like the Jellyfin verb
+    // below, and for its reason: the classic cursor survives the page being swapped away.
+    QString msId, msName;
+    const bool hasMusicServer = jfSurfaceOk && home_->browseMusicServer(jfThemedIdx, &msId, &msName);
+
+    enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow,
+                RemoveMusicServer };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5628,6 +5642,9 @@ void MainWindow::openBrowseContextMenu()
         offer(JellyfinDl, jfKind == int(browse::JellyfinDownloadTarget::Kind::Item)
                               ? tr("Download for offline")
                               : tr("Download episodes…"));
+    // LAST, and named for what it is. It is the destructive one on this menu, so it does not sit where a
+    // hurried press lands, and the confirmation behind it says what is lost before anything goes.
+    if (hasMusicServer) offer(RemoveMusicServer, tr("Remove this music server…"));
 
     if (items.isEmpty()) { sendNavKey(Qt::Key_Escape); return; }   // nothing to configure -> today's Start=Back
 
@@ -5651,6 +5668,14 @@ void MainWindow::openBrowseContextMenu()
                 downloadJellyfinItem(jfRef, jfTitle, jfThumb);
             else
                 downloadJellyfinBatch(jfRef, jfSeasonRef, jfTitle);
+            break;
+        // The server was resolved before the menu opened, for the same reason. Deferred a turn: NavMenu::pick
+        // has returned, but the removal opens its own nav-kit cards (and, on the send path, a network round
+        // trip), and stacking those on the frame this menu unwound is the #28 / #211 discipline.
+        case RemoveMusicServer:
+            deferPastQmlEmission([this, msId, msName] {
+                if (home_) home_->removeMusicServerFromMenu(msId, msName);
+            });
             break;
         // The row and the port were resolved BEFORE the menu opened (above), so the grid moving under the
         // nested loop cannot make this fire on a different game. NavMenu::pick has already returned, so the
@@ -6090,7 +6115,9 @@ void MainWindow::showEvent(QShowEvent* event)
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
         // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
         // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
-        QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
+        // #337's sweep rides behind it, for the same reason it does on the picker path: main.cpp has made the
+        // one profile current, so the per-profile queue keys this reads are that profile's.
+        QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); sweepOrphanScrobbleQueues(); });
     });
 }
 
@@ -15954,7 +15981,9 @@ bool MainWindow::maybeForceThemePick(const QString& profileId, bool startup)
 void MainWindow::finishToHome()
 {
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
-    QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
+    // ...and #337's sweep behind it: a profile is now chosen, so the per-profile scrobble keys it reads are
+    // the right ones. Behind maybeOfferTvMode rather than beside it so two cards can never be up at once.
+    QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); sweepOrphanScrobbleQueues(); });
 }
 
 void MainWindow::chooseProfile(const QString& id, bool startup)

@@ -41,7 +41,21 @@
 #include <QString>
 #include <QVector>
 
+#include <functional>
+
 class QTimer;
+
+// WHAT A FINAL FLUSH ACHIEVED (issue #337). Reported once, to the one thing that ever asks for one: the
+// removal of a music server, which is the last moment that server's sign-in still works and therefore the
+// last moment its unsent listens can be delivered at all.
+struct ScrobbleFlush
+{
+    int     sent = 0;    // listens this destination accepted just now
+    int     left = 0;    // still unsent — and, at the only call site there is, about to be discarded
+    // Why the rest did not go, in the service's own words, and subject to the same rule as every other
+    // message in this feature: NEVER any part of a credential. Empty when nothing is left.
+    QString message;
+};
 
 class Scrobbler : public QObject
 {
@@ -122,6 +136,30 @@ public:
     // the feature not working. Nothing in the background calls this; a real network outage still backs off.
     void retryNow();
 
+    // SEND WHAT THIS DESTINATION IS STILL OWED, NOW, AND SAY WHAT LANDED (issue #337) — the goodbye call.
+    //
+    // #299 removed the provider when a music server went away and deliberately left its queue alone; #337 is
+    // what that left behind. The queue is filed under a provider id built from the server's UUID, and
+    // re-adding the same server mints a new UUID, so a queue whose server is gone can never be matched to a
+    // destination again: undeliverable, undrainable, invisible. The only moment it can still be drained is
+    // the moment BEFORE the sign-in is forgotten, and this is that moment made available to the UI.
+    //
+    // WHAT IT DOES DIFFERENTLY FROM retryNow(). It cancels the backoff exactly as retryNow does, but it also
+    // keeps going batch after batch until the queue is EMPTY, and then reports. A failure does not climb the
+    // ladder and wait: there is no later. It stops and answers, because the user is standing in front of a
+    // confirmation and the removal they asked for must not be held hostage to a box that is asleep.
+    //
+    // `done` is called EXACTLY ONCE and never from inside the caller's own frame or inside a network reply's
+    // emission — it is delivered a turn later through the event loop, so the caller may open a nav-kit card
+    // in it without meeting the #28 / #211 nested-loop crash. It is called even when there is nothing to
+    // send, when this id names no installed destination, and when the destination is removed mid-flush: a
+    // caller that is waiting to tell the user what happened must never be left waiting.
+    //
+    // It is BOUNDED. Nothing in the Subsonic path sets a transfer timeout, so an unanswering server would
+    // otherwise leave the removal pending until TCP gave up. After kFlushBudgetMs the flush answers with
+    // what it has, and whatever the wire does afterwards is recorded against the queue as usual.
+    void flushProvider(const QString& id, std::function<void(ScrobbleFlush)> done);
+
 signals:
     // The counter, the queue depth or the error moved. The settings surfaces re-render their status line.
     void statusChanged();
@@ -156,6 +194,10 @@ private:
     void pumpSlot(Slot* s);
     void scheduleRetry(Slot* s);
     void recordResult(Slot* s, const ScrobbleResult& r, int submitted);
+    // Answer an armed flush and disarm it (issue #337). Idempotent by construction — it takes the callback
+    // off the slot before calling it — which is what makes "exactly once" true across the three ways a flush
+    // can end: the queue emptied, the destination refused, and the budget ran out.
+    void finishFlush(Slot* s, const QString& message);
     void clearProviders();
 
     QVector<Slot*>  slots_;

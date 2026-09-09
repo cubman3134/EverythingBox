@@ -102,6 +102,9 @@
 #include "../core/LiveTvMigrate.h"     // #203: re-identify legacy livetv: rows when a channel list arrives
 #include "../core/OpdsCatalogStore.h"  // OPDS book catalogs (#146)
 #include "../core/SubsonicServerStore.h" // Subsonic music servers (#193)
+#include "../core/SubsonicScrobbleProvider.h" // #337: the provider id a removed server's queue is filed under
+#include "../core/ScrobbleQueue.h"       // #337: how many of its listens are still unsent, and forgetting them
+#include "../core/ScrobbleRemoval.h"     // #337: the sentences a removal owes, pure and probe-asserted
 #include "../core/Jellyfin.h"            // #160: the server-qualified id and the transport verdicts
 #include "../core/JellyfinClient.h"      // #160: /System/Info/Public + the sign-in
 #include "../core/JellyfinServerStore.h" // #160: the connected servers (tokens device-local)
@@ -6437,16 +6440,118 @@ void HomeView::addMusicServerInteractive()
     populateMusicServers();  // on the servers level -> refresh (also fires browseItemsChanged)
 }
 
-// Remove a saved music server. The Live TV shape, and the one extra sentence this feature owes: what the
-// user is actually giving up is the SIGN-IN, and nothing on the server itself is touched.
+void HomeView::setMusicServerFlushHook(
+    std::function<void(const QString&, std::function<void(int, int, const QString&)>)> hook)
+{
+    musicServerFlush_ = std::move(hook);
+}
+
+// The removal itself, once the user has answered — and it is a free function rather than a lambda repeated
+// three times because there are three ways to arrive here (nothing was pending, the flush finished, the user
+// discarded outright) and all three must forget the same four ini keys. See ScrobbleQueue::forget: dropping
+// only the queue leaves the delivered counter, the dropped counter and the last error behind for ever, which
+// is most of what #337 means by orphaned.
+static void removeMusicServerAndForget(const QString& serverId)
+{
+    SubsonicServerStore::remove(serverId);   // fires the change hook -> the Music tab re-evaluates, and
+                                             // syncSubsonicScrobbleProviders drops the provider (#299)
+    ScrobbleQueue::forget(SubsonicScrobbleProvider::idFor(serverId));
+}
+
+// Remove a saved music server. The Live TV shape, and the two extra things this feature owes.
+//
+// THE FIRST is the sentence it has always had: what the user is giving up is the SIGN-IN, and nothing on the
+// server itself is touched.
+//
+// THE SECOND IS #337, and it only exists at this exact moment. A music server is a scrobble destination
+// (#193 increment 6) with a queue of its own, filed under a provider id built from the server's uuid. #299
+// removed the provider when the server went away and deliberately left that queue alone — but a re-added
+// server mints a NEW uuid, so the queue could never be matched to a destination again: listens the user
+// played, kept for ever, delivered never, mentioned nowhere.
+//
+// So the removal asks. RIGHT NOW the credentials still work and the box is probably still awake, which is
+// the only state of the world in which those listens can still be delivered; a minute later there is no
+// address and no password to deliver them with. Three answers, and the middle one is the whole feature:
+//
+//   Cancel                     nothing happens, and nothing is deleted.
+//   Send them, then remove     one bounded attempt, then the removal proceeds WHATEVER the attempt did —
+//                              a server that is asleep does not get a veto over a removal the user asked
+//                              for (and the report afterwards says exactly what landed).
+//   Remove and discard         the honest version of today's behaviour, said out loud with the number in
+//                              it rather than left on disk where nobody will ever see it again.
+//
+// Whichever is chosen, the plays that are not sent are deleted, and the user was told so BEFORE choosing.
+// That ordering is the rule; ScrobbleRemoval.h holds the sentences and says why they are pure.
 void HomeView::removeMusicServerInteractive(const QString& serverId, const QString& name)
 {
+    const QString providerId = SubsonicScrobbleProvider::idFor(serverId);
+    // Read once, before anything is asked: this is the number the user is answering about, and re-reading it
+    // after the card closed would be a different number if a track finished behind it.
+    const int pending = ScrobbleQueue::count(providerId);
+
+    // NOTHING WAITING: the confirmation people have seen since #193, word for word. A removal that grew a
+    // paragraph about zero unsent plays would make the ordinary case worse to serve the rare one.
+    if (pending <= 0)
+    {
+        const int choice = NavConfirm::ask(tr("Remove music server"),
+            tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed.").arg(name),
+            { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+        if (choice != 1) return;
+        removeMusicServerAndForget(serverId);
+        populateMusicServers();              // on the servers level -> refresh
+        return;
+    }
+
+    // With no flush hook there is no destination this class can reach, so there is no honest offer to make —
+    // but the loss is still stated, and stated before the removal happens.
+    QStringList buttons{ tr("Cancel") };
+    const bool canSend = bool(musicServerFlush_);
+    if (canSend) buttons << ScrobbleRemoval::sendLabel(pending);
+    buttons << ScrobbleRemoval::discardLabel(pending);
+
     const int choice = NavConfirm::ask(tr("Remove music server"),
-        tr("Remove “%1” and forget its sign-in? Nothing on the server itself is changed.").arg(name),
-        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
-    if (choice != 1) return;
-    SubsonicServerStore::remove(serverId);   // fires the change hook -> the Music tab re-evaluates
-    populateMusicServers();                  // on the servers level -> refresh
+        ScrobbleRemoval::offerMessage(name, pending), buttons,
+        /*focusIndex*/ 0, /*cancelIndex*/ 0, window());
+    if (choice <= 0) return;                                   // Cancel or Back: nothing is deleted
+    const bool sendFirst = canSend && choice == 1;
+
+    if (!sendFirst)
+    {
+        removeMusicServerAndForget(serverId);
+        populateMusicServers();
+        // SAID AGAIN, AFTER THE FACT, with the number. The confirmation already said it — this is not the
+        // telling the rule requires — but a deletion that leaves no trace on screen is the shape of the
+        // complaint, and the second sentence costs one card.
+        NavConfirm::ask(tr("Remove music server"),
+                        ScrobbleRemoval::outcomeMessage(name, /*sent*/ 0, pending, QString()),
+                        { tr("OK") }, 0, 0, window());
+        return;
+    }
+
+    // THE ATTEMPT. Bounded by the orchestrator (Scrobbler.h: kFlushBudgetMs), so a server that has gone to
+    // sleep cannot hold the removal open; and reported through a toast in the meantime, because the alternative
+    // is a screen that does not change for up to twenty seconds after a press.
+    emit toastRequested(tr("Sending %n play(s) to “%1”…", "", pending).arg(name), kFeedbackLong);
+    QPointer<HomeView> self(this);
+    musicServerFlush_(serverId, [self, serverId, name](int sent, int left, const QString& why) {
+        if (!self) return;
+        emit self->toastHideRequested();
+        // Scrobbler::flushProvider already delivers this a turn past any reply's emission, so a nav-kit
+        // card here is not the #28 / #211 nested-loop family. Deferred again anyway, for the same reason
+        // connectJellyfinServerInteractive defers: the guarantee belongs to the callee, and a call site
+        // that relies on it silently without saying so is one refactor away from the crash.
+        QMetaObject::invokeMethod(self.data(), [self, serverId, name, sent, left, why] {
+            if (!self) return;
+            // THE REMOVAL HAPPENS EITHER WAY. The user asked for a server to be removed; what the network
+            // did about the leftovers is a different question, and answering it with "so we kept your
+            // server" would be answering a question nobody asked.
+            removeMusicServerAndForget(serverId);
+            self->populateMusicServers();
+            NavConfirm::ask(tr("Remove music server"),
+                            ScrobbleRemoval::outcomeMessage(name, sent, left, why),
+                            { tr("OK") }, 0, 0, self->window());
+        }, Qt::QueuedConnection);
+    });
 }
 
 // ---- JELLYFIN, N SERVERS (issue #160) -----------------------------------------------------------------
@@ -11662,6 +11767,35 @@ bool HomeView::browseNativePort(int themedIndex, MediaItem* itemOut, QString* po
     if (itemOut) *itemOut = items_[row];
     if (portIdOut) *portIdOut = id;
     return true;
+}
+
+// THE SAVED MUSIC SERVER THE CURSOR IS STANDING ON (issue #337), shaped exactly like the two beside it and
+// for the same reason: the verb's target is resolved BEFORE any menu opens, so a grid that moves under a
+// nested loop cannot make "remove" fire on a different server.
+//
+// It exists because removing a music server had exactly ONE door — a right-click or long-press on the
+// classic grid — and the themed layout has neither gesture. Something that can be added on a layout and
+// never removed on it is not configuration (HomeView says so where the long-press is routed), and #337's
+// one-last-chance offer to send that server's unsent listens lives inside that removal, so on the themed
+// layout the whole of this issue's fix would have been unreachable.
+bool HomeView::browseMusicServer(int themedIndex, QString* serverIdOut, QString* nameOut) const
+{
+    int row = -1;
+    if (themedIndex < 0) { if (!grid_) return false; row = grid_->currentRow(); }
+    else                 { if (themedIndex >= browseRowMap_.size()) return false; row = browseRowMap_[themedIndex]; }
+    if (row < 0 || row >= items_.size()) return false;
+    const MediaItem& it = items_[row];
+    if (it.type != QString::fromLatin1(browse::kMusicServerType)) return false;
+    const QString sid = browse::musicKeyOf(it.mime, browse::kMusicServerPrefix);
+    if (sid.isEmpty()) return false;
+    if (serverIdOut) *serverIdOut = sid;
+    if (nameOut)     *nameOut = it.title;
+    return true;
+}
+
+void HomeView::removeMusicServerFromMenu(const QString& serverId, const QString& name)
+{
+    removeMusicServerInteractive(serverId, name);
 }
 
 bool HomeView::browseJellyfinDownload(int themedIndex, int* kindOut, QString* refOut,

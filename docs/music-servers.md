@@ -85,3 +85,25 @@ its own "waiting to send" line in Settings, so one box being switched off never 
 
 Long-press (or right-click) its row under **Music Servers**. That forgets the sign-in here and stops
 reporting plays to it; nothing on the server itself is touched.
+
+### Plays that have not been reported yet
+
+A server that was asleep, or that you listened past on a train, may still be owed some plays. Removing
+it is the **last moment those can ever be sent**: afterwards there is no address and no sign-in left to
+send them with, and the app will not keep asking a server it no longer knows about.
+
+So if any are waiting, the confirmation says how many and offers three answers:
+
+| | What happens |
+|---|---|
+| **Cancel** | Nothing is removed and nothing is deleted. |
+| **Send *n* plays, then remove** | One attempt, right now, while the sign-in still works. Then the server is removed **whatever the attempt achieved** — you asked for it to go, and a box that is asleep does not get a veto. You are told exactly what landed and what did not. |
+| **Remove and discard *n* plays** | The server goes and the waiting plays go with it. |
+
+Whichever you choose, **anything not sent is deleted, and you are told so before you choose** — the
+plays cannot be kept for a server that no longer exists, and leaving them on disk unmentioned is worse
+than losing them, because then nobody ever finds out.
+
+If you removed a server in an older version and it left plays behind, the app finds them once at
+startup and says so: it cannot send them (that sign-in is long gone), so it offers to delete them or
+leave them where they are. Nothing is deleted unless you say so.
