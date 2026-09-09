@@ -46,6 +46,7 @@
 #include "../core/LaunchRecipe.h"   // issue #191: the MS-DOS MIDI device list is recipe DATA, not a C++ table
 #include "../core/ShaderPreset.h"   // curated shader-preset registry backing the global-default picker (issue #99)
 #include "../core/LocalLibrary.h"
+#include "../core/LibraryScanActivity.h"   // #302: "a scan is running" — the idle preview walk's input
 #include "../core/CatalogMatch.h"  // #207: what a resolved payload plainly is (payloadShape)
 #include "../core/MusicLibrary.h"   // issue #74: the local music scan + Artists/Albums/Tracks index
 #include "../core/AudiobookLibrary.h" // issue #139: the local audiobook scan + Authors/Narrators/Series index
@@ -1119,7 +1120,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         const auto shows = resolveCache_->seriesIdsByShow();        // show snapshot on the MAIN thread (thread-safe by value)
         const quint64 gen = libScanGen_;                            // READ (do not ++) — a refresh, not a superseding scan
         auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+        LibraryScanActivity::begin();   // #302: a library walk owns the disk; the idle preview walk stands aside
         connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+            LibraryScanActivity::end();
             if (gen == libScanGen_) {                               // a newer folder-change rescan invalidates this stale rebuild
                 LocalLibrary::installIndex(w->result());
                 if (home_) home_->onLocalLibraryChanged();
@@ -3232,7 +3235,9 @@ void MainWindow::rescanLocalLibrary()
     const QHash<QString, QStringList> shows = resolveCache_ ? resolveCache_->seriesIdsByShow()
                                                             : QHash<QString, QStringList>{};
     auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+    LibraryScanActivity::begin();       // #302: a scan owns the disk; the idle preview walk stands aside
     connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+        LibraryScanActivity::end();     // …including for a scan superseded by a newer one, which still ends
         if (gen == libScanGen_) {                               // ignore a scan superseded by a newer rescan
             LocalLibrary::installIndex(w->result());
             if (home_) home_->onLocalLibraryChanged();
@@ -3258,7 +3263,9 @@ void MainWindow::rescanMusicLibrary()
     const QStringList seps  = Settings::musicTagSeparatorList();  // ...and the multi-value split (#196)
     const quint64 gen = ++musicScanGen_;
     auto* w = new QFutureWatcher<MusicLibrary::Index>(this);
+    LibraryScanActivity::begin();       // #302: as the video scan above
     connect(w, &QFutureWatcher<MusicLibrary::Index>::finished, this, [this, w, gen] {
+        LibraryScanActivity::end();
         if (gen == musicScanGen_)                              // ignore a scan superseded by a newer rescan
         {
             MusicLibrary::installIndex(w->result());
@@ -3316,7 +3323,9 @@ void MainWindow::rescanAudiobookLibrary()
     const QStringList seps  = Settings::musicTagSeparatorList();   // ONE separator setting, both libraries
     const quint64 gen = ++audiobookScanGen_;
     auto* w = new QFutureWatcher<AudiobookLibrary::ScanResult>(this);
+    LibraryScanActivity::begin();       // #302: as the video scan above
     connect(w, &QFutureWatcher<AudiobookLibrary::ScanResult>::finished, this, [this, w, gen] {
+        LibraryScanActivity::end();
         if (gen == audiobookScanGen_)                              // ignore a scan superseded by a newer one
         {
             // BOTH HALVES (issue #198): the entries as the tags read them and the index built from them.
@@ -3377,7 +3386,9 @@ void MainWindow::rescanBookLibrary()
     const QString artDir    = MusicArt::cacheDir();           // ...and so does this one
     const quint64 gen = ++bookScanGen_;
     auto* w = new QFutureWatcher<BookLibrary::Index>(this);
+    LibraryScanActivity::begin();       // #302: as the video scan above
     connect(w, &QFutureWatcher<BookLibrary::Index>::finished, this, [this, w, gen] {
+        LibraryScanActivity::end();
         if (gen == bookScanGen_)                              // ignore a scan superseded by a newer one
         {
             BookLibrary::installIndex(w->result());
@@ -22549,6 +22560,18 @@ void MainWindow::openGeneralSettings()
              tr("Shows a picture of where you are dragging to on the seek bar. Thumbnails are made in the "
                 "background, between playbacks, for videos stored on this device only — a stream is never "
                 "previewed. Older previews are deleted first when the limit is reached."), QString());
+        // Idle library sweep (issue #302). SEPARATE from the size above, and it is not a second way to say
+        // no: with the size at Off this is inert, so the two can never disagree in the direction that
+        // matters. It answers a different question — may the app go LOOKING for work — and it is off by
+        // default because it is the one part of this feature the user did not implicitly ask for by
+        // opening a file. Twin below in the QWidget builder.
+        toggle(QStringLiteral("pb.seekpreviewidle"), tr("Make them ahead of time when idle"),
+               Settings::previewIdleScan());
+        info(QStringLiteral("pb.seekpreviewidlehint"),
+             tr("Goes through the videos in your library while nothing else is happening, so a film has its "
+                "previews the first time you watch it. One at a time, and it stops the moment you start "
+                "playing something, a library scan begins or you touch anything. Never while running on "
+                "battery, and never when this device cannot tell whether it is plugged in."), QString());
         // Refresh-rate matching, Tier 1 (issue #70). video-sync=display-resync locks video to the display clock
         // (mpv resamples audio) to smooth 24fps-on-60Hz judder; default on for desktop/TV, off on iOS's software
         // render path (RefreshSync::videoSyncFor). Applies to the next video. Twin below in the QWidget builder.
@@ -23380,6 +23403,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("pb.seekpreview")) {
                     for (const auto& p : previewCachePairs) if (p.first == val) { Settings::setPreviewCacheMb(p.second); break; }
                 }
+                else if (id == QStringLiteral("pb.seekpreviewidle")) Settings::setPreviewIdleScan(on);
                 else if (id == QStringLiteral("player.external")) {
                     QString key = val;                              // map the picked display back to the stored key
                     for (const auto& p : playerOptPairs) if (p.first == val) { key = p.second; break; }
@@ -25088,6 +25112,24 @@ void MainWindow::openGeneralSettings()
                                           "previews are deleted first when the limit is reached."));
         previewNote->setWordWrap(true); previewNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(previewNote);
+
+        // Idle library sweep (issue #302): the classic twin of the themed pb.seekpreviewidle row. Same
+        // Settings key and setter (previews/idleScan) - one write path, no drift. It is a second control
+        // beside the size rather than another spelling of it: the size says how much this may cost, this
+        // says whether the app may go looking for work at all, and with the size at Off it is inert.
+        auto* previewIdle = new QCheckBox(tr("Make them ahead of time when idle"));
+        previewIdle->setChecked(Settings::previewIdleScan());
+        connect(previewIdle, &QCheckBox::toggled, this, [](bool on) { Settings::setPreviewIdleScan(on); });
+        v->addWidget(previewIdle);
+        auto* previewIdleNote = new QLabel(tr("Goes through the videos in your library while nothing else is "
+                                              "happening, so a film has its previews the first time you watch "
+                                              "it. One at a time, and it stops the moment you start playing "
+                                              "something, a library scan begins or you touch anything. Never "
+                                              "while running on battery, and never when this device cannot "
+                                              "tell whether it is plugged in."));
+        previewIdleNote->setWordWrap(true);
+        previewIdleNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(previewIdleNote);
 
         // Default audiobook/podcast speed (issue #140): the classic twin of the themed pb.defaultspeed row. Same
         // Settings key/setter (playback/defaultSpeed) — one write path, no drift. A book with a remembered

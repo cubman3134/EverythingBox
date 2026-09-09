@@ -31,7 +31,7 @@ engine — which is what makes both all-format video and libretro first-class.
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below || Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`, `browse/JellyfinCatalogs`): **several servers at once**, merged into one library — browse, play, and report progress back | **built**; `probe_jellyfin` covers the ids, the migration, the store, the union, PlaybackInfo, progress, resume and segments, `probe_browse` the browse levels, `probe_leafroute` the leaf, `probe_segments` the server tier. Drive verified against local fixture servers — see below |
 | Jellyfin servers (`Jellyfin`, `JellyfinServerStore`, `JellyfinClient`): **several servers at once**, merged into one library | **core + settings built**; `probe_jellyfin` covers the ids, the migration, the store and the union. Drive verified against local fixture servers — see below |
-| Seek previews (`Trickplay`, `TrickplayGen`, `MainWindowTrickplay`): thumbnail sprite sheets for files stored on this device, shown while you scrub | **built**; `probe_trickplay` covers the tile arithmetic, the cache key, resuming, eviction, the sidecar and the stream refusal — see below |
+| Seek previews (`Trickplay`, `TrickplayGen`, `MainWindowTrickplay`, + `TrickplayIdle`/`TrickplayIdleWalk`/`TrickplayPower`): thumbnail sprite sheets for files stored on this device, shown while you scrub — made between playbacks and, optionally, on genuine idle | **built**; `probe_trickplay` covers the tile arithmetic, the cache key, resuming, eviction, the sidecar, the stream refusal and the idle predicate (incl. battery) — see below |
 | One music library across every source (`MusicId`, `MusicMerge`, `MusicRemap`, + `Subsonic`/`JellyfinMusic`/`ServerMusic` suppliers) | **built**; `probe_musicid`, `probe_musicremap` and `probe_musicsources` cover identity, the remap and all four suppliers. Drive verified against fixture HTTP stubs — see below |
 
 ## Seek previews
@@ -51,6 +51,36 @@ call site, and `probe_trickplay` drives it over every url shape the app produces
 with its own headless `libmpv`, and never while something is playing — the decoder belongs to what you are
 watching. A run that is interrupted keeps the sheets it finished and picks up where it left off; nothing is
 written until a whole sheet is complete.
+
+**And, if you ask for it, ahead of time when the machine is idle.** Settings → General → Playback → *Make
+them ahead of time when idle*, on both settings surfaces. With it on, the same job also walks your local
+video library while nothing else is happening, so a film has its previews the **first** time you watch it
+rather than the second. It is exactly the same job with a wider trigger: one file at a time, off the GUI
+thread, the same sheets, the same cache key and the same size bound.
+
+*Idle means idle.* The walk starts only when previews are on, you have switched this on, nothing is playing
+(a video, a game, an emulator, a reader, or music continuing behind a browse screen), no library scan is
+running, no port is being compiled, and the app has not been touched for a minute. It is re-asked every few
+seconds, so pressing play stops a walk halfway through a film rather than at the end of it. Interrupting it
+costs nothing: it keeps every whole sheet, and the next quiet period continues at the next file rather than
+starting the library again.
+
+*Never on battery.* On Windows and Linux the app asks the machine whether it is on mains and will not sweep
+a library unless it is. On platforms where it cannot ask — Android, iOS and macOS — the answer is *unknown*,
+and unknown refuses too: this is work you did not ask for at that moment, so it does not get the benefit of
+the doubt. Previews for a film you have just watched are unaffected on every platform, because you opened
+that file.
+
+*It never deletes anything to make room for itself.* If the cache is already at its limit the walk stops.
+Eviction is for making space for what you **are** watching; a film nobody has opened does not get to push
+one out.
+
+**Why it is off by default.** The between-playbacks trigger is a consequence of something you did — you
+opened that file. A library sweep is not, and there are three things the app genuinely cannot see: whether
+the *machine* is busy (it can only tell whether **it** is being driven, so EverythingBox minimised behind a
+game looks idle), whether a fanless handheld has the thermal headroom for an hour of decoding even while
+plugged in, and whether the disk wants the writes. Rather than decide those on your behalf it asks, once, in
+a sentence.
 
 **Where they live.** One directory per video under `previews/` in the app's data folder (beside
 `EverythingBox.exe` on desktop), holding tiled JPEG grids and a small `index.json` describing them. The

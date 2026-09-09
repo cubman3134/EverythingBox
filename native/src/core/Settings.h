@@ -619,6 +619,31 @@ namespace Settings
     int  previewCacheMb();
     void setPreviewCacheMb(int mb);
 
+    // Seek previews, second trigger (issue #302): may the app also sweep the LOCAL LIBRARY on genuine idle,
+    // so a film has its strip the FIRST time it is watched rather than the second? Stored under
+    // "previews/idleScan", and device-local by inheritance — the whole "previews/" prefix is in CloudSync's
+    // carve-out (#301) — which is the right shape here too: whether a sweep is polite is a fact about this
+    // machine, not about the account. A handheld and a desktop want different answers.
+    //
+    // DEFAULT OFF, and that is a decision rather than caution. #85's trigger is a CONSEQUENCE of something
+    // the user did — they opened that file — so spending a few minutes of CPU on it afterwards is work they
+    // implicitly asked for. A library sweep is not: it is the app deciding, on its own, to spend hours of
+    // decode and up to the whole cache bound in writes on films nobody has opened. Three things we cannot
+    // detect make that unsafe to assume for somebody:
+    //
+    //   * whether the MACHINE is busy. The idle input is app-scoped (the same input funnel attract mode uses),
+    //     so EverythingBox minimised behind a game, a compile or a video call looks perfectly idle to us;
+    //   * thermal and fan headroom. On a passively-cooled handheld an hour of continuous decode is audible
+    //     and warm even when it is plugged in;
+    //   * whether the disk wants it. The bound is a size, not a write budget, and an SSD in a cheap TV box is
+    //     not the drive the number was chosen against.
+    //
+    // Where we CAN tell — power — the rule is absolute: never on battery, and never when we cannot tell
+    // (TrickplayIdle::evaluate). Given all that, on by default would be the app quietly deciding on the
+    // user's behalf; off by default with a plainly-worded switch is the same feature, chosen.
+    bool previewIdleScan();
+    void setPreviewIdleScan(bool on);
+
     // Refresh-rate matching, Tier 1 (issue #70): reduce judder by locking video to the display clock via mpv's
     // video-sync=display-resync (RefreshSync::videoSyncFor). Read at player creation and re-applied live on
     // change. The stored value is a plain bool under "video/refreshSync"; when ABSENT the default is form-factor

@@ -4,6 +4,7 @@
 #include "Settings.h"
 
 #include <QAtomicInt>
+#include <QAtomicInteger>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -60,12 +61,45 @@ class TrickplayWorker : public QObject
 public:
     // Read by the worker between every frame, written by the GUI thread. The only shared state there is.
     QAtomicInt cancel{ 0 };
+    // #302: what the cache held at the worker's last measurement. Written here, read (advisory) by the GUI
+    // thread — an atomic rather than a mutex because a stale read is harmless: the authoritative check is the
+    // one taken below, on this thread, with a live number.
+    QAtomicInteger<qint64> cacheBytes{ 0 };
+
+    // What the whole preview cache occupies right now. The same walk sweep() does, without the deleting —
+    // and on this thread for the same reason sweep() is: it is a directory tree's worth of stat calls.
+    qint64 cacheSizeBytes()
+    {
+        QDir rd(TrickplayGen::cacheRoot());
+        if (!rd.exists()) return 0;
+        qint64 total = 0;
+        for (const QFileInfo& item : rd.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+        {
+            QDir d(item.absoluteFilePath());
+            for (const QFileInfo& f : d.entryInfoList(QDir::Files)) total += f.size();
+        }
+        return total;
+    }
 
 public slots:
-    void generate(const QString& path, qint64 boundBytes)
+    void generate(const QString& path, qint64 boundBytes, bool idleOrigin)
     {
         const QString dir = TrickplayGen::itemDirFor(path);
         if (dir.isEmpty()) { emit done(path); return; }
+
+        // #302. An idle item is work nobody asked for, so it must prove there is ROOM before it makes any —
+        // and the answer when there is not is to stop, never to evict. (A user-originated item skips this
+        // entirely: #85's behaviour is unchanged, and its LRU sweep at the end is what makes room for it.)
+        qint64 used = 0;
+        if (idleOrigin)
+        {
+            used = cacheSizeBytes();
+            cacheBytes.storeRelease(used);
+            // Publishing the measurement is what un-sticks the walk later: it is the ONLY number the GUI
+            // side has, so "at the bound" and "there is room" are both said by the same store.
+            if (!TrickplayIdle::hasHeadroom(used, boundBytes)) { emit done(path); return; }
+        }
+
         if (!QDir().mkpath(dir))  { emit done(path); return; }
 
         const QFileInfo fi(path);
@@ -156,10 +190,23 @@ public slots:
             painter.end();
             if (!gridOk) break;
 
-            if (!saveImageAtomically(dir + QLatin1Char('/') + Trickplay::gridFileName(g), sheet)) break;
+            const QString gridPath = dir + QLatin1Char('/') + Trickplay::gridFileName(g);
+            if (!saveImageAtomically(gridPath, sheet)) break;
             ix.completeGrids = g + 1;
             writeAtomically(dir + QStringLiteral("/index.json"), Trickplay::writeIndex(ix));
             emit progressed(path);
+
+            // #302: an idle walk re-asks the bound between grids. A film that was inside it when the walk
+            // started can cross it halfway through, and the honest answer there is to stop with the grids
+            // already written — which are whole, and which Trickplay::resumeGrid will pick up from if the
+            // user later frees space. Counted rather than re-measured: the tree was walked once above and
+            // this loop knows exactly what it has added since.
+            if (idleOrigin)
+            {
+                used += QFileInfo(gridPath).size();
+                cacheBytes.storeRelease(used);
+                if (!TrickplayIdle::hasHeadroom(used, boundBytes)) break;
+            }
         }
 
         QFile::remove(tile);
@@ -167,7 +214,12 @@ public slots:
 
         // The sweep runs here, on this thread, whether or not the walk finished — an interrupted item still
         // added bytes. The item just touched is protected from its own sweep.
-        sweep(boundBytes, QFileInfo(dir).fileName());
+        //
+        // AN IDLE ITEM DOES NOT SWEEP (#302), and this is the one line that keeps decision 4 true. The sweep
+        // is an eviction, and an eviction triggered by uninvited work would delete the strip of a film the
+        // user watched last night to make room for one they have never opened. The idle path stops at the
+        // bound instead (above); eviction stays where #85 put it, on the path where the user IS watching.
+        if (!idleOrigin) sweep(boundBytes, QFileInfo(dir).fileName());
         Q_UNUSED(cancelled);
         emit done(path);
     }
@@ -282,7 +334,13 @@ TrickplayGen::TrickplayGen(QObject* parent) : QObject(parent)
     worker_->moveToThread(thread_);
     connect(thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(worker_, &TrickplayWorker::progressed, this, &TrickplayGen::itemProgressed);
-    connect(worker_, &TrickplayWorker::done, this, [this](const QString&) { busy_ = false; pump(); });
+    connect(worker_, &TrickplayWorker::done, this, [this](const QString& path) {
+        busy_ = false;
+        // #302: tell the library walk its item is finished with BEFORE pumping, so the walk can queue the
+        // next file and have this same pump pick it up rather than waiting a whole poll interval.
+        if (runningIdle_) { runningIdle_ = false; emit idleItemFinished(path); }
+        pump();
+    });
     // Below normal: this is a courtesy job. It must never be the reason anything else is slow.
     thread_->start(QThread::LowPriority);
 }
@@ -339,12 +397,59 @@ void TrickplayGen::noteUsed(const QString& dir)
     QMetaObject::invokeMethod(worker_, "touch", Qt::QueuedConnection, Q_ARG(QString, dir));
 }
 
+// What this file's cache directory holds, for the idle walk's skip rule (#302). Reads the sidecar RAW rather
+// than through loadIndex(), whose returned frameCount is clamped to the complete grids: comparing that
+// against itself would answer Complete for every partial item and the walk would never finish anything it
+// started.
+TrickplayIdle::ItemState TrickplayGen::itemState(const QString& path)
+{
+    const QString dir = itemDirFor(path);
+    if (dir.isEmpty()) return TrickplayIdle::ItemState::Complete;   // nothing to do here, and never will be
+    QFile f(dir + QStringLiteral("/index.json"));
+    if (!f.open(QIODevice::ReadOnly)) return TrickplayIdle::ItemState::NoSheets;
+    Trickplay::Index ix;
+    if (!Trickplay::readIndex(f.readAll(), &ix)) return TrickplayIdle::ItemState::NoSheets;
+    const QFileInfo fi(path);
+    // A sidecar describing a different file than the one on disk now is not this item's — the mtime/size half
+    // of the cache key, applied at the moment of use exactly as loadIndex applies it.
+    if (ix.sourceMtime != fi.lastModified().toSecsSinceEpoch() || ix.sourceSize != fi.size())
+        return TrickplayIdle::ItemState::NoSheets;
+    const int grids = Trickplay::gridCount(ix.layout);
+    return (grids > 0 && ix.completeGrids >= grids) ? TrickplayIdle::ItemState::Complete
+                                                    : TrickplayIdle::ItemState::Partial;
+}
+
+qint64 TrickplayGen::knownCacheBytes() const { return worker_ ? worker_->cacheBytes.loadAcquire() : 0; }
+
 void TrickplayGen::request(const QString& path)
 {
     if (Settings::previewCacheMb() <= 0) return;          // previews off: nothing is generated, ever
     if (itemDirFor(path).isEmpty()) return;               // not ours to preview, or gone
     pending_ = path;
+    pendingIdle_ = false;   // #302: a file the user just watched outranks anything the library walk queued
     pump();
+}
+
+// #302. The idle walk's way in. Note what it will NOT do: displace a pending user-originated request. That
+// one is about a file somebody just had open; this one is about a file nobody has opened at all.
+void TrickplayGen::requestIdle(const QString& path)
+{
+    if (Settings::previewCacheMb() <= 0) return;
+    if (!Settings::previewIdleScan()) return;             // the walk's own switch, checked here as well
+    if (!pending_.isEmpty() && !pendingIdle_) return;     // a user request is queued: leave it alone
+    if (itemDirFor(path).isEmpty()) return;
+    pending_ = path;
+    pendingIdle_ = true;
+    pump();
+}
+
+// Stop the library walk without touching a user-originated one. cancel is a single flag shared with the
+// worker, so it may only be raised when the item the worker holds is OURS — otherwise a walk conditions
+// changed under would abort the strip of the film the user is about to scrub.
+void TrickplayGen::cancelIdle()
+{
+    if (pendingIdle_) { pending_.clear(); pendingIdle_ = false; }
+    if (runningIdle_) worker_->cancel.storeRelease(1);
 }
 
 void TrickplayGen::setPlaybackBusy(bool busy)
@@ -357,20 +462,30 @@ void TrickplayGen::setPlaybackBusy(bool busy)
 void TrickplayGen::cancelAll()
 {
     pending_.clear();
+    pendingIdle_ = false;
     worker_->cancel.storeRelease(1);
 }
 
 void TrickplayGen::pump()
 {
+    // Merely BUSY keeps the request: setPlaybackBusy(false) pumps again, and the file just watched is the one
+    // most worth a strip. That split is #85's and is deliberately untouched.
     if (playing_ || busy_ || pending_.isEmpty()) return;
     const qint64 bound = qint64(Settings::previewCacheMb()) * 1024 * 1024;
-    if (bound <= 0) { pending_.clear(); return; }
+    // #85's OWN trigger, named (TrickplayIdle::mayGenerateForOpenedFile) rather than spelled out here, so that
+    // #302's widening onto idle cannot quietly narrow it: that function takes exactly the two inputs it has
+    // always had and none of the new ones, and probe_trickplay drives it over the whole cross-product of them
+    // to assert the answer never moves. `playing_` is already false above; passing it keeps the call honest.
+    if (!TrickplayIdle::mayGenerateForOpenedFile(bound > 0, playing_)) { pending_.clear(); return; }
     const QString path = pending_;
+    const bool idleOrigin = pendingIdle_;
     pending_.clear();
+    pendingIdle_ = false;
+    runningIdle_ = idleOrigin;
     busy_ = true;
     worker_->cancel.storeRelease(0);
     QMetaObject::invokeMethod(worker_, "generate", Qt::QueuedConnection,
-                              Q_ARG(QString, path), Q_ARG(qint64, bound));
+                              Q_ARG(QString, path), Q_ARG(qint64, bound), Q_ARG(bool, idleOrigin));
 }
 
 #include "TrickplayGen.moc"

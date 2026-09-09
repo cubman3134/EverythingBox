@@ -19,8 +19,14 @@
 #include "MainWindow.h"
 
 #include "../core/AppPaths.h"
+#include "../core/AttractController.h"
+#include "../core/LibraryScanActivity.h"
+#include "../core/LocalLibrary.h"
+#include "../core/RecompBuildJob.h"
 #include "../core/Settings.h"
 #include "../core/TrickplayGen.h"
+#include "../core/TrickplayIdleWalk.h"
+#include "../core/TrickplayPower.h"
 #include "../media/PlaybackSession.h"
 #include "../video/MpvWidget.h"
 
@@ -31,6 +37,15 @@
 #include <QSlider>
 #include <QStyle>
 #include <QStyleOptionSlider>
+
+namespace
+{
+// Issue #302. How long the app must have gone undriven before an idle sweep may begin. Sixty seconds, and it
+// is deliberately generous rather than tuned: somebody who has stopped pressing buttons for twenty seconds is
+// still sitting in front of the machine reading a synopsis, and a fan spinning up while they do that reads as
+// the app doing something behind their back. It costs nothing to wait — the whole feature is a courtesy.
+constexpr int kTrickplayQuietSeconds = 60;
+} // namespace
 
 void MainWindow::initTrickplay()
 {
@@ -52,6 +67,57 @@ void MainWindow::initTrickplay()
         trickGrid_ = QPixmap();
         trickGridNo_ = -1;
     });
+
+    // ---- Issue #302: the second trigger ----------------------------------------------------------------
+    // #85 makes a film's strip between playbacks, so it exists from the SECOND viewing. This adds a walk of
+    // the local library on genuine idle, which makes it exist the first time. It is OFF by default (see
+    // Settings::previewIdleScan for the argument) and every start goes through the pure predicate below.
+    trickWalk_ = new TrickplayIdleWalk(trickGen_, this);
+    trickWalk_->setConditionsProvider([this] { return trickplayConditions(); });
+    trickWalk_->setLibraryProvider([] {
+        // The LOCAL video library, and nothing else. Not Recents, not a catalogue, not a downloads folder:
+        // the issue's own framing is that previews should be a property of the library. LocalLibrary::index()
+        // is main-thread-only and this lambda is only ever called from the walk's timer, on this thread.
+        QStringList out;
+        const auto& entries = LocalLibrary::index().all();
+        out.reserve(entries.size());
+        for (const LocalLibrary::VideoEntry& e : entries) out << e.path;
+        return out;
+    });
+    trickWalk_->start();
+}
+
+// Everything TrickplayIdle::evaluate() decides on, gathered from facts this window already keeps. Nothing
+// here is a new clock or a new watcher: an input we cannot get honestly is one this feature must not claim.
+//
+//   playing   — attract mode's own "content is on screen" split (a video, a game, an emulator, a reader, and
+//               a standalone emulator running behind the wait page), plus music continuing behind a browse
+//               surface. That is #85's rule about the MACHINE rather than about the page, restated.
+//   scanning  — LibraryScanActivity, incremented by all five library walks.
+//   building  — #248's self-compile tier. We do not fight it for cores; it will finish sooner if we stay off.
+//   userActive— the app's own input funnel (AttractController::lastInputMs, which EVERY input path resets
+//               whether or not attract mode is enabled). It is APP-scoped: EverythingBox minimised behind a
+//               game looks idle to us. That limit is stated in TrickplayIdle.h and is the main reason the
+//               setting defaults off; it is not papered over here.
+//   power     — TrickplayPower, which answers on Windows and Linux and Unknown everywhere else. Battery AND
+//               Unknown both refuse.
+TrickplayIdle::Conditions MainWindow::trickplayConditions() const
+{
+    TrickplayIdle::Conditions c;
+    c.previewsEnabled = Settings::previewCacheMb() > 0;
+    c.idleEnabled     = Settings::previewIdleScan();
+    c.playing         = (attract_ && attract_->playbackActive()) || musicPlayingInBackground();
+    c.scanning        = LibraryScanActivity::running();
+    c.building        = RecompBuildJob::instance().busy();
+    // The quiet period. Deliberately generous: somebody who has just stopped pressing buttons is still
+    // sitting in front of the machine, and a fan spinning up thirty seconds after they stopped browsing
+    // reads as the app doing something behind their back.
+    const qint64 quietMs = qint64(kTrickplayQuietSeconds) * 1000;
+    c.userActive      = !attract_ || (attractClock_.elapsed() - attract_->lastInputMs()) < quietMs;
+    c.power           = TrickplayPower::current();
+    c.boundBytes      = qint64(Settings::previewCacheMb()) * 1024 * 1024;
+    c.cacheBytes      = 0;   // filled by the walk from the worker's own measurement
+    return c;
 }
 
 // Called from onDuration, which mpv re-emits for the SAME file, so the first thing this does is notice it
