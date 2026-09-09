@@ -776,6 +776,15 @@ the built binary's own import table (Windows) or `DT_NEEDED` (Linux). Adding a
 theme, an addon file or a linked library therefore needs no edit here -- and
 forgetting to package one fails the release.
 
+**In the archive is not the same as findable** (issue #339). `AppPaths::dataDir()`
+is `QCoreApplication::applicationDirPath()` on every desktop platform, so
+`themes2/` and `addons/` are read from the executable's OWN directory and
+nowhere else -- the zip root on Windows, `usr/bin` inside the AppDir on Linux.
+An AppImage that stashed them at the image root, or under `usr/share` where a
+distro package would put them, would ship two trees the app never opens. Until
+#339 it shipped neither at all, and Linux users got the classic home and no
+first-party add-on. The checker asserts the path, not just the presence.
+
 The literal half -- the executable's name, the Qt platform plugin, and which
 libraries the OS supplies -- lives in one block at the top of that script. Put
 anything new there, not in the workflow. If you change what the packaging step

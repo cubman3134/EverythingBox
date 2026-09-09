@@ -1795,14 +1795,30 @@ else
     elif [ -n "$arc_a" ] && [ "$arc_v" -gt "$arc_a" ]; then
       arc_bad="$arc_bad  the $arc_name job checks the archive only AFTER uploading/attaching it"$'\n'
     fi
+    # The AppImage's two bundled trees (issue #339). The checker above cannot fire on a pull request:
+    # release.yml runs on a tag and weekly, so its verdict arrives long after the mistake is written.
+    # What CAN be held here is that the Linux packaging step still copies themes2/ and addons/ BESIDE
+    # THE BINARY -- usr/bin inside the AppDir, the one directory AppPaths::dataDir() resolves to on
+    # Linux. Every AppImage before #339 copied neither, so Linux users got the classic home (no
+    # bundled theme to render) and no first-party add-on at all.
+    if [ "$arc_name" = linux ]; then
+      for arc_tree in themes2 addons; do
+        # grep -c, never -q: the haystack is a variable and this suite runs under `set -o pipefail`.
+        if [ "$(printf '%s\n' "$arc_block" | grep -c "native/$arc_tree.*APPDIR/usr/bin")" = 0 ]; then
+          arc_bad="$arc_bad  the linux job never copies native/$arc_tree beside the binary in the AppDir"$'\n'
+        fi
+      done
+    fi
   done
   if [ -n "$arc_bad" ]; then
     printf '%s' "$arc_bad"
-    echo "FAIL: release archive manifest -- release.yml does not read back what it packaged before it"
-    echo "  goes out, so whatever the packaging step forgets is what users download."
+    echo "FAIL: release archive manifest -- release.yml either no longer packages what the app needs,"
+    echo "  or no longer reads back what it packaged before it goes out. Either way, what the packaging"
+    echo "  step forgets is what users download."
     fail=1
   else
-    echo "the checker fails on a missing file, and both packaging jobs run it before they publish"
+    echo "the checker fails on a missing file, both packaging jobs run it before they publish, and the"
+    echo "AppImage still copies themes2/ and addons/ beside the binary"
     echo "PASS: release archive manifest"
   fi
 fi

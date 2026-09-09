@@ -340,6 +340,15 @@ jobs:
           mkdir -p $APPDIR/usr/bin
           cp build/EverythingBox $APPDIR/usr/bin/
           cp native/gamecontrollerdb.txt $APPDIR/usr/bin/  # SDL reads it from the binary's own dir
+          # The two bundled trees (issue #339). They go BESIDE THE BINARY, not at the AppDir root and
+          # not under usr/share, because AppPaths::dataDir() is QCoreApplication::applicationDirPath()
+          # on Linux exactly as it is on Windows: ThemeEngine reads <dataDir>/themes2 and AddonManager
+          # reads <dataDir>/addons, one directory each, with no search and no fallback. Every AppImage
+          # released before this shipped neither, so Linux had no bundled theme (the themed home fell
+          # back to classic) and no first-party add-on. The Windows zip has always copied both; this
+          # brings the AppImage up to it. verify-release-archive.py asserts them, at this path.
+          cp -r native/themes2 $APPDIR/usr/bin/
+          cp -r native/addons  $APPDIR/usr/bin/
           cp native/resources/appicon.png EverythingBox.png
           cat > EverythingBox.desktop <<'EOF'
           [Desktop Entry]

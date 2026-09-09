@@ -16,10 +16,13 @@ script exists to catch -- it drifts the moment somebody adds a file. So the mani
 the repository already knows the answer, and literal only where nothing in the tree can be asked:
 
   DERIVED, from the repo tree (`--repo`), which is the same checkout the packaging step copied from:
-    * every file under native/addons/**  -> must be in the archive at addons/<same relative path>
-    * every file under native/themes2/** -> must be in the archive at themes2/<same relative path>
+    * every file under native/addons/**  -> must be in the archive at <bindir>/addons/<same rel path>
+    * every file under native/themes2/** -> must be in the archive at <bindir>/themes2/<same rel path>
       (both trees are copied WHOLESALE by the packaging step, so the tree is the list; adding a theme
-      or an addon file needs no edit here, and forgetting to package one is caught)
+      or an addon file needs no edit here, and forgetting to package one is caught. <bindir> is the
+      executable's own directory -- the zip root on Windows, usr/bin inside the AppDir on Linux --
+      because that is what AppPaths::dataDir() resolves to, and it is the ONLY directory ThemeEngine
+      and AddonManager read from. See issue #339.)
     * native/gamecontrollerdb.txt        -> beside the executable, BYTE-IDENTICAL
     * native/resources/Uninstall.cmd     -> beside the executable, BYTE-IDENTICAL (Windows only)
   DERIVED, from the built binary itself:
@@ -37,8 +40,10 @@ WINDOWS AND LINUX ASK DIFFERENT QUESTIONS. For the zip, "is it in there" is the 
 reads its data dir from applicationDirPath() (AppPaths.h), so a file beside EverythingBox.exe is a file
 the app finds. For the AppImage, "is it in there" and "can the app find it" are separate -- a file inside
 the image at a path the binary never looks at is still missing -- so the AppImage checks also assert that
-gamecontrollerdb.txt is in the SAME directory as the binary SDL_GetBasePath() resolves to, and that the
-Qt platform plugin is reachable by the search path qt.conf actually establishes.
+gamecontrollerdb.txt is in the SAME directory as the binary SDL_GetBasePath() resolves to, that themes2/
+and addons/ are in that same directory (dataDir() is applicationDirPath() on Linux too, so an AppImage
+that stashed them under usr/share would ship two trees nothing ever opens), and that the Qt platform
+plugin is reachable by the search path qt.conf actually establishes.
 
 Usage:
   verify-release-archive.py --kind windows  --archive EverythingBox-windows-x64.zip [--repo .]
@@ -360,7 +365,21 @@ def platform_provided(name_lower):
 def check_bundled_data(repo, rep, read, prefix):
     """The controller database and the two bundled trees, asserted against the repo tree itself."""
     expect_identical(repo, rep, read, "native/gamecontrollerdb.txt", prefix + "gamecontrollerdb.txt")
-    for rel, arcdir in (("native/addons", "addons"), ("native/themes2", "themes2")):
+    check_bundled_trees(repo, rep, read, prefix)
+
+
+BUNDLED_TREES = (("native/addons", "addons"), ("native/themes2", "themes2"))
+
+
+def check_bundled_trees(repo, rep, read, prefix, trees=BUNDLED_TREES):
+    """themes2/ and addons/, file by file, under `prefix` (the executable's own directory).
+
+    Split out of check_bundled_data because the AppImage answers the controller database's question
+    differently (it has to say WHERE a stray copy is), but asks exactly this one about the two trees.
+    `trees` narrows it: a tree the AppImage put in the wrong directory has already been reported as
+    such, and listing its several hundred files again as "never packaged" would bury that finding.
+    """
+    for rel, arcdir in trees:
         files = repo_tree_files(repo, rel)
         if not files:
             rep.bad("%s in the repo checkout holds no files, so this check asserted NOTHING about the "
@@ -372,20 +391,21 @@ def check_bundled_data(repo, rep, read, prefix):
         for arc, full in files:
             got = read("%s%s/%s" % (prefix, arcdir, arc))
             if got is None:
-                missing.append("%s/%s" % (arcdir, arc))
+                missing.append("%s%s/%s" % (prefix, arcdir, arc))
             else:
                 with open(full, "rb") as f:
                     if f.read() != got:
-                        differing.append("%s/%s" % (arcdir, arc))
+                        differing.append("%s%s/%s" % (prefix, arcdir, arc))
         if missing:
             for m in missing[:12]:
                 rep.bad("%s (in %s, never packaged)" % (m, rel))
             if len(missing) > 12:
-                rep.bad("... and %d more file(s) under %s" % (len(missing) - 12, arcdir))
+                rep.bad("... and %d more file(s) under %s%s" % (len(missing) - 12, prefix, arcdir))
         for d in differing:
             rep.bad("%s (packaged, but its bytes differ from the repo's copy)" % d)
         if not missing and not differing:
-            rep.ok("%s/ -- all %d file(s) from %s, byte-identical" % (arcdir, len(files), rel))
+            rep.ok("%s%s/ -- all %d file(s) from %s, byte-identical"
+                   % (prefix, arcdir, len(files), rel))
 
 
 def expect_identical(repo, rep, read, repo_rel, arc_path):
@@ -481,13 +501,8 @@ def check_appdir(appdir, repo, rep):
     if binrel is not None:
         check_elf_deps(appdir, read(binrel), binrel, rep)
 
-    # A note, not a failure: the Linux packaging step deliberately copies neither tree today (see the
-    # Package (AppImage) step in release.yml). Saying so keeps the difference visible rather than
-    # letting it read as something this check forgot to look at.
-    if not os.path.isdir(os.path.join(appdir, bindir.replace("/", os.sep), "themes2")):
-        rep.note("no themes2/ or addons/ travel in the AppImage -- the Linux packaging step copies "
-                 "neither, so the themed home falls back to classic there (tracked separately; this "
-                 "check asserts what the step packages, it does not change it)")
+    # --- the two bundled trees (issue #339), with the same findability half as the pad database.
+    check_bundled_trees_findable(appdir, repo, rep, read, bindir)
 
 
 def check_desktop_exec(appdir, desktop, bindir, rep):
@@ -512,6 +527,43 @@ def find_in_appdir(appdir, name):
         if name in files:
             return os.path.relpath(os.path.join(dirpath, name), appdir).replace(os.sep, "/")
     return None
+
+
+def find_dir_in_appdir(appdir, name):
+    for dirpath, dirs, _files in os.walk(appdir):
+        if name in dirs:
+            return os.path.relpath(os.path.join(dirpath, name), appdir).replace(os.sep, "/")
+    return None
+
+
+def check_bundled_trees_findable(appdir, repo, rep, read, bindir):
+    """themes2/ and addons/: in the image, AND in the one directory the app reads them from.
+
+    ISSUE #339, and the reason it is a separate function from the plain per-file check. On every
+    desktop platform AppPaths::dataDir() is QCoreApplication::applicationDirPath(), so ThemeEngine
+    resolves <bindir>/themes2 (ThemeRegistry::themesRoot) and AddonManager resolves <bindir>/addons.
+    Neither searches anywhere else and neither falls back. A tree parked at the AppDir root, or under
+    usr/share where a distro package would put it, is therefore hundreds of files that ship and are
+    never opened -- and the symptom is exactly what #339 reports: no bundled theme, so the themed home
+    falls back to classic, and no first-party add-on at all.
+
+    A tree that is simply absent is left to the per-file check below, which names the files; a tree in
+    the WRONG place is reported here and then skipped, because relisting its files as "never packaged"
+    would bury the one line that says what actually went wrong.
+    """
+    listable = []
+    for rel, name in BUNDLED_TREES:
+        if os.path.isdir(os.path.join(appdir, *(bindir.split("/") + [name]))):
+            listable.append((rel, name))
+            continue
+        stray = find_dir_in_appdir(appdir, name)
+        if stray:
+            rep.bad("%s/ IS in the image (at %s) but not in %s, which is the only directory the app "
+                    "reads it from (dataDir() is the executable's own directory) -- in the image is "
+                    "not the same as findable" % (name, stray, bindir))
+        else:
+            listable.append((rel, name))
+    check_bundled_trees(repo, rep, read, bindir + "/", listable)
 
 
 def check_qt_plugin_findable(appdir, bindir, rep):
@@ -744,6 +796,11 @@ def _synth_appdir(root, repo):
     _write(os.path.join(root, "EverythingBox.png"), b"\x89PNG\r\n\x1a\n")
     with open(os.path.join(repo, "native", "gamecontrollerdb.txt"), "rb") as f:
         _write(os.path.join(root, "usr", "bin", "gamecontrollerdb.txt"), f.read())
+    # Beside the binary, not at the AppDir root: usr/bin IS the app's data dir on Linux (issue #339).
+    for rel, arcdir in (("addons", "addons"), ("themes2", "themes2")):
+        for arc, full in repo_tree_files(repo, "native/" + rel):
+            with open(full, "rb") as f:
+                _write(os.path.join(root, "usr", "bin", arcdir, *arc.split("/")), f.read())
 
 
 def _verdict(kind, path, repo, verbose):
@@ -768,8 +825,12 @@ def selftest(verbose=False):
     tmp = tempfile.mkdtemp(prefix="eb-verify-selftest-")
     failures = []
 
-    def case(kind, mutate, want_rc, want_text, label):
-        """Rebuild a pristine archive, apply `mutate`, and require the stated verdict."""
+    def case(kind, mutate, want_rc, want_text, label, want_absent=None):
+        """Rebuild a pristine archive, apply `mutate`, and require the stated verdict.
+
+        `want_absent` is the other half a couple of cases need: not just that the right complaint is
+        made, but that a misleading one is not made beside it.
+        """
         work = os.path.join(tmp, "case%d" % case.n)
         case.n += 1
         repo = os.path.join(work, "repo")
@@ -791,6 +852,9 @@ def selftest(verbose=False):
             failures.append("%s: expected rc=%d, got rc=%d\n%s" % (label, want_rc, rc, text))
         elif want_text and want_text not in text:
             failures.append("%s: verdict did not mention %r\n%s" % (label, want_text, text))
+        elif want_absent and want_absent in text:
+            failures.append("%s: verdict should not have mentioned %r\n%s"
+                            % (label, want_absent, text))
     case.n = 0
 
     def rm(rel):
@@ -805,7 +869,10 @@ def selftest(verbose=False):
 
     def move(src, dst):
         def go(root, _repo):
-            os.rename(os.path.join(root, *src.split("/")), os.path.join(root, *dst.split("/")))
+            target = os.path.join(root, *dst.split("/"))
+            if not os.path.isdir(os.path.dirname(target)):
+                os.makedirs(os.path.dirname(target))   # e.g. usr/share, which nothing else creates
+            os.rename(os.path.join(root, *src.split("/")), target)
         return go
 
     # ---- Windows: the complete archive passes, and each removal is named.
@@ -862,6 +929,21 @@ def selftest(verbose=False):
     case("appimage", put("usr/bin/EverythingBox", b"\x7fELF" + b"\0" * 200), 1,
          "could not be read as an ELF64", "appimage/unreadable binary")
     case("appimage", rm("usr/lib/libSDL2-2.0.so.0"), 1, "libSDL2-2.0.so.0", "appimage/no SDL2")
+    # ---- issue #339: the two bundled trees, and the AppImage-only "in the image, but not where the
+    # app looks" half of the question. A theme that ships and is never read is the same defect as one
+    # that did not travel at all, so both spellings of the mistake have to be named.
+    case("appimage", rm("usr/bin/addons/demo/main.js"), 1, "usr/bin/addons/demo/main.js",
+         "appimage/no addon file")
+    case("appimage", rm("usr/bin/themes2/Night/qml/Home.qml"), 1,
+         "usr/bin/themes2/Night/qml/Home.qml", "appimage/no theme file")
+    case("appimage", move("usr/bin/themes2", "themes2"), 1,
+         "in the image is not the same as findable", "appimage/themes at the AppDir root")
+    case("appimage", move("usr/bin/addons", "usr/share/addons"), 1,
+         "in the image is not the same as findable", "appimage/addons under usr/share")
+    # ...and a misplaced tree must not ALSO be relisted file by file, or the one line saying what
+    # actually went wrong is buried under everything that followed from it.
+    case("appimage", move("usr/bin/themes2", "themes2"), 1, None,
+         "appimage/misplaced tree is reported once", want_absent="never packaged")
     # Negative control: what the HOST supplies is not this project's to bundle, and an AppImage that
     # relies on libstdc++/libGL being present is doing what every AppImage does.
     case("appimage", put("usr/bin/EverythingBox",
