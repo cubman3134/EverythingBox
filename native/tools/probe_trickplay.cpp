@@ -21,11 +21,23 @@
 // The urls below are SHAPES, not credentials: the "signed" fixture carries the literal word placeholder
 // where a real link carries a token, because a probe transcript is a log like any other.
 //
+// SINCE ISSUE #302 there is a sixth, and it is the one that spends somebody's electricity: WHEN the job
+// may run at all. #85 generated a film's strip between playbacks, so it existed from the second viewing;
+// #302 widens the trigger to a walk of the local library on genuine idle, so it exists from the first.
+// That is work the user did not ask for at that moment, which makes every refusal in
+// TrickplayIdle::evaluate load-bearing — battery above all, since a handheld quietly making thumbnails
+// while unplugged is a bug however politely it does it. Sections 7 to 9 drive that predicate over its
+// whole input space, assert that #85's own trigger is untouched by any of the new inputs, and pin the
+// walk's resume point, its already-cached skip and its stop-do-not-evict rule at the size bound.
+//
 // Prints TRICKPLAY-OK on success; any failure prints TRICKPLAY-FAIL <cond> and exits non-zero.
 #include "Trickplay.h"
+#include "TrickplayIdle.h"
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
+#include <algorithm>
 #include <cstdio>
 
 static int failures = 0;
@@ -329,6 +341,222 @@ int main()
         CHECK(tied.size() == 1);
         CHECK(tied.value(0) == QStringLiteral("aaa"));
     }
+
+
+    // ---- 7. The idle predicate (issue #302) ----------------------------------------------------------
+    //
+    // #85 made previews between playbacks. #302 lets the same job also run on genuine IDLE, walking the local
+    // library, so a film has its strip the FIRST time it is watched. That is uninvited work on somebody
+    // else's machine, so this predicate is the whole safety of the increment and it is driven here over its
+    // entire input space rather than at the two or three points that seem interesting.
+    using TrickplayIdle::Conditions;
+    using TrickplayIdle::Power;
+    using TrickplayIdle::Verdict;
+
+    // The state in which everything says yes. Every case below is this, with exactly one thing changed —
+    // which is the only way to be sure the case is testing what it claims to.
+    Conditions ok;
+    ok.previewsEnabled = true;
+    ok.idleEnabled     = true;
+    ok.playing         = false;
+    ok.scanning        = false;
+    ok.building        = false;
+    ok.userActive      = false;
+    ok.power           = Power::Mains;
+    ok.cacheBytes      = 100;
+    ok.boundBytes      = 1000;
+    CHECK(TrickplayIdle::evaluate(ok) == Verdict::Go);
+    CHECK(TrickplayIdle::mayStart(ok));
+
+    // One condition at a time, and each one names its own refusal — a log line that says "no" is no use for
+    // working out why a library never gained previews.
+    { Conditions c = ok; c.previewsEnabled = false; CHECK(TrickplayIdle::evaluate(c) == Verdict::PreviewsOff); }
+    { Conditions c = ok; c.idleEnabled     = false; CHECK(TrickplayIdle::evaluate(c) == Verdict::IdleOff); }
+    { Conditions c = ok; c.playing         = true;  CHECK(TrickplayIdle::evaluate(c) == Verdict::Playing); }
+    { Conditions c = ok; c.scanning        = true;  CHECK(TrickplayIdle::evaluate(c) == Verdict::Scanning); }
+    { Conditions c = ok; c.building        = true;  CHECK(TrickplayIdle::evaluate(c) == Verdict::Building); }
+    { Conditions c = ok; c.userActive      = true;  CHECK(TrickplayIdle::evaluate(c) == Verdict::UserActive); }
+
+    // BATTERY. The issue's own absolute: never. And Unknown refuses too, which is a decision and not an
+    // oversight — this is uninvited work, so the burden of proof is on us to show it is free, and a machine
+    // that will not say whether it is plugged in has not shown that. A desktop with no battery answers Mains
+    // (TrickplayPower), so this costs a real desktop nothing.
+    { Conditions c = ok; c.power = Power::Battery; CHECK(TrickplayIdle::evaluate(c) == Verdict::OnBattery); }
+    { Conditions c = ok; c.power = Power::Unknown; CHECK(TrickplayIdle::evaluate(c) == Verdict::PowerUnknown); }
+    { Conditions c = ok; c.power = Power::Battery; CHECK(!TrickplayIdle::mayStart(c)); }
+    { Conditions c = ok; c.power = Power::Unknown; CHECK(!TrickplayIdle::mayStart(c)); }
+
+    // THE BOUND, REACHED. Stop; do not evict. Eviction exists to make room for what the user IS watching, and
+    // deleting last night's film to cache one nobody has opened is the cache working against its owner. The
+    // predicate's part of that is simply refusing to start another item.
+    { Conditions c = ok; c.cacheBytes = 1000; CHECK(TrickplayIdle::evaluate(c) == Verdict::CacheFull); }  // exactly at it
+    { Conditions c = ok; c.cacheBytes = 1001; CHECK(TrickplayIdle::evaluate(c) == Verdict::CacheFull); }  // over it
+    { Conditions c = ok; c.cacheBytes = 999;  CHECK(TrickplayIdle::evaluate(c) == Verdict::Go); }         // one byte under
+    { Conditions c = ok; c.boundBytes = 0; c.cacheBytes = 0; CHECK(TrickplayIdle::evaluate(c) == Verdict::CacheFull); }
+
+    // The reasons are ordered, and the order is asserted so it cannot drift: a user who switched the feature
+    // off is told THAT, not that their disk is full. Two refusals at once answer the earlier one.
+    { Conditions c = ok; c.previewsEnabled = false; c.playing = true; c.power = Power::Battery;
+      CHECK(TrickplayIdle::evaluate(c) == Verdict::PreviewsOff); }
+    { Conditions c = ok; c.idleEnabled = false; c.power = Power::Battery;
+      CHECK(TrickplayIdle::evaluate(c) == Verdict::IdleOff); }
+    { Conditions c = ok; c.playing = true; c.scanning = true; c.building = true;
+      CHECK(TrickplayIdle::evaluate(c) == Verdict::Playing); }
+    { Conditions c = ok; c.scanning = true; c.building = true; CHECK(TrickplayIdle::evaluate(c) == Verdict::Scanning); }
+    { Conditions c = ok; c.building = true; c.userActive = true; CHECK(TrickplayIdle::evaluate(c) == Verdict::Building); }
+    { Conditions c = ok; c.userActive = true; c.power = Power::Battery;
+      CHECK(TrickplayIdle::evaluate(c) == Verdict::UserActive); }
+    { Conditions c = ok; c.power = Power::Battery; c.cacheBytes = 99999;
+      CHECK(TrickplayIdle::evaluate(c) == Verdict::OnBattery); }
+
+    // EVERY COMBINATION, exhaustively: 2^6 booleans x 3 power states x 3 cache states. The assertion is
+    // stated INDEPENDENTLY of evaluate() rather than by re-running it — "may start" is exactly "all eight
+    // permissions hold" — so a rule dropped from the predicate is caught by the conjunction here rather than
+    // by a copy of the same mistake.
+    {
+        const Power powers[3] = { Power::Unknown, Power::Mains, Power::Battery };
+        const qint64 caches[3] = { 0, 999, 1000 };   // empty, one byte under the bound, exactly at it
+        int seenGo = 0, seenNo = 0;
+        for (int bits = 0; bits < 64; ++bits)
+            for (int pi = 0; pi < 3; ++pi)
+                for (int ci = 0; ci < 3; ++ci)
+                {
+                    Conditions c;
+                    c.previewsEnabled = (bits & 1)  != 0;
+                    c.idleEnabled     = (bits & 2)  != 0;
+                    c.playing         = (bits & 4)  != 0;
+                    c.scanning        = (bits & 8)  != 0;
+                    c.building        = (bits & 16) != 0;
+                    c.userActive      = (bits & 32) != 0;
+                    c.power           = powers[pi];
+                    c.cacheBytes      = caches[ci];
+                    c.boundBytes      = 1000;
+                    const bool expected = c.previewsEnabled && c.idleEnabled && !c.playing && !c.scanning
+                                          && !c.building && !c.userActive && c.power == Power::Mains
+                                          && c.cacheBytes < c.boundBytes;
+                    CHECK(TrickplayIdle::mayStart(c) == expected);
+                    CHECK((TrickplayIdle::evaluate(c) == Verdict::Go) == expected);
+                    if (expected) ++seenGo; else ++seenNo;
+                }
+        // …and the sweep really did exercise both answers, so a predicate stuck at one value cannot pass by
+        // making every "expected" agree with it.
+        CHECK(seenGo == 2);      // Mains x (cache 0, cache 999), with all six booleans in their one good state
+        CHECK(seenNo == 574);
+    }
+
+    // ---- 8. #85's own trigger, unchanged (the identity assertion) --------------------------------------
+    //
+    // The point of this section is a NEGATIVE: widening the job onto idle must not narrow the trigger it
+    // already had. mayGenerateForOpenedFile takes exactly the two inputs #85 gave it, and the whole
+    // cross-product of #302's six new ones is swept past it to assert the answer never moves. A field added
+    // to Conditions cannot start gating it, because it does not take a Conditions at all.
+    CHECK(TrickplayIdle::mayGenerateForOpenedFile(true, false));    // previews on, nothing playing: generate
+    CHECK(!TrickplayIdle::mayGenerateForOpenedFile(true, true));    // …the player has the machine: wait
+    CHECK(!TrickplayIdle::mayGenerateForOpenedFile(false, false));  // …previews off: never
+    CHECK(!TrickplayIdle::mayGenerateForOpenedFile(false, true));
+    {
+        const Power powers[3] = { Power::Unknown, Power::Mains, Power::Battery };
+        for (int bits = 0; bits < 16; ++bits)
+            for (int pi = 0; pi < 3; ++pi)
+                for (int prev = 0; prev < 2; ++prev)
+                    for (int play = 0; play < 2; ++play)
+                    {
+                        Conditions c;
+                        c.previewsEnabled = prev != 0;
+                        c.playing         = play != 0;
+                        c.idleEnabled     = (bits & 1) != 0;    // …every one of these is #302's, and…
+                        c.scanning        = (bits & 2) != 0;
+                        c.building        = (bits & 4) != 0;
+                        c.userActive      = (bits & 8) != 0;
+                        c.power           = powers[pi];
+                        c.cacheBytes      = 999999;             // …the cache being over its bound too
+                        c.boundBytes      = 1000;
+                        // …none of which may change the between-playbacks answer.
+                        CHECK(TrickplayIdle::mayGenerateForOpenedFile(c.previewsEnabled, c.playing)
+                              == (c.previewsEnabled && !c.playing));
+                        // The idle walk is strictly NARROWER: whatever it permits, #85's trigger permits too.
+                        if (TrickplayIdle::mayStart(c))
+                            CHECK(TrickplayIdle::mayGenerateForOpenedFile(c.previewsEnabled, c.playing));
+                    }
+    }
+    // A film the user is watching still gets its strip on a machine running from battery, mid-scan and
+    // mid-compile. That is #85's bargain and #302 does not revisit it: the user opened the file.
+    CHECK(TrickplayIdle::mayGenerateForOpenedFile(true, false));
+
+    // ---- 9. The walk: bounded, resumable, and it does not redo work ------------------------------------
+    {
+        QStringList lib;
+        for (int i = 1; i <= 10; ++i)
+            lib << QStringLiteral("D:/Films/%1.mkv").arg(i, 2, 10, QLatin1Char('0'));   // 01..10, sorted
+
+        // A fresh sweep starts at the beginning.
+        CHECK(TrickplayIdle::nextAfter(lib, QString()) == 0);
+
+        // INTERRUPTED AFTER FILE 3 OF 10, RESUMES AT 4 — and does not redo 1 to 3. The cursor is the path
+        // just completed, so this is the whole property in one line.
+        const QString after3 = TrickplayIdle::advanceCursor(lib, 2);          // finished index 2 = "03.mkv"
+        CHECK(after3 == QStringLiteral("D:/Films/03.mkv"));
+        CHECK(TrickplayIdle::nextAfter(lib, after3) == 3);                    // index 3 = "04.mkv"
+        CHECK(lib.at(TrickplayIdle::nextAfter(lib, after3)) == QStringLiteral("D:/Films/04.mkv"));
+
+        // Step it forward one at a time from there and the rest of the library follows in order, exactly
+        // once each — the loop the walk actually runs.
+        QStringList visited;
+        QString cur = after3;
+        for (int guard = 0; guard < 20; ++guard)
+        {
+            const int i = TrickplayIdle::nextAfter(lib, cur);
+            if (i < 0) break;
+            visited << lib.at(i);
+            cur = TrickplayIdle::advanceCursor(lib, i);
+            if (cur.isEmpty()) break;      // that was the last file
+        }
+        CHECK(visited.size() == 7);
+        CHECK(visited.first() == QStringLiteral("D:/Films/04.mkv"));
+        CHECK(visited.last()  == QStringLiteral("D:/Films/10.mkv"));
+        CHECK(!visited.contains(QStringLiteral("D:/Films/01.mkv")));
+        CHECK(!visited.contains(QStringLiteral("D:/Films/03.mkv")));
+
+        // The END of a sweep clears the cursor rather than pinning it at the last file, so the next idle
+        // period starts at the top and picks up whatever was added since. On an already-swept library that
+        // costs one sidecar read per file and never opens a decoder (ItemState::Complete, below).
+        CHECK(TrickplayIdle::advanceCursor(lib, 9).isEmpty());
+        CHECK(TrickplayIdle::nextAfter(lib, QStringLiteral("D:/Films/10.mkv")) == -1);
+
+        // A cursor naming a file that is GONE (deleted, renamed, an unplugged drive) does not restart the
+        // sweep and does not stop it: the answer is still "the first path after it". That is why the cursor
+        // is a path and not an index — an index-based resume silently skips a file for ever the first time
+        // something is inserted alphabetically before it.
+        CHECK(TrickplayIdle::nextAfter(lib, QStringLiteral("D:/Films/03a-was-deleted.mkv")) == 3);
+        QStringList grown = lib;
+        grown << QStringLiteral("D:/Films/00-new-arrival.mkv");
+        std::sort(grown.begin(), grown.end());
+        CHECK(grown.at(TrickplayIdle::nextAfter(grown, after3)) == QStringLiteral("D:/Films/04.mkv"));
+
+        // Degenerate inputs answer "nothing to do" rather than index 0 of an empty list.
+        CHECK(TrickplayIdle::nextAfter(QStringList(), QString()) == -1);
+        CHECK(TrickplayIdle::advanceCursor(lib, -1).isEmpty());
+        CHECK(TrickplayIdle::advanceCursor(lib, 99).isEmpty());
+        // An empty entry is skipped rather than treated as a path that sorts before everything.
+        QStringList holey; holey << QString() << QStringLiteral("D:/Films/01.mkv");
+        CHECK(TrickplayIdle::nextAfter(holey, QString()) == 1);
+    }
+
+    // ALREADY CACHED IS SKIPPED, and a half-finished item is NOT: it is the cheapest work in the library,
+    // because Trickplay::resumeGrid means only its missing grids are captured.
+    CHECK(!TrickplayIdle::needsGeneration(TrickplayIdle::ItemState::Complete));
+    CHECK(TrickplayIdle::needsGeneration(TrickplayIdle::ItemState::Partial));
+    CHECK(TrickplayIdle::needsGeneration(TrickplayIdle::ItemState::NoSheets));
+
+    // THE BOUND REACHED MID-WALK. The worker re-asks this between grids, so a film that was inside the bound
+    // when it started and crosses it halfway through stops with the whole grids it has written — rather than
+    // evicting something to finish itself.
+    CHECK(TrickplayIdle::hasHeadroom(0, 1000));
+    CHECK(TrickplayIdle::hasHeadroom(999, 1000));
+    CHECK(!TrickplayIdle::hasHeadroom(1000, 1000));    // exactly at the bound is FULL, not "just fits"
+    CHECK(!TrickplayIdle::hasHeadroom(1001, 1000));
+    CHECK(!TrickplayIdle::hasHeadroom(0, 0));          // previews off spells the bound as zero
+    CHECK(!TrickplayIdle::hasHeadroom(0, -1));
 
     if (failures) { std::fprintf(stderr, "TRICKPLAY-FAIL %d check(s)\n", failures); return 1; }
     std::printf("TRICKPLAY-OK\n");

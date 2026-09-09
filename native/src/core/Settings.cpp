@@ -676,6 +676,20 @@ void Settings::setPreviewCacheMb(int mb)
     store().sync();
 }
 
+// Idle library sweep (#302). DEFAULT OFF, and the default is the decision — see Settings.h for the argument.
+// It is a second switch beside the size on purpose, which #85 deliberately avoided for its own control: the
+// size answers "how much may this cost me", and this answers a different question entirely, "may the app go
+// looking for work". Nothing here can turn previews ON — with the size at zero this is inert, so the two
+// cannot disagree in the direction that matters.
+bool Settings::previewIdleScan()
+{
+    return store().value(QStringLiteral("previews/idleScan"), false).toBool();
+}
+void Settings::setPreviewIdleScan(bool on)
+{
+    store().setValue(QStringLiteral("previews/idleScan"), on); store().sync();
+}
+
 bool Settings::videoRefreshSync()
 {
     const QString sk = QStringLiteral("video/refreshSync");

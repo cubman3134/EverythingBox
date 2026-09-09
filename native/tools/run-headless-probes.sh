@@ -2477,6 +2477,7 @@ else
     'pb.skipsegauto|new QCheckBox(tr("Skip them automatically (no button)"))'
     'pb.hwdec|hwdec = new QComboBox()'
     'pb.seekpreview|previewCache = new QComboBox()'
+    'pb.seekpreviewidle|new QCheckBox(tr("Make them ahead of time when idle"))'
     'pb.refreshsync|new QCheckBox(tr("Reduce judder (sync video to display)"))'
     'pb.hdr|hdr = new QComboBox()'
     'player.external|player = new QComboBox()'

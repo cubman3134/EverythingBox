@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.241 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.242 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -662,6 +662,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         # header-only so a reader of this list can see where the feature lives. probe_trickplay pins it.
         src/core/TrickplayGen.cpp  src/core/TrickplayGen.h
         src/core/Trickplay.h
+        # Issue #302: the same job's SECOND trigger -- a bounded, resumable walk of the local library run on
+        # genuine idle, so a film has its strip the FIRST time it is watched. TrickplayIdle.h is the pure
+        # predicate (when it may run, and where an interrupted walk picks up), TrickplayPower the thin
+        # platform answer to "are we on mains?", and TrickplayIdleWalk the plumbing around them.
+        src/core/TrickplayIdle.h
+        src/core/TrickplayPower.cpp    src/core/TrickplayPower.h
+        src/core/TrickplayIdleWalk.cpp src/core/TrickplayIdleWalk.h
+        src/core/LibraryScanActivity.h # "a library scan is running" -- one of that predicate's inputs
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
@@ -3819,11 +3827,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     # given second of a film lives in (the last grid is SHORT, and a time past the end clamps rather than
     # blanking), the path+mtime+size cache key that makes a replaced file lose its old strip, the resume
     # point of an interrupted walk, the LRU eviction order, the sidecar round trip, and the guard that
-    # keeps generation off anything that is not a file on this machine. Header-only unit, so there is no
+    # keeps generation off anything that is not a file on this machine. Since issue #302 it also pins the
+    # IDLE predicate beside it: which of playing / scanning / building / being driven / battery refuses an
+    # uninvited library sweep, the walk's resume point, the already-cached skip, the stop-do-not-evict rule
+    # at the size bound, and -- the assertion that matters most -- that #85's own between-playbacks trigger
+    # answers identically over the whole cross-product of those new inputs. Header-only unit, so there is no
     # .cpp to also add to the app's source list (the issue-#182 trap); Qt6::Core only -- no decoder, no
     # window and no disk are involved in any of it.
     add_executable(probe_trickplay tools/probe_trickplay.cpp
-        src/core/Trickplay.h)
+        src/core/Trickplay.h
+        src/core/TrickplayIdle.h)
     target_include_directories(probe_trickplay PRIVATE src src/core)
     target_link_libraries(probe_trickplay PRIVATE Qt6::Core)
 

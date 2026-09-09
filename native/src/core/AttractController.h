@@ -73,6 +73,13 @@ public:
     // like the app had been idle since the epoch and fire immediately.
     void resetIdle(qint64 nowMs) { lastInputMs_ = nowMs; }
 
+    // When the app was last DRIVEN, on the same monotonic clock the caller feeds poll()/noteInput(). This is
+    // the app's one authoritative "is anybody here" fact — every input path resets it, whether or not attract
+    // mode is even enabled — so issue #302's idle preview walk reads it rather than starting a second clock
+    // that could disagree with this one. It is app-scoped and says nothing about the rest of the machine;
+    // TrickplayIdle.h states that limit at length, because it is the reason that feature is opt-in.
+    qint64 lastInputMs() const { return lastInputMs_; }
+
     // What feeding one input decides.
     struct InputResult
     {

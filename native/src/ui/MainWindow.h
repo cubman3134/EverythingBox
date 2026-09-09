@@ -42,6 +42,7 @@
 #include "../comic/PageSupply.h"    // PageSupplyOptions — what a page supplier may ask of openImagePages
 #include "../ebook/OpdsPse.h"       // OpdsPseLink — pseLink_ is a value member (#153)
 #include "../core/Trickplay.h"      // issue #85: Trickplay::Index is a value member (Qt-Core-only, header-only)
+#include "../core/TrickplayIdle.h"  // issue #302: TrickplayIdle::Conditions is returned by value below
 #include <QPixmap>                  // …and the one decoded preview grid is held by value beside it
 
 namespace LaunchOpts { struct Override; }   // issue #189: the per-game content levers' row-value helper
@@ -938,8 +939,13 @@ private:
     void trickplayShowAt(double seconds); // draw the frame nearest `seconds` above the seek bar, with its time
     void trickplayHide();                 // the drag ended (or the player closed)
     void trickplayIdle();                 // playback stopped: the background job may have the machine back
+    // Issue #302: the SECOND trigger. trickplayConditions() gathers what the pure idle predicate decides on
+    // (playing / scanning / building / driven / power / the cache bound) from things this window already
+    // knows; trickWalk_ polls it and walks the local library. Both definitions are in MainWindowTrickplay.cpp.
+    TrickplayIdle::Conditions trickplayConditions() const;
     QLabel*          trickThumb_ = nullptr;  // the floating preview, a plain child of player_ like skipChip_
     TrickplayGen*    trickGen_   = nullptr;
+    class TrickplayIdleWalk* trickWalk_ = nullptr;
     Trickplay::Index trickIndex_;            // the open file's sheet description (frameCount 0 == no strip)
     QString          trickDir_;              // …and where its grids are; empty when there are none
     QString          trickPath_;             // the local file the two above belong to
