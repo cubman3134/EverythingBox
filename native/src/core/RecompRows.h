@@ -110,11 +110,24 @@ namespace recomps
         bool    checkingDumps = false;
         QString installedTag;   // "" = EB never recorded which release this install is
         QString catalogueTag;   // "" = the catalogue pins no release
+        // #248 (c), the self-compiled tier. A build of THIS entry is running on this machine right now, or
+        // finished during this session and has not been launched yet. Read before everything else below,
+        // because they are the only two inputs that are about the present moment: a row whose compile is
+        // twenty seconds from finishing must not say `needs ROM` because the dump is an archive nobody has
+        // hashed. They are session facts (RecompBuildJob), stored nowhere, exactly like the other four.
+        bool building = false;
+        bool builtNotLaunched = false;
     };
 
     // THE DERIVATION. Read top to bottom; each clause is the reason the next one is reachable.
     inline State deriveState(const Facts& f)
     {
+        // FIRST, and it is the case increment (a) reserved `Building` and `Ready` for. A build in flight is
+        // the most specific true thing about a row and it outranks every other input, including `installed`:
+        // a REBUILD runs against an entry that is already installed, and a row that said `installed` while a
+        // compile of it was running would be describing the wrong minute.
+        if (f.building) return State::Building;
+        if (f.builtNotLaunched) return State::Ready;
         if (f.installed)
         {
             // Both tags must be known before a difference means anything — see the header note on unknowns.
@@ -401,6 +414,30 @@ namespace recomps
             if (!hashesCoverEntry(port, r.hashes)) checking = true;   // nothing to compare yet — ask again
         }
         return checking ? DumpMatch::Checking : DumpMatch::None;
+    }
+
+    // WHICH dump matched — the path a build's recompiler is pointed at, and the only thing this feature ever
+    // does with somebody's game file. Same precedence as dumpMatch, deliberately: the two are asked in the
+    // same breath (is it installable / what would it be built from) and an answer of `Hashed` from one with
+    // a path from the other would be two different dumps.
+    //
+    // "" whenever dumpMatch would not answer Hashed or TitleOnly, so a caller cannot start a build off a
+    // question that has not been answered yet.
+    inline QString matchedDumpPath(const ExternalEmulator& port, const QVector<LibraryRom>& library)
+    {
+        if (!port.isNativePort()) return QString();
+        if (!publishesHash(port))
+        {
+            for (const LibraryRom& r : library)
+                if (NativePorts::matchesRow(port, r.systemId, r.title, r.path)) return r.path;
+            return QString();
+        }
+        for (const LibraryRom& r : library)
+        {
+            if (!worthHashing(port, r)) continue;
+            if (hashMatches(port, r.hashes)) return r.path;
+        }
+        return QString();
     }
 
     // The files the caller must hash — off the GUI thread, once each — before asking again. EMPTY whenever

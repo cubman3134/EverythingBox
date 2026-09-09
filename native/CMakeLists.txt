@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.240 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.241 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1006,6 +1006,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         # network-touching function, kept in its own TU so the probe never links Qt6::Network.
         src/core/RecompFeed.cpp src/core/RecompFeed.h
         src/core/RecompFeedFetch.cpp
+        # #248 (c): the self-compile tier. Toolchain.cpp ONLY READS this machine - it starts no download and
+        # installs nothing, and there is no bundled toolchain anywhere for it to fall back on. RecompBuild.cpp
+        # is where a build lives on disk; RecompBuildRunner.cpp is the only thing in the feature that starts a
+        # child process; RecompBuildJob.cpp is the orchestration and the one part that touches the network.
+        src/core/Toolchain.cpp src/core/Toolchain.h
+        src/core/RecompBuild.cpp src/core/RecompBuild.h
+        src/core/RecompBuildRunner.cpp src/core/RecompBuildRunner.h
+        src/core/RecompBuildJob.cpp src/core/RecompBuildJob.h
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -2007,6 +2015,34 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_ports PRIVATE
         MINIZ_NO_ZLIB_COMPATIBLE_NAMES                      # matches the app build
         EB_PORTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ports")
+
+    # The self-compile tier (issues #248 (c)): what this machine can build with, and building a recomp on it.
+    # A SEPARATE target from probe_ports on purpose - see the note at the top of tools/probe_recompbuild.cpp.
+    # probe_ports is a pure-parse probe that starts no process; this one's whole subject is a child process,
+    # so it carries the stub-engine dependency and probe_ports does not.
+    #
+    # THE STUB ENGINE is built in-tree (tools/stub_recomp_engine.cpp) and is the only "recompiler" this
+    # repository will ever contain. psxrecomp is PolyForm Noncommercial: it may be RUN on a user's machine and
+    # may never be redistributed by us, so no engine binary enters this tree, is committed to it, or is
+    # shipped in the app - and the probe asserts that as well as using the stub in its place.
+    add_executable(stub_recomp_engine tools/stub_recomp_engine.cpp)   # deliberately Qt-free
+    # std::this_thread::sleep_for wants -pthread on GCC, and the CI runner is GCC. Without it the stub links
+    # on Windows, fails on Linux, and the probe that depends on it never builds there.
+    find_package(Threads REQUIRED)
+    target_link_libraries(stub_recomp_engine PRIVATE Threads::Threads)
+
+    add_executable(probe_recompbuild tools/probe_recompbuild.cpp
+        src/core/Toolchain.cpp src/core/Toolchain.h
+        src/core/RecompBuild.cpp src/core/RecompBuild.h
+        src/core/RecompBuildRunner.cpp src/core/RecompBuildRunner.h)
+    add_dependencies(probe_recompbuild stub_recomp_engine)
+    target_include_directories(probe_recompbuild PRIVATE src src/core)
+    target_link_libraries(probe_recompbuild PRIVATE Qt6::Core)
+    target_compile_definitions(probe_recompbuild PRIVATE
+        EB_STUB_ENGINE="$<TARGET_FILE:stub_recomp_engine>"
+        # So the probe can assert that nothing this feature writes lands inside the source tree, and that the
+        # tree holds no engine binary.
+        EB_RECOMP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
     # Launch recipes (src/core/LaunchRecipe.h, issue #190): the per-system launch knowledge - core options to
     # seed, firmware to name when it is missing, how content reaches the core, and the MS-DOS executable

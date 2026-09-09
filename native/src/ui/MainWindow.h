@@ -2229,11 +2229,18 @@ private:
     // port is and what it will ask them for, then install (if it is not there yet) and launch it. `portId`
     // is a NativePorts catalog id. See core/NativePorts.h for why a port is not an emulator.
     void showNativePort(const MediaItem& item, const QString& portId);
-    // The SELF-COMPILED tier's card (issue #248 increment b), defined in MainWindowRecomps.cpp. A catalogue
-    // entry that names a recompiler is built ON THIS MACHINE from that engine plus the user's own dump, and
-    // this build does not build anything yet — so the row lists, states its engine and licence, and its
-    // Install says so and offers the engine's own page instead of starting something that cannot finish.
+    // The SELF-COMPILED tier's card (issue #248 increments b and c), defined in MainWindowRecomps.cpp. A
+    // catalogue entry that names a recompiler is built ON THIS MACHINE from that engine plus the user's own
+    // dump: the card says which engine and under what licence, what this computer can build with (and what
+    // to install when it cannot), which dump it would read, and — while a build runs — its live progress and
+    // the tail of its log, with a cancel that stops it.
     void showSelfCompiledPort(const ExternalEmulator& port);
+    // Connects this window to RecompBuildJob once, lazily. In MainWindowRecomps.cpp so the feature costs
+    // MainWindow.cpp no hunk at all: a build can only be started from the card above, so the first call to
+    // it always precedes the first build.
+    void ensureRecompBuildWiring();
+    bool recompBuildWired_ = false;
+    QElapsedTimer recompBuildPaintDue_;   // throttles the build note + the Recomps repaint to 1 Hz
     // A hack the user has already chosen and confirmed, waiting for the base ROM it patches. Held by value:
     // the flow that chose it has returned by the time this is used, and a download can outlive the page the
     // game was picked from.

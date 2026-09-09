@@ -216,12 +216,121 @@ The card states the licence and, when the port is not installed, that it is an u
 antivirus may quarantine — Defender's `Bearfoos.A!ml`-class heuristic flags exactly this kind of download, and
 saying so beforehand is the difference between an install that looks broken and one that explains itself.
 
+## The self-compile tier (#248, increment c)
+
+A catalogue entry that names a recompiler (`build.generate.engine`) ships **no binary anywhere**. The port is
+produced on the user's own computer: the recompiler is run against the dump they already own, and the C++ it
+emits is compiled by their own toolchain. That is the half the issue was actually opened for.
+
+### The toolchain: detected, never installed
+
+`core/Toolchain.h` is a **pure decision table** — (what was found on this machine, which OS) → (a verdict and
+the two sentences a person reads). Four verdicts, and every one of them carries both sentences, so a state
+with a verdict and no explanation is unreachable:
+
+| compiler | CMake | verdict | what the card says |
+|---|---|---|---|
+| yes | yes | `Ready` | which compiler and which CMake it found; a **Build it on this computer** verb appears |
+| yes | no  | `NoCMake` | names the compiler it found, and that CMake is what is missing |
+| no  | yes | `NoCompiler` | there is nothing for CMake to compile with |
+| no  | no  | `NoToolchain` | both, named, with both installer pages |
+
+The compiler preferred per OS is a property of where the system headers come from, not a taste: **MSVC** first
+on Windows (it is the only one of the three that arrives with the Windows SDK — a bare `clang` on `PATH` very
+often has no MSVC headers behind it and dies at the first `#include <windows.h>`), **clang** first on macOS,
+**gcc** first on Linux. A program that is present but did not answer `--version` in a shape we parse still
+counts as present.
+
+`Toolchain.cpp` is the only half that looks at the machine: `vswhere -latest -products * -requires
+…VC.Tools.x86.x64` for MSVC (so a Visual Studio with only the .NET workload is correctly *not* a C++
+compiler), `cl` / `clang++` / `g++` / `cmake` on `PATH` plus the directories a Windows installer uses when the
+user did not tick "add to PATH". The answer is cached in `<data>/recomps/toolchain.json` for a week and the
+card offers **Check again**, so somebody who installs the Build Tools in the other window does not have to
+restart the app to be believed. A cache file that cannot be parsed re-probes; it can never assert that this
+machine has no compiler.
+
+**This app does not download or install a compiler, an SDK or a toolchain pack, and it has none bundled to
+fall back on.** That is a deliberate divergence from RetComM, whose recipe downloads a `cmake-clang-v1` pack
+(`build.toolchain`); we read that field and never act on it. A compiler is a large, long-lived, system-wide
+thing a person is entitled to choose, place and update themselves.
+
+### The build
+
+`core/RecompBuild.h` is the model and it is pure: the state machine, the step plan, the log tail, the progress
+line, the failure sentences and the path safety. `RecompBuildRunner` is the only thing that starts a child
+process. `RecompBuildJob` is the orchestration, lives outside the UI, and runs on a pooled thread.
+
+    Idle -> FetchingSource -> Unpacking -> Generating -> Configuring -> Compiling -> Staging -> Succeeded
+                                       \-> Failed        \-> Cancelled       \-> Blocked
+
+1. **the toolchain**, first, before a byte is downloaded — no compiler or no CMake is `Blocked`, not `Failed`,
+   and nothing has been written;
+2. **the source**, from the project's own GitHub zipball (`build.source.github` / `.ref`), bounded and
+   deadlined;
+3. **unpacked** into `<data>/recomps/builds/<id>/source`, refusing any member that is absolute, drive-lettered
+   or holds a `..` segment;
+4. **the recompiler**, harvested out of that tree by the name the entry gives it, run against the user's dump
+   — `psxrecomp <config> --disc <path>`, which is what SCHEMA.md specifies for PSX. **PSX only**: the SNES and
+   GBA generators take arguments that document does not spell out, and an entry for one of those is refused
+   with a sentence rather than built with invented flags;
+5. **the user's own cmake**, to configure and then to compile;
+6. **staged** into `emulators/<id>/`, which is what makes `EmulatorManager::isInstalled` true and lights up
+   the existing *Play (native)* verb. One launch path, not two.
+
+The build **survives navigating away**: it belongs to `RecompBuildJob`, not to the card that started it, so
+walking back out leaves it running with a sticky note and a live Recomps row (`compiling 62% · 3m 14s ·
+[ 62%] Building CXX object …`). Opening the row again shows the same build. **Cancel actually stops it** — a
+flag the runner watches between polls, `terminate()` then `kill()` — and the one rule the whole thing rests on
+is that **a terminal state absorbs everything**: the child's non-zero exit arrives *after* the cancel, and a
+machine that took it at face value would rewrite the user's own cancellation as "the compiler failed with
+code 1".
+
+Only one build at a time. Two would compete for every core on the machine and make both slower; a second Start
+is refused with a sentence naming the one that is running.
+
+### Failures read as sentences
+
+Never a spinner that stopped. Every terminal state carries a sentence, and the ones that ran a program carry
+the path to the full log (`<data>/recomps/builds/<id>/build.log`, capped at 32 MB with one line saying so):
+
+* `cmake --build exited with code 1. The full log is at …`
+* `psxrecomp ended unexpectedly — it wasn't asked to stop and it didn't finish. The full log is at …`
+* the source failed to download / was over the ceiling / would not unpack — each says **nothing was changed**;
+* **the artefact-missing case**: every step exited 0 and the program is not there. On Windows that is exactly
+  what Defender quarantining a freshly compiled unsigned exe looks like from here, so the sentence names the
+  path, says the program was unsigned and brand new, and points at Windows Security → Protection history. It
+  never suggests disabling anything and never silently retries.
+
+### The engine, and why fetching one is not redistribution
+
+`psxrecomp` is **PolyForm Noncommercial 1.0.0**: it may be *run* by the person who obtained it and may not be
+redistributed by us. So:
+
+* **nothing engine-shaped is in this repository**, has ever been committed to it, or is in the app's shipped
+  artefact. The only "recompiler" in the tree is `tools/stub_recomp_engine.cpp`, a stand-in the probe drives;
+* an engine reaches a machine only as part of the **source the user's own machine fetched** from the project's
+  own release, at the moment that user asked for a build. It lands under `<data>/recomps/builds/<id>/source`
+  (or `<data>/recomps/engines/<engine>` when a separate tools pack is used), which is a per-machine directory
+  the app creates after installation — never inside the repository and never in the artefact anybody
+  downloads from us;
+* `writeEngineNotice` puts a `WHERE-THIS-CAME-FROM.txt` beside it naming the engine, its licence and the URL
+  it came from, so those bytes carry their provenance even to somebody who finds the folder later;
+* the licence is on the row and on the card **before** anything is fetched.
+
+### No ROM moves
+
+The dump is passed to the recompiler as one command-line argument and that is the entire relationship between
+this feature and somebody's game file. No step in any plan copies it, no plan's working directory is the
+folder it lives in, and the probe asserts both — and asserts that after a full run the fixture dump is
+byte-for-byte what it was and that no copy of its bytes exists anywhere the build wrote.
+
 ## What is not here yet
 
 * **(b, part)** the live release lookup that fills `release.tag` for a feed entry, so *update available* can
   fire on one. The feed and the ROM gate themselves are done (above).
-* **(c)** the self-compiled tier: toolchain detection (report what is missing and link the official installer;
-  never download a compiler), the external build with progress, log tail and cancel, PSX first.
+* **(c, part)** SNES and GBA generate recipes (PSX is wired up; the other two are refused with a sentence),
+  and a separately downloaded `build.sdk` tools pack — today the recompiler is harvested from the source tree,
+  which is what SCHEMA.md says is preferred.
 * **(d)** the rebuild-on-update flow: explicit, never automatic, keeping the previous build until the new one
   has launched once.
 
@@ -238,3 +347,13 @@ gate per digest kind (including a title match with a *wrong* digest, asserted ag
 function so the behaviour change is visible in the probe), the narrowing, the no-hashing-at-browse-time rule,
 and the last-good-copy surviving a broken publish **byte for byte**. Fixture catalogues are written with miniz
 in the probe process, so each malformed case differs from the good one by exactly the byte it is about.
+
+`probe_recompbuild` (`native/tools/probe_recompbuild.cpp`) is increment (c)'s, and it is a separate target
+because its subject is a **child process** rather than a document: it drives the toolchain decision table over
+all sixteen combinations of (MSVC, clang, gcc, CMake) on all three operating systems, the state machine's whole
+path, the failure sentences, the log tail against a hundred thousand lines and against one line of forty
+thousand characters, the path safety, and then the runner itself against the in-tree stub engine — exiting
+cleanly, exiting non-zero, dying rather than exiting, being **cancelled mid-run** (deterministically: the flag
+is set from the line callback on the child's third line), and finishing successfully while leaving no artefact
+behind. It also asserts that the fixture dump it points the plan at is untouched afterwards, that no copy of
+its bytes reached the workspace, and that this repository holds no engine binary.

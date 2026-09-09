@@ -118,6 +118,25 @@ struct NativePortBinding
     // increment (c) adds the build itself without reshaping the catalog or the row model.
     QString buildEngine;
 
+    // ...and the rest of that recipe, read in increment (c) so a build can actually be planned. Field names
+    // follow SCHEMA.md's "build (local generate + cmake)" section exactly; anything the schema leaves out is
+    // left out here rather than guessed at.
+    //
+    // `buildToolchainId` is READ AND DELIBERATELY NOT ACTED ON. RetComM's recipe names a toolchain pack it
+    // downloads (`cmake-clang-v1`); this app detects the toolchain the user already has and never downloads
+    // one, so the field is carried for round-tripping and nothing more. That is the one place the two
+    // launchers deliberately differ, and it is recorded here rather than in a commit message.
+    bool    buildEnabled = false;
+    QString buildSourceRepo;                    // build.source.github (defaults to release.github)
+    QString buildSourceRef;                     // build.source.ref — a tag, a branch or a commit
+    QString buildSdkId;                         // build.sdk.id
+    QString buildToolchainId;                   // build.toolchain.id — see above
+    QString buildGenerateConfig;                // build.generate.config (PSX: game.toml)
+    QString buildGenerateOutDir;                // build.generate.out_dir
+    QString buildCmakeDir;                      // build.cmake.build_dir
+    QString buildCmakeTarget;                   // build.cmake.target
+    QString buildCmakeConfig;                   // build.cmake.config (Release)
+
     // ---- OUR EXTENSIONS to that schema, named so they read as ours.
     // How the port takes the ROM: "in_app_menu" = it asks in its own UI and converts the file itself
     // (Zelda64Recomp); "beside_exe" = the file must sit next to the executable; "cli_path" = it takes a path on
