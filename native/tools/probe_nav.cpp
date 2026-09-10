@@ -742,6 +742,22 @@ int main(int argc, char** argv)
             CHECK(asGiven, (at + ": every label is the label it was given, whole").constData());
             if (linesOf(bs) > 1) ++wrappedAt;
 
+            // THE ROW WRAPS EXACTLY WHEN ONE LINE CANNOT HOLD IT. Measured with this platform's own font, so
+            // it says the same thing on a runner whose font is narrower than this machine's (CI's is: there
+            // the five labels fit one line at 1280 wide). What a line can hold is relayoutPanel's window
+            // clamp, less the card's frame and the layout's margins; what one line needs is every button's
+            // own size hint, 10px apart.
+            if (QFrame* panel = panelOf349(card); panel && panel->layout())
+            {
+                const QMargins fm = panel->contentsMargins();
+                const QMargins cm = panel->layout()->contentsMargins();
+                const int lineRoom = qMax(300, sz.first - 120) - fm.left() - fm.right() - cm.left() - cm.right();
+                int oneLine = 10 * (int(bs.size()) - 1);
+                for (QPushButton* b : bs) oneLine += b->sizeHint().width();
+                CHECK((linesOf(bs) > 1) == (oneLine > lineRoom),
+                      (at + ": the row wraps exactly when one line cannot hold it").constData());
+            }
+
             // EVERY ACTION IS REACHABLE WITH A PAD, IN THE ORDER GIVEN. Left to the start of the row, then
             // Right to its end: the walk has to be exactly the buttons as listed, or wrapping the row would
             // have hidden the very action it was widening (on a wrapped row that is the card's sequential
@@ -771,7 +787,7 @@ int main(int argc, char** argv)
             delete host;
             pump();
         }
-        CHECK(wrappedAt >= 3, "the rebuild card really wraps at the sizes it was clipped at (not vacuous)");
+        CHECK(wrappedAt >= 1, "the rebuild card really wraps at one tested size or more (this is not vacuous)");
 
         // (B) THE TEN PAIRS FROM #347'S AUDIT, each at the size it was measured clipping at, with the labels
         // the source has. The message is short on purpose: what squeezes the row is the card's WIDTH — the
@@ -874,17 +890,46 @@ int main(int argc, char** argv)
         // (D) A SINGLE LABEL WIDER THAN THE WHOLE CARD. Wrapping the row cannot help — there is no narrower
         // line to put it on — so the label breaks across two lines of the button itself. No shipped string
         // reaches this at any tested size; a translation can, and an elided label would be a lost action.
+        //
+        // The card is sized FROM THE LABEL, measured with this platform's font: a line three quarters as
+        // wide as the label needs on one line, which no font can fit it into and either half of it fits
+        // comfortably. A fixed window size made this case depend on the runner's font — at 800px CI's
+        // narrower font fitted the whole label on one line and there was nothing to break.
         {
+            const QString monster = QStringLiteral("Delete every downloaded file for this game and "
+                                                   "forget where it came from");
+            const QStringList row = { monster, QStringLiteral("Cancel") };
+            int oneLine = 0, frameAndMargins = 0;
+            {
+                auto* wideHost = new QWidget;
+                wideHost->resize(3000, 1000);
+                wideHost->show();
+                wideHost->activateWindow();
+                pump();
+                auto* wide = new NavConfirm(QStringLiteral("Remove the download"),
+                                            QStringLiteral("This cannot be undone."), row, 1, wideHost);
+                pump(); pump();
+                for (QPushButton* b : buttonsOf(wide))
+                    if (b->text() == monster) oneLine = b->sizeHint().width();
+                if (QFrame* panel = panelOf349(wide); panel && panel->layout())
+                {
+                    const QMargins fm = panel->contentsMargins();
+                    const QMargins cm = panel->layout()->contentsMargins();
+                    frameAndMargins = fm.left() + fm.right() + cm.left() + cm.right();
+                }
+                wide->dismiss(-1);
+                delete wideHost;
+                pump();
+            }
+            CHECK(oneLine > 0 && frameAndMargins > 0, "the over-long label was measured on one line first");
+            const int hostW = oneLine * 3 / 4 + frameAndMargins + 120;   // + relayoutPanel's window margin
             auto* host = new QWidget;
-            host->resize(800, 480);
+            host->resize(hostW, 480);
             host->show();
             host->activateWindow();
             pump();
-            const QString monster = QStringLiteral("Delete every downloaded file for this game and "
-                                                   "forget where it came from");
             auto* card = new NavConfirm(QStringLiteral("Remove the download"),
-                                        QStringLiteral("This cannot be undone."),
-                                        { monster, QStringLiteral("Cancel") }, 1, host);
+                                        QStringLiteral("This cannot be undone."), row, 1, host);
             pump(); pump();
             QPushButton* big = nullptr;
             for (QPushButton* b : buttonsOf(card))
@@ -901,7 +946,8 @@ int main(int argc, char** argv)
                 CHECK(card->describe() == monster,
                       "...and the UI-test channel still reads it as the one label it was given");
             }
-            rowIsWhole(card, "the over-long label at 800x480");
+            rowIsWhole(card, QByteArray("the over-long label, on a card ") + QByteArray::number(hostW)
+                                 + "px wide");
             card->dismiss(-1);
             delete host;
             pump();
