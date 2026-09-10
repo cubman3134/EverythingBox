@@ -17,9 +17,11 @@
 
 class NavGraph;
 class NavRing;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QScrollArea;
 class QVBoxLayout;
 
 class NavOverlay : public QWidget
@@ -40,6 +42,11 @@ public:
     // mode) fall back HARD to the original palette, so overlays always render. Mechanics are untouched — colors
     // only. Applies to EVERY NavOverlay subclass (NavMenu/NavConfirm) via the shared panel stylesheet.
     static void setThemeColors(const QVariantMap& colors);
+
+    // One colour out of that block, or `fallback` when the theme does not define it (classic mode
+    // pushes an empty map). The panel stylesheet's own lookup, exposed so a subclass styling a child
+    // widget of its card — the confirm card's message scrollbar (#347) — matches the card it sits in.
+    static QString themeColor(const char* key, const char* fallback);
 
     // Form-factor sizing (D1 Task 3): the panel body font sizes, pushed by MainWindow::applyFormFactorWidgets
     // (the ONE place the token math lives). Defaults are today's desktop-identity values (14px labels/buttons,
@@ -92,6 +99,21 @@ protected:
     NavRing* ring() const { return ring_; }
     void relayoutPanel(); // re-fit + centre the panel (run automatically after show; call after edits)
 
+    // Bound the panel's own content to the height it is allowed to take (issue #347). Called once per
+    // relayout, AFTER the panel's width is fixed and its children have their real widths, and BEFORE
+    // the panel's height is measured — the one moment at which a subclass can give each item an
+    // explicit height measured at the width it is actually PAINTED at. Two things make that necessary,
+    // and between them they were cutting nine shipped confirmations at every window size:
+    //   * QLayout::heightForWidth measures at the widget's full width — the panel's 1px stylesheet
+    //     border is invisible to it, so it wraps the text 2px wider than the label ever is; and
+    //   * a label capped by maximumWidth is narrower still than the layout item it sits in, so a card
+    //     made wide by its button row measured the message at 1552px and then painted it at 560px.
+    // Either way the layout allocates fewer lines than the text needs and the surplus is painted
+    // nowhere at all. `heightBudget` is the tallest the panel may become (relayoutPanel's own window
+    // clamp). Default: do nothing, so NavMenu / the OSK / the passcode pad size exactly as they always
+    // have.
+    virtual void fitPanelContent(int heightBudget);
+
 private:
     QFrame* panel_ = nullptr;
     NavRing* ring_ = nullptr;
@@ -136,6 +158,14 @@ private:
 // A confirmation card: title + message + a row of buttons. `ask` blocks in a nested event loop and
 // returns the chosen button index, or `cancelIndex` when backed out — a drop-in for QMessageBox::exec
 // that stays in-window and controller-navigable.
+//
+// A MESSAGE TOO LONG FOR THE CARD SCROLLS (issue #347). The card never silently drops a sentence: it
+// gives the message exactly the height its text needs, and when that is more than the window allows,
+// the message area becomes a scrolling one — with its scrollbar always shown, so the card SAYS there
+// is more — and Up/Down scroll it with the pad. The buttons are pinned below and stay on the card at
+// every size; if a title long enough to eat the card leaves the message under two lines, the title
+// scrolls with it rather than being clipped. A message that fits builds no scroll area at all, so a
+// short card is the same widget tree, at the same size, that it has always been.
 class NavConfirm : public NavOverlay
 {
     Q_OBJECT
@@ -150,8 +180,32 @@ public:
     // if the card was built with an empty message (no label was created).
     void setMessage(const QString& message);
 
+    // True when the message does not fit and the card is scrolling it (Up/Down move the text rather
+    // than the button selection). False for every card that fits, which is nearly all of them.
+    bool messageScrolls() const { return scrollable_; }
+
+    // Adds " [scroll v/max]" while the message is scrolling, so a UI-test drive can prove it read the
+    // whole message rather than the first screenful.
+    QString describe() const override;
+
 protected:
     QLabel* message_ = nullptr; // the message label, or null when the card was built message-less
+
+    // #347: give the title and the message the height their text needs at the width they are painted
+    // at, and move the message into a scrolling viewport when that is more than the card may have.
+    void fitPanelContent(int heightBudget) override;
+    bool handleNavKey(int key) override;   // Up/Down scroll the message while it is scrolling
+
+private:
+    void ensureScrollArea();               // build the viewport the first time a message overflows
+    void setTitleScrolls(bool inside);     // move the title in/out of that viewport
+
+    QLabel* title_ = nullptr;
+    QHBoxLayout* buttonRow_ = nullptr;
+    QScrollArea* scroll_ = nullptr;        // null until a message first overflows; never torn down again
+    QWidget* body_ = nullptr;              // what scrolls: the message, and the title when even it must
+    bool titleInBody_ = false;
+    bool scrollable_ = false;
 };
 
 // A NavConfirm that counts down: the message is relabeled once a second and the card auto-accepts (dismisses
