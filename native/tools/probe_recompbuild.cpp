@@ -1087,7 +1087,7 @@ int main(int argc, char** argv)
         CHECK(recompupdate::keptRemovedSentence(QStringLiteral("Klonoa"), 52428800)
                   .contains(QStringLiteral("50 MB")));
         CHECK(recompupdate::keptSurvivedSentence(QStringLiteral("Klonoa"))
-                  .contains(QStringLiteral("Go back to the previous build")));
+                  .contains(QStringLiteral("Go back a build")));
         CHECK(recompupdate::cannotKeepSentence(QStringLiteral("Klonoa"))
                   .contains(QStringLiteral("will not build over one it cannot put back")));
         CHECK(recompupdate::restoredSentence(QStringLiteral("Klonoa"))

@@ -27,6 +27,7 @@
 #include <QLabel>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSet>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
@@ -624,6 +625,336 @@ int main(int argc, char** argv)
                       "Down on a card that fits is still the ring's, not a scroll's");
             }
             card->dismiss(-1);
+            pump();
+        }
+    }
+
+    // --------------------------------------------- 10c. a button always says what it does (issue #349)
+    //
+    // The other half of #347, on the same card and just as silent. The buttons live in ONE horizontal row
+    // sharing the card's width, and the card is capped at the window's width less a margin. A QHBoxLayout
+    // given less than its items need does not refuse — it hands each of them a SHARE, and a QPushButton
+    // paints as much of its label as the share holds. That is how the button which starts a minutes-long
+    // compile came to read "Rebuild it wi": 252px of the 478px its label needs, at 1280x760, with no
+    // ellipsis and nothing to say a word had been dropped. #347's audit measured ten card/size pairs doing it.
+    //
+    // The card cannot answer this the way #347 answered the message. A message can scroll; a button cannot,
+    // and eliding one is simply losing it — this is a TV app driven by a pad, so there is no hover to read
+    // the rest with. So the row WRAPS: the buttons are packed, in order, into as many lines as the widest
+    // card the window allows needs, every label painted whole, and Left/Right walk them across the line
+    // break. What follows pins that, the ten pairs from the audit, that the same card lays out the same way
+    // every time — and, the thing that matters most, that a row which fits is exactly the row it always was.
+    //
+    // THE LABELS ARE THE AUDITED ONES, not today's shorter copy on the rebuild card. This pins the LAYOUT;
+    // a label shortened until it happened to fit would let a layout that still squeezes pass here, and
+    // clip again for the next long word or the next translation.
+    {
+        auto panelOf349 = [](NavOverlay* o) {
+            return o->findChild<QFrame*>(QStringLiteral("navOverlayPanel"));
+        };
+        // What a button needs to paint its label: the widest of its lines, plus the frame allowance
+        // clippedTexts() uses — the expression the issue's numbers were measured with.
+        auto needOf = [](QPushButton* b) {
+            int adv = 0;
+            for (const QString& ln : b->text().split(QLatin1Char('\n')))
+                adv = qMax(adv, b->fontMetrics().horizontalAdvance(ln));
+            return adv + 16;
+        };
+        // The card's buttons in the order they were given: findChildren walks the children in creation
+        // order, and moving a button from one line's layout to another never re-parents it.
+        auto buttonsOf = [](NavOverlay* o) {
+            QVector<QPushButton*> out;
+            for (QPushButton* b : o->findChildren<QPushButton*>()) out << b;
+            return out;
+        };
+        // How many lines the buttons sit on, read from where they ARE rather than from anything the widget
+        // reports about itself — so this section reads the pre-#349 widget just as honestly.
+        auto linesOf = [](const QVector<QPushButton*>& bs) {
+            QSet<int> ys;
+            for (QPushButton* b : bs) ys.insert(b->y());
+            return int(ys.size());
+        };
+        auto flat = [](const QString& s) { return QString(s).replace(QLatin1Char('\n'), QLatin1Char(' ')); };
+        // Everything a card owes its buttons, in one place for every case below. Each button is at least as
+        // wide as the layout asks for its label — so it is not SQUEEZED, which is the defect's own mechanism
+        // — and at least as wide as the label's ink plus frame, so nothing is CLIPPED; no two overlap; all
+        // are on the card and the card is in the window; and clippedTexts(), the CI text-fit contract, agrees.
+        auto rowIsWhole = [&](NavConfirm* card, const QByteArray& at) {
+            QFrame* panel = panelOf349(card);
+            const QVector<QPushButton*> bs = buttonsOf(card);
+            bool fit = !bs.isEmpty(), inside = panel != nullptr, apart = true;
+            for (int i = 0; i < bs.size(); ++i)
+            {
+                QPushButton* b = bs.at(i);
+                if (b->width() < b->sizeHint().width() || b->width() < needOf(b)) fit = false;
+                if (!panel || !panel->rect().contains(b->geometry())) inside = false;
+                for (int j = i + 1; j < bs.size(); ++j)
+                    if (b->geometry().intersects(bs.at(j)->geometry())) apart = false;
+            }
+            CHECK(fit, (at + ": every button is as wide as its own label asks").constData());
+            CHECK(inside, (at + ": every button is on the card").constData());
+            CHECK(apart, (at + ": no button is laid over another").constData());
+            CHECK(panel && card->rect().contains(panel->geometry()), (at + ": the card is in the window").constData());
+            CHECK(card->clippedTexts().isEmpty(), (at + ": the card reports nothing clipped").constData());
+        };
+
+        const QStringList kAuditedRebuildRow = { QStringLiteral("Cancel"), QStringLiteral("Play (native)"),
+                                                 QStringLiteral("Rebuild it with the newer version"),
+                                                 QStringLiteral("Go back to the previous build"),
+                                                 QStringLiteral("Open homepage") };
+        // A message long enough that the card is at its full height at the smaller sizes: the row is
+        // measured against a card that is already as tight as it gets, and next to a message that scrolls.
+        const QString kMsg349 = QStringLiteral(
+            "A newer version of this port is available: the catalogue offers build 1.2.0 and the copy on "
+            "this computer is 1.1.1.\n\nThe build that was working before the last rebuild is still being "
+            "kept, at 2.1 GB, in the \u201ckept\u201d folder beside the new one.\n\nA recompilation of the "
+            "retail game into a native program for this computer, with widescreen, high frame rates and gyro "
+            "aiming.\n\nIt would be built from your own copy at C:/Games/ROMs/Nintendo 64/The Legend of "
+            "Zelda - Majora's Mask (USA).z64. That file is read where it is; it is never copied, moved or "
+            "changed.");
+
+        // (A) THE CARD IN THE ISSUE, at every size the audit measured.
+        const QVector<QPair<int, int>> sizes349 = { { 1920, 1080 }, { 1280, 760 }, { 1280, 720 },
+                                                    { 1024, 600 }, { 800, 480 } };
+        int wrappedAt = 0;   // a probe that never reaches the wrapping path would be pinning nothing
+        for (const QPair<int, int>& sz : sizes349)
+        {
+            const QByteArray at = QByteArray("rebuild card at ") + QByteArray::number(sz.first) + "x"
+                                  + QByteArray::number(sz.second);
+            auto* host = new QWidget;
+            host->resize(sz.first, sz.second);
+            host->show();
+            host->activateWindow();   // offscreen QPA does not auto-activate subsequent windows
+            pump();
+
+            auto* card = new NavConfirm(QStringLiteral("Zelda 64: Recompiled"), kMsg349, kAuditedRebuildRow,
+                                        2, host);
+            pump(); pump();
+            const QVector<QPushButton*> bs = buttonsOf(card);
+            CHECK(bs.size() == kAuditedRebuildRow.size(), (at + ": every button asked for is on the card").constData());
+            rowIsWhole(card, at);
+
+            // NOTHING IS SHORTENED ON THE USER'S BEHALF. A label that had to break is, put back together,
+            // exactly the label that was asked for.
+            bool asGiven = bs.size() == kAuditedRebuildRow.size();
+            for (int i = 0; asGiven && i < bs.size(); ++i)
+                if (flat(bs.at(i)->text()) != kAuditedRebuildRow.at(i)) asGiven = false;
+            CHECK(asGiven, (at + ": every label is the label it was given, whole").constData());
+            if (linesOf(bs) > 1) ++wrappedAt;
+
+            // EVERY ACTION IS REACHABLE WITH A PAD, IN THE ORDER GIVEN. Left to the start of the row, then
+            // Right to its end: the walk has to be exactly the buttons as listed, or wrapping the row would
+            // have hidden the very action it was widening (on a wrapped row that is the card's sequential
+            // walk; on a single line it is the ring's own geometric step).
+            for (int i = 0; i < 12; ++i) ctx.routeKey(Qt::Key_Left);
+            pump();
+            QVector<QPushButton*> walk;
+            auto note = [&walk] {
+                if (auto* f = qobject_cast<QPushButton*>(QApplication::focusWidget()))
+                    if (walk.isEmpty() || walk.last() != f) walk << f;
+            };
+            note();
+            for (int i = 0; i < int(bs.size()) + 3; ++i) { ctx.routeKey(Qt::Key_Right); pump(); note(); }
+            CHECK(walk == bs, (at + ": Left, then Right, walks every button in the order given").constData());
+
+            // ENTER ANSWERS THE BUTTON THAT IS SELECTED — here the third, the rebuild, which after a wrap
+            // may sit on a different line from where it started.
+            for (int i = 0; i < 12; ++i) ctx.routeKey(Qt::Key_Left);
+            ctx.routeKey(Qt::Key_Right);
+            ctx.routeKey(Qt::Key_Right);
+            pump();
+            int answered = -2;
+            QObject::connect(card, &NavOverlay::closed, card, [&answered](int r) { answered = r; });
+            ctx.routeKey(Qt::Key_Return);
+            pump();
+            CHECK(answered == 2, (at + ": Enter answers the button that is selected").constData());
+            delete host;
+            pump();
+        }
+        CHECK(wrappedAt >= 3, "the rebuild card really wraps at the sizes it was clipped at (not vacuous)");
+
+        // (B) THE TEN PAIRS FROM #347'S AUDIT, each at the size it was measured clipping at, with the labels
+        // the source has. The message is short on purpose: what squeezes the row is the card's WIDTH — the
+        // row's own requirement clamped to the window — so these reproduce the defect exactly without
+        // carrying paragraphs of shipped copy into a probe that is not about the copy.
+        {
+            struct Pair349 { int w, h; const char* what; QStringList row; };
+            const QStringList unsent = { QStringLiteral("Send 14 plays, then remove"),
+                                         QStringLiteral("Remove and discard 14 plays"), QStringLiteral("Cancel") };
+            const QVector<Pair349> pairs = {
+                { 1280, 760, "MainWindowRecomps.cpp:350 (recomp rebuild)", kAuditedRebuildRow },
+                { 1280, 720, "MainWindowRecomps.cpp:350 (recomp rebuild)", kAuditedRebuildRow },
+                { 1024, 600, "MainWindowRecomps.cpp:350 (recomp rebuild)", kAuditedRebuildRow },
+                { 800, 480,  "MainWindowRecomps.cpp:350 (recomp rebuild)", kAuditedRebuildRow },
+                { 1024, 600, "HomeView.cpp:6552 (music server with unsent plays)", unsent },
+                { 800, 480,  "HomeView.cpp:6552 (music server with unsent plays)", unsent },
+                { 800, 480,  "MainWindow.cpp:15288 (no parental PIN is set)",
+                  { QStringLiteral("Set a parental PIN first"), QStringLiteral("Continue without one") } },
+                { 800, 480,  "MainWindow.cpp:16576 (the game didn't stay open)",
+                  { QStringLiteral("Open game folder"), QStringLiteral("Choose a different .exe"),
+                    QStringLiteral("Close") } },
+                { 800, 480,  "MainWindow.cpp:18354 (native port offer)",
+                  { QStringLiteral("Cancel"), QStringLiteral("Install and play"),
+                    QStringLiteral("Open homepage"), QStringLiteral("Remove") } },
+                { 800, 480,  "MainWindowOpdsPse.cpp:152 (couldn't finish reading online)",
+                  { QStringLiteral("Try again"), QStringLiteral("Download the volume instead"),
+                    QStringLiteral("Not now") } },
+            };
+            for (const Pair349& p : pairs)
+            {
+                const QByteArray at = QByteArray(p.what) + " at " + QByteArray::number(p.w) + "x"
+                                      + QByteArray::number(p.h);
+                auto* host = new QWidget;
+                host->resize(p.w, p.h);
+                host->show();
+                host->activateWindow();
+                pump();
+                auto* card = new NavConfirm(QString::fromUtf8(p.what),
+                                            QStringLiteral("This is what the card explains before it asks."),
+                                            p.row, 0, host);
+                pump(); pump();
+                rowIsWhole(card, at);
+                card->dismiss(-1);
+                delete host;
+                pump();
+            }
+        }
+
+        // (C) THE CARD IS SIZED FROM ITS ROW'S REAL REQUIREMENT, AND THE SAME CARD LAYS OUT THE SAME WAY
+        // EVERY TIME. Packing the row against the width the card already had would measure the previous
+        // packing: the first layout left the card at the window clamp with a band of nothing beside its
+        // lines, and the next relayout shrank it under them — and a NavCountdown relays out once a second.
+        {
+            auto* host = new QWidget;
+            host->resize(800, 480);
+            host->show();
+            host->activateWindow();
+            pump();
+            const QString shortMsg = QStringLiteral("A newer version of this port is available.");
+            auto* card = new NavConfirm(QStringLiteral("Zelda 64: Recompiled"), shortMsg, kAuditedRebuildRow,
+                                        2, host);
+            pump(); pump();
+            QFrame* panel = panelOf349(card);
+            const QVector<QPushButton*> bs = buttonsOf(card);
+            CHECK(linesOf(bs) > 1, "the rebuild card wraps at 800x480 (the cases below are real)");
+            if (panel && panel->layout() && linesOf(bs) > 1)
+            {
+                // The widest line, from where the buttons are. The title and this message are both far
+                // narrower, so the row is what the card's width has to answer to.
+                QHash<int, QPair<int, int>> span;   // y -> (left, right)
+                for (QPushButton* b : bs)
+                {
+                    auto it = span.find(b->y());
+                    if (it == span.end()) span.insert(b->y(), { b->x(), b->x() + b->width() });
+                    else it.value() = { qMin(it->first, b->x()), qMax(it->second, b->x() + b->width()) };
+                }
+                int widest = 0;
+                for (const QPair<int, int>& s : span) widest = qMax(widest, s.second - s.first);
+                const QMargins fm = panel->contentsMargins();
+                const QMargins cm = panel->layout()->contentsMargins();
+                // relayoutPanel's own sizing, applied to the row: content + margins + frame + 4px headroom.
+                CHECK(panel->width() <= widest + fm.left() + fm.right() + cm.left() + cm.right() + 4,
+                      "a wrapped card is as wide as its widest line of buttons, not left at the window clamp");
+
+                const QRect panelBefore = panel->geometry();
+                QVector<QRect> before;
+                for (QPushButton* b : bs) before << b->geometry();
+                for (int k = 0; k < 3; ++k) { card->setMessage(shortMsg); pump(); }
+                QVector<QRect> after;
+                for (QPushButton* b : bs) after << b->geometry();
+                CHECK(panel->geometry() == panelBefore && after == before,
+                      "relaying out a wrapped card moves nothing (a NavCountdown relays out every second)");
+                rowIsWhole(card, "the wrapped card after three relayouts");
+            }
+            card->dismiss(-1);
+            delete host;
+            pump();
+        }
+
+        // (D) A SINGLE LABEL WIDER THAN THE WHOLE CARD. Wrapping the row cannot help — there is no narrower
+        // line to put it on — so the label breaks across two lines of the button itself. No shipped string
+        // reaches this at any tested size; a translation can, and an elided label would be a lost action.
+        {
+            auto* host = new QWidget;
+            host->resize(800, 480);
+            host->show();
+            host->activateWindow();
+            pump();
+            const QString monster = QStringLiteral("Delete every downloaded file for this game and "
+                                                   "forget where it came from");
+            auto* card = new NavConfirm(QStringLiteral("Remove the download"),
+                                        QStringLiteral("This cannot be undone."),
+                                        { monster, QStringLiteral("Cancel") }, 1, host);
+            pump(); pump();
+            QPushButton* big = nullptr;
+            for (QPushButton* b : buttonsOf(card))
+                if (flat(b->text()) == monster) big = b;
+            CHECK(big != nullptr, "the over-long button is on the card, its label whole");
+            if (big)
+            {
+                CHECK(big->text().contains(QLatin1Char('\n')),
+                      "a label too wide for the card breaks onto a second line of the button");
+                CHECK(big->height() >= 2 * big->fontMetrics().lineSpacing(),
+                      "...on a button tall enough to hold both lines");
+                big->setFocus(Qt::OtherFocusReason);
+                pump();
+                CHECK(card->describe() == monster,
+                      "...and the UI-test channel still reads it as the one label it was given");
+            }
+            rowIsWhole(card, "the over-long label at 800x480");
+            card->dismiss(-1);
+            delete host;
+            pump();
+        }
+
+        // (E) THE REGRESSION THAT WOULD MATTER, and it is the one #347 pinned for the message: a row that
+        // FITS is untouched. One line; each button exactly the width its label asks for, which is what a
+        // QHBoxLayout behind a leading stretch has always given it; 10px apart; right-aligned against the
+        // card's margin — the geometry of the single row this card has always had. Every confirmation in
+        // the app is this shape, including the ones that delete things.
+        auto asAlways = [&](NavConfirm* card, const QByteArray& at) {
+            QFrame* panel = panelOf349(card);
+            const QVector<QPushButton*> bs = buttonsOf(card);
+            CHECK(panel && panel->layout() && !bs.isEmpty(), (at + ": the card has its buttons").constData());
+            if (!panel || !panel->layout() || bs.isEmpty()) return;
+            const QMargins fm = panel->contentsMargins();
+            const QMargins cm = panel->layout()->contentsMargins();
+            bool oneLine = true, hinted = true, spaced = true;
+            for (int i = 0; i < bs.size(); ++i)
+            {
+                if (bs.at(i)->y() != bs.first()->y()) oneLine = false;
+                if (bs.at(i)->width() != bs.at(i)->sizeHint().width()) hinted = false;
+                if (i > 0 && bs.at(i)->x() != bs.at(i - 1)->x() + bs.at(i - 1)->width() + 10) spaced = false;
+            }
+            CHECK(oneLine, (at + ": a row that fits is still one line").constData());
+            CHECK(hinted, (at + ": ...each button exactly as wide as its label asks").constData());
+            CHECK(spaced, (at + ": ...10px apart").constData());
+            CHECK(bs.last()->x() + bs.last()->width() == panel->width() - fm.right() - cm.right(),
+                  (at + ": ...right-aligned against the card's margin").constData());
+            CHECK(card->clippedTexts().isEmpty(), (at + ": ...and nothing clipped").constData());
+        };
+        {
+            auto* card = new NavConfirm(QStringLiteral("Uninstall game"),
+                                        QStringLiteral("This removes the downloaded game file."),
+                                        { QStringLiteral("Yes"), QStringLiteral("No") }, 1, &win);
+            pump(); pump();
+            asAlways(card, "the two-button card at 1280x720");
+            card->dismiss(-1);
+            pump();
+        }
+        {
+            // Five long labels that DO fit, at 1920x1080 — the same card that wraps at every smaller size.
+            auto* host = new QWidget;
+            host->resize(1920, 1080);
+            host->show();
+            host->activateWindow();
+            pump();
+            auto* card = new NavConfirm(QStringLiteral("Zelda 64: Recompiled"), kMsg349, kAuditedRebuildRow,
+                                        2, host);
+            pump(); pump();
+            asAlways(card, "the rebuild card at 1920x1080");
+            card->dismiss(-1);
+            delete host;
             pump();
         }
     }

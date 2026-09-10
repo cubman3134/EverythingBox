@@ -314,16 +314,16 @@ void MainWindow::showSelfCompiledPort(const ExternalEmulator& port)
     {
         // A REBUILD IS EXPLICIT AND IT IS THIS BUTTON. Nothing anywhere else in this feature starts one:
         // a feed refresh moves the label on the row and stops there (#248 d, decision 2).
-        buttons << (installedHere ? (updateHere ? tr("Rebuild it with the newer version")
-                                                : tr("Build it again on this computer"))
-                                  : tr("Build it on this computer"));
+        buttons << (installedHere ? (updateHere ? tr("Rebuild (newer version)")
+                                                : tr("Build it again"))
+                                  : tr("Build it here"));
         verbs << Verb::Build;
     }
     // GOING BACK. Offered whenever the previous build is still being held, which is exactly the window in
     // which a rebuild might have produced something that does not work.
     if (keptHere)
     {
-        buttons << tr("Go back to the previous build");
+        buttons << tr("Go back a build");
         verbs << Verb::GoBack;
     }
     if (!tc.canBuild())

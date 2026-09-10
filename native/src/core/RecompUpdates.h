@@ -399,7 +399,7 @@ namespace recompupdate
     inline QString keptSurvivedSentence(const QString& title)
     {
         return QStringLiteral("%1 closed straight away, so the build that worked before it has been kept. "
-                              "Open its row and choose “Go back to the previous build” to put it "
+                              "Open its row and choose “Go back a build” to put it "
                               "back.")
             .arg(title);
     }

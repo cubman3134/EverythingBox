@@ -271,6 +271,29 @@ viewport at all and renders exactly as it always has — that identity is pinned
 with the overflow behaviour, by `probe_nav` §10b (issue \#347). Write the
 message the confirmation needs; do not trim it to fit the card.
 
+**A confirmation button says what it does.** The row of buttons is the one part
+of the card that can neither scroll nor be shortened by the widget. So before the
+card's width is measured, the row is packed against the widest the card can be
+(the window less its margin) and WRAPS onto as many lines as the labels need;
+the card is then as wide as its widest line. Nothing is squeezed and nothing is
+elided. Eliding would be worse than clipping here: this is a TV app driven by a
+pad, there is no hover to read the rest with, and an action nobody can read is
+an action nobody can press on purpose. The packing depends on the labels and the
+window alone, so a card lays out the same way on every relayout (a countdown
+relays out once a second). While the row is wrapped, Left/Right walk the buttons
+in the order they were given, across the line break (a geometric step cannot
+cross it — the lines are right-aligned, so the next button is down *and to the
+left*); a row that fits stays the single-line row it has always been, with the
+ring's own geometric step. Pinned by `probe_nav` §10c (issue \#349).
+
+What that leaves you responsible for is the label. **Write two or three words
+that name the action** — "Rebuild (newer version)", "Go back a build", "Install
+and play". Not a sentence, and never a bare "OK" or "Yes" on a card that deletes,
+overwrites or starts something long: after any shortening the button must still
+say *what it does*, because the buttons are what somebody reads when they have
+skimmed the message. Where the count or the target is the point — #337's "Send 14
+plays, then remove" — it stays in the label; the widget can fit it.
+
 **A QML scene is never a ring stop.** `NavRing` refuses `QQuickWidget`s whatever
 focus policy they carry. That is not a special case bolted on — it is how the app
 already routes QML: a themed page owns its own focus, `MainWindow` hands it

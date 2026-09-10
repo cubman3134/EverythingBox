@@ -253,11 +253,14 @@ void NavOverlay::relayoutPanel()
         panel_->ensurePolished();
         const QList<QWidget*> kids = panel_->findChildren<QWidget*>();
         for (QWidget* c : kids) c->ensurePolished();
+        const int maxW = qMax(300, width() - 120);
+        // #349: content that has to be ARRANGED to fit the widest the card can be — a confirmation's button
+        // row — is arranged now, against that width, so the size hint measured next is its real requirement.
+        fitPanelWidth(maxW);
         lay->invalidate();
         lay->activate();
         // +headroom: the panel's stylesheet border (1px a side) is painted inside the widget but is invisible
         // to the layout, which otherwise shaves the last couple of pixels off the bottom line of text.
-        const int maxW = qMax(300, width() - 120);
         const int w = qBound(320, panel_->sizeHint().width() + 4, maxW);
 #ifdef EB_NAV_DEBUG
         {
@@ -291,6 +294,9 @@ void NavOverlay::relayoutPanel()
 // Default: the panel sizes to its content exactly as it always has. NavConfirm overrides it (#347).
 void NavOverlay::fitPanelContent(int /*heightBudget*/) {}
 
+// Default: nothing to arrange. NavConfirm overrides it to pack its button row (#349).
+void NavOverlay::fitPanelWidth(int /*maxPanelWidth*/) {}
+
 // Walk the panel and report any text that doesn't fully fit its widget. This is the CI-probed contract
 // behind "no dialog text is ever cut off": labels (plain + word-wrapped), buttons, and list rows.
 QStringList NavOverlay::clippedTexts() const
@@ -319,7 +325,14 @@ QStringList NavOverlay::clippedTexts() const
         else if (auto* btn = qobject_cast<QAbstractButton*>(w))
         {
             if (btn->text().isEmpty()) continue;
-            const int need = btn->fontMetrics().horizontalAdvance(btn->text())
+            // The WIDEST LINE of the label: #349 lets a button label that cannot fit a line of the card
+            // break at a space, and one advance over the whole string would then read as clipped when
+            // every line of it is painted in full. Single-line labels — all but a handful — measure
+            // exactly as they always have.
+            int adv = 0;
+            for (const QString& ln : btn->text().split(QLatin1Char('\n')))
+                adv = qMax(adv, btn->fontMetrics().horizontalAdvance(ln));
+            const int need = adv
                              + (qobject_cast<QCheckBox*>(btn) ? 28 : 16); // indicator / frame allowance
             if (need > btn->width())
                 bad << QStringLiteral("button text clipped: \"%1\" (needs %2px, has %3px)")
@@ -482,8 +495,13 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
         message_->setMaximumWidth(560);
         v->addWidget(message_);
     }
+    // The buttons live in an AREA of lines rather than a single row (#349). It holds exactly one line
+    // until fitButtonRow finds that the labels do not fit the card's width, so a card whose row fits —
+    // which is nearly all of them — is laid out to the pixel it always was.
+    buttonArea_ = new QVBoxLayout;
+    buttonArea_->setContentsMargins(0, 0, 0, 0);
+    buttonArea_->setSpacing(10);
     auto* row = new QHBoxLayout;
-    buttonRow_ = row;           // #347: the pinned height the message has to fit around
     row->setSpacing(10);
     row->addStretch(1);
     QPushButton* focusBtn = nullptr;
@@ -492,9 +510,13 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
         auto* b = new QPushButton(buttons[i], panel());
         connect(b, &QPushButton::clicked, this, [this, i] { dismiss(i); });
         row->addWidget(b);
+        buttons_ << b;
+        buttonLabels_ << buttons[i];
         if (i == focusIndex) focusBtn = b;
     }
-    v->addLayout(row);
+    buttonArea_->addLayout(row);
+    buttonLines_ = QVector<int>{ int(buttons.size()) };
+    v->addLayout(buttonArea_);
     if (focusBtn) QTimer::singleShot(0, this, [focusBtn] { if (focusBtn->isVisible()) focusBtn->setFocus(); });
 }
 
@@ -530,7 +552,10 @@ void NavConfirm::fitPanelContent(int heightBudget)
 
     const QMargins cm = v->contentsMargins();
     const int sp   = qMax(0, v->spacing());
-    const int rowH = buttonRow_ ? buttonRow_->sizeHint().height() : 0;
+    // #349: the button row was packed by fitPanelWidth before the card's width was measured, so this is its
+    // real height — one line of buttons, or as many as it took to show every label whole. Everything below
+    // is measured against what it leaves, so it has to be the real one.
+    const int rowH = buttonArea_ ? buttonArea_->sizeHint().height() : 0;
     const int line = qMax(1, title_->fontMetrics().lineSpacing());
     // relayoutPanel adds 6px of headroom for the panel's border before it clamps; budget for it here too,
     // or the panel it builds from these numbers is 6px past the clamp and gets squeezed after all.
@@ -613,6 +638,120 @@ void NavConfirm::fitPanelContent(int heightBudget)
     scrollable_ = bodyH > viewH;
 }
 
+// ---------------------------------------------------------------- #349: every button says what it does
+//
+// A QHBoxLayout given less width than its items need does not refuse: it hands each of them a SHARE of
+// what there is, and a QPushButton paints as much of its label as fits the share. That is how the button
+// which starts a minutes-long compile came to read "Rebuild it wi" — 252px of the 478px its label needs —
+// with no ellipsis and nothing to say a word had been dropped. The panel cannot simply grow: it is capped
+// at the window's width less a margin, and on a 800x480 screen five buttons will not fit a line whatever
+// the card does.
+//
+// So the row WRAPS. The buttons are packed, in order, into as many lines as they need, each line as wide
+// as the card allows; every label is painted whole, and no action is hidden behind an ellipsis or a hover
+// (this is a TV app driven by a pad — there is no hover, and an elided label is simply a lost one). A
+// label too long for even a line of its own is broken at a space and painted on two lines of the button,
+// which is still the whole label.
+//
+// WHEN THE ROW IS PACKED MATTERS AS MUCH AS HOW. It is packed against the widest the card can be — the
+// window's clamp — BEFORE the card's width is measured, so the card is then sized from the row's real
+// requirement: its widest line. Packing it against the card's CURRENT width instead measures the previous
+// packing: the first layout left the card at the clamp with a band of nothing beside the lines, and the
+// next relayout (a NavCountdown relays out once a second) shrank the card under them. Packed from the
+// labels and the window alone, the same card lays out the same way every time.
+//
+// A ROW THAT FITS IS NOT TOUCHED: one line, one QHBoxLayout, the widths the layout always gave it, and
+// Left/Right still handled by the ring's geometric step. That identity is the point — this widget is on
+// the path of every confirmation in the app, including the ones that delete things.
+void NavConfirm::fitPanelWidth(int maxPanelWidth)
+{
+    auto* v = qobject_cast<QVBoxLayout*>(panel()->layout());
+    if (!v) return;
+    // What a line of buttons really gets inside a card that wide: less the card's frame (its 1px stylesheet
+    // border, which QFrame keeps in its contentsMargins) and the layout's own margins. Leaving the frame out
+    // would pack a line 2px wider than it is ever laid out at — #347's border bug, on the other axis.
+    const QMargins fm = panel()->contentsMargins();
+    const QMargins cm = v->contentsMargins();
+    fitButtonRow(qMax(40, maxPanelWidth - fm.left() - fm.right() - cm.left() - cm.right()));
+}
+
+void NavConfirm::fitButtonRow(int rowWidth)
+{
+    if (!buttonArea_ || buttons_.isEmpty()) return;
+    const int sp = qMax(0, buttonArea_->spacing());
+
+    // MEASURE THE LABEL, NEVER THE LAST MEASUREMENT (#347's rule, and this widget re-fits on every
+    // relayout): put back the text as it was given before asking how wide it wants to be.
+    for (int i = 0; i < buttons_.size(); ++i)
+    {
+        if (!buttons_[i]) continue;
+        if (buttons_[i]->text() != buttonLabels_.at(i)) buttons_[i]->setText(buttonLabels_.at(i));
+    }
+
+    QVector<int> need;
+    need.reserve(buttons_.size());
+    for (QPushButton* b : buttons_) need << (b ? b->sizeHint().width() : 0);
+
+    // A SINGLE LABEL WIDER THAN THE WHOLE LINE. Break it at the space nearest the middle and let the
+    // button paint two lines — a button is allowed to be two lines tall; it is not allowed to lie about
+    // what it does. (Shipped labels do not reach this at any tested size; a translation can.)
+    for (int i = 0; i < buttons_.size(); ++i)
+    {
+        if (need.at(i) <= rowWidth || !buttons_[i]) continue;
+        const QString label = buttonLabels_.at(i);
+        const QStringList words = label.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        if (words.size() < 2) continue;                 // one long word: nothing to break, keep it whole
+        int bestCut = -1, bestDelta = -1;
+        for (int cut = 1; cut < words.size(); ++cut)
+        {
+            const int a = buttons_[i]->fontMetrics().horizontalAdvance(
+                              QStringList(words.mid(0, cut)).join(QLatin1Char(' ')));
+            const int b = buttons_[i]->fontMetrics().horizontalAdvance(
+                              QStringList(words.mid(cut)).join(QLatin1Char(' ')));
+            const int delta = qAbs(a - b);
+            if (bestCut < 0 || delta < bestDelta) { bestCut = cut; bestDelta = delta; }
+        }
+        buttons_[i]->setText(QStringList(words.mid(0, bestCut)).join(QLatin1Char(' '))
+                             + QLatin1Char('\n')
+                             + QStringList(words.mid(bestCut)).join(QLatin1Char(' ')));
+        need[i] = buttons_[i]->sizeHint().width();
+    }
+
+    // PACK, in order, greedily. Reading order is the order the caller listed the buttons in, which is the
+    // order the ring walks them in, so the two never disagree about where "next" is.
+    QVector<int> lines;
+    int used = 0, count = 0;
+    for (int i = 0; i < need.size(); ++i)
+    {
+        const int add = (count == 0) ? need.at(i) : sp + need.at(i);
+        if (count > 0 && used + add > rowWidth) { lines << count; used = need.at(i); count = 1; }
+        else { used += add; ++count; }
+    }
+    if (count > 0) lines << count;
+
+    if (lines == buttonLines_) return;   // same packing as it already has: nothing to rebuild
+    buttonLines_ = lines;
+
+    // Rebuild the lines. The buttons are children of the panel, so taking them out of a layout and putting
+    // them into another neither destroys nor hides them.
+    while (QLayoutItem* it = buttonArea_->takeAt(0))
+    {
+        if (QLayout* old = it->layout())
+            while (QLayoutItem* sub = old->takeAt(0)) delete sub;
+        delete it;
+    }
+    int at = 0;
+    for (int n : lines)
+    {
+        auto* line = new QHBoxLayout;
+        line->setSpacing(sp);
+        line->addStretch(1);
+        for (int k = 0; k < n && at < buttons_.size(); ++k, ++at)
+            if (buttons_[at]) line->addWidget(buttons_[at]);
+        buttonArea_->addLayout(line);
+    }
+}
+
 // The viewport, built the first time a message overflows and kept for the life of the card. Not resizable:
 // QScrollArea's own widgetResizable path sizes its widget to minimumSizeHint(), which for a word-wrapped
 // QLabel is a couple of lines — it would clip the very text this is here to show. We set the body's size
@@ -683,10 +822,15 @@ void NavConfirm::setTitleScrolls(bool inside)
     titleInBody_ = inside;
 }
 
-// Up/Down scroll the message while it is scrolling. They are free to: every button on this card lives in
-// ONE horizontal row, so Left/Right — which the ring keeps — are the keys the buttons need, and Up/Down
-// have never moved the selection here. Back/Escape and Enter are untouched, so a card that scrolls is
-// still dismissed and still answered the way every other one is.
+// Up/Down scroll the message while it is scrolling. They are free to: the buttons on this card are walked
+// with Left/Right, and Up/Down have never moved the selection here. Back/Escape and Enter are untouched,
+// so a card that scrolls is still dismissed and still answered the way every other one is.
+//
+// AND WHILE THE ROW IS WRAPPED (#349), Left/Right walk the buttons in the order they were given, across
+// the line break. The ring's geometric step cannot: the lines are right-aligned, so the first button of
+// the second line sits DOWN AND TO THE LEFT of the last button of the first, and a Right press from the
+// end of a line finds nothing to its right. Sequential is also simply what a row of actions means. For a
+// row on ONE line the two orders are the same, so this is left to the ring there — unchanged.
 bool NavConfirm::handleNavKey(int key)
 {
     if (scrollable_ && scroll_ && (key == Qt::Key_Up || key == Qt::Key_Down))
@@ -696,12 +840,31 @@ bool NavConfirm::handleNavKey(int key)
         bar->setValue(bar->value() + (key == Qt::Key_Down ? step : -step));
         return true;
     }
+    if (buttonRowWraps() && (key == Qt::Key_Left || key == Qt::Key_Right))
+    {
+        QWidget* fw = QApplication::focusWidget();
+        const int cur = fw ? buttons_.indexOf(qobject_cast<QPushButton*>(fw)) : -1;
+        if (cur >= 0)
+        {
+            const int next = cur + (key == Qt::Key_Right ? 1 : -1);
+            // No wraparound at the ends: exactly what the geometric step does on a single-line row.
+            if (next >= 0 && next < buttons_.size() && buttons_.at(next))
+            {
+                buttons_.at(next)->setFocus(Qt::OtherFocusReason);
+                return true;
+            }
+            return true;   // at an end of the row: consumed, and the selection stays where it is
+        }
+    }
     return NavOverlay::handleNavKey(key);
 }
 
 QString NavConfirm::describe() const
 {
-    const QString base = NavOverlay::describe();
+    QString base = NavOverlay::describe();
+    // A label broken across two lines of its button (#349) is still reported as the label it was given.
+    for (int i = 0; i < buttons_.size() && !base.isEmpty(); ++i)
+        if (buttons_.at(i) && buttons_.at(i)->text() == base) { base = buttonLabels_.at(i); break; }
     if (!scrollable_ || !scroll_ || !scroll_->verticalScrollBar()) return base;
     const QScrollBar* bar = scroll_->verticalScrollBar();
     return base + QStringLiteral(" [scroll %1/%2]").arg(bar->value()).arg(bar->maximum());
