@@ -11,6 +11,7 @@
 #include <QFrame>
 #include <QPointer>
 #include <QVariantMap>
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 #include <functional>
@@ -21,6 +22,7 @@ class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPushButton;
 class QScrollArea;
 class QVBoxLayout;
 
@@ -114,6 +116,15 @@ protected:
     // have.
     virtual void fitPanelContent(int heightBudget);
 
+    // Arrange content whose shape depends on how wide the panel can be (issue #349). Called once per
+    // relayout, BEFORE the panel's width is measured from its size hint, with the widest the panel may
+    // become (relayoutPanel's own window clamp). Arranging here rather than in fitPanelContent is the
+    // point: the width is then measured from what the arrangement really needs, and the arrangement is
+    // decided from the content and the window alone — never from the width a previous arrangement left
+    // the panel at, which would make the same card lay out differently the second time. Default: do
+    // nothing, so every overlay but a confirmation sizes exactly as it always has.
+    virtual void fitPanelWidth(int maxPanelWidth);
+
 private:
     QFrame* panel_ = nullptr;
     NavRing* ring_ = nullptr;
@@ -159,6 +170,13 @@ private:
 // returns the chosen button index, or `cancelIndex` when backed out — a drop-in for QMessageBox::exec
 // that stays in-window and controller-navigable.
 //
+// EVERY BUTTON SHOWS ITS WHOLE LABEL (issue #349). The row of buttons is measured against the widest the
+// card can be, and when the buttons do not all fit on one line the row WRAPS onto as many lines as it
+// needs; the card is then as wide as its widest line. Nothing is squeezed and nothing is elided, because
+// a button that cannot say what it does is a button nobody can press on purpose. While the row is wrapped, Left/Right walk the buttons in order
+// (across the line break, which a geometric step cannot do), so every action stays reachable with a pad.
+// A row that fits on one line is untouched: same layout, same widths, same keys.
+//
 // A MESSAGE TOO LONG FOR THE CARD SCROLLS (issue #347). The card never silently drops a sentence: it
 // gives the message exactly the height its text needs, and when that is more than the window allows,
 // the message area becomes a scrolling one — with its scrollbar always shown, so the card SAYS there
@@ -188,20 +206,31 @@ public:
     // whole message rather than the first screenful.
     QString describe() const override;
 
+    // True when the button row has been wrapped onto more than one line to keep every label whole.
+    bool buttonRowWraps() const { return buttonLines_.size() > 1; }
+
 protected:
     QLabel* message_ = nullptr; // the message label, or null when the card was built message-less
 
     // #347: give the title and the message the height their text needs at the width they are painted
     // at, and move the message into a scrolling viewport when that is more than the card may have.
     void fitPanelContent(int heightBudget) override;
-    bool handleNavKey(int key) override;   // Up/Down scroll the message while it is scrolling
+    // #349: pack the button row against the widest the card can be, before the card's width is measured.
+    void fitPanelWidth(int maxPanelWidth) override;
+    // Up/Down scroll the message while it is scrolling; Left/Right walk the buttons in order while the
+    // row is wrapped (#349), because a geometric step cannot cross a line break in a right-aligned row.
+    bool handleNavKey(int key) override;
 
 private:
     void ensureScrollArea();               // build the viewport the first time a message overflows
     void setTitleScrolls(bool inside);     // move the title in/out of that viewport
+    void fitButtonRow(int rowWidth);       // #349: pack the buttons into lines no wider than rowWidth
 
     QLabel* title_ = nullptr;
-    QHBoxLayout* buttonRow_ = nullptr;
+    QVBoxLayout* buttonArea_ = nullptr;    // one QHBoxLayout per line of buttons (usually exactly one)
+    QVector<QPushButton*> buttons_;        // in the order they were given: the row's reading order
+    QStringList buttonLabels_;             // the labels AS GIVEN — measured, never re-measured
+    QVector<int> buttonLines_;             // buttons per line: the packing currently laid out
     QScrollArea* scroll_ = nullptr;        // null until a message first overflows; never torn down again
     QWidget* body_ = nullptr;              // what scrolls: the message, and the title when even it must
     bool titleInBody_ = false;

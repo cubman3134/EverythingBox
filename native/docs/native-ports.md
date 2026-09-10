@@ -240,7 +240,7 @@ with a verdict and no explanation is unreachable:
 
 | compiler | CMake | verdict | what the card says |
 |---|---|---|---|
-| yes | yes | `Ready` | which compiler and which CMake it found; a **Build it on this computer** verb appears |
+| yes | yes | `Ready` | which compiler and which CMake it found; a **Build it here** verb appears |
 | yes | no  | `NoCMake` | names the compiler it found, and that CMake is what is missing |
 | no  | yes | `NoCompiler` | there is nothing for CMake to compile with |
 | no  | no  | `NoToolchain` | both, named, with both installer pages |
@@ -397,7 +397,7 @@ From then on:
   `GameLauncher`'s own threshold for *closed immediately = a failed boot*, reused rather than re-chosen. The
   judgement is conservative on purpose: keeping a dead copy costs disk, dropping a live one costs somebody
   their working program;
-* the new program **does not run** → nothing is dropped. The row offers *Go back to the previous build*,
+* the new program **does not run** → nothing is dropped. The row offers *Go back a build*,
   which removes the replacement and renames the kept copy back. Its stamp travels with the folder, so the row
   returns to saying exactly what it said before the rebuild;
 * the rebuild **fails** → nothing changed. Every failure before staging never reached the move at all; the
