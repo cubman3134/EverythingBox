@@ -140,4 +140,23 @@ namespace browse
         bool ok() const { return kind != Kind::None; }
     };
     JellyfinDownloadTarget jellyfinDownloadTargetFor(const MediaItem& it);
+
+    // ---- THE CLASSIC LAYOUT'S DOOR ON A SERIES OR SEASON LEVEL (issue #310) ----------------------------
+    // Enter on a container row DRILLS (HomeView::activateItem's _jfseries / _jfseason arms), so a container
+    // never reaches a classic detail page, and the batch verbs had only the Start menu for a door. The
+    // level the drill opens now carries a Download action of its own — the same header card an addon's
+    // series level shows above its episodes, narrowed to the one verb.
+    //
+    // The two builders are THE level item the drill pushes, exposed so probe_browse can hold the level
+    // against the row it was opened from: a press on the level's action and a Start-menu press on that row
+    // must resolve the same JellyfinDownloadTarget, and they can only be seen to do so if the level is built
+    // here rather than inline in the view.
+    MediaItem jellyfinSeriesLevelItem(const QString& seriesRef, const QString& title);
+    // `marker` is "<qualified series id>\n<qualified season id>" — see kJellyfinSeasonPrefix.
+    MediaItem jellyfinSeasonLevelItem(const QString& marker, const QString& title);
+
+    // Does this LEVEL offer the batch Download action? Asked of the one table above, so the header's
+    // presence and what its press means cannot come apart: a series or season level whose marker resolves
+    // to a Series / Season target does, and nothing else does (a library, the root, a malformed marker).
+    bool jellyfinLevelOffersDownload(const MediaItem& level);
 }

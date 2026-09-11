@@ -1913,6 +1913,10 @@ QWidget* HomeView::detailActionButton() const
     // Favorite is offered it is the only action there — and without this the D-pad would land on nothing
     // (the #40/#47 shape of bug).
     if (editMetaBtn_ && editMetaBtn_->isVisible()) return editMetaBtn_;
+    // LAST of all, so no page that already had a landing gets a different one: every page requestMeta
+    // builds shows Favorite, which is taken above. The one card on which Download is the only action is a
+    // Jellyfin series or season level (#310), and without this Up from its top row would skip the card.
+    if (downloadBtn_ && downloadBtn_->isVisible()) return downloadBtn_;
     return nullptr;
 }
 
