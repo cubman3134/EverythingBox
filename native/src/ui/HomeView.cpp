@@ -5318,10 +5318,34 @@ LoadedAddon* HomeView::addonForKey(const QString& catalogKey) const
 }
 
 // The bucket the current catalogue classifies into — the key playlists filter/create on (playlists widened
-// from per-catalogue to per-category). Segment 2 of the catalogKey is the catalogType the oracle maps.
-QString HomeView::currentCategoryKey() const
+// from per-catalogue to per-category). A real catalogue answers with its type, exactly as before; a synthetic
+// root answers with the category the user is in; failing both, the row's own type (#373 — the rules and their
+// order are core::playlistCategory's, pinned by probe_playlists).
+QString HomeView::currentCategoryKey(const QString& itemType) const
 {
-    return mediaCategory(currentCatalogKey().section(QLatin1Char('|'), 2, 2));
+    return core::playlistCategory(currentCatalogKey(), activeCategoryKey(), itemType);
+}
+
+// The bucket of the category the user is standing in, when the browse root is one of the SYNTHETIC categories
+// (#373): Music, Audiobooks, My Books, Photos, or a bucket's own Playlists list. Those roots are pushed with no
+// catalogue, so currentCatalogKey() says nothing about them ("native||"). Each root carries, as its mime, the
+// navKey its tab was opened by ("so loadTop() repopulates on Back"), and that tab declares the type the themed
+// bucket column already groups it under (Music -> "album" -> audio) — so this answers the category the user can
+// SEE they are in. Only the synthetic tabs are matched: an add-on catalogue's navKey is its catalogue id, which
+// could spell the same word. "" for anything else — a real catalogue answers for itself, and Search and Home
+// have no single category.
+QString HomeView::activeCategoryKey() const
+{
+    if (stack_.isEmpty()) return QString();
+    const Level& root = stack_.first();
+    if (root.addon || !root.catalogId.isEmpty() || !root.catalogType.isEmpty()) return QString();
+    const QString& mime = root.item.mime;
+    if (mime.startsWith(QStringLiteral("playlists:"))) return mime.mid(int(qstrlen("playlists:")));
+    if (mime.isEmpty()) return QString();
+    for (const NavTarget& t : navTargets_)
+        if (!t.isHome && !t.addon && (t.music || t.audiobooks || t.books || t.photos) && t.navKey == mime)
+            return mediaCategory(t.type);
+    return QString();
 }
 
 void HomeView::openPlaylistsLevel(const QString& categoryKey, bool asRoot)
@@ -7058,6 +7082,8 @@ void HomeView::deletePlaylistInteractive(const QString& playlistId)
     populatePlaylists(p.categoryKey); // refresh the list we're standing on (the row disappears)
 }
 
+static void hvLog(const QString& msg); // defined with the Home list's menus, below
+
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
@@ -7071,7 +7097,12 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     // XMB-in-catalog, the detail view's verb, classic "P") is covered by the one test.
     if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) return;
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
-    const QString key = currentCategoryKey(); // the whole category's playlists are offered, not just this catalogue's
+    // The whole category's playlists are offered, not just this catalogue's. The row's type is passed because on
+    // a root with no catalogue and no synthetic category (a search) it is the only thing left to go on (#373).
+    const QString key = currentCategoryKey(it.type);
+    // Which inputs chose the bucket — keys and types only, never the row's title or url.
+    hvLog(QStringLiteral("playlist add: bucket=%1 catalogKey=%2 category=%3 type=%4")
+              .arg(key, currentCatalogKey(), activeCategoryKey(), it.type));
     QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
@@ -9600,7 +9631,9 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
 
 void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
 {
-    const QString key = currentCategoryKey(); // game-category playlists (offered across every games catalogue)
+    // Game-category playlists (offered across every games catalogue). From Home's own Recent list there is no
+    // catalogue at the root, and the row's type is what files it (#373 — it used to fall to "video").
+    const QString key = currentCategoryKey(it.type);
     QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
