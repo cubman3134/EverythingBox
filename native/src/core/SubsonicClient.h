@@ -163,9 +163,17 @@ public:
     QString streamUrl(const QString& qualifiedTrackId) const;
 
     // Fetch this album's cover into MetaCache (keyed on the qualified ALBUM id) if it is not already there.
-    // No-op when the album has no cover art, when it is already cached, or when a fetch is in flight.
-    // `then` fires once the bytes have landed, so a level can re-render with pictures on it.
+    // No-op when the album has no cover art, when it is already cached, when a fetch is in flight, or when
+    // the server already said this session that there is none.
+    //
+    // `then` fires ONLY when artwork actually landed on disk (#370). It means "re-render with pictures on
+    // it", and the level re-runs this prefetch when it re-renders — so firing it for an answer that stored
+    // nothing is a request loop. What each answer means, and why only some are remembered, is CoverFetch.h.
     void prefetchAlbumCover(const QString& albumKey, std::function<void()> then = {});
+
+    // The album keys this session has been told have no cover. For the probe, which holds this state to the
+    // no-credential rule by scanning it; nothing in the app reads it.
+    QSet<QString> coversKnownMissing() const { return coverMissing_; }
 
     // The LOCAL FILE MetaCache holds for this album's cover, or an empty string. Deliberately not a fallback
     // to the remote url: a MediaItem's thumbnailUrl is copied into caches and item records, and the remote
@@ -224,6 +232,11 @@ private:
     QNetworkAccessManager*    nam_ = nullptr;
     QHash<QString, Cache>     caches_;
     QSet<QString>             inflight_;         // "<method>|<target>" — coalesces duplicate fetches
+    // ALBUM KEYS whose cover the server ANSWERED with nothing, this session (#370). In memory only and written
+    // nowhere: art the server gains later must appear in a later session, and a persisted "no art" is a
+    // verdict nothing would ever revisit. Keyed on the qualified album key — NEVER the cover url, which
+    // carries the token and the salt (see the header). A failure is not an answer and never lands here.
+    QSet<QString>             coverMissing_;
     QHash<QString, QVector<Done>> waiting_;      // the callbacks a coalesced fetch still owes
 };
 

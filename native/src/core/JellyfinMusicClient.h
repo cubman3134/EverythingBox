@@ -95,8 +95,13 @@ public:
     QString streamUrl(const QString& qualifiedTrackId) const;
 
     // Fetch this album's cover into MetaCache (keyed on the qualified ALBUM id) if it is not already there.
-    // No-op when it is already cached or a fetch is in flight.
+    // No-op when it is already cached, a fetch is in flight, or the server said this session there is none.
+    // `then` fires ONLY when artwork actually landed on disk (#370): it re-renders the level, which re-runs
+    // this, so firing it for anything else is a loop. CoverFetch.h has the rule.
     void prefetchAlbumCover(const QString& albumKey, std::function<void()> then = {});
+
+    // The album keys this session has been told have no cover. For the probe's no-credential scan only.
+    QSet<QString> coversKnownMissing() const { return coverMissing_; }
 
     // The LOCAL FILE MetaCache holds for this album's cover, or an empty string. Deliberately not a fallback
     // to the remote url: a MediaItem's thumbnailUrl is copied into caches and item records, and the remote
@@ -128,5 +133,8 @@ private:
     QNetworkAccessManager*        nam_ = nullptr;
     QHash<QString, Cache>         caches_;
     QSet<QString>                 inflight_;    // "<what>|<target>" — coalesces duplicate fetches
+    // Album keys whose cover the server ANSWERED with nothing, this session (#370). In memory only, keyed on
+    // the album key and nothing else; a failure never lands here. See CoverFetch.h.
+    QSet<QString>                 coverMissing_;
     QHash<QString, QVector<Done>> waiting_;     // the callbacks a coalesced fetch still owes
 };

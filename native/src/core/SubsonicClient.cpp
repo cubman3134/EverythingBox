@@ -1,5 +1,6 @@
 #include "SubsonicClient.h"
 #include "AppBrand.h"
+#include "CoverFetch.h"
 #include "JellyfinMusicClient.h"   // issue #194 increment 3: the other two suppliers MusicSupply routes to
 #include "MetaCache.h"
 #include "MusicArt.h"
@@ -600,6 +601,9 @@ void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<v
 
     const QString tag = QStringLiteral("cover|") + albumKey;
     if (inflight_.contains(tag)) return;
+    // ...and ASKED ONCE A SESSION. A server that answered "no picture" has answered; asking again on every
+    // re-render is the wasted traffic #370 counted, on somebody's own machine, per visit to the level.
+    if (coverMissing_.contains(albumKey)) return;
     inflight_.insert(tag);
 
     const QString salt = Subsonic::saltFrom(QRandomGenerator::global()->generate64());
@@ -614,20 +618,36 @@ void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<v
     QNetworkRequest req{ u };
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+    // Bounded, so a hung request cannot hold `tag` — and every later ask for this cover — all session. A
+    // timeout is a failure, not an answer: see CoverFetch.h.
+    req.setTransferTimeout(CoverFetch::kTransferTimeoutMs);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, albumKey, tag, then] {
         reply->deleteLater();
         inflight_.remove(tag);
-        if (reply->error() == QNetworkReply::NoError)
+        const bool       transportOk = reply->error() == QNetworkReply::NoError;
+        const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body   = transportOk ? reply->readAll() : QByteArray();
+        switch (Subsonic::coverAnswer(transportOk, status, body))
         {
-            // storeImage records the FILE NAME under "images", never the url it came from — which is what
-            // makes routing the cover through MetaCache safe at all, since that url carries the credential.
-            // (Verified in MetaCache.cpp: only `file` is written into the json.)
-            MetaCache::storeImage(albumKey, QStringLiteral("cover"),
-                                  QStringLiteral("cover.jpg"),
-                                  reply->header(QNetworkRequest::ContentTypeHeader).toString(),
-                                  reply->readAll());
+            case CoverFetch::Answer::Image:
+                // storeImage records the FILE NAME under "images", never the url it came from — which is what
+                // makes routing the cover through MetaCache safe at all, since that url carries the credential.
+                // (Verified in MetaCache.cpp: only `file` is written into the json.)
+                MetaCache::storeImage(albumKey, QStringLiteral("cover"),
+                                      QStringLiteral("cover.jpg"),
+                                      reply->header(QNetworkRequest::ContentTypeHeader).toString(), body);
+                break;
+            case CoverFetch::Answer::Absent:
+                coverMissing_.insert(albumKey);
+                break;
+            case CoverFetch::Answer::Retry:
+                break;
         }
+        // DID ANYTHING LAND? Only the disk says so. `then` re-renders the level, and the re-render re-runs this
+        // prefetch — so firing it when nothing was stored is the loop the early return above guards against for
+        // a cached cover, re-created by an empty answer (#370).
+        if (MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
         if (then) then();
     });
 }

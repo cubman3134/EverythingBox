@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.252 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.253 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -722,6 +722,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
         src/core/SubsonicTransport.h     # the ONE sentence table a failed request may produce (no url, ever)
+        src/core/CoverFetch.h            # (#370) what a cover answer means: landed, "no art" this session, or retry
         # ...and increment 6: the server as a SCROBBLE DESTINATION - #192's seam, one provider per server.
         src/core/SubsonicScrobbleProvider.cpp src/core/SubsonicScrobbleProvider.h
         # ONE MUSIC LIBRARY ACROSS EVERY SOURCE (#194 increment 3): a Jellyfin server's music, and the
@@ -2489,9 +2490,26 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/StreamHeaders.cpp   # AddonPageList parses a page's headers with it (#188)
         src/addons/AddonModels.h
         src/core/Settings.cpp     src/core/Settings.h
-        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        # ...and the SOCKET half, for one question only (#370): what an empty or failed cover answer does
+        # to a level that re-renders when art lands. Driven against a loopback stub the probe stands up
+        # itself - never a real server, never an account. SubsonicClient.cpp carries MusicSupply, which
+        # routes to the Jellyfin and EverythingBox-server music clients, so those link too - and they are
+        # asked the same question, because they had the same shape.
+        src/core/SubsonicClient.cpp      src/core/SubsonicClient.h
+        src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h
+        src/core/SubsonicTransport.h
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h
+        src/core/JellyfinMusicClient.cpp src/core/JellyfinMusicClient.h
+        src/core/JellyfinMusic.cpp       src/core/JellyfinMusic.h
+        src/core/Jellyfin.cpp            src/core/Jellyfin.h
+        src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
+        src/core/ServerMusicClient.cpp   src/core/ServerMusicClient.h
+        src/core/ServerMusic.cpp         src/core/ServerMusic.h
+        src/core/MetaCache.cpp           src/core/MetaOverrides.cpp
+        src/core/MetaCache.h             src/core/MetaOverrides.h)
     target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
-    target_link_libraries(probe_subsonic PRIVATE Qt6::Core Qt6::Gui tag)
+    target_link_libraries(probe_subsonic PRIVATE Qt6::Core Qt6::Gui Qt6::Network tag)
 
     # Headless test for CROSS-SOURCE MUSIC IDENTITY (issue #194): the artist/album normalisers and every trap
     # music tags set for them (edition and remaster noise, Vol./Volume/Vol, Pt. II and Roman numerals levelled

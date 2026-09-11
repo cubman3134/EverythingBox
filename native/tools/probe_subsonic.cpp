@@ -3,7 +3,8 @@
 //
 // NO CREDENTIAL APPEARS ANYWHERE IN THIS FILE. Every password below is the literal string
 // "probe-not-a-real-password", named so nobody can mistake it for one, and every host is a name that
-// resolves nowhere. Nothing here opens a connection.
+// resolves nowhere. Nothing here opens a connection - except the last section (#370), which opens one to
+// ITSELF: a loopback stub this probe stands up, because what is under test there is what a real reply does.
 //
 // What is under test, and why each of these and not something easier:
 //
@@ -18,18 +19,45 @@
 //      and JSON forms produces identical results, which is what lets one set of readers serve both.
 //   4. THE BROWSE SHAPES — a server's Index rendered by the very builders #74's local library uses, and the
 //      compatibility claim that a local index is unaffected by any of it.
+//   5. COVER ANSWERS (#370) — an empty, failed or "not found" cover answer must not re-render the level
+//      that asked, so the level cannot ask again in a loop; "no art" is remembered for the session only
+//      and holds no credential. Counted in requests the stub actually received, never in time.
 #include "Subsonic.h"
+#include "AppPaths.h"
+#include "Jellyfin.h"
+#include "JellyfinMusicClient.h"
+#include "JellyfinServerStore.h"
+#include "MetaCache.h"
 #include "MusicCatalogs.h"
 #include "MusicFixtures.h"
 #include "MusicLibrary.h"
+#include "ServerMusic.h"
+#include "ServerMusicClient.h"
+#include "SubsonicClient.h"
+#include "SubsonicServerStore.h"
 
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDeadlineTimer>
 #include <QDir>
+#include <QHostAddress>
+#include <QImage>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QUuid>
 
 #include <cstdio>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <vector>
 
 static int g_fail = 0;
 #define CHECK(cond) do { if (!(cond)) { \
@@ -1300,8 +1328,621 @@ static void testNoCredentialAnywhere()
     CHECK(!scanned.contains(QByteArray("/rest/")));
 }
 
+// ==================================================================================================
+// #370 — AN EMPTY COVER ANSWER MUST NOT LOOP
+// ==================================================================================================
+// The one part of this file that opens a socket, and it only ever opens one to itself: a loopback stub
+// this probe stands up, speaking just enough HTTP/1.1 to answer the requests below. No real server, no
+// account, and the password is still the literal above.
+//
+// THE BUG. prefetchAlbumCover's `then` means "new artwork landed, re-render", and the level wires it to a
+// debounced loadTop that re-runs the prefetch over the same rows (HomeView::scheduleMusicArtRefresh). An
+// answer that stored nothing - an empty body, which MetaCache::storeImage silently drops - fired `then`
+// anyway, so the re-render found nothing on disk and nothing in flight, and asked again. For ever.
+static const char* kUser    = "probe-user";
+static const char* kJfToken = "probe-fixture-jellyfin-token-3b7e";   // distinctive: a byte scan must not match by accident
+static const char* kJfServerId = "0123456789abcdef0123456789abcdef";  // Jellyfin ids are 32 hex digits
+static const char* kShelfId = "probe-shelf";
+
+class CoverStub : public QTcpServer
+{
+public:
+    enum class Answer { Empty, Image, ServerError, NotFoundEnvelope, AuthEnvelope, Http404 };
+    QHash<QString, Answer> answers;   // cover id -> what asking for it gets. Unlisted ids answer Empty.
+    QByteArray imageBytes;
+    QString    root;                  // http://127.0.0.1:<port>, once listening
+    QStringList coverIds;             // every cover request, by the id it asked for - in order
+    // Every request target. THESE HOLD THE SUBSONIC TOKEN AND SALT and are never printed; they exist so
+    // the byte scan at the end can harvest exactly what went over the wire.
+    QStringList targets;
+
+    explicit CoverStub(QObject* parent = nullptr) : QTcpServer(parent) {}
+    int covers(const QString& id) const { return int(coverIds.count(id)); }
+
+protected:
+    void incomingConnection(qintptr handle) override
+    {
+        auto* sock = new QTcpSocket(this);
+        sock->setSocketDescriptor(handle);
+        connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
+            sock->setProperty("buf", sock->property("buf").toByteArray() + sock->readAll());
+            const QByteArray buf = sock->property("buf").toByteArray();
+            if (buf.indexOf("\r\n\r\n") < 0) return;   // GETs only: the head is the whole request
+            if (sock->property("done").toBool()) return;
+            sock->setProperty("done", true);
+            const QList<QByteArray> reqLine = buf.left(buf.indexOf("\r\n")).split(' ');
+            reply(sock, QString::fromUtf8(reqLine.value(1)));
+        });
+    }
+
+private:
+    static void send(QTcpSocket* sock, int status, const QByteArray& type, const QByteArray& body)
+    {
+        sock->write("HTTP/1.1 " + QByteArray::number(status) + (status == 200 ? " OK" : " ERR")
+                    + "\r\nContent-Type: " + type
+                    + "\r\nContent-Length: " + QByteArray::number(body.size())
+                    + "\r\nConnection: close\r\n\r\n" + body);
+        sock->flush();
+        sock->disconnectFromHost();
+    }
+
+    void answerCover(QTcpSocket* sock, const QString& id)
+    {
+        coverIds.push_back(id);
+        switch (answers.value(id, Answer::Empty))
+        {
+            case Answer::Empty:       send(sock, 200, "image/jpeg", QByteArray()); return;
+            case Answer::Image:       send(sock, 200, "image/png", imageBytes); return;
+            case Answer::ServerError: send(sock, 500, "text/plain", "busy"); return;
+            case Answer::Http404:     send(sock, 404, "text/plain", "no such image"); return;
+            // THE PROTOCOL'S OWN "NO SUCH COVER": a 200, with a failure envelope inside. Code 70 is "the
+            // requested data was not found"; 40 is a refused credential.
+            case Answer::NotFoundEnvelope:
+                send(sock, 200, "text/xml", "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                                            "<error code=\"70\" message=\"Cover art not found\"/>"
+                                            "</subsonic-response>");
+                return;
+            case Answer::AuthEnvelope:
+                send(sock, 200, "text/xml", "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                                            "<error code=\"40\" message=\"Wrong username or password\"/>"
+                                            "</subsonic-response>");
+                return;
+        }
+    }
+
+    void reply(QTcpSocket* sock, const QString& target)
+    {
+        targets.push_back(target);
+        const QUrl u(target);
+        const QString path = u.path();
+        if (path == QLatin1String("/rest/getStarred2.view"))
+        {
+            // Every starred record has a DIFFERENT cover id from its album id, so a client that asked for
+            // the album id rather than the cover id would be asking the stub for something it never lists.
+            QByteArray body = "<subsonic-response status=\"ok\" version=\"1.16.1\"><starred2>";
+            for (int i = 1; i <= 6; ++i)
+                body += "<album id=\"al-" + QByteArray::number(i) + "\" name=\"Record " + QByteArray::number(i)
+                      + "\" artist=\"Probe\" artistId=\"ar-1\" songCount=\"1\" coverArt=\"c-"
+                      + QByteArray::number(i) + "\"/>";
+            body += "</starred2></subsonic-response>";
+            send(sock, 200, "text/xml", body);
+            return;
+        }
+        if (path == QLatin1String("/rest/getCoverArt.view"))
+        {
+            answerCover(sock, QUrlQuery(u).queryItemValue(QStringLiteral("id")));
+            return;
+        }
+        // Jellyfin: /Items/<id>/Images/Primary
+        if (path.startsWith(QLatin1String("/Items/")) && path.endsWith(QLatin1String("/Images/Primary")))
+        {
+            answerCover(sock, path.section(QLatin1Char('/'), 2, 2));
+            return;
+        }
+        // The EverythingBox server's music shelf: one artist's albums, then each album's own image url.
+        if (path.startsWith(QLatin1String("/detail/")))
+        {
+            const QByteArray r = root.toUtf8();
+            send(sock, 200, "application/json",
+                 "{\"items\":["
+                 "{\"id\":\"sm-1\",\"title\":\"Empty sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-1\"},"
+                 "{\"id\":\"sm-2\",\"title\":\"No sleeve at all\",\"type\":\"album\"},"
+                 "{\"id\":\"sm-3\",\"title\":\"Real sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-3\"},"
+                 "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"}"
+                 "]}");
+            return;
+        }
+        if (path.startsWith(QLatin1String("/cover/")))
+        {
+            answerCover(sock, path.mid(7));
+            return;
+        }
+        send(sock, 404, "text/plain", "");
+    }
+};
+
+static bool waitFor(const std::function<bool()>& done, int ms = 5000)
+{
+    QDeadlineTimer dl(ms);
+    while (!done() && !dl.hasExpired())
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    return done();
+}
+static void settleFor(int ms) { waitFor([] { return false; }, ms); }
+
+// A LEVEL, REDUCED TO WHAT MATTERS HERE. It draws, it asks for the art of what it drew, and a landing arms
+// ONE re-render - which is HomeView::scheduleMusicArtRefresh exactly: a debounced loadTop that re-runs the
+// prefetch over the same rows. kCap only bounds the broken loop so a red run terminates; a correct client
+// never gets anywhere near it.
+class ArtView
+{
+public:
+    using Prefetch = std::function<void(const QString&, std::function<void()>)>;
+    static constexpr int kCap = 25;
+    ArtView(Prefetch p, QString key) : prefetch_(std::move(p)), key_(std::move(key)) {}
+    void render()
+    {
+        ++renders;
+        prefetch_(key_, [this] { ++landed; schedule(); });
+    }
+    int renders = 0;
+    int landed  = 0;    // how many times the client said "new artwork landed"
+private:
+    void schedule()
+    {
+        if (pending_ || renders >= kCap) return;
+        pending_ = true;
+        QTimer::singleShot(0, &ctx_, [this] { pending_ = false; render(); });
+    }
+    Prefetch prefetch_;
+    QString  key_;
+    bool     pending_ = false;
+    QObject  ctx_;
+};
+
+// Views live until the process ends: a reply that lands after its test returned still calls back into its
+// view, and the broken client in a red run does exactly that.
+static ArtView& newView(ArtView::Prefetch p, const QString& key)
+{
+    static std::vector<std::unique_ptr<ArtView>> views;
+    views.push_back(std::make_unique<ArtView>(std::move(p), key));
+    return *views.back();
+}
+
+// Let a view's first pass play out: either it loops to the cap (broken), or nothing more happens.
+// (The bound is how long "nothing more happens" is watched for. The broken client reached the cap well inside
+// it on loopback; nothing is ever asserted about time.)
+static void settleView(const ArtView& v) { waitFor([&] { return v.renders >= ArtView::kCap; }, 700); }
+
+// One more pass of the level, for a reason that has nothing to do with this cover - another row's art
+// landed, the index changed, the user came back to the level. Long enough for any request it causes to be
+// answered and read.
+static void anotherPass(ArtView& v, const CoverStub& stub, const QString& coverId)
+{
+    const int before = stub.covers(coverId);
+    v.render();
+    waitFor([&] { return stub.covers(coverId) > before; }, 300);
+    settleFor(100);
+}
+
+static QString coverOf(const QString& key) { return MetaCache::imagePath(key, QStringLiteral("cover")); }
+
+static void testSubsonicCoverAnswers(CoverStub& stub, const QString& serverId)
+{
+    SubsonicClient& cl = SubsonicClient::instance();
+    bool done = false, ok = false;
+    cl.fetchStarred(serverId, [&](const SubsonicClient::Result& r) { done = true; ok = r.ok; });
+    CHECK(waitFor([&] { return done; }));
+    CHECK(ok);
+    auto key = [&](int i) {
+        return Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-%1").arg(i));
+    };
+    const ArtView::Prefetch prefetch = [&cl](const QString& k, std::function<void()> t) {
+        cl.prefetchAlbumCover(k, std::move(t));
+    };
+
+    // ---- 1. AN EMPTY ANSWER, with the refresh wired the way the level wires it: asked ONCE ----------------
+    {
+        stub.answers[QStringLiteral("c-1")] = CoverStub::Answer::Empty;
+        ArtView& v = newView(prefetch, key(1));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-1")) >= 1; }));
+        settleView(v);
+        std::printf("370 subsonic: empty answer, level wired as the app wires it -> %d getCoverArt request(s), "
+                    "%d render(s)\n", stub.covers(QStringLiteral("c-1")), v.renders);
+        CHECK(stub.covers(QStringLiteral("c-1")) == 1);
+        CHECK(v.landed == 0);                        // nothing landed, so nothing may say it did
+        CHECK(coverOf(key(1)).isEmpty());
+        // ...and ONCE PER SESSION: five re-renders for other reasons ask nothing more.
+        for (int i = 0; i < 5; ++i) anotherPass(v, stub, QStringLiteral("c-1"));
+        std::printf("370 subsonic: ...after 5 more passes of the level -> %d request(s)\n",
+                    stub.covers(QStringLiteral("c-1")));
+        CHECK(stub.covers(QStringLiteral("c-1")) == 1);
+        CHECK(cl.coversKnownMissing().contains(key(1)));
+    }
+
+    // ---- 2. A REAL IMAGE still lands, and says so exactly once ---------------------------------------
+    {
+        stub.answers[QStringLiteral("c-2")] = CoverStub::Answer::Image;
+        ArtView& v = newView(prefetch, key(2));
+        v.render();
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("c-2")) == 1);
+        CHECK(v.landed == 1);
+        CHECK(v.renders == 2);                       // the landing re-rendered once, and that pass asked nothing
+        CHECK(!coverOf(key(2)).isEmpty());
+        anotherPass(v, stub, QStringLiteral("c-2"));
+        CHECK(stub.covers(QStringLiteral("c-2")) == 1);
+        CHECK(v.landed == 1);
+    }
+
+    // ---- 3. A FAILED REQUEST is not "no art": it may succeed next time, so a later pass asks again -----
+    {
+        stub.answers[QStringLiteral("c-3")] = CoverStub::Answer::ServerError;
+        ArtView& v = newView(prefetch, key(3));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-3")) >= 1; }));
+        settleView(v);
+        std::printf("370 subsonic: HTTP 500 -> %d request(s), %d render(s)\n",
+                    stub.covers(QStringLiteral("c-3")), v.renders);
+        CHECK(stub.covers(QStringLiteral("c-3")) == 1);   // ...but not in a loop
+        CHECK(v.landed == 0);
+        CHECK(coverOf(key(3)).isEmpty());
+        CHECK(!cl.coversKnownMissing().contains(key(3)));   // a failure is not "no art"
+        stub.answers[QStringLiteral("c-3")] = CoverStub::Answer::Image;   // the server recovers
+        anotherPass(v, stub, QStringLiteral("c-3"));
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("c-3")) == 2);   // retried once, on the next pass, and no more
+        CHECK(v.landed == 1);
+        CHECK(!coverOf(key(3)).isEmpty());
+    }
+
+    // ---- 4. THE PROTOCOL'S "NOT FOUND" is an answer: remembered, and NEVER written to disk as a cover ------
+    // A failure envelope is a perfectly good non-empty body. Stored as cover.jpg it would be a broken picture
+    // that PERSISTS - and imagePath() would say "already on disk" in every later session, so art the server
+    // gains later could never arrive.
+    {
+        stub.answers[QStringLiteral("c-4")] = CoverStub::Answer::NotFoundEnvelope;
+        ArtView& v = newView(prefetch, key(4));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-4")) >= 1; }));
+        settleView(v);
+        CHECK(coverOf(key(4)).isEmpty());
+        CHECK(v.landed == 0);
+        for (int i = 0; i < 3; ++i) anotherPass(v, stub, QStringLiteral("c-4"));
+        CHECK(stub.covers(QStringLiteral("c-4")) == 1);
+        CHECK(cl.coversKnownMissing().contains(key(4)));
+    }
+
+    // ---- 5. HTTP 404 is the server saying there is no such image: an answer, remembered ----------------
+    {
+        stub.answers[QStringLiteral("c-5")] = CoverStub::Answer::Http404;
+        ArtView& v = newView(prefetch, key(5));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-5")) >= 1; }));
+        settleView(v);
+        CHECK(v.landed == 0);
+        for (int i = 0; i < 3; ++i) anotherPass(v, stub, QStringLiteral("c-5"));
+        CHECK(stub.covers(QStringLiteral("c-5")) == 1);
+    }
+
+    // ---- 6. A refused CREDENTIAL inside the envelope is not "no art" either: not stored, not remembered --
+    {
+        stub.answers[QStringLiteral("c-6")] = CoverStub::Answer::AuthEnvelope;
+        ArtView& v = newView(prefetch, key(6));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-6")) >= 1; }));
+        settleView(v);
+        CHECK(coverOf(key(6)).isEmpty());
+        CHECK(v.landed == 0);
+        CHECK(stub.covers(QStringLiteral("c-6")) == 1);
+        anotherPass(v, stub, QStringLiteral("c-6"));
+        CHECK(stub.covers(QStringLiteral("c-6")) == 2);
+    }
+}
+
+// THE NEXT SESSION, for real: a second PROCESS over the same data directory. Art the server gains after an
+// empty answer must reach a later session, which is the whole reason "no art" is never written down.
+static int coverSessionChild(const QString& root, const QString& serverId)
+{
+    SubsonicServer srv;
+    srv.id = serverId; srv.name = QStringLiteral("Fixture"); srv.url = root;
+    srv.username = QLatin1String(kUser); srv.password = QLatin1String(kPassword); srv.allowPlainHttp = true;
+    SubsonicServerStore::add(srv);   // by id: an update in place, never a second server
+    bool done = false;
+    SubsonicClient::instance().fetchStarred(serverId, [&](const SubsonicClient::Result&) { done = true; });
+    if (!waitFor([&] { return done; })) return 2;
+    const QString key = Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-1"));
+    if (!coverOf(key).isEmpty()) return 3;      // the first session must not have left anything behind
+    bool landed = false;
+    SubsonicClient::instance().prefetchAlbumCover(key, [&] { landed = true; });
+    if (!waitFor([&] { return landed; })) return 4;
+    return coverOf(key).isEmpty() ? 5 : 0;
+}
+
+static void testNextSessionAsksAgain(CoverStub& stub, const QString& serverId)
+{
+    const int before = stub.covers(QStringLiteral("c-1"));
+    CHECK(before == 1);                          // the first session asked once and got nothing
+    stub.answers[QStringLiteral("c-1")] = CoverStub::Answer::Image;   // ...and the server has art now
+    QProcess child;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("EB_PROBE_DATA_DIR"), AppPaths::dataDir());
+    child.setProcessEnvironment(env);
+    child.start(QCoreApplication::applicationFilePath(),
+                { QStringLiteral("cover-session"), stub.root, serverId });
+    CHECK(waitFor([&] { return child.state() == QProcess::NotRunning; }, 30000));
+    std::printf("370 subsonic: next session -> exit %d, %d request(s) for that cover in total\n",
+                child.exitCode(), stub.covers(QStringLiteral("c-1")));
+    CHECK(child.exitStatus() == QProcess::NormalExit);
+    CHECK(child.exitCode() == 0);
+    CHECK(stub.covers(QStringLiteral("c-1")) == before + 1);
+}
+
+// THE SAME SHAPE, TWICE MORE. The Jellyfin and EverythingBox-server music clients fed the same level through
+// the same callback - and fired it on EVERY path: for a cover already on disk, for an album with no art,
+// for a failure. With the callback wired to a re-render that re-runs the prefetch, each of those is a level
+// that reloads itself every 400 ms for as long as it is on screen.
+static void testJellyfinCoverAnswers(CoverStub& stub)
+{
+    JellyfinServer jf;
+    jf.id = QLatin1String(kJfServerId); jf.name = QStringLiteral("Fixture JF"); jf.url = stub.root;
+    jf.userId = QStringLiteral("u1"); jf.userName = QStringLiteral("probe");
+    jf.token = QLatin1String(kJfToken); jf.allowPlainHttp = true; jf.enabled = true;
+    CHECK(JellyfinServerStore::add(jf));
+    JellyfinMusicClient& cl = JellyfinMusicClient::instance();
+    const ArtView::Prefetch prefetch = [&cl](const QString& k, std::function<void()> t) {
+        cl.prefetchAlbumCover(k, std::move(t));
+    };
+    auto key = [](const char* item) { return Jellyfin::qualify(QLatin1String(kJfServerId), QLatin1String(item)); };
+
+    // A COVER ALREADY ON DISK: nothing landed, nothing to re-render, nothing asked.
+    MetaCache::storeImage(key("jf-1"), QStringLiteral("cover"), QStringLiteral("cover.jpg"),
+                          QStringLiteral("image/png"), stub.imageBytes);
+    CHECK(!coverOf(key("jf-1")).isEmpty());
+    {
+        ArtView& v = newView(prefetch, key("jf-1"));
+        v.render();
+        settleView(v);
+        std::printf("370 jellyfin: cover already cached -> %d render(s)\n", v.renders);
+        CHECK(v.landed == 0);
+        CHECK(v.renders == 1);
+        CHECK(stub.covers(QStringLiteral("jf-1")) == 0);
+    }
+    // AN EMPTY ANSWER: once.
+    {
+        ArtView& v = newView(prefetch, key("jf-2"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("jf-2")) >= 1; }));
+        settleView(v);
+        std::printf("370 jellyfin: empty answer -> %d request(s), %d render(s)\n",
+                    stub.covers(QStringLiteral("jf-2")), v.renders);
+        CHECK(stub.covers(QStringLiteral("jf-2")) == 1);
+        CHECK(v.landed == 0);
+        for (int i = 0; i < 3; ++i) anotherPass(v, stub, QStringLiteral("jf-2"));
+        CHECK(stub.covers(QStringLiteral("jf-2")) == 1);
+    }
+    // A REAL IMAGE: lands once.
+    {
+        stub.answers[QStringLiteral("jf-3")] = CoverStub::Answer::Image;
+        ArtView& v = newView(prefetch, key("jf-3"));
+        v.render();
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("jf-3")) == 1);
+        CHECK(v.landed == 1);
+        CHECK(!coverOf(key("jf-3")).isEmpty());
+    }
+    // A FAILURE: not in a loop, and not remembered.
+    {
+        stub.answers[QStringLiteral("jf-4")] = CoverStub::Answer::ServerError;
+        ArtView& v = newView(prefetch, key("jf-4"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("jf-4")) >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("jf-4")) == 1);
+        CHECK(v.landed == 0);
+        anotherPass(v, stub, QStringLiteral("jf-4"));
+        CHECK(stub.covers(QStringLiteral("jf-4")) == 2);
+    }
+}
+
+static void testServerMusicCoverAnswers(CoverStub& stub)
+{
+    ServerMusicClient& cl = ServerMusicClient::instance();
+    ServerMusicClient::Shelf shelf;
+    shelf.id = QLatin1String(kShelfId); shelf.name = QStringLiteral("Fixture shelf");
+    shelf.baseUrl = stub.root; shelf.catalogId = QStringLiteral("music");
+    cl.setShelves({ shelf });
+    bool done = false, ok = false;
+    cl.fetchArtistAlbums(ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Artist,
+                                              QStringLiteral("ar-1")),
+                         [&](const ServerMusicClient::Result& r) { done = true; ok = r.ok; });
+    CHECK(waitFor([&] { return done; }));
+    CHECK(ok);
+    const ArtView::Prefetch prefetch = [&cl](const QString& k, std::function<void()> t) {
+        cl.prefetchAlbumCover(k, std::move(t));
+    };
+    auto key = [](const char* id) {
+        return ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QLatin1String(id));
+    };
+
+    // AN ALBUM WITH NO ART AT ALL: nothing to ask for, nothing landed, nothing to re-render.
+    {
+        ArtView& v = newView(prefetch, key("sm-2"));
+        v.render();
+        settleView(v);
+        std::printf("370 server shelf: album with no image url -> %d render(s)\n", v.renders);
+        CHECK(v.landed == 0);
+        CHECK(v.renders == 1);
+    }
+    // AN EMPTY ANSWER: once.
+    {
+        ArtView& v = newView(prefetch, key("sm-1"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("sm-1")) >= 1; }));
+        settleView(v);
+        std::printf("370 server shelf: empty answer -> %d request(s), %d render(s)\n",
+                    stub.covers(QStringLiteral("sm-1")), v.renders);
+        CHECK(stub.covers(QStringLiteral("sm-1")) == 1);
+        CHECK(v.landed == 0);
+        for (int i = 0; i < 3; ++i) anotherPass(v, stub, QStringLiteral("sm-1"));
+        CHECK(stub.covers(QStringLiteral("sm-1")) == 1);
+    }
+    // A REAL IMAGE: lands once, and a later pass over the cached cover asks and re-renders nothing.
+    {
+        stub.answers[QStringLiteral("sm-3")] = CoverStub::Answer::Image;
+        ArtView& v = newView(prefetch, key("sm-3"));
+        v.render();
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("sm-3")) == 1);
+        CHECK(v.landed == 1);
+        CHECK(v.renders == 2);
+        CHECK(!coverOf(key("sm-3")).isEmpty());
+    }
+    // A FAILURE: not in a loop, and not remembered.
+    {
+        stub.answers[QStringLiteral("sm-4")] = CoverStub::Answer::ServerError;
+        ArtView& v = newView(prefetch, key("sm-4"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("sm-4")) >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("sm-4")) == 1);
+        CHECK(v.landed == 0);
+        anotherPass(v, stub, QStringLiteral("sm-4"));
+        CHECK(stub.covers(QStringLiteral("sm-4")) == 2);
+    }
+}
+
+// THE RULE, AS A TABLE — including the case no live stub produces cheaply: a TIMEOUT, which reaches the
+// client as a failed transfer with no status line at all, and must be Retry, never "no art".
+static void testCoverAnswerRules()
+{
+    using A = CoverFetch::Answer;
+    const QByteArray none;
+    const QByteArray png = QByteArray::fromHex("89504e470d0a1a0a0000000d49484452");   // a PNG's first bytes
+    CHECK(CoverFetch::classify(true, 200, none) == A::Absent);    // #370's empty image
+    CHECK(CoverFetch::classify(true, 204, none) == A::Absent);
+    CHECK(CoverFetch::classify(true, 200, png) == A::Image);
+    CHECK(CoverFetch::classify(false, 404, none) == A::Absent);   // the server: "no such image"
+    CHECK(CoverFetch::classify(false, 410, none) == A::Absent);
+    CHECK(CoverFetch::classify(false, 0, none) == A::Retry);      // refused connection - or a TIMEOUT
+    CHECK(CoverFetch::classify(false, 500, none) == A::Retry);
+    CHECK(CoverFetch::classify(false, 503, none) == A::Retry);
+    CHECK(CoverFetch::classify(false, 401, none) == A::Retry);
+    CHECK(CoverFetch::classify(false, 200, png) == A::Retry);     // cut off mid-body: not a picture
+    CHECK(CoverFetch::kTransferTimeoutMs > 0);
+
+    // Subsonic's envelope layer, in both encodings. Bodies are built outside CHECK so no escape sequence ever
+    // reaches a stringified condition (GCC reads some of those as universal character names).
+    const QByteArray nfXml = "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                             "<error code=\"70\" message=\"Cover art not found\"/></subsonic-response>";
+    const QByteArray nfJson = "{\"subsonic-response\":{\"status\":\"failed\",\"version\":\"1.16.1\","
+                              "\"error\":{\"code\":70,\"message\":\"Cover art not found\"}}}";
+    const QByteArray nfPadded = QByteArray("  \r\n") + nfXml;
+    const QByteArray authXml = "<subsonic-response status=\"failed\" version=\"1.16.1\">"
+                               "<error code=\"40\" message=\"Wrong username or password\"/></subsonic-response>";
+    const QByteArray okXml = "<subsonic-response status=\"ok\" version=\"1.16.1\"/>";
+    const QByteArray svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+    CHECK(Subsonic::coverAnswer(true, 200, nfXml) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, nfJson) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, nfPadded) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, authXml) == A::Retry);   // a refused credential is not "no art"
+    CHECK(Subsonic::coverAnswer(true, 200, okXml) == A::Absent);    // a subsonic-response is never a picture
+    CHECK(Subsonic::coverAnswer(true, 200, svg) == A::Image);       // markup that IS a picture stays one
+    CHECK(Subsonic::coverAnswer(true, 200, png) == A::Image);
+    CHECK(Subsonic::coverAnswer(true, 200, none) == A::Absent);
+    CHECK(Subsonic::coverAnswer(false, 0, none) == A::Retry);       // the timeout shape
+    CHECK(Subsonic::coverAnswer(false, 404, none) == A::Absent);
+    CHECK(Subsonic::coverAnswer(false, 500, none) == A::Retry);
+}
+
+// NO CREDENTIAL IN THE NEW STATE. The Subsonic cover url carries the token and the salt, and a shelf's image
+// url may be signed; "no art" is keyed on the album key, and this holds all three clients to that by scanning
+// everything they now remember for every secret that actually went over the wire.
+static void testCoverStateHoldsNoCredential(const CoverStub& stub, const QString& serverId)
+{
+    const QSet<QString> sub = SubsonicClient::instance().coversKnownMissing();
+    const QSet<QString> jf  = JellyfinMusicClient::instance().coversKnownMissing();
+    const QSet<QString> sm  = ServerMusicClient::instance().coversKnownMissing();
+
+    // Not vacuous: each client remembers exactly what it was TOLD had no picture, and nothing it failed on.
+    auto sKey = [&](int i) {
+        return Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-%1").arg(i));
+    };
+    CHECK(sub.contains(sKey(1)) && sub.contains(sKey(4)) && sub.contains(sKey(5)));   // empty, "not found", 404
+    CHECK(!sub.contains(sKey(2)) && !sub.contains(sKey(3)) && !sub.contains(sKey(6))); // image, 500, refused
+    CHECK(sub.size() == 3);
+    const QString jf2 = Jellyfin::qualify(QLatin1String(kJfServerId), QStringLiteral("jf-2"));
+    const QString jf4 = Jellyfin::qualify(QLatin1String(kJfServerId), QStringLiteral("jf-4"));
+    CHECK(jf.contains(jf2) && !jf.contains(jf4) && jf.size() == 1);
+    const QString sm1 = ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QStringLiteral("sm-1"));
+    const QString sm4 = ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QStringLiteral("sm-4"));
+    CHECK(sm.contains(sm1) && !sm.contains(sm4) && sm.size() == 1);
+
+    QByteArray scanned;
+    for (const QSet<QString>* s : { &sub, &jf, &sm })
+        for (const QString& k : *s) scanned += k.toUtf8() + '\n';
+    CHECK(!scanned.isEmpty());
+
+    // Every secret the stub actually received, harvested off the wire rather than recomputed.
+    QSet<QByteArray> secrets{ QByteArray(kPassword), QByteArray(kJfToken) };
+    int harvested = 0;
+    for (const QString& t : stub.targets)
+    {
+        const QUrlQuery q{ QUrl(t) };
+        for (const char* name : { "t", "s", "p" })
+        {
+            const QString v = q.queryItemValue(QLatin1String(name));
+            if (!v.isEmpty()) { secrets.insert(v.toUtf8()); ++harvested; }
+        }
+    }
+    CHECK(harvested > 0);                        // the scan is over real tokens, not over an empty list
+    for (const QByteArray& s : secrets) CHECK(!scanned.contains(s));
+    CHECK(!scanned.contains(QByteArray("&t=")));
+    CHECK(!scanned.contains(QByteArray("/rest/")));
+    CHECK(!scanned.contains(QByteArray("http")));
+}
+
+static void testCoverAnswers370()
+{
+    CoverStub stub;
+    CHECK(stub.listen(QHostAddress::LocalHost, 0));
+    if (!stub.isListening()) return;
+    stub.root = QStringLiteral("http://127.0.0.1:%1").arg(stub.serverPort());
+    {
+        QImage img(4, 4, QImage::Format_RGB32);
+        img.fill(Qt::darkCyan);
+        QBuffer buf(&stub.imageBytes);
+        buf.open(QIODevice::WriteOnly);
+        img.save(&buf, "PNG");
+    }
+    CHECK(!stub.imageBytes.isEmpty());
+
+    SubsonicServer srv;
+    srv.name = QStringLiteral("Fixture"); srv.url = stub.root;
+    srv.username = QLatin1String(kUser); srv.password = QLatin1String(kPassword); srv.allowPlainHttp = true;
+    const QString serverId = SubsonicServerStore::add(srv);
+    CHECK(!serverId.isEmpty());
+
+    testSubsonicCoverAnswers(stub, serverId);
+    testNextSessionAsksAgain(stub, serverId);
+    testJellyfinCoverAnswers(stub);
+    testServerMusicCoverAnswers(stub);
+    testCoverStateHoldsNoCredential(stub, serverId);
+    testCoverAnswerRules();
+}
+
 int main(int argc, char** argv)
 {
+    if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
+    {
+        QCoreApplication child(argc, argv);
+        return coverSessionChild(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
+    }
     QCoreApplication app(argc, argv);
 
     // A real scanned library, from the shared fixtures — the same story probe_musicbrowse tells, and for the
@@ -1336,6 +1977,8 @@ int main(int argc, char** argv)
     testSectionLevels();
     testDoorsOnlyInsideAServer(local);
     testNoCredentialAnywhere();
+    // ---- #370: what an empty or failed cover answer does to the level that asked --------------------
+    testCoverAnswers370();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");

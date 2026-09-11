@@ -79,6 +79,7 @@
 // payload readers below are written ONCE, over Nodes. A reader that could see only one encoding would be a
 // silent no-op against half the deployments in the wild.
 #pragma once
+#include "CoverFetch.h"
 #include "MusicLibrary.h"
 
 #include <QByteArray>
@@ -258,6 +259,19 @@ namespace Subsonic
     // invalid API key. All mean "no amount of retrying helps" — the surface must say so rather than
     // retrying a refused credential in a loop, which is how an account gets rate-limited.
     bool isAuthCode(int code);
+
+    // "The requested data was not found" — the one failure code that is an answer about the THING asked for
+    // rather than about the request, and what a server that follows the spec says for a record with no art.
+    constexpr int kNotFoundCode = 70;
+
+    // WHAT A getCoverArt REPLY ANSWERED (#370): CoverFetch::classify, plus the one thing only this protocol
+    // does. Its failures arrive as a 200 with an envelope inside — a perfectly good NON-EMPTY body, which
+    // MetaCache would store as cover.jpg: a broken picture that PERSISTS, and that imagePath() then calls
+    // "already on disk" in every later session, so art the server gains later could never arrive. So an
+    // envelope is never an Image. A "not found" one is Absent; any other failure (a refused credential, a
+    // server fault) is Retry; an "ok" one is Absent, since a subsonic-response is never a picture. A body
+    // that merely STARTS like markup and is not a subsonic-response — an SVG — is left to CoverFetch.
+    CoverFetch::Answer coverAnswer(bool transportOk, int httpStatus, const QByteArray& body);
 
     // ---- The payloads this increment reads -------------------------------------------------------------
     // Flat structs of exactly what the browse levels need, so nothing above this file touches a Node.
