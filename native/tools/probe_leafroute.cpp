@@ -66,8 +66,18 @@
 //      Plus the shape the playlist verb is reached through (browse::queueOnRowCopy): not run inside the press,
 //      run once a turn later, and run on the row as it was when pressed even after the list it came from has
 //      been overwritten at that index and reallocated. That last clause is the P key's use-after-free.
+//   §10 A STARRED LOCAL TRACK OPENS ITS ALBUM IN TRACK ORDER (issue #369). §8's local arm queued the track's
+//      FOLDER by file name. Over an index the REAL builder (MusicLibrary::buildIndex) makes from a two-disc
+//      album split across disc folders whose file names do not sort in track order, plus a cue album: a
+//      starred disc-2 track routes to its ALBUM (LocalAlbum -> openMusicAlbum) and the queue that album
+//      holds is both discs, in disc-then-track order, starting at that track; a track the index does not
+//      hold falls back to §8's openRecent route unchanged; a Subsonic favourite is untouched; a cue track's
+//      SOURCE file is checked (in the index or not) and a missing one says the moved-file sentence; a clip
+//      url nobody can read a file out of opens as before, unchecked; CueSheet::clipFile reads mpvClipUrl
+//      back; and routing all of it fires no love hook and leaves the store exactly as it was.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
+#include "CueSheet.h"
 #include "FavoriteRoute.h"
 #include "JellyfinCatalogs.h"
 #include "LeafRoute.h"
@@ -82,6 +92,7 @@
 #include <QHash>
 #include <QString>
 #include <QStringList>
+#include <algorithm>
 #include <cstdio>
 
 static int g_fails = 0;
@@ -719,8 +730,10 @@ int main(int argc, char** argv)
 
         const QString dawnPath = QStringLiteral("C:/music/Vol 1/01 Dawn.flac");
         const QString gonePath = QStringLiteral("C:/music/Moved Away/03 Gone.flac");
-        // A cue track's id is mpv's clip url of the shared file (MusicLibrary::IndexTrack::path).
-        const QString clipUrl  = QStringLiteral("edl://%27%C:/music/Live/live.flac,start=12.5,length=200");
+        // A cue track's id is mpv's clip url of the shared file (MusicLibrary::IndexTrack::path) — minted by the
+        // real writer, since #369 reads the file back out of it (CueSheet::clipFile) and checks it is there.
+        const QString livePath = QStringLiteral("C:/music/Live/live.flac");
+        const QString clipUrl  = CueSheet::mpvClipUrl(livePath, 12500, 212500);
         const QString srvHere  = QStringLiteral("3f2b8c1e-6a4d-4e0b-9a51-2c7d8e9f0a1b");
         const QString srvGone  = QStringLiteral("9d0c6b7a-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
         const QString subHere  = Subsonic::qualify(srvHere, Subsonic::Kind::Track, QStringLiteral("tr-42"));
@@ -740,7 +753,7 @@ int main(int argc, char** argv)
 
         // The world the router asks. `asked` records every file question, so a server id can be shown never
         // to have been treated as a path.
-        const QStringList files   = { dawnPath };
+        const QStringList files   = { dawnPath, livePath };
         const QStringList servers = { srvHere };
         const QStringList sources = { QStringLiteral("com.example.films"), QStringLiteral("com.example.radio") };
         QStringList asked;
@@ -865,12 +878,14 @@ int main(int argc, char** argv)
         }
 
         // 8e. A CUE TRACK is local, and opens by its clip url without being asked about as a file (it is not
-        // one — the url names a span of one).
+        // one — the url names a span of one). Since #369 the FILE the url names is asked about instead: this
+        // world holds no index, so it is the not-in-the-index case and falls back to openRecent; §10 has the rest.
         {
             const FavoriteRoute r = routes.value(clipFav.itemId);
             CHECK(r.how == FavoriteOpen::LocalTrack);
             CHECK(r.path == clipUrl && r.kind == QLatin1String("audio"));
             CHECK(!asked.contains(clipUrl));
+            CHECK(asked.contains(livePath));                       // #369: its source file WAS asked about
         }
 
         // 8f. A TRACK THAT CANNOT BE OPENED SAYS WHY, and it is its own sentence each time. None of them hands
@@ -1116,6 +1131,290 @@ int main(int argc, char** argv)
             QCoreApplication::sendPostedEvents(nullptr, 0);
             CHECK(!ran);
         }
+    }
+
+    // ---- §10 A STARRED LOCAL TRACK OPENS ITS ALBUM IN TRACK ORDER (issue #369) -----------------------------
+    // §8's local arm opened a starred track by openRecent, which queues the track's FOLDER sorted by file name.
+    // A two-disc set split across disc folders then plays one disc, and a folder whose names do not sort the
+    // way its tracks do plays out of order. The index already knows each track's album and keeps each album in
+    // disc-then-track order; this pins that the shelf now uses it, and that everything else stays as §8 has it.
+    {
+        using browse::FavoriteOpen;
+        using browse::FavoriteRoute;
+
+        // THE FIXTURE, through the REAL grouping and sort (MusicLibrary::buildIndex) — the claim is about the
+        // order the index keeps, so a hand-built index would only be testing the hand that built it.
+        const QString d1 = QStringLiteral("C:/music/Mira Vale/Night Sessions/Disc 1/");
+        const QString d2 = QStringLiteral("C:/music/Mira Vale/Night Sessions/Disc 2/");
+        // Track order. File-name order is the OPPOSITE inside both folders (Amber < Zephyr; Ember < Harbor < Tide).
+        const QString zephyr = d1 + "Zephyr.flac", amber = d1 + "Amber.flac";                       // disc 1: 1, 2
+        const QString tide = d2 + "Tide.flac", harbor = d2 + "Harbor.flac", ember = d2 + "Ember.flac"; // disc 2: 1, 2, 3
+        const QStringList trackOrder = { zephyr, amber, tide, harbor, ember };
+        auto entry = [](const QString& path, const QString& title, int disc, int track) {
+            MusicLibrary::TrackEntry e;
+            e.path = path; e.title = title;
+            e.artist = e.albumArtist = QStringLiteral("Mira Vale");
+            e.artists = QStringList{ e.artist };
+            e.album = QStringLiteral("Night Sessions");
+            e.disc = disc; e.discTotal = 2; e.track = track; e.trackTotal = 3; e.year = 2021; e.durationSec = 180;
+            return e;
+        };
+        // A single-file cue rip: three tracks, one file.
+        const QString livePath = QStringLiteral("C:/music/Mira Vale/Live at the Hall/live.flac");
+        MusicLibrary::TrackEntry live;
+        live.path = livePath; live.artist = live.albumArtist = QStringLiteral("Mira Vale");
+        live.artists = QStringList{ live.artist };
+        live.album = QStringLiteral("Live at the Hall"); live.durationSec = 600;
+        const char* liveTitles[] = { "Opener", "Middle", "Closer" };
+        for (int n = 1; n <= 3; ++n)
+        {
+            MusicLibrary::CueTrack c;
+            c.number = n; c.title = QString::fromLatin1(liveTitles[n - 1]);
+            c.startMs = (n - 1) * 200000; c.endMs = n < 3 ? n * 200000 : -1;
+            live.cueTracks << c;
+        }
+        // Handed over in the order a folder walk meets them — by NAME — so the index's order is its own.
+        const MusicLibrary::Index idx = MusicLibrary::buildIndex({
+            entry(amber, QStringLiteral("Amber"), 1, 2), entry(zephyr, QStringLiteral("Zephyr"), 1, 1),
+            entry(ember, QStringLiteral("Ember"), 2, 3), entry(harbor, QStringLiteral("Harbor"), 2, 2),
+            entry(tide, QStringLiteral("Tide"), 2, 1), live });
+
+        // 10a. THE LOOKUP: MusicLibrary::Index::track finds a track by the path playback is handed, and the
+        // album it names is the album that holds it. Walked over EVERY track of EVERY album, so a lookup that
+        // answered from anywhere but the album's own copy — or missed a cue clip — shows here.
+        const MusicLibrary::IndexTrack* h = idx.track(harbor);
+        CHECK(h && h->path == harbor && h->disc == 2 && h->track == 2);
+        const MusicLibrary::Album* ns = h ? idx.album(h->albumKey) : nullptr;
+        CHECK(ns && ns->title == QLatin1String("Night Sessions") && ns->discCount == 2 && ns->tracks.size() == 5);
+        int walked = 0;
+        for (const MusicLibrary::Artist& a : idx.artists)
+            for (const MusicLibrary::Album& b : a.albums)
+                for (const MusicLibrary::IndexTrack& t : b.tracks)
+                {
+                    ++walked;
+                    CHECK(idx.track(t.path) == &t);
+                    CHECK(t.albumKey == b.key);
+                }
+        CHECK(walked == 8);                                                   // five files + three cue tracks
+        CHECK(idx.track(QStringLiteral("C:/music/Loose/single.flac")) == nullptr);
+        CHECK(idx.track(QString()) == nullptr);
+        CHECK(idx.track(d2 + "harbor.flac") == nullptr);                      // exact: no near-miss matching
+
+        // FIXTURE SANITY. The album holds both discs in disc-then-track order, and that is NOT the order the
+        // files' names give — otherwise every order check below would pass on a name sort too.
+        QStringList albumOrder;
+        if (ns) for (const MusicLibrary::IndexTrack& t : ns->tracks) albumOrder << t.path;
+        CHECK(albumOrder == trackOrder);
+        QStringList byName = trackOrder;
+        std::sort(byName.begin(), byName.end());
+        CHECK(byName != trackOrder);
+        const MusicLibrary::IndexTrack* mid = nullptr;
+        const MusicLibrary::Album* liveAlbum = nullptr;
+        for (const MusicLibrary::Artist& a : idx.artists)
+            for (const MusicLibrary::Album& b : a.albums)
+                if (b.title == QLatin1String("Live at the Hall")) liveAlbum = &b;
+        CHECK(liveAlbum && liveAlbum->tracks.size() == 3);
+        if (liveAlbum && liveAlbum->tracks.size() == 3) mid = &liveAlbum->tracks.at(1);
+        CHECK(mid && mid->path.startsWith(QLatin1String("edl://")) && mid->sourcePath == livePath);
+
+        // THE RECORDS, written by the real writer from the real album builder's rows (#297's trackFavoriteFor),
+        // exactly as a person starring these tracks would write them.
+        auto starFrom = [&](const MusicLibrary::Album* b, const QString& path) {
+            FavoriteItem f;
+            if (!b) return f;
+            for (const MediaItem& it : browse::musicAlbumCatalog(idx, b->key, noCover).items)
+                if (it.url == path) f = browse::trackFavoriteFor(it);
+            return f;
+        };
+        const FavoriteItem harborFav = starFrom(ns, harbor);
+        const FavoriteItem zephyrFav = starFrom(ns, zephyr);
+        const FavoriteItem midFav    = starFrom(liveAlbum, mid ? mid->path : QString());
+        CHECK(harborFav.itemId == harbor && zephyrFav.itemId == zephyr);
+        CHECK(mid && midFav.itemId == mid->path);
+        CHECK(harborFav.addonId.isEmpty() && harborFav.path.isEmpty() && harborFav.type == QLatin1String("track"));
+
+        auto trackRec = [](const QString& id, const QString& title) {
+            FavoriteItem f;
+            f.itemId = id; f.title = title; f.subtitle = QStringLiteral("Mira Vale");
+            f.type = QStringLiteral("track"); f.thumbnailUrl = QStringLiteral("C:/covers/") + title + ".png";
+            return f;
+        };
+        const QString loose     = QStringLiteral("C:/music/Loose/single.flac");            // on disk, not indexed
+        const QString oldRip    = QStringLiteral("C:/music/Old Rip/old, rip.flac");        // gone, and dropped
+        const QString otherRip  = QStringLiteral("C:/music/Other Rip/other.flac");         // on disk, not indexed
+        const QString droppedClip = CueSheet::mpvClipUrl(oldRip, 60000, 120000);
+        const QString otherClip   = CueSheet::mpvClipUrl(otherRip, 0, 90000);
+        const QString badClip     = QStringLiteral("edl://%99%C:/music/Nowhere/n.flac,1.000;");  // unreadable
+        const QString srv = QStringLiteral("5e1d2c3b-4a59-4687-9a0b-1c2d3e4f5a6b");
+        const QString subId = Subsonic::qualify(srv, Subsonic::Kind::Track, QStringLiteral("tr-369"));
+        const FavoriteItem looseFav   = trackRec(loose, QStringLiteral("Single"));
+        const FavoriteItem droppedFav = trackRec(droppedClip, QStringLiteral("Old Rip Two"));
+        const FavoriteItem otherFav   = trackRec(otherClip, QStringLiteral("Other One"));
+        const FavoriteItem badFav     = trackRec(badClip, QStringLiteral("Unreadable"));
+        const FavoriteItem subFav     = trackRec(subId, QStringLiteral("Server Song"));
+        CHECK(CueSheet::clipFile(badClip).isEmpty());                         // FIXTURE: truly unreadable
+
+        const QVector<FavoriteItem> all = { harborFav, zephyrFav, midFav, looseFav, droppedFav, otherFav, badFav, subFav };
+        for (const FavoriteItem& f : all) FavoritesStore::addFromSource(f);   // seeding, not starring: quiet
+        CHECK(FavoritesStore::list().size() == all.size());
+
+        struct Love { FavoriteItem f; bool loved; };
+        QVector<Love> loves;
+        FavoritesStore::setLoveHook([&loves](const FavoriteItem& f, bool loved) { loves.push_back({ f, loved }); });
+        const QVector<FavoriteItem> before = FavoritesStore::list();
+
+        // The world: every indexed file on disk, the local index handed over, the one server set up.
+        QStringList files = trackOrder;
+        files << livePath << loose << otherRip;
+        QStringList asked;
+        browse::FavoriteWorld world;
+        world.fileExists  = [&](const QString& f) { asked << f; return files.contains(f); };
+        world.serverKnown = [&](const QString& s) { return s == srv; };
+        world.localMusic  = &idx;
+        // One favourite routed exactly as openFavorite routes it: the shelf's row, the store as it stands.
+        auto routeOf = [&](const FavoriteItem& f, const browse::FavoriteWorld& w) {
+            asked.clear();
+            return browse::favoriteRouteFor(browse::favoriteShelfRow(f), FavoritesStore::list(), w);
+        };
+        // THE QUEUE openMusicAlbum(albumKey, path) BUILDS from a LocalAlbum answer: the album's tracks as the
+        // local index holds them (MusicSupply::indexFor answers MusicLibrary::index() for a local key, and a
+        // local path is its own play url), started at `path` — MainWindow.cpp's openMusicAlbum, restated only
+        // as far as the queue it hands PlaybackSession.
+        auto queueFor = [&](const FavoriteRoute& r, int* start) {
+            QStringList q;
+            const MusicLibrary::Album* b = idx.album(r.albumKey);
+            if (b) for (const MusicLibrary::IndexTrack& t : b->tracks) q << t.path;
+            *start = q.indexOf(r.path);
+            return q;
+        };
+
+        // 10b. A STARRED DISC-2 TRACK OPENS ITS ALBUM: LocalAlbum, naming the album it is on and itself as the
+        // start. The queue is BOTH discs in disc-then-track order, starting at it — not disc 2's folder by name.
+        {
+            const FavoriteRoute r = routeOf(harborFav, world);
+            const MediaItem row = browse::favoriteShelfRow(harborFav);
+            CHECK(r.how == FavoriteOpen::LocalAlbum);
+            CHECK(ns && r.albumKey == ns->key);
+            CHECK(r.path == harbor);
+            CHECK(r.title == row.title && r.thumb == row.thumbnailUrl);
+            CHECK(r.kind.isEmpty() && r.resumeKey.isEmpty());                 // openRecent is not what opens it
+            CHECK(asked.contains(harbor));                                    // its file was checked first
+            int start = -1;
+            const QStringList q = queueFor(r, &start);
+            CHECK(q == trackOrder);
+            CHECK(start == 3);
+            CHECK(q.contains(zephyr) && q.contains(amber));                   // disc 1 is in it
+            QStringList disc2ByName = { tide, harbor, ember };
+            std::sort(disc2ByName.begin(), disc2ByName.end());
+            CHECK(q != disc2ByName);                                          // ...which the folder queue was
+        }
+        // 10c. TRACK ORDER, NOT NAME ORDER, from the first track too: disc 1's track 1 is "Zephyr", which sorts
+        // after "Amber", and it is still first and still the start.
+        {
+            const FavoriteRoute r = routeOf(zephyrFav, world);
+            CHECK(r.how == FavoriteOpen::LocalAlbum && ns && r.albumKey == ns->key && r.path == zephyr);
+            int start = -1;
+            const QStringList q = queueFor(r, &start);
+            CHECK(start == 0 && q.value(1) == amber && q.value(2) == tide);
+        }
+        // 10d. NOT IN THE INDEX -> TODAY'S ROUTE, exactly §8c's answer. A file outside the scanned library; and
+        // an indexed file while no index has been handed over (the library not scanned yet).
+        {
+            const FavoriteRoute r = routeOf(looseFav, world);
+            CHECK(r.how == FavoriteOpen::LocalTrack);
+            CHECK(r.path == loose && r.kind == QLatin1String("audio") && r.resumeKey == loose);
+            CHECK(r.albumKey.isEmpty());
+            CHECK(asked.contains(loose));
+            browse::FavoriteWorld unscanned = world;
+            unscanned.localMusic = nullptr;
+            const FavoriteRoute u = routeOf(harborFav, unscanned);
+            CHECK(u.how == FavoriteOpen::LocalTrack);
+            CHECK(u.path == harbor && u.kind == QLatin1String("audio") && u.resumeKey == harbor);
+            CHECK(u.albumKey.isEmpty());
+        }
+        // 10e. AN INDEXED TRACK WHOSE FILE HAS GONE since the scan says so — it does not open an album over it.
+        {
+            browse::FavoriteWorld moved = world;
+            moved.fileExists = [&](const QString& f) { asked << f; return f != harbor && files.contains(f); };
+            const FavoriteRoute r = routeOf(harborFav, moved);
+            CHECK(r.how == FavoriteOpen::TrackFileGone);
+            CHECK(r.path.isEmpty() && r.albumKey.isEmpty());
+        }
+        // 10f. A SUBSONIC FAVOURITE KEEPS #364'S ROUTE, with the local index in the world: its qualified id, as
+        // kind "audio", to openRecent's qualified-track arm — never an album, never asked about as a file.
+        {
+            const FavoriteRoute r = routeOf(subFav, world);
+            CHECK(r.how == FavoriteOpen::ServerTrack);
+            CHECK(r.path == subId && r.resumeKey == subId && r.kind == QLatin1String("audio"));
+            CHECK(r.albumKey.isEmpty());
+            CHECK(asked.isEmpty());
+        }
+        // 10g. A CUE TRACK. Its SOURCE file is what is asked about — never the clip url — whether the index
+        // holds it or not; a missing one says the moved-file sentence; one the index holds opens its album.
+        {
+            // In the index, file there: its album, started at it.
+            const FavoriteRoute r = routeOf(midFav, world);
+            CHECK(r.how == FavoriteOpen::LocalAlbum);
+            CHECK(liveAlbum && r.albumKey == liveAlbum->key);
+            CHECK(mid && r.path == mid->path);
+            CHECK(asked.contains(livePath) && mid && !asked.contains(mid->path));
+            int start = -1;
+            const QStringList q = queueFor(r, &start);
+            CHECK(q.size() == 3 && start == 1);
+
+            // In the index, file gone (moved since the scan).
+            browse::FavoriteWorld moved = world;
+            moved.fileExists = [&](const QString& f) { asked << f; return f != livePath && files.contains(f); };
+            const FavoriteRoute g = routeOf(midFav, moved);
+            CHECK(g.how == FavoriteOpen::TrackFileGone);
+            CHECK(asked.contains(livePath));
+            const QString s = browse::favoriteOpenSentence(g.how, midFav.title);
+            CHECK(s.contains(midFav.title) && s.contains(QLatin1String("moved or deleted")));
+
+            // Not in the index (a rescan dropped it), file gone: read out of the url, and the same sentence.
+            const FavoriteRoute d = routeOf(droppedFav, world);
+            CHECK(d.how == FavoriteOpen::TrackFileGone);
+            CHECK(asked.contains(oldRip) && !asked.contains(droppedClip));
+            CHECK(d.path.isEmpty());
+
+            // Not in the index, file there: today's route, by the clip url.
+            const FavoriteRoute o = routeOf(otherFav, world);
+            CHECK(o.how == FavoriteOpen::LocalTrack);
+            CHECK(o.path == otherClip && o.kind == QLatin1String("audio") && o.resumeKey == otherClip);
+            CHECK(asked.contains(otherRip));
+
+            // A clip url nobody can read a file out of: opened as before, and nothing asked — "cannot tell"
+            // is never "gone". (Never worse than today.)
+            const FavoriteRoute b = routeOf(badFav, world);
+            CHECK(b.how == FavoriteOpen::LocalTrack && b.path == badClip);
+            CHECK(asked.isEmpty());
+        }
+        // 10h. CueSheet::clipFile reads mpvClipUrl BACK — a comma and an accent in the path (the %bytes% form
+        // exists for exactly those, and the count is of UTF-8 bytes), the last track's no-length form, and the
+        // plain unquoted form — and answers EMPTY for anything it cannot read, rather than a wrong file.
+        {
+            const QString odd = QString::fromUtf8("C:/music/Now, That\xE2\x80\x99s Caf\xC3\xA9/rip.flac");
+            CHECK(CueSheet::clipFile(CueSheet::mpvClipUrl(odd, 1500, 61500)) == odd);
+            CHECK(CueSheet::clipFile(CueSheet::mpvClipUrl(odd, 61500, -1)) == odd);
+            CHECK(CueSheet::clipFile(CueSheet::mpvClipUrl(livePath, 0, -1)) == livePath);
+            CHECK(CueSheet::clipFile(QStringLiteral("edl://C:/music/a.flac,12.000,30.000;"))
+                  == QLatin1String("C:/music/a.flac"));
+            CHECK(CueSheet::clipFile(QStringLiteral("C:/music/a.flac")).isEmpty());          // not a clip
+            CHECK(CueSheet::clipFile(QStringLiteral("https://x.example/a.flac")).isEmpty()); // not a clip
+            CHECK(CueSheet::clipFile(QStringLiteral("edl://%3%C:/music/a.flac,1.000;")).isEmpty()); // count off-field
+            CHECK(CueSheet::clipFile(QStringLiteral("edl://%x%C:/a.flac,1.000;")).isEmpty());       // no count
+            CHECK(CueSheet::clipFile(QString()).isEmpty());
+        }
+        // 10i. OPENING CHANGES NOTHING, over every route above: no love, no un-love, the store as it was.
+        CHECK(loves.isEmpty());
+        const QVector<FavoriteItem> after = FavoritesStore::list();
+        CHECK(after.size() == before.size());
+        for (int i = 0; i < qMin(after.size(), before.size()); ++i)
+            CHECK(after.at(i).itemId == before.at(i).itemId && after.at(i).ts == before.at(i).ts);
+
+        FavoritesStore::setLoveHook({});
+        for (const FavoriteItem& f : all) FavoritesStore::remove(f.itemId);
+        CHECK(FavoritesStore::list().isEmpty());
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

@@ -2858,6 +2858,12 @@ echo
 #     hook sends a server star on add, and pressing Play is not starring.
 #  5. THE SHELF BUILDS ITS ROWS WITH THE PROBED BUILDER. buildFavorites calls browse::favoriteShelfRow, so the
 #     row §8 routes is the row the shelf draws.
+#  6. A LOCAL TRACK THE INDEX HOLDS OPENS ITS ALBUM (issue #369). The LocalAlbum arm's first emit is
+#     playMusicAlbumRequested(route.albumKey, route.path) - MainWindow::openMusicAlbum, the album in
+#     disc-then-track order started at that track - and not openRecent's folder queue in file-name order;
+#     openFavorite hands the router the local index (MusicLibrary::index(), the one openMusicAlbum reads a
+#     local key from); and MainWindow still connects that signal to openMusicAlbum. probe_leafroute §10 pins
+#     the router's half.
 #
 # Comments are stripped first, as in the gates above. Every test counts rather than "| grep -q", and line
 # numbers come from awk rather than a "| head" pipeline, so pipefail cannot turn a match into a failure.
@@ -2915,6 +2921,16 @@ else
   # --- 5. The shelf builds its rows with the probed builder. ---
   [ "$(grep -cF 'browse::favoriteShelfRow(' "$fo_bf" || true)" -ge 1 ] \
     || fo_note "buildFavorites does not build its rows with browse::favoriteShelfRow. probe_leafroute §8 routes THAT builder's rows; a shelf building its own is a shelf nothing checks."
+
+  # --- 6. #369: a local track the index holds opens its album, through openMusicAlbum. ---
+  fo_la="$(awk '/FavoriteOpen::LocalAlbum/ { p = 1; next } p && /emit[[:space:]]/ { print; exit }' "$fo_fn" </dev/null)"
+  [ "$(printf '%s\n' "$fo_la" | grep -cE 'emit[[:space:]]+playMusicAlbumRequested\([[:space:]]*route\.albumKey[[:space:]]*,[[:space:]]*route\.path[[:space:]]*\)' || true)" -ge 1 ] \
+    || fo_note "the LocalAlbum arm of HomeView::openFavorite does not first emit playMusicAlbumRequested(route.albumKey, route.path). A starred local track would go back to queueing its folder by file name - one disc, in name order - instead of its album in track order."
+  [ "$(grep -cE 'localMusic[[:space:]]*=[[:space:]]*&MusicLibrary::index\(\)' "$fo_fn" || true)" -ge 1 ] \
+    || fo_note "HomeView::openFavorite does not hand the router the local music index (world.localMusic = &MusicLibrary::index()). Without it every local track falls back to the folder queue and the LocalAlbum arm never fires."
+  fo_mw="$HERE/../src/ui/MainWindow.cpp"
+  [ "$(sed -E 's://.*$::' "$fo_mw" 2>/dev/null | grep -cE 'connect\(home_,[[:space:]]*&HomeView::playMusicAlbumRequested,[[:space:]]*this,[[:space:]]*&MainWindow::openMusicAlbum\)' || true)" -ge 1 ] \
+    || fo_note "MainWindow no longer connects HomeView::playMusicAlbumRequested to MainWindow::openMusicAlbum. A starred track's album would be asked for and never played."
 
   rm -f "$fo_h" "$fo_v" "$fo_fn" "$fo_bf"
   if [ "$fo_fail" -eq 0 ]; then

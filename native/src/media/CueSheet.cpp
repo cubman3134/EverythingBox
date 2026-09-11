@@ -356,4 +356,30 @@ QString mpvClipUrl(const QString& filePath, int startMs, int endMs)
     return url + QLatin1Char(';');
 }
 
+QString clipFile(const QString& clipUrl)
+{
+    static const QLatin1String kScheme("edl://");
+    if (!clipUrl.startsWith(kScheme)) return {};
+    const QString rest = clipUrl.mid(kScheme.size());
+    if (rest.startsWith(QLatin1Char('%')))
+    {
+        // %<bytes>%<path> — the count is of UTF-8 BYTES, so the path is cut from the bytes, not the QChars.
+        const int close = rest.indexOf(QLatin1Char('%'), 1);
+        if (close < 2) return {};
+        bool ok = false;
+        const qsizetype bytes = rest.mid(1, close - 1).toLongLong(&ok);
+        if (!ok || bytes <= 0) return {};
+        const QByteArray tail = rest.mid(close + 1).toUtf8();
+        if (bytes > tail.size()) return {};
+        // A quoted field ends where its count says, and a real one is followed by the next field or the end.
+        if (bytes < tail.size() && tail.at(bytes) != ',' && tail.at(bytes) != ';') return {};
+        return QString::fromUtf8(tail.left(bytes));
+    }
+    // Unquoted: the field runs to the first separator.
+    qsizetype end = rest.size();
+    for (qsizetype i = 0; i < rest.size(); ++i)
+        if (rest.at(i) == QLatin1Char(',') || rest.at(i) == QLatin1Char(';')) { end = i; break; }
+    return rest.left(end);
+}
+
 } // namespace CueSheet

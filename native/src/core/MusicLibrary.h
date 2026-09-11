@@ -356,6 +356,18 @@ namespace MusicLibrary
         const Album*  album(const QString& albumKey) const;
         const Composer*     composer(const QString& composerKey) const;
         const ComposerWork* work(const QString& workKey) const;
+
+        // THE TRACK A PLAYBACK PATH NAMES (issue #369) — `path` compared, exactly, against IndexTrack::path:
+        // a file for an ordinary track, the clip url for a cue track. nullptr when no album holds it (the
+        // library has not been scanned, the file is outside the roots, or a rescan dropped it).
+        //
+        // It is how a caller that holds only a path — a starred track on the ★ Favorites shelf — gets to the
+        // album that track is ON (IndexTrack::albumKey) and so to that album's disc-then-track order, instead
+        // of the folder's file-name order. A walk rather than a path -> album table on purpose: every track
+        // already carries its album key, so the index IS that table, and a second one kept beside it would be
+        // a copy that can drift from it (and would dangle on a copy, for album()'s reason above). Linear for
+        // album()'s reason too: it runs once per press, never per frame.
+        const IndexTrack* track(const QString& path) const;
     };
 
     // ------------------------------------------------------------------------------------------------

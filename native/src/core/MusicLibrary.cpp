@@ -648,6 +648,18 @@ const Album* Index::album(const QString& albumKey) const
     return nullptr;
 }
 
+const IndexTrack* Index::track(const QString& path) const
+{
+    // Albums only, never Artist::credits: a credit row is a COPY of a track that sits on some album, so the
+    // album walk already sees every track once, and it is the album's copy that names the album.
+    if (path.isEmpty()) return nullptr;
+    for (const Artist& a : artists)
+        for (const Album& b : a.albums)
+            for (const IndexTrack& t : b.tracks)
+                if (t.path == path) return &t;
+    return nullptr;
+}
+
 const Composer* Index::composer(const QString& composerKey) const
 {
     for (const Composer& c : composers)
