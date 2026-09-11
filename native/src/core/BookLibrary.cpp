@@ -136,6 +136,30 @@ Kind kindFor(const QString& path)
     return (e == QStringLiteral("cbz") || e == QStringLiteral("cbr")) ? Kind::Comic : Kind::Book;
 }
 
+bool isSavedPageSupportFolder(const QString& dirPath, const QStringList& siblingNames)
+{
+    // The one suffix both browsers write today (the header cites where). A table of localised words would be
+    // a list nobody here can source; see the header for what an unrecognised one costs.
+    static const QLatin1String kSuffix("_files");
+    static const QLatin1String kPageExts[] = { QLatin1String(".html"), QLatin1String(".htm") };
+
+    // The folder's own name, and nothing above it. cleanPath drops a trailing separator; QFileInfo::fileName
+    // is string work and reads no disk.
+    const QString name = QFileInfo(QDir::cleanPath(dirPath)).fileName();
+    if (name.size() <= kSuffix.size() || !name.endsWith(kSuffix, Qt::CaseInsensitive)) return false;
+    const QString stem = name.left(name.size() - kSuffix.size());
+
+    // THE PAIRING: a sibling that is exactly <stem> plus a page extension. Whole-name equality, so a stem
+    // that matches only as a prefix ("notes-old.html", "my notes.html") pairs nothing.
+    for (const QString& sib : siblingNames)
+        for (const QLatin1String& ext : kPageExts)
+            if (sib.size() == stem.size() + ext.size()
+                && sib.endsWith(ext, Qt::CaseInsensitive)
+                && sib.startsWith(stem, Qt::CaseInsensitive))
+                return true;
+    return false;
+}
+
 QString authorKeyFor(const QString& author) { return foldKey(author); }
 QString seriesKeyFor(const QString& series) { return ComicName::seriesKey(series); }
 
@@ -160,6 +184,26 @@ QVector<FileEntry> scanFolder(const QString& root, const QHash<QString, FileEntr
         return out;
     }
 
+    // A SAVED WEB PAGE'S FOLDER, AND EVERYTHING UNDER IT (#360). A directory counts as "inside" when it is
+    // a `<stem>_files` folder paired with its page (isSavedPageSupportFolder) or sits anywhere below one, so
+    // a nested pair inside a saved page's folder is covered by the outer one. Judged once per directory and
+    // memoised, and only for directories that hold a reading file, so a library with no saved pages pays one
+    // hash lookup per book. THE ROOT ITSELF IS NEVER JUDGED: a user who points the library at one of these
+    // folders has said what they want read.
+    const QString rootAbs = QDir::cleanPath(QFileInfo(root).absoluteFilePath());
+    QHash<QString, bool> insideSavedPage;
+    std::function<bool(const QString&)> isInsideSavedPage = [&](const QString& dir) -> bool {
+        if (dir.size() <= rootAbs.size()) return false;
+        const auto hit = insideSavedPage.constFind(dir);
+        if (hit != insideSavedPage.constEnd()) return *hit;
+        const QString parent = QFileInfo(dir).path();   // string work; "C:/Books" -> "C:/", never "C:"
+        const bool inside = isInsideSavedPage(parent)
+            || isSavedPageSupportFolder(dir, QDir(parent).entryList(QDir::Files | QDir::Hidden
+                                                                    | QDir::NoDotAndDotDot));
+        insideSavedPage.insert(dir, inside);
+        return inside;
+    };
+
     QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
     while (it.hasNext())
     {
@@ -168,6 +212,13 @@ QVector<FileEntry> scanFolder(const QString& root, const QHash<QString, FileEntr
         // Extension-only, before anything is opened: a cover.jpg, a .nfo, a loose folder of scanned pages
         // that is not an archive at all — each costs one string compare and is not read.
         if (!isReadingFile(fi.filePath())) continue;
+        // BEFORE the cache is consulted, so an index written by an older build cannot bring a frame back:
+        // it is simply not found, and counts as dropped below.
+        if (isInsideSavedPage(QDir::cleanPath(fi.absolutePath())))
+        {
+            ++s.savedPageSkipped;
+            continue;
+        }
         const QString abs  = fi.absoluteFilePath();
         const qint64 mtime = fi.lastModified().toSecsSinceEpoch();
         const qint64 size  = fi.size();

@@ -1803,6 +1803,155 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- §17 A SAVED WEB PAGE'S _files FOLDER IS NOT A SHELF OF BOOKS (issue #360) ----------------------
+    // "Save page as... complete" writes <stem>.html AND <stem>_files/ full of frames and fragments. The page
+    // is a book; nothing inside its folder is. The PAIRING is the marker: a _files folder with no matching
+    // page beside it is an ordinary folder and is scanned in full.
+    {
+        // (a) THE PURE RULE, over its edges. Sibling lists are NAMES, as the scan hands them over.
+        const QStringList page { QStringLiteral("Article.html"), QStringLiteral("style.css") };
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_files"), page));
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_files/"), page));  // trailing slash
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("Article_files"), page));      // bare name
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Old_files"),
+                                                    { QStringLiteral("Old.htm") }));              // .htm pairs too
+        // Case, of the extension, the stem and the suffix alike.
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_files"),
+                                                    { QStringLiteral("Article.HTML") }));
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Old_files"), { QStringLiteral("Old.HtM") }));
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/article_files"), page));
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_FILES"), page));
+        // A stem with dots in it: only the page's LAST extension is dropped, as both browsers derive it.
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/v1.2 notes_files"),
+                                                    { QStringLiteral("v1.2 notes.html") }));
+        CHECK(BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/report.v2_files"),
+                                                    { QStringLiteral("report.v2.html") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/report_files"),
+                                                     { QStringLiteral("report.v2.html") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/v1_files"),
+                                                     { QStringLiteral("v1.2 notes.html") }));
+        // A stem that matches only by PREFIX, in either direction, or with the page's name inside a longer one.
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Articl_files"), page));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article2_files"), page));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("notes-old.html") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("my notes.html") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("notes.html.bak") }));
+        // Only .html / .htm pair: not .xhtml, not .txt, not a page with no extension at all.
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("notes.xhtml") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("notes.txt") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"), { QStringLiteral("notes") }));
+        // No page at all: the name alone is not a marker.
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"), {}));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/notes_files"),
+                                                     { QStringLiteral("other.html") }));
+        // Not a _files folder, whatever sits beside it; and a bare "_files" has no stem to pair.
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article"), page));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_file"), page));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/Article_files2"), page));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QStringLiteral("/x/_files"), { QStringLiteral(".html") }));
+        CHECK(!BookLibrary::isSavedPageSupportFolder(QString(), page));
+
+        // (b) THE SCAN. Its own root, for §14's reason.
+        const QString lib360 = base + QStringLiteral("/lib360");
+        const QByteArray article = QByteArrayLiteral("<html><head><title>The Saved Article</title></head>"
+                                                     "<body><p>the one book that was meant</p></body></html>");
+        const QByteArray shell = QByteArrayLiteral("<html><body>ad frame</body></html>");
+        // A saved page, complete: its folder holds frames, a stray .txt, non-reading files, a page-and-folder
+        // pair of its own, and an unpaired _files folder. NONE of it is a book.
+        CHECK(writeFile(lib360 + QStringLiteral("/Article.html"), article));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/frame.html"), shell));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/ads.htm"), shell));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/robots.txt"), QByteArrayLiteral("User-agent: *")));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/style.css"), QByteArrayLiteral("p{}")));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/pixel.png"), pngBytes(QColor(1, 2, 3), 1, 1)));
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/sub.html"), shell));            // nested pair...
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/sub_files/deep.html"), shell)); // ...still skipped
+        CHECK(writeFile(lib360 + QStringLiteral("/Article_files/stray_files/x.html"), shell));
+        // The .htm spelling pairs the same way.
+        CHECK(writeFile(lib360 + QStringLiteral("/Old.htm"), QByteArrayLiteral("<p>an old page</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/Old_files/frame.html"), shell));
+        // A pair one level down is judged in ITS OWN parent, not the root's.
+        CHECK(writeFile(lib360 + QStringLiteral("/saved/Deep.html"), QByteArrayLiteral("<p>deep page</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/saved/Deep_files/f.html"), shell));
+        // COUNTER-CASES, scanned in full. A _files folder with no page beside it:
+        CHECK(writeFile(lib360 + QStringLiteral("/notes_files/a.html"), QByteArrayLiteral("<p>a</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/notes_files/b.htm"), QByteArrayLiteral("<p>b</p>")));
+        // ...one whose page lives in a DIFFERENT folder, which is no pairing at all:
+        CHECK(writeFile(lib360 + QStringLiteral("/elsewhere/Stray.html"), QByteArrayLiteral("<p>stray</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/other/Stray_files/s.html"), QByteArrayLiteral("<p>s</p>")));
+        // ...and an ordinary folder of several HTML books.
+        CHECK(writeFile(lib360 + QStringLiteral("/essays/one.html"), QByteArrayLiteral("<p>1</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/essays/two.html"), QByteArrayLiteral("<p>2</p>")));
+        CHECK(writeFile(lib360 + QStringLiteral("/essays/three.htm"), QByteArrayLiteral("<p>3</p>")));
+
+        ScanStats s;
+        const QVector<BookLibrary::FileEntry> e = BookLibrary::scanFolder(lib360, {}, &s);
+        const Index r = BookLibrary::buildIndex(e);
+        // Listed: Article.html, Old.htm, saved/Deep.html, notes_files/{a,b}, elsewhere/Stray.html,
+        // other/Stray_files/s.html, essays/{one,two,three}. Skipped: the 6 reading files under Article_files
+        // (frame, ads, robots.txt, sub, sub_files/deep, stray_files/x), Old_files/frame, saved/Deep_files/f.
+        CHECK(s.files == 10);
+        CHECK(s.savedPageSkipped == 8);      // reading files only: style.css and pixel.png are not counted
+        CHECK(r.bookCount == 10);
+        CHECK(e.size() == 10);
+        bool anyInsideSaved = false;
+        for (const BookLibrary::FileEntry& fe : e)
+        {
+            const QString p = fe.path;
+            if (p.contains(QStringLiteral("/Article_files/")) || p.contains(QStringLiteral("/Old_files/"))
+                || p.contains(QStringLiteral("/Deep_files/")))
+                anyInsideSaved = true;
+        }
+        CHECK(!anyInsideSaved);
+        // The saved page ITSELF is still the book, under what it says it is.
+        CHECK(findBook(r, QStringLiteral("The Saved Article")) != nullptr);
+        CHECK(findBook(r, QStringLiteral("Old")) != nullptr);
+        CHECK(findBook(r, QStringLiteral("Deep")) != nullptr);
+        // And the counter-cases are all there.
+        for (const char* t : { "a", "b", "Stray", "s", "one", "two", "three" })
+            CHECK(findBook(r, QString::fromLatin1(t)) != nullptr);
+        CHECK(findBook(r, QStringLiteral("frame")) == nullptr);
+        CHECK(findBook(r, QStringLiteral("ads")) == nullptr);
+        CHECK(findBook(r, QStringLiteral("deep")) == nullptr);
+
+        // (c) A PREVIOUS INDEX CANNOT RESURRECT A SKIPPED FILE. A library cached by the #259 build listed
+        //     the frames; the skip runs before the cache is consulted, so they leave the shelf and are counted
+        //     as dropped, and the caller's save writes the index without them.
+        {
+            QVector<BookLibrary::FileEntry> old = e;
+            BookLibrary::FileEntry frame;
+            const QFileInfo ffi(lib360 + QStringLiteral("/Article_files/frame.html"));
+            frame.path  = ffi.absoluteFilePath();
+            frame.mtime = ffi.lastModified().toSecsSinceEpoch();
+            frame.size  = ffi.size();
+            old.push_back(frame);
+            ScanStats s2;
+            const QVector<BookLibrary::FileEntry> e2 = BookLibrary::scanFolder(lib360, BookLibrary::byPath(old), &s2);
+            CHECK(e2.size() == 10);
+            CHECK(s2.reused == 10);
+            CHECK(s2.dropped == 1);
+            CHECK(s2.savedPageSkipped == 8);
+        }
+
+        // (d) THE ROOT IS NEVER JUDGED. A user who points the books root AT a saved page's folder has said
+        //     what they want read; it is their statement, and every reading file in it is listed.
+        {
+            ScanStats s3;
+            const QVector<BookLibrary::FileEntry> e3 =
+                BookLibrary::scanFolder(lib360 + QStringLiteral("/Article_files"), {}, &s3);
+            // frame, ads, robots.txt, sub; sub_files and stray_files sit INSIDE the root. sub_files pairs with
+            // sub.html beside it, so its deep.html is still skipped; stray_files has no page and is listed.
+            CHECK(s3.files == 5);
+            CHECK(s3.savedPageSkipped == 1);
+            CHECK(e3.size() == 5);
+        }
+    }
+
     QDir(base).removeRecursively();
 
     if (g_fails == 0)
