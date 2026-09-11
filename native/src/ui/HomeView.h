@@ -153,6 +153,12 @@ public:
     // #365: Download on a row already resolved to a copy. downloadThemedLeaf's body, so the classic menus and
     // the themed chooser run ONE crawl entry rather than two.
     void downloadBrowseItem(const MediaItem& row);
+    // #372 — whether Download is OFFERED on this row: THE answer both themed surfaces read, the detail view's
+    // action row (themedDetailData's "download" verb) and the XMB chooser's Download row (MainWindow writes
+    // themedDownloadOffered into ThemeView's actionDownload). browse::downloadOffered decides, over the crawl's
+    // own arm table (browse::downloadLeafArmFor, which dlResolveLeaf dispatches on); this gathers its facts.
+    bool downloadOfferedFor(const MediaItem& it) const;
+    bool themedDownloadOffered(int themedIndex) const;   // the same, for a themed column row
     // The copy of this item already on disk, or empty — see the note on the definition.
     QString localCopyForItem(const MediaItem& it) const;
     // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it
@@ -644,6 +650,10 @@ private:
     // verbs) both call this, so the themed row can never drift from the classic visibility rules.
     struct ActionGates { bool play = false; bool download = false; bool readable = false; };
     ActionGates classicActionGates(const MediaItem& item) const;
+    // The add-on a download crawl walks for this row at the current level: the level's, else the row's own
+    // sourceAddonId. ONE reading, shared by the press (downloadBrowseItem), the Download offer
+    // (downloadOfferedFor) and the classic track menus (trackMenuForRow), so none can walk a different one.
+    LoadedAddon* crawlAddonFor(const MediaItem& it) const;
 
     // True when playing this leaf goes through the Stremio stream add-ons — i.e. there is a LIST of releases
     // to choose between, which is the only case "Choose source…" means anything. A local-library item plays

@@ -178,6 +178,64 @@ TrackMenuVerbs trackMenuVerbsFor(const MediaItem& it, TrackAddon addon)
     return v;
 }
 
+bool isReadableChapterType(const QString& type)
+{
+    static const QString kSuffix = QStringLiteral("_chapter");
+    return type.size() > kSuffix.size() && type.endsWith(kSuffix);   // a bare "_chapter" names no family
+}
+
+DownloadLeafArm downloadLeafArmFor(const MediaItem& it, TrackAddon addon)
+{
+    // HomeView::dlResolveLeaf's arms, in its order. It dispatches on this, so this IS the crawl's table.
+    // Can't pull as a single file: a store-launcher game, or a page-based chapter.
+    if (it.mime == QLatin1String("steamgame") || it.mime == QLatin1String("epicgame")
+        || it.mime == QLatin1String("goggame") || it.mime == QLatin1String("battlenetgame")
+        || isReadableChapterType(it.type))
+        return DownloadLeafArm::None;
+    // A script add-on's document or game: searched for on the file provider by title.
+    if (addon == TrackAddon::Script
+        && (it.type == QLatin1String("comic_issue") || it.type == QLatin1String("book")
+            || it.type == QLatin1String("audiobook") || it.type == QLatin1String("game")))
+        return DownloadLeafArm::LocalBridge;
+    // A remote add-on's leaf, of any type: its /stream (a file provider OR Stremio).
+    if (addon == TrackAddon::Remote) return DownloadLeafArm::RemoteStream;
+    // A movie / episode / series / tv from anywhere else: its /meta names the IMDB id, and that bridges.
+    if (it.type == QLatin1String("movie") || it.type == QLatin1String("episode")
+        || it.type == QLatin1String("series") || it.type == QLatin1String("tv"))
+        return DownloadLeafArm::MetaBridge;
+    return DownloadLeafArm::None;   // unknown / non-downloadable leaf
+}
+
+bool downloadOffered(const MediaItem& it, const DownloadOfferFacts& facts)
+{
+    // Already on this machine (a local game file, a Recent / Downloaded row): the press could only say so.
+    if (facts.alreadyLocal) return false;
+    // Everything the detail row offered before #372 is still offered — classicActionGates' answer, kept whole
+    // (a remote / bridged catalog leaf, a crawlable container, a Jellyfin row).
+    if (facts.classicGate) return true;
+    // Beyond it, only a real LEAF can be claimed by a crawl arm: not a container (its download is the classic
+    // gate's, above), not a synthetic '_' row, a guidance line or a Recent divider, and not a row with no id.
+    if (it.expandable || it.id.isEmpty() || it.type.startsWith(QLatin1Char('_'))
+        || it.type == QLatin1String("info") || it.type == QLatin1String("rechdr"))
+        return false;
+    // A LIBRARY row — a local / Subsonic / Jellyfin / server track, or a row in the library track's spelling
+    // that names no file. #365's rule, asked of the same classification trackMenuVerbsFor uses: never Download,
+    // whatever add-on context it is asked in. There is no add-on for the crawl to walk.
+    if (queueTargetFor(it).what == QueueAdd::Track || it.mime.startsWith(QLatin1String(kMusicTrackPrefix)))
+        return false;
+    switch (downloadLeafArmFor(it, facts.addon))
+    {
+    case DownloadLeafArm::LocalBridge:  return facts.fileProvider;   // the title search needs a provider to ask
+    case DownloadLeafArm::RemoteStream: return true;                 // the add-on's own /stream
+    case DownloadLeafArm::MetaBridge:
+        // requestMeta answers nothing without an add-on (the press would sit on "Preparing download…"), and
+        // onMetaReady's resolve by IMDB id needs a stream provider for the row's kind.
+        return facts.addon != TrackAddon::None && facts.streamProvider;
+    case DownloadLeafArm::None:         break;
+    }
+    return false;
+}
+
 ThemedEnter themedEnterFor(const QString& type, bool expandable)
 {
     if (expandable) return ThemedEnter::Drill;                        // a container: series / console / volume

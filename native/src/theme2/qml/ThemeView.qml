@@ -157,6 +157,10 @@ Item {
     // dynamic property added from C++ carries no change notification, so the chooser's row model — a JS
     // expression — read it once as undefined and never re-evaluated. The row could not appear at all.
     property bool actionRomhack: false
+    // Whether this item gets the "Download" row (issue #372). Written by MainWindow::showThemedXmb's onActivated
+    // from HomeView::themedDownloadOffered — the answer the detail view's action row reads — so the chooser
+    // offers Download exactly where the press can act. Declared for the same reason actionRomhack is.
+    property bool actionDownload: false
     // Whether this item gets the extra "Add to queue" / "Play next" rows (issue #193 increment 2 — a local
     // music TRACK leaf). Declared for the same reason actionRomhack is, and its bug is the same one.
     property bool actionQueue: false
