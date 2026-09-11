@@ -38,6 +38,11 @@ namespace FavoritesStore
     void addFromSource(const FavoriteItem& item);
     void remove(const QString& itemId);
     bool isFavorite(const QString& itemId);
+    // A star the user PRESSED, as one call: add() when the item is not a favourite, remove() when it is — so
+    // the love hook below fires either way and the server star (#193 increment 6) goes wherever the press
+    // came from (issue #297, the classic track menus). Returns whether the item is a favourite afterwards.
+    // Never the path for a star that came FROM a server; that is addFromSource, and it must stay quiet.
+    bool toggle(const FavoriteItem& item);
 
     // Identity keys (itemId + path) of EVERY profile's favourites, for image-cache pinning: a starred
     // item's art must never be evicted, whichever profile starred it.

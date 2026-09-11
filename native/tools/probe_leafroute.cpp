@@ -45,6 +45,11 @@
 //      even once produced, every file route in the table would have refused it. Pins that a legacy
 //      url-shaped favourite is NOT listed, that no row carries a `://` anywhere, and that the channel LIST's
 //      own rows (which do have a url) are untouched by the new prefix.
+//   §7 STARRING A MUSIC TRACK FROM A CLASSIC MENU (issue #297). Which rows offer Favorite / Remove
+//      (browse::trackFavoriteFor + trackFavoriteVerb, the same reading queueTargetFor makes), the record they
+//      write (the row's own id — its path — and type "track"), and that the press goes through the REAL store
+//      with the love hook installed: it fires for FavoritesStore::toggle and does NOT fire for addFromSource.
+//      That last pair is the silent failure — a favourite that lands on the shelf and never reaches the server.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
 #include "JellyfinCatalogs.h"
@@ -539,6 +544,146 @@ int main(int argc, char** argv)
         // producer that invented a row would put an "★ Favorites" shelf on every video root.
         CHECK(browse::liveTvFavoriteRows({}).isEmpty());
         CHECK(browse::liveTvFavoriteRows({ movie, game }).isEmpty());
+    }
+
+    // ---- §7 STARRING A MUSIC TRACK FROM A CLASSIC MENU (issue #297) ---------------------------------------
+    // The classic layout's two menus on a track row offered the queue verbs and nothing else, so a track could
+    // be starred only from the themed chooser — and, since #193 increment 6, that was the only door to the
+    // server star too. The star is sent by FavoritesStore's love hook, not by a button, so what the classic
+    // verb has to get right is (a) which rows offer it and what it says, (b) the record it writes, and (c)
+    // that it goes through add(), which fires the hook, and never addFromSource(), which deliberately does
+    // not. (c) is the one that fails silently: a favourite lands, the shelf shows it, and the server never
+    // hears. So this section drives the REAL store with a hook installed and watches it.
+    {
+        using browse::TrackFavVerb;
+        const MusicLibrary::Index idx = oneAlbumIndex();
+        const MediaCatalog album = browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover);
+
+        // 7a. EVERY TRACK ROW OFFERS IT, as the record the themed chooser writes — and the row that is not a
+        // track (the "Play album" action row at the top) does not. Asked of the real builder's rows.
+        int offered = 0;
+        MediaItem dawn;
+        for (const MediaItem& it : album.items)
+        {
+            const FavoriteItem f = browse::trackFavoriteFor(it);
+            const bool isTrack = browse::queueTargetFor(it).what == browse::QueueAdd::Track;
+            CHECK(f.itemId.isEmpty() == !isTrack);   // the queue's reading and this one agree, row for row
+            if (!isTrack)
+            {
+                CHECK(browse::trackFavoriteVerb(f, false) == TrackFavVerb::None);
+                CHECK(browse::trackFavoriteVerb(f, true) == TrackFavVerb::None);
+                continue;
+            }
+            ++offered;
+            // THE ROW'S OWN ID, which for a track is its path: the id adoptStarredFavourites files a server's
+            // star under and the id the love hook recovers the tags by. Another id and the row's heart could
+            // not find its own favourite.
+            CHECK(f.itemId == it.id);
+            CHECK(f.itemId == it.url);
+            // "track", because that is the ONE type the love hook acts on (MainWindow's setLoveHook).
+            CHECK(f.type == QLatin1String("track"));
+            CHECK(f.type == QString::fromLatin1(browse::kMusicTrackType));
+            CHECK(f.title == it.title);
+            CHECK(f.subtitle == it.subtitle);
+            CHECK(f.thumbnailUrl == it.thumbnailUrl);
+            // The themed chooser's generic arm stamps no path/kind/system for a track; neither does this, or one
+            // track would be two differently shaped records depending on which layout starred it.
+            CHECK(f.path.isEmpty() && f.kind.isEmpty() && f.system.isEmpty() && f.addonId.isEmpty());
+            CHECK(browse::trackFavoriteVerb(f, false) == TrackFavVerb::Add);
+            CHECK(browse::trackFavoriteVerb(f, true) == TrackFavVerb::Remove);
+            // Picked by FILE, not title: the row's title is numbered ("1. Dawn") in an album's list.
+            if (it.url == QStringLiteral("C:/music/Vol 1/01 Dawn.flac")) dawn = it;
+        }
+        CHECK(offered == 2);
+        // ...and the id is IndexTrack::path verbatim, which is the key adoptStarredFavourites uses.
+        CHECK(dawn.id == QStringLiteral("C:/music/Vol 1/01 Dawn.flac"));
+
+        // 7b. NOTHING THAT IS NOT A TRACK OFFERS IT. Without this, 7a is satisfied by a function that offers
+        // Favorite on every row, and the classic menu would grow a second, differently shaped star on a film.
+        const MediaCatalog artist = browse::musicArtistCatalog(idx, QStringLiteral("the hollows"), noCover);
+        CHECK(!artist.items.isEmpty());
+        for (const MediaItem& it : artist.items)                 // the album row, Play all, Shuffle all
+            CHECK(browse::trackFavoriteFor(it).itemId.isEmpty());
+        MediaItem movie;  movie.type = QStringLiteral("movie"); movie.id = QStringLiteral("tt0816692");
+        movie.mime = QStringLiteral("video/mp4"); movie.url = QStringLiteral("https://cdn.example/s.mp4");
+        MediaItem photo;  photo.type = QStringLiteral("photo"); photo.mime = QString::fromLatin1(browse::kPhotoMime);
+        photo.url = QStringLiteral("C:/pics/a.jpg"); photo.id = photo.url;
+        MediaItem game;   game.type = QStringLiteral("game"); game.url = QStringLiteral("C:/roms/nes/a.nes");
+        game.id = game.url;
+        MediaItem book;   book.type = QString::fromLatin1(browse::kOpdsBookType);
+        book.url = QStringLiteral("https://opds.example/acq/1"); book.id = book.url;
+        MediaItem localVid; localVid.mime = QString::fromLatin1(browse::kLocalVideoMime);
+        localVid.url = QStringLiteral("C:/vid/a.mkv"); localVid.id = localVid.url;
+        MediaItem artistRow; artistRow.type = QString::fromLatin1(browse::kMusicArtistType);
+        artistRow.mime = QString::fromLatin1(browse::kMusicArtistPrefix) + QStringLiteral("the hollows");
+        MediaItem jf;     jf.type = QStringLiteral("movie"); jf.id = QStringLiteral("jfid");
+        jf.mime = QString::fromLatin1(browse::kJellyfinItemPrefix)
+                  + Jellyfin::qualify(QStringLiteral("0123456789abcdef0123456789abcdef"), QStringLiteral("aa"));
+        MediaItem noFile; noFile.type = QString::fromLatin1(browse::kMusicTrackType);   // a track naming no file
+        noFile.mime = QString::fromLatin1(browse::kMusicTrackPrefix) + QString::fromLatin1(kAlbumKey);
+        noFile.id = QStringLiteral("C:/music/gone.flac");
+        for (const MediaItem& it : { movie, photo, game, book, localVid, artistRow, jf, noFile })
+        {
+            const FavoriteItem f = browse::trackFavoriteFor(it);
+            CHECK(f.itemId.isEmpty());
+            CHECK(browse::trackFavoriteVerb(f, false) == TrackFavVerb::None);
+        }
+
+        // 7c. THROUGH THE STORE, AND THE LOVE HOOK FIRES. The hook is the real seam MainWindow installs; the
+        // probe installs a recorder in its place and presses the verb the way both classic menus press it.
+        struct Love { FavoriteItem f; bool loved; };
+        QVector<Love> loves;
+        FavoritesStore::setLoveHook([&loves](const FavoriteItem& f, bool loved) { loves.push_back({ f, loved }); });
+        const FavoriteItem fav = browse::trackFavoriteFor(dawn);
+        CHECK(!FavoritesStore::isFavorite(dawn.id));
+        CHECK(FavoritesStore::toggle(fav));                     // "Favorite"
+        CHECK(FavoritesStore::isFavorite(dawn.id));             // the row's own id finds it
+        int landed = 0;
+        for (const FavoriteItem& s : FavoritesStore::list())
+            if (s.itemId == dawn.id && s.type == QLatin1String("track") && s.title == dawn.title) ++landed;
+        CHECK(landed == 1);
+        CHECK(loves.size() == 1);
+        if (loves.size() == 1)
+        {
+            CHECK(loves.at(0).loved);
+            CHECK(loves.at(0).f.itemId == dawn.id);
+            CHECK(loves.at(0).f.type == QLatin1String("track"));
+        }
+        // Standing on it again, the menu now says the other thing.
+        CHECK(browse::trackFavoriteVerb(browse::trackFavoriteFor(dawn), FavoritesStore::isFavorite(dawn.id))
+              == TrackFavVerb::Remove);
+        CHECK(!FavoritesStore::toggle(fav));                    // "Remove from Favorites"
+        CHECK(!FavoritesStore::isFavorite(dawn.id));
+        CHECK(loves.size() == 2);
+        if (loves.size() == 2)
+        {
+            CHECK(!loves.at(1).loved);                          // the un-star reaches the server too
+            CHECK(loves.at(1).f.itemId == dawn.id);
+            CHECK(loves.at(1).f.type == QLatin1String("track"));
+        }
+        CHECK(browse::trackFavoriteVerb(browse::trackFavoriteFor(dawn), FavoritesStore::isFavorite(dawn.id))
+              == TrackFavVerb::Add);
+
+        // 7d. ...AND NOT FOR addFromSource. The same record arriving as a server's own star stays quiet — that
+        // is the whole reason the second entry point exists — which is what makes 7c a real distinction and
+        // not a hook that fires for everything.
+        loves.clear();
+        FavoritesStore::addFromSource(fav);
+        CHECK(FavoritesStore::isFavorite(dawn.id));
+        CHECK(loves.isEmpty());
+        // A server's star shows on the classic row as Remove, and removing it there DOES tell the server.
+        CHECK(browse::trackFavoriteVerb(browse::trackFavoriteFor(dawn), FavoritesStore::isFavorite(dawn.id))
+              == TrackFavVerb::Remove);
+        CHECK(!FavoritesStore::toggle(fav));
+        CHECK(loves.size() == 1 && !loves.at(0).loved);
+
+        // 7e. A record naming nothing (what a non-track row resolves to) is refused and fires nothing.
+        loves.clear();
+        const FavoriteItem none;
+        CHECK(!FavoritesStore::toggle(none));
+        CHECK(loves.isEmpty());
+        CHECK(FavoritesStore::list().isEmpty());
+        FavoritesStore::setLoveHook({});
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

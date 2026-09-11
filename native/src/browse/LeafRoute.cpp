@@ -126,6 +126,29 @@ QueueTarget queueTargetFor(const MediaItem& it)
     return {};
 }
 
+FavoriteItem trackFavoriteFor(const MediaItem& it)
+{
+    // Asked of queueTargetFor rather than of the mime a second time: a row that queues as a track is the row
+    // that stars as one, and a rename of the track prefix cannot unroute one verb and leave the other.
+    if (queueTargetFor(it).what != QueueAdd::Track || it.id.isEmpty()) return {};
+    // The themed chooser's generic arm (HomeView::favoriteThemedLeaf), field for field. A music level has no
+    // addon, so addonId is empty there too; no path/kind/system, because a track re-opens through neither.
+    FavoriteItem f;
+    f.itemId       = it.id;          // a track row's id IS its path (trackRow) — the id the love hook maps
+    f.title        = it.title;
+    f.subtitle     = it.subtitle;
+    f.type         = it.type;        // kMusicTrackType, "track": the one type the love hook acts on
+    f.thumbnailUrl = it.thumbnailUrl;
+    f.expandable   = it.expandable;
+    return f;
+}
+
+TrackFavVerb trackFavoriteVerb(const FavoriteItem& fav, bool alreadyFavorite)
+{
+    if (fav.itemId.isEmpty()) return TrackFavVerb::None;
+    return alreadyFavorite ? TrackFavVerb::Remove : TrackFavVerb::Add;
+}
+
 ThemedEnter themedEnterFor(const QString& type, bool expandable)
 {
     if (expandable) return ThemedEnter::Drill;                        // a container: series / console / volume
