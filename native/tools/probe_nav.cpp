@@ -101,6 +101,8 @@ struct ProfilePage
     QPushButton* pick0 = nullptr;
     QPushButton* edit0 = nullptr;
     QPushButton* del0 = nullptr;
+    QPushButton* create = nullptr;   // #353: full width, nothing beside it in its row
+    QPushButton* cancel = nullptr;
 };
 
 static ProfilePage buildProfilePage(QWidget* parent)
@@ -123,7 +125,9 @@ static ProfilePage buildProfilePage(QWidget* parent)
     }
     auto* create = new QPushButton(QStringLiteral("＋  Create New Profile"), p.page);
     v->addWidget(create);
-    v->addWidget(new QPushButton(QStringLiteral("Cancel"), p.page));
+    p.create = create;
+    p.cancel = new QPushButton(QStringLiteral("Cancel"), p.page);
+    v->addWidget(p.cancel);
     v->addStretch(1);
     p.page->setGeometry(0, 0, 420, 460);
     p.page->show(); p.page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
@@ -135,7 +139,22 @@ static ProfilePage buildProfilePage(QWidget* parent)
 // button instead of the row below it; #351: at QT_FONT_DPI=72, Right from the row landed on the header Back
 // instead of its ✎). Down from the wide "pick" button lands on the row DIRECTLY below, never the narrow side
 // button; the ✎/✕ are reached with Right, not Down, and Left from ✎ goes back to its own row.
-static void checkProfileRowGeometry(NavContext& ctx, const ProfilePage& p)
+static QVector<QWidget*> navUnreachable(NavRing& ring, NavContext& ctx);
+
+// What a widget is and where it sits, for a FAILURE message only. Never asserted on: a pixel count is this
+// machine's font (worker rules, #349), so the rects are there to explain a failure, not to define a pass.
+static QByteArray where(QWidget* w)
+{
+    if (!w) return QByteArrayLiteral("<nothing>");
+    auto* b = qobject_cast<QAbstractButton*>(w);
+    const QRect r(w->mapToGlobal(QPoint(0, 0)), w->size());
+    return QStringLiteral("%1 '%2' at (%3,%4 %5x%6)")
+        .arg(QString::fromLatin1(w->metaObject()->className()), b ? b->text() : w->objectName())
+        .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height())
+        .toUtf8();
+}
+
+static void checkProfileRowGeometry(NavContext& ctx, NavRing& ring, const ProfilePage& p)
 {
     p.pick0->setFocus(); pump();
     ctx.routeKey(Qt::Key_Right);
@@ -161,6 +180,154 @@ static void checkProfileRowGeometry(NavContext& ctx, const ProfilePage& p)
     }
     auto* bottom = qobject_cast<QPushButton*>(QApplication::focusWidget()); // reached the bottom
     CHECK(bottom && bottom->text() == QStringLiteral("Cancel"), "walking Down lands on Cancel and clamps there");
+
+    // #353: Create and Cancel are full width, so nothing sits beside them in their row, and a sideways press
+    // there stays put. It used to fall back to scoring every widget by centre and climb into a profile row's
+    // side buttons (✎ opens a profile's editor, ✕ its deletion).
+    auto sideways = [&](QPushButton* from, int key) {
+        from->setFocus(); pump();
+        ctx.routeKey(key);
+        QWidget* now = QApplication::focusWidget();
+        if (now != from) std::fprintf(stderr, "  from %s landed on %s\n", where(from).constData(), where(now).constData());
+        return now;
+    };
+    CHECK(sideways(p.create, Qt::Key_Right) == p.create, "Right from the full-width Create stays on it (no row neighbour)");
+    CHECK(sideways(p.create, Qt::Key_Left) == p.create, "Left from the full-width Create stays on it");
+    CHECK(sideways(p.cancel, Qt::Key_Right) == p.cancel, "Right from the full-width Cancel stays on it");
+    CHECK(sideways(p.cancel, Qt::Key_Left) == p.cancel, "Left from the full-width Cancel stays on it");
+    // ...and taking that fallback away strands nothing: every stop is still reachable by arrows.
+    const QVector<QWidget*> orphans = navUnreachable(ring, ctx);
+    for (QWidget* w : orphans) std::fprintf(stderr, "  unreachable: %s\n", where(w).constData());
+    CHECK(orphans.isEmpty(), "every stop on the profile page is reachable by arrows");
+}
+
+// #353 on the REAL Profiles list (ProfileDialog's page 0) and its inline delete confirmation, inside a replica
+// of the panel that hosts them — §24's shape: a header (‹ Back + title label) over a widget-resizable scroll area
+// carrying the embedded dialog, all of it one ring, header included, as in the app. Three profiles, so every row
+// has its ✕. Run by the parent at its own font DPI (§13c) and by every §13b DPI child. Assertions are about
+// where the focus lands; rects appear only in failure messages.
+static void checkRealProfileList(NavContext& ctx, QWidget* parent)
+{
+    for (int i = 0; i < 8 && NavOverlay::topmost(); ++i) NavOverlay::topmost()->dismiss(-1);
+    pump();
+    QStringList added;   // the store is this process's scratch dir; still, leave it as found
+    while (ProfileStore::list().size() < 3)
+        added << ProfileStore::add(QStringLiteral("P353-%1").arg(added.size()), QString::fromUtf8("🐸")).id;
+
+    auto* host = new QWidget(parent);
+    auto* pv = new QVBoxLayout(host);
+    pv->setContentsMargins(0, 0, 0, 0);
+    pv->setSpacing(0);
+    auto* header = new QWidget(host);
+    auto* phl = new QHBoxLayout(header);
+    phl->setContentsMargins(16, 10, 16, 10);
+    auto* back = new QPushButton(QStringLiteral("‹ Back"), header);
+    back->setStyleSheet(QStringLiteral("QPushButton{padding:10px 18px;font-size:16px;font-weight:bold;}"));
+    phl->addWidget(back);
+    phl->addSpacing(12);
+    phl->addWidget(new QLabel(QStringLiteral("Profiles"), header), 1);
+    pv->addWidget(header);
+    auto* scroll = new QScrollArea(host);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget;
+    auto* cv = new QVBoxLayout(content);
+    cv->setContentsMargins(28, 24, 28, 24);
+    cv->setSpacing(14);
+    auto* dlg = new ProfileDialog(false, [](const QString&) { return true; }, content);
+    dlg->setWindowFlags(Qt::Widget);
+    cv->addWidget(dlg);
+    cv->addStretch(1);
+    scroll->setWidget(content);
+    pv->addWidget(scroll, 1);
+    host->setGeometry(0, 0, 1280, 760);
+    host->show(); host->activateWindow();
+    pump();
+
+    NavRing ring(host);
+    ctx.setActiveRing(&ring);
+    pump();
+
+    auto label = [](QWidget* w) {
+        auto* b = qobject_cast<QAbstractButton*>(w);
+        return b ? b->text().remove(QLatin1Char('&')) : QString();
+    };
+    auto named = [&](const QString& t) -> QWidget* {
+        for (QWidget* w : ring.widgets()) if (label(w) == t) return w;
+        return nullptr;
+    };
+    auto press = [&](QWidget* from, int key) -> QWidget* {
+        if (!from) return nullptr;
+        from->setFocus(Qt::OtherFocusReason);
+        pump();
+        ctx.routeKey(key);
+        pump();
+        QWidget* now = QApplication::focusWidget();
+        if (now != from) std::fprintf(stderr, "  from %s landed on %s\n", where(from).constData(), where(now).constData());
+        return now;
+    };
+
+    QWidget* create = nullptr;
+    QWidget* cancel = named(QStringLiteral("Cancel"));
+    QVector<QWidget*> picks, edits, dels;
+    for (QWidget* w : ring.widgets())
+    {
+        const QString t = label(w);
+        if (t.contains(QStringLiteral("Create New Profile"))) create = w;
+        else if (t == QString::fromUtf8("✎")) edits.push_back(w);
+        else if (t == QString::fromUtf8("✕")) dels.push_back(w);
+        else if (t.contains(ProfileStore::list().first().name)) picks.push_back(w);
+    }
+    const bool up = back && create && cancel && picks.size() == 1 && edits.size() == 3 && dels.size() == 3;
+    CHECK(up, "profiles(real): the list page is up — ‹ Back, three rows each with ✎ and ✕, Create, Cancel");
+    if (up)
+    {
+        QWidget* got = press(create, Qt::Key_Right);
+        CHECK(got == create, "profiles(real): Right from the full-width Create New Profile stays on it (#353)");
+        CHECK(!dels.contains(got) && !edits.contains(got),
+              "profiles(real): Right from Create never lands on a profile row's ✕ or ✎");
+        CHECK(press(create, Qt::Key_Left) == create, "profiles(real): Left from Create stays on it");
+        CHECK(press(cancel, Qt::Key_Right) == cancel, "profiles(real): Right from Cancel stays on it");
+        CHECK(press(cancel, Qt::Key_Left) == cancel, "profiles(real): Left from Cancel stays on it");
+        CHECK(press(back, Qt::Key_Right) == back,
+              "profiles(real): Right from the header ‹ Back stays on it (the title beside it is not a stop)");
+        CHECK(press(picks[0], Qt::Key_Left) == picks[0],
+              "profiles(real): Left from a profile row (nothing left of it in its row) stays on it");
+        // In-row moves are unchanged: the row's own buttons, in order, and the row's end is an end.
+        CHECK(press(picks[0], Qt::Key_Right) == edits[0], "profiles(real): Right from a profile row still reaches its ✎");
+        CHECK(press(edits[0], Qt::Key_Right) == dels[0], "profiles(real): Right from ✎ still reaches the same row's ✕");
+        CHECK(press(dels[0], Qt::Key_Left) == edits[0], "profiles(real): Left from ✕ comes back to its ✎");
+        CHECK(press(dels[0], Qt::Key_Right) == dels[0], "profiles(real): Right from a row's ✕ (the row's end) stays on it");
+        CHECK(press(create, Qt::Key_Down) == cancel, "profiles(real): Down from Create reaches Cancel");
+
+        const QVector<QWidget*> orphans = navUnreachable(ring, ctx);
+        for (QWidget* w : orphans) std::fprintf(stderr, "  unreachable: %s\n", where(w).constData());
+        CHECK(orphans.isEmpty(), "profiles(real): every stop on the list page is reachable by arrows");
+
+        // The inline delete confirmation (✕ pushes it in place). Its header ‹ Back also has nothing beside it,
+        // and the old fallback took a Right from there straight onto the DESTRUCTIVE button.
+        qobject_cast<QAbstractButton*>(dels[0])->click();
+        pump(); pump();
+        QWidget* doDelete = named(QStringLiteral("Delete"));
+        QWidget* keep = named(QStringLiteral("Cancel"));
+        CHECK(doDelete && keep, "profiles(real): ✕ opens the inline delete confirmation");
+        if (doDelete && keep)
+        {
+            got = press(back, Qt::Key_Right);
+            CHECK(got != doDelete, "confirm(real): Right from the header ‹ Back never lands on Delete");
+            CHECK(got == back, "confirm(real): Right from the header ‹ Back stays on it");
+            const QVector<QWidget*> lost = navUnreachable(ring, ctx);
+            for (QWidget* w : lost) std::fprintf(stderr, "  unreachable: %s\n", where(w).constData());
+            CHECK(lost.isEmpty(), "confirm(real): every stop on the delete confirmation is reachable by arrows");
+            qobject_cast<QAbstractButton*>(keep)->click();   // leave without deleting anything
+            pump(); pump();
+        }
+        CHECK(ProfileStore::list().size() >= 3, "profiles(real): nothing on this page deleted a profile");
+    }
+    ctx.setActiveRing(nullptr);
+    delete host;
+    pump();
+    for (const QString& id : added) ProfileStore::remove(id);
 }
 
 // §13b's child mode (#351). QT_FONT_DPI is read once, when the QGuiApplication starts, so the only honest way to
@@ -179,10 +346,12 @@ static int profileRowChild()
     const ProfilePage p = buildProfilePage(&win);
     NavRing ring(p.page);
     ctx.setActiveRing(&ring);
-    checkProfileRowGeometry(ctx, p);
+    checkProfileRowGeometry(ctx, ring, p);
     std::printf("PROFILEROW-DPI %d\n", qRound(p.page->logicalDpiY() * p.page->devicePixelRatioF()));
     ctx.setActiveRing(nullptr);
     delete p.page;
+    pump();
+    checkRealProfileList(ctx, &win);   // #353: the real Profiles list, at this DPI too
     return failures == 0 ? 0 : 1;
 }
 
@@ -1242,7 +1411,7 @@ int main(int argc, char** argv)
         ctx.setActiveRing(&ring);
 
         // At this process's font DPI; §13b runs the same checks again at 72, 96, 120 and 144.
-        checkProfileRowGeometry(ctx, prof);
+        checkProfileRowGeometry(ctx, ring, prof);
 
         ring.ensureSelection();
         static const int walk[] = { Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Right, Qt::Key_Down,
@@ -1305,6 +1474,41 @@ int main(int argc, char** argv)
         CHECK(NavRing::besideInRow(QRect(340, 41, 36, 15), row, L), "beside: Left from ✎ finds its own, taller row");
         CHECK(!NavRing::besideInRow(row, QRect(340, 41, 36, 15), Qt::Key_Down), "beside: answers Left/Right only");
 
+        // (a2) #353: the whole Left/Right choice over a rect SET (NavRing::pickBeside) — §13's page as fixed
+        // rects: header Back, three rows of [pick | ✎ | ✕], then full-width Create and Cancel. Indices: 0 Back;
+        // row r at 1+3r (pick), 2+3r (✎), 3+3r (✕); 10 Create; 11 Cancel. No font anywhere in it.
+        QVector<QRect> page = { QRect(8, 8, 408, 15) };
+        for (int y : { 27, 75, 123 })
+            page << QRect(8, y, 328, 44) << QRect(340, y + 14, 36, 15) << QRect(380, y + 14, 36, 15);
+        page << QRect(8, 171, 408, 24) << QRect(8, 199, 408, 24);
+        auto stepOn = [&page](int from, int key) {
+            QVector<QRect> others;
+            QVector<int> index;
+            for (int i = 0; i < page.size(); ++i) if (i != from) { others << page[i]; index << i; }
+            const int got = NavRing::pickBeside(page[from], others, key);
+            return got < 0 ? -1 : index[got];
+        };
+        // With a row neighbour: unchanged — the row's own buttons, nearest first.
+        CHECK(stepOn(1, R) == 2, "pickBeside: Right from a profile row picks its ✎");
+        CHECK(stepOn(2, R) == 3, "pickBeside: Right from ✎ picks the same row's ✕, not another row's");
+        CHECK(stepOn(3, L) == 2, "pickBeside: Left from ✕ picks its ✎, the nearer of the two left of it");
+        // Without one: stay put. The old fallback answered each of these with a widget in ANOTHER row.
+        CHECK(stepOn(10, R) == -1, "pickBeside: Right from the full-width Create stays put (never a row's ✎ or ✕)");
+        CHECK(stepOn(10, L) == -1, "pickBeside: Left from the full-width Create stays put (never a profile row)");
+        CHECK(stepOn(11, R) == -1, "pickBeside: Right from the full-width Cancel stays put");
+        CHECK(stepOn(0, R) == -1, "pickBeside: Right from the header Back stays put (never the first row's ✎)");
+        CHECK(stepOn(3, R) == -1, "pickBeside: Right from the end of a row stays put");
+        CHECK(stepOn(1, L) == -1, "pickBeside: Left from the start of a row stays put");
+        // #353 in isolation: the only candidate is a ✕ up and to the right of Create, near enough the diagonal
+        // that the old centre filter let it through. It is still not a candidate.
+        CHECK(NavRing::pickBeside(page[10], { page[9] }, R) == -1, "pickBeside: a ✕ up-and-right of Create is never a candidate");
+        CHECK(NavRing::pickBeside(QRect(0, 100, 100, 20), { QRect(110, 70, 20, 20), QRect(300, 100, 20, 20) }, R) == 1,
+              "pickBeside: the row neighbour wins even when a widget outside the row is nearer");
+        CHECK(NavRing::pickBeside(QRect(0, 40, 36, 20), { QRect(200, 0, 50, 100), QRect(50, 30, 100, 40) }, R) == 1,
+              "pickBeside: the nearer of two row neighbours wins, a taller one included");
+        CHECK(NavRing::pickBeside(QRect(0, 0, 100, 20), {}, R) == -1, "pickBeside: no candidates, no move");
+        CHECK(NavRing::pickBeside(page[1], { page[2] }, Qt::Key_Down) == -1, "pickBeside: answers Left/Right only");
+
         // (b) The profile rows themselves at several font DPIs, each in its own process (profileRowChild). Every
         // assertion there is a relationship — where the focus lands — never a pixel count, so it means the same
         // thing on any machine's fonts; only the geometry it runs against changes with the DPI.
@@ -1333,6 +1537,9 @@ int main(int argc, char** argv)
             CHECK(got == dpi, ("the profile-row child really ran at that font DPI" + at).constData());
         }
     }
+
+    // ------------------------------------------- 13c. #353: the REAL Profiles list — no sideways press leaves its row
+    checkRealProfileList(ctx, &win);
 
     // ------------------------------------------- 14. one Back rule: Escape == Backspace, everywhere
     {
@@ -1733,6 +1940,37 @@ int main(int argc, char** argv)
             auto* b = qobject_cast<QPushButton*>(QApplication::focusWidget());
             CHECK(b && b->text().size() == 1, "Up from the recovery row lands back on a digit key");
             pad4->dismiss(-1);
+            pump();
+        }
+        // d) #353: a recovery row is full width, so nothing sits beside it in its row. Right from the first one
+        //    used to fall back to centre scoring and climb into the grid — onto the ✕ key, which CANCELS the
+        //    entry. A sideways press there now stays put, and every key and row is still reachable by arrows.
+        {
+            auto* pad5 = new PasscodePad(QStringLiteral("Enter the passcode"), QString(),
+                                         { QStringLiteral("Use the parental PIN"), QStringLiteral("Forgot the code") },
+                                         nullptr, &win);
+            pump();
+            NavRing padRing(pad5);   // the same members the pad's own ring steps over; keys go through the pad
+            QWidget* extra = nullptr;
+            for (QWidget* w : padRing.widgets())
+                if (auto* pb = qobject_cast<QPushButton*>(w); pb && pb->text().contains(QStringLiteral("parental")))
+                    extra = w;
+            CHECK(extra != nullptr, "the pad's recovery rows are ring stops");
+            if (extra)
+            {
+                extra->setFocus(Qt::OtherFocusReason); pump();
+                ctx.routeKey(Qt::Key_Right); pump();
+                QWidget* now = QApplication::focusWidget();
+                if (now != extra) std::fprintf(stderr, "  from %s landed on %s\n", where(extra).constData(), where(now).constData());
+                CHECK(now == extra, "Right from a full-width recovery row stays on it (never the ✕ cancel key)");
+                extra->setFocus(Qt::OtherFocusReason); pump();
+                ctx.routeKey(Qt::Key_Left); pump();
+                CHECK(QApplication::focusWidget() == extra, "Left from a full-width recovery row stays on it");
+            }
+            const QVector<QWidget*> lost = navUnreachable(padRing, ctx);
+            for (QWidget* w : lost) std::fprintf(stderr, "  unreachable: %s\n", where(w).constData());
+            CHECK(lost.isEmpty(), "every key and recovery row on the pad is reachable by arrows");
+            pad5->dismiss(-1);
             pump();
         }
     }

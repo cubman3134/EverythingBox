@@ -112,6 +112,14 @@ public:
     // candidate passes this, pickNext chooses among those alone.
     static bool besideInRow(const QRect& from, const QRect& target, int key);
 
+    // The whole Left/Right choice (#353), pure over rects: the index in `candidates` a Left/Right press from
+    // `from` lands on, or -1 for "stay put". Only candidates besideInRow puts in `from`'s row on the pressed
+    // side compete; among them the nearest centre wins, sideways drift weighted 4x. With no neighbour in the
+    // row the answer is -1 — a sideways press never leaves the row (Up/Down move between rows). Any key other
+    // than Qt::Key_Left / Qt::Key_Right answers -1. All rects in one coordinate space; `candidates` must not
+    // include `from` itself. pickNext answers every Left/Right through this.
+    static int pickBeside(const QRect& from, const QVector<QRect>& candidates, int key);
+
 private:
     void activate(QWidget* w);          // Return pressed on w
     QPointer<QWidget> container_;
