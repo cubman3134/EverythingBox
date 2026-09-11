@@ -3407,6 +3407,10 @@ void MainWindow::rescanBookLibrary()
         const QVector<BookLibrary::FileEntry> entries = BookLibrary::scanFolder(
             bookRoot, sameRules ? BookLibrary::byPath(known) : QHash<QString, BookLibrary::FileEntry>{},
             &stats);
+        // #360: the one line that makes the saved-page skip findable in the log.
+        if (stats.savedPageSkipped > 0)
+            qInfo("[books] %d file(s) inside saved web pages' _files folders not listed",
+                  stats.savedPageSkipped);
 
         // Persist only when the scan learned something, and NEVER when the root is unreachable - the same
         // external-drive rule the other two scans state at length: a drive that is not plugged in scans as

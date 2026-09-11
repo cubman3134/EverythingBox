@@ -288,12 +288,40 @@ namespace BookLibrary
     bool isReadingFile(const QString& path);
     Kind kindFor(const QString& path);      // .cbz / .cbr => Comic, everything else this scans => Book
 
+    // A BROWSER'S "SAVE PAGE AS... COMPLETE" FOLDER (issue #360). Saving a page complete writes the page AND
+    // a sibling folder `<stem>_files` holding everything it pulled in: frames, fragments, ad shells, tracking
+    // iframes. Since #259 every .html in there would be listed as a book of its own, burying the one book that
+    // was meant. This asks whether `dirPath` is that folder. `siblingNames` are the NAMES (not paths) of the
+    // files in the same parent directory. Only the last component of `dirPath` is read, and no disk is touched.
+    //
+    // THE PAIRING IS THE MARKER, NOT THE NAME. True only when the folder is named `<stem>_files` AND a
+    // `<stem>.html` or `<stem>.htm` sits beside it, which is what the browser wrote, both at once. A folder
+    // somebody named `notes_files` with no `notes.html` next to it is an ordinary folder and is scanned in
+    // full. A rule that rests on a name alone is the guess this header turns down everywhere else.
+    //
+    //   * `<stem>` is the page's name minus its LAST extension. That is how both browsers derive it
+    //     (Chromium's FilePath::RemoveExtension, Firefox's getFileBaseName), so "v1.2 notes.html" pairs
+    //     "v1.2 notes_files". The stem is compared WHOLE: "notes.html" does not claim "note_files" or
+    //     "notes-old_files".
+    //   * Compared case-insensitively, stem, suffix and extension alike: "Page.HTML" pairs "page_files". The
+    //     filesystem most collections live on does not tell those apart either.
+    //   * `_files` ONLY. Chromium (and so Chrome and Edge) writes that literal (content/browser/download/
+    //     save_package.cc), and current Firefox writes the same literal because it stopped localising it
+    //     (toolkit/content/contentAreaUtils.js). Older localised Firefox builds wrote other words, such as
+    //     "-Dateien" and "_fichiers". Those folders are not recognised, so they are scanned exactly as before.
+    //     Missing a folder costs some clutter; skipping the wrong one would hide books.
+    bool isSavedPageSupportFolder(const QString& dirPath, const QStringList& siblingNames);
+
     struct ScanStats
     {
-        int files    = 0;   // reading files found under the root
+        int files    = 0;   // reading files found under the root AND listed (never one skipped below)
         int reread   = 0;   // files actually opened and re-read
         int reused   = 0;   // files whose mtime AND size matched a known entry, so were not opened at all
-        int dropped  = 0;   // known entries whose file is no longer on disk
+        int dropped  = 0;   // known entries whose file is no longer on disk, or is no longer listed
+        // Reading files NOT listed because they sit inside a saved web page's `_files` folder, at any depth
+        // (#360; see isSavedPageSupportFolder). Counted so the skip is never silent: a file that went missing
+        // from the shelf shows up in this number.
+        int savedPageSkipped = 0;
     };
 
     // Recursive scan of a root -> one FileEntry per reading file. `known` is a previous scan's entries keyed
