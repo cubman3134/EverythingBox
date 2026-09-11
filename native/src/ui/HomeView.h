@@ -930,7 +930,10 @@ private:
     // identifies a catalogue ("addonId|catalogId|catalogType"); currentCategoryKey() maps the current
     // catalogue's type to its bucket (the key playlists actually filter/create on).
     QString currentCatalogKey() const;                   // key for the catalogue at the root of the browse stack
-    QString currentCategoryKey() const;                  // the bucket the current catalogue classifies into
+    // The bucket to file/offer playlists in (#373: core::playlistCategory). Pass the row being added, when there
+    // is one — on a root with no catalogue and no synthetic category it is the only thing left to go on.
+    QString currentCategoryKey(const QString& itemType = QString()) const;
+    QString activeCategoryKey() const;                   // the synthetic category's bucket at the root, else ""
     LoadedAddon* addonForKey(const QString& catalogKey) const; // the catalogue's source addon (null if native)
     void populatePlaylists(const QString& categoryKey);  // (re)build that list (each playlist + a New entry)
     void openPlaylistLevel(const QString& playlistId);   // drill a playlist -> its items
