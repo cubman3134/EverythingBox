@@ -1347,9 +1347,10 @@ static const char* kShelfId = "probe-shelf";
 class CoverStub : public QTcpServer
 {
 public:
-    enum class Answer { Empty, Image, ServerError, NotFoundEnvelope, AuthEnvelope, Http404 };
+    enum class Answer { Empty, Image, ServerError, NotFoundEnvelope, AuthEnvelope, Http404, HtmlPage, Bytes };
     QHash<QString, Answer> answers;   // cover id -> what asking for it gets. Unlisted ids answer Empty.
     QByteArray imageBytes;
+    QHash<QString, QByteArray> bodies;   // cover id -> the exact bytes an Answer::Bytes id is answered with
     QString    root;                  // http://127.0.0.1:<port>, once listening
     QStringList coverIds;             // every cover request, by the id it asked for - in order
     // Every request target. THESE HOLD THE SUBSONIC TOKEN AND SALT and are never printed; they exist so
@@ -1407,6 +1408,15 @@ private:
                                             "<error code=\"40\" message=\"Wrong username or password\"/>"
                                             "</subsonic-response>");
                 return;
+            // #377: A REVERSE PROXY'S ERROR PAGE, answered 200 - and labelled image/jpeg, because the header is
+            // exactly the part a misbehaving proxy gets wrong. Only the bytes can say this is not a picture.
+            case Answer::HtmlPage:
+                send(sock, 200, "image/jpeg", "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>"
+                                              "<body><h1>Bad Gateway</h1><p>The upstream server is restarting."
+                                              "</p></body></html>\n");
+                return;
+            // A real picture in some other format, served with a header that names none (the header is not read).
+            case Answer::Bytes:       send(sock, 200, "application/octet-stream", bodies.value(id)); return;
         }
     }
 
@@ -1420,7 +1430,7 @@ private:
             // Every starred record has a DIFFERENT cover id from its album id, so a client that asked for
             // the album id rather than the cover id would be asking the stub for something it never lists.
             QByteArray body = "<subsonic-response status=\"ok\" version=\"1.16.1\"><starred2>";
-            for (int i = 1; i <= 6; ++i)
+            for (int i = 1; i <= 7; ++i)
                 body += "<album id=\"al-" + QByteArray::number(i) + "\" name=\"Record " + QByteArray::number(i)
                       + "\" artist=\"Probe\" artistId=\"ar-1\" songCount=\"1\" coverArt=\"c-"
                       + QByteArray::number(i) + "\"/>";
@@ -1448,7 +1458,8 @@ private:
                  "{\"id\":\"sm-1\",\"title\":\"Empty sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-1\"},"
                  "{\"id\":\"sm-2\",\"title\":\"No sleeve at all\",\"type\":\"album\"},"
                  "{\"id\":\"sm-3\",\"title\":\"Real sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-3\"},"
-                 "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"}"
+                 "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"},"
+                 "{\"id\":\"sm-5\",\"title\":\"Proxied sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-5\"}"
                  "]}");
             return;
         }
@@ -1526,6 +1537,18 @@ static void anotherPass(ArtView& v, const CoverStub& stub, const QString& coverI
 }
 
 static QString coverOf(const QString& key) { return MetaCache::imagePath(key, QStringLiteral("cover")); }
+
+// What is ON DISK for a key's cover, read as bytes rather than taken from the record: #377's broken picture
+// was a real file, so "nothing stored" is asserted over the folder, and "stored" over the file's contents.
+static int coverFilesOf(const QString& key)
+{
+    return int(QDir(MetaCache::dirFor(key)).entryList({ QStringLiteral("cover.*") }, QDir::Files).size());
+}
+static QByteArray storedCoverBytes(const QString& key)
+{
+    QFile f(coverOf(key));
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
 
 static void testSubsonicCoverAnswers(CoverStub& stub, const QString& serverId)
 {
@@ -1641,6 +1664,31 @@ static void testSubsonicCoverAnswers(CoverStub& stub, const QString& serverId)
         anotherPass(v, stub, QStringLiteral("c-6"));
         CHECK(stub.covers(QStringLiteral("c-6")) == 2);
     }
+
+    // ---- 7. #377: A 200 THAT IS NOT A PICTURE - a proxy's error page - is a failure, not a cover ------------
+    // Stored, it would be a broken picture that is also "already on disk", so the real art would never be
+    // asked for again. Not stored, not remembered as "no art", and the next pass gets the real thing.
+    {
+        stub.answers[QStringLiteral("c-7")] = CoverStub::Answer::HtmlPage;
+        ArtView& v = newView(prefetch, key(7));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("c-7")) >= 1; }));
+        settleView(v);
+        std::printf("377 subsonic: 200 + an HTML error page -> %d request(s), %d landing(s), %d cover file(s) "
+                    "on disk\n", stub.covers(QStringLiteral("c-7")), v.landed, coverFilesOf(key(7)));
+        CHECK(stub.covers(QStringLiteral("c-7")) == 1);   // not in a loop
+        CHECK(v.landed == 0);
+        CHECK(coverOf(key(7)).isEmpty());
+        CHECK(coverFilesOf(key(7)) == 0);                 // not a byte of it written, under any name
+        CHECK(!cl.coversKnownMissing().contains(key(7)));   // a proxy's page is not the server saying "no art"
+        stub.answers[QStringLiteral("c-7")] = CoverStub::Answer::Image;   // the upstream is back
+        anotherPass(v, stub, QStringLiteral("c-7"));
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        settleView(v);
+        CHECK(stub.covers(QStringLiteral("c-7")) == 2);   // asked again on the later pass, and no more
+        CHECK(v.landed == 1);
+        CHECK(storedCoverBytes(key(7)) == stub.imageBytes);   // the REAL art, byte for byte
+    }
 }
 
 // THE NEXT SESSION, for real: a second PROCESS over the same data directory. Art the server gains after an
@@ -1747,6 +1795,50 @@ static void testJellyfinCoverAnswers(CoverStub& stub)
         anotherPass(v, stub, QStringLiteral("jf-4"));
         CHECK(stub.covers(QStringLiteral("jf-4")) == 2);
     }
+    // #377: AN ERROR PAGE ANSWERED 200 is a failure: not stored, not remembered, asked again, and then the real art.
+    {
+        stub.answers[QStringLiteral("jf-5")] = CoverStub::Answer::HtmlPage;
+        ArtView& v = newView(prefetch, key("jf-5"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("jf-5")) >= 1; }));
+        settleView(v);
+        std::printf("377 jellyfin: 200 + an HTML error page -> %d request(s), %d cover file(s) on disk\n",
+                    stub.covers(QStringLiteral("jf-5")), coverFilesOf(key("jf-5")));
+        CHECK(stub.covers(QStringLiteral("jf-5")) == 1);
+        CHECK(v.landed == 0);
+        CHECK(coverFilesOf(key("jf-5")) == 0);
+        CHECK(!cl.coversKnownMissing().contains(key("jf-5")));
+        stub.answers[QStringLiteral("jf-5")] = CoverStub::Answer::Image;
+        anotherPass(v, stub, QStringLiteral("jf-5"));
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        CHECK(stub.covers(QStringLiteral("jf-5")) == 2);
+        CHECK(storedCoverBytes(key("jf-5")) == stub.imageBytes);
+    }
+    // #377: EVERY FORMAT THE CACHE CAN HOLD still lands, byte for byte, whatever the header says. (PNG is
+    // stub.imageBytes, above. These are complete, tiny, real files - built from base64 so no escape sequence
+    // reaches a CHECK.)
+    {
+        const struct { const char* id; QByteArray bytes; } formats[] = {
+            { "jf-6", QByteArray::fromBase64("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=") },   // JPEG
+            { "jf-7", QByteArray::fromBase64("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==") },   // WebP (lossless)
+            { "jf-8", QByteArray::fromBase64("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7") },   // GIF89a
+        };
+        for (const auto& f : formats)
+        {
+            CHECK(!f.bytes.isEmpty());
+            stub.answers[QLatin1String(f.id)] = CoverStub::Answer::Bytes;
+            stub.bodies[QLatin1String(f.id)] = f.bytes;
+            ArtView& v = newView(prefetch, key(f.id));
+            v.render();
+            CHECK(waitFor([&] { return v.landed >= 1; }));
+            settleView(v);
+            std::printf("377 jellyfin: %s -> %d request(s), %d landing(s)\n", f.id,
+                        stub.covers(QLatin1String(f.id)), v.landed);
+            CHECK(stub.covers(QLatin1String(f.id)) == 1);
+            CHECK(v.landed == 1);
+            CHECK(storedCoverBytes(key(f.id)) == f.bytes);
+        }
+    }
 }
 
 static void testServerMusicCoverAnswers(CoverStub& stub)
@@ -1815,6 +1907,25 @@ static void testServerMusicCoverAnswers(CoverStub& stub)
         anotherPass(v, stub, QStringLiteral("sm-4"));
         CHECK(stub.covers(QStringLiteral("sm-4")) == 2);
     }
+    // #377: AN ERROR PAGE ANSWERED 200: a failure, then the real art on a later pass.
+    {
+        stub.answers[QStringLiteral("sm-5")] = CoverStub::Answer::HtmlPage;
+        ArtView& v = newView(prefetch, key("sm-5"));
+        v.render();
+        CHECK(waitFor([&] { return stub.covers(QStringLiteral("sm-5")) >= 1; }));
+        settleView(v);
+        std::printf("377 server shelf: 200 + an HTML error page -> %d request(s), %d cover file(s) on disk\n",
+                    stub.covers(QStringLiteral("sm-5")), coverFilesOf(key("sm-5")));
+        CHECK(stub.covers(QStringLiteral("sm-5")) == 1);
+        CHECK(v.landed == 0);
+        CHECK(coverFilesOf(key("sm-5")) == 0);
+        CHECK(!cl.coversKnownMissing().contains(key("sm-5")));
+        stub.answers[QStringLiteral("sm-5")] = CoverStub::Answer::Image;
+        anotherPass(v, stub, QStringLiteral("sm-5"));
+        CHECK(waitFor([&] { return v.landed >= 1; }));
+        CHECK(stub.covers(QStringLiteral("sm-5")) == 2);
+        CHECK(storedCoverBytes(key("sm-5")) == stub.imageBytes);
+    }
 }
 
 // THE RULE, AS A TABLE — including the case no live stub produces cheaply: a TIMEOUT, which reaches the
@@ -1858,6 +1969,54 @@ static void testCoverAnswerRules()
     CHECK(Subsonic::coverAnswer(false, 0, none) == A::Retry);       // the timeout shape
     CHECK(Subsonic::coverAnswer(false, 404, none) == A::Absent);
     CHECK(Subsonic::coverAnswer(false, 500, none) == A::Retry);
+
+    // #377: A 200 BODY IS A PICTURE ONLY IF ITS OWN FIRST BYTES SAY SO - for each format MetaCache can hold
+    // (jpg/jpeg, png, webp, gif, svg: MetaCache.cpp's imageExts). Anything else is a failure, not a cover:
+    // Retry - never stored, never "no art".
+    const QByteArray jpeg   = QByteArray::fromHex("ffd8ffe000104a46494600010100");
+    const QByteArray webp   = QByteArray("RIFF") + QByteArray::fromHex("1a000000") + QByteArray("WEBPVP8L");
+    const QByteArray gif87  = QByteArray("GIF87a") + QByteArray::fromHex("01000100");
+    const QByteArray gif89  = QByteArray("GIF89a") + QByteArray::fromHex("01000100");
+    const QByteArray svgXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- drawn by hand -->\n"
+                              "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
+                              "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg width=\"1\" height=\"1\"/>";
+    const QByteArray svgBom = QByteArray::fromHex("efbbbf") + "  <svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    CHECK(CoverFetch::classify(true, 200, jpeg) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, webp) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, gif87) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, gif89) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, svg) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, svgXml) == A::Image);
+    CHECK(CoverFetch::classify(true, 200, svgBom) == A::Image);
+
+    const QByteArray html      = "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head></html>";
+    const QByteArray htmlBare  = "<html><body>Please sign in to the hotel wifi</body></html>";
+    const QByteArray htmlSvg   = "<html><body><svg width=\"1\" height=\"1\"/></body></html>";   // an svg INSIDE a page
+    const QByteArray svgLookal = "<svgfont/>";                                                // not an <svg> root
+    const QByteArray json      = "{\"error\":\"Unauthorized\",\"statusCode\":401}";
+    const QByteArray text      = "Bad Gateway";
+    const QByteArray pngCut    = png.left(7);                                                 // not all eight bytes
+    const QByteArray wave      = QByteArray("RIFF") + QByteArray::fromHex("1a000000") + QByteArray("WAVEfmt ");
+    const QByteArray gifShort  = "GIF8";
+    const QByteArray jpegTwo   = QByteArray::fromHex("ffd8");
+    CHECK(CoverFetch::classify(true, 200, html) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, htmlBare) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, htmlSvg) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, svgLookal) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, json) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, text) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, pngCut) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, wave) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, gifShort) == A::Retry);
+    CHECK(CoverFetch::classify(true, 200, jpegTwo) == A::Retry);
+    // ...and the answers #370 settled are untouched by it: an empty 200 is still "no art", and so is
+    // Subsonic's own not-found - which is markup, and must NOT be mistaken for a failed picture.
+    CHECK(CoverFetch::classify(true, 200, none) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, nfXml) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, nfJson) == A::Absent);
+    CHECK(Subsonic::coverAnswer(true, 200, html) == A::Retry);      // a proxy in front of a Subsonic server
+    CHECK(Subsonic::coverAnswer(true, 200, json) == A::Retry);
+    CHECK(Subsonic::coverAnswer(true, 200, jpeg) == A::Image);
 }
 
 // NO CREDENTIAL IN THE NEW STATE. The Subsonic cover url carries the token and the salt, and a shelf's image
@@ -1875,13 +2034,16 @@ static void testCoverStateHoldsNoCredential(const CoverStub& stub, const QString
     };
     CHECK(sub.contains(sKey(1)) && sub.contains(sKey(4)) && sub.contains(sKey(5)));   // empty, "not found", 404
     CHECK(!sub.contains(sKey(2)) && !sub.contains(sKey(3)) && !sub.contains(sKey(6))); // image, 500, refused
+    CHECK(!sub.contains(sKey(7)));                                                      // #377: a proxy's page
     CHECK(sub.size() == 3);
     const QString jf2 = Jellyfin::qualify(QLatin1String(kJfServerId), QStringLiteral("jf-2"));
     const QString jf4 = Jellyfin::qualify(QLatin1String(kJfServerId), QStringLiteral("jf-4"));
-    CHECK(jf.contains(jf2) && !jf.contains(jf4) && jf.size() == 1);
+    const QString jf5 = Jellyfin::qualify(QLatin1String(kJfServerId), QStringLiteral("jf-5"));
+    CHECK(jf.contains(jf2) && !jf.contains(jf4) && !jf.contains(jf5) && jf.size() == 1);
     const QString sm1 = ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QStringLiteral("sm-1"));
     const QString sm4 = ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QStringLiteral("sm-4"));
-    CHECK(sm.contains(sm1) && !sm.contains(sm4) && sm.size() == 1);
+    const QString sm5 = ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QStringLiteral("sm-5"));
+    CHECK(sm.contains(sm1) && !sm.contains(sm4) && !sm.contains(sm5) && sm.size() == 1);
 
     QByteArray scanned;
     for (const QSet<QString>* s : { &sub, &jf, &sm })
