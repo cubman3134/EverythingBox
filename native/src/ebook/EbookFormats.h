@@ -22,15 +22,17 @@
 namespace EbookFormats
 {
     // Every reflowable book format EbookView can open: EPUB, FictionBook (plain and zipped), the Kindle
-    // family, and plain text / Markdown. Matched on the whole name, not on QFileInfo::suffix(), because
-    // ".fb2.zip" has the suffix "zip".
+    // family, plain text / Markdown, and a single-file HTML document (#259). Matched on the whole name, not on
+    // QFileInfo::suffix(), because ".fb2.zip" has the suffix "zip". ".html" does not match ".xhtml" (an
+    // EPUB's insides, unpacked) or ".html.zip" (a zip, refused as every bare zip is).
     inline bool opensInBookReader(const QString& path)
     {
         const QString p = path.toLower();
         for (const char* ext : { ".epub",
                                  ".fb2", ".fb2.zip", ".fbz",
                                  ".azw3", ".azw", ".mobi",
-                                 ".txt", ".text", ".md", ".markdown", ".mdown", ".mkd" })
+                                 ".txt", ".text", ".md", ".markdown", ".mdown", ".mkd",
+                                 ".html", ".htm" })
             if (p.endsWith(QLatin1String(ext))) return true;
         return false;
     }

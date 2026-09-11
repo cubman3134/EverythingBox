@@ -92,12 +92,20 @@ The reader opens these directly — no conversion step, no external tool:
 
 | | Formats |
 |---|---|
-| **Books** | `.epub` · `.fb2` (and the zipped `.fb2.zip` / `.fbz`) · `.mobi` · `.azw` · `.azw3` (KF8) · `.txt` · `.md` · `.pdf` |
+| **Books** | `.epub` · `.fb2` (and the zipped `.fb2.zip` / `.fbz`) · `.mobi` · `.azw` · `.azw3` (KF8) · `.txt` · `.md` · `.html` / `.htm` · `.pdf` |
 | **Comics** | `.cbz` · `.cbr` · `.cb7` · `.cbt` (and a bare `.zip` of page images) |
 
 All of them share one reader: the same pagination, font sizing, contents panel, bookmarks and highlights,
 per-book resume and reading stats, and all of them are picked up by the local **reading library** scan (`.cb7` and `.cbt`
 open but are not scanned — reaching page one of either costs a whole-archive extraction).
+
+**A single `.html` / `.htm` file reads as a book.** It is split into chapters at its top-level headings — the
+shallowest heading level it uses; if that level appears only once it is the document's title, and the
+chapters are the next level down. A page with no headings reads as one chapter. The title comes from its
+`<title>` (else its first heading, else the file name) and the author only from an `author` meta tag.
+**Nothing remote is ever loaded.** Scripts, frames, embedded objects, stylesheets and event handlers are
+removed, and so is every image that points at a server; an image shows only when it is a file in the page's
+own folder (or a subfolder of it), or is carried inside the page itself.
 
 ### Your own books and comics
 
@@ -395,7 +403,7 @@ through them with the **Voice** control in the reader. If a build of EverythingB
 against a Qt without the TextToSpeech module, or the platform offers no engine at all, the
 read-aloud controls are simply not there.
 
-Works wherever the reader has structured text: EPUB, MOBI, FB2, TXT and Markdown, and a PDF read
+Works wherever the reader has structured text: EPUB, MOBI, FB2, TXT, Markdown and HTML, and a PDF read
 in text mode. Comics have nothing to read. Screen-off and background listening are not here yet.
 
 ## Home rows

@@ -23,12 +23,22 @@
 //      rung 2 did, and the choice is between a page of replacement characters and a page that is readable
 //      with the wrong accents. Byte-for-byte recoverable beats destroyed.
 //
+// AN .html IS THE ONE FILE HERE THAT CAN STATE ITS ENCODING (issue #259): a <meta charset>, or the http-equiv
+// Content-Type. That statement is a rung of its own, between 1 and 2 - below the BOM, because a mark in the
+// bytes outranks a claim written inside them, and above everything else, because a claim outranks a guess.
+// It does not get the last word: a label nothing here can decode, or bytes that are not what they claim, fall
+// through to rung 2 as if nothing had been said. The labels the web reads as windows-1252 ("iso-8859-1",
+// "us-ascii", "latin1", ...) are decoded as windows-1252, on every platform, so a page that says Latin-1 and
+// uses curly quotes gets curly quotes.
+//
 // ---- WHAT BECOMES A CHAPTER -------------------------------------------------------------------------------
 //
 // A .md splits at its TOP-LEVEL (`#`) headings, so a manuscript written as one file reads as its own
 // chapters; with no `#` in it, it is one chapter. A .txt is always ONE chapter: a blank line is a paragraph
 // break and nothing in a plain text file distinguishes a chapter heading from a line of dialogue in capitals,
-// so inventing chapters from it would be a guess the reader then paginated as fact.
+// so inventing chapters from it would be a guess the reader then paginated as fact. An .html/.htm splits at
+// its top-level heading level, sanitised to what the reader may render and fetch - HtmlText.h states both
+// rules in full, and is where they are enforced.
 #pragma once
 #include "EbookSource.h"
 
@@ -38,17 +48,27 @@ class TextBook : public EbookSource
 {
 public:
     // Which rung of the ladder above answered. Returned by decode() so the caller (and the probe) can assert
-    // the DECISION and not merely the text it produced.
-    enum class Encoding { Utf8Bom, Utf16LeBom, Utf16BeBom, Utf8, System, Latin1 };
+    // the DECISION and not merely the text it produced. Declared == the document's own charset statement.
+    enum class Encoding { Utf8Bom, Utf16LeBom, Utf16BeBom, Utf8, System, Latin1, Declared };
 
-    // Extension gates. Plain-text: .txt/.text. Markdown: .md/.markdown/.mdown/.mkd.
+    // Extension gates. Plain-text: .txt/.text. Markdown: .md/.markdown/.mdown/.mkd. HTML: .html/.htm.
     static bool isPlainTextPath(const QString& path);
     static bool isMarkdownPath(const QString& path);
-    static bool isTextBookPath(const QString& path) { return isPlainTextPath(path) || isMarkdownPath(path); }
+    static bool isHtmlPath(const QString& path);
+    static bool isTextBookPath(const QString& path)
+    {
+        return isPlainTextPath(path) || isMarkdownPath(path) || isHtmlPath(path);
+    }
 
     // The ladder, as a pure function over bytes. `used` receives the rung that answered.
     static QString decode(const QByteArray& bytes, Encoding* used = nullptr);
+    // The same ladder with the document's own statement (a charset label, e.g. HtmlText::declaredCharset())
+    // as the rung between the BOM and the rest. An empty label is exactly decode(bytes, used).
+    static QString decode(const QByteArray& bytes, const QByteArray& declaredCharset, Encoding* used);
     static const char* encodingName(Encoding e);   // for logs and reports, not for the UI
+
+    // Which rung answered for the file open() last read.
+    Encoding encoding() const { return encoding_; }
 
     // Plain text -> HTML: a blank line ends a paragraph, and the lines inside one are joined with a space
     // (hard-wrapped prose is one paragraph, not forty). HTML metacharacters are escaped, always.
@@ -67,6 +87,7 @@ public:
 
 private:
     QString sourcePath_, title_, author_, rootDir_;
+    Encoding encoding_ = Encoding::Utf8;
     QStringList chapterFiles_;
     QVector<EpubTocEntry> toc_;
 };

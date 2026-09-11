@@ -9134,8 +9134,8 @@ void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Document"), QString(),
-        tr("Documents (*.epub *.fb2 *.fb2.zip *.azw3 *.mobi *.txt *.md *.pdf *.cbz *.cbr *.cb7 *.cbt);;"
-           "Books (*.epub *.fb2 *.fb2.zip *.azw3 *.azw *.mobi);;Text (*.txt *.md);;"
+        tr("Documents (*.epub *.fb2 *.fb2.zip *.azw3 *.mobi *.txt *.md *.html *.htm *.pdf *.cbz *.cbr *.cb7 *.cbt);;"
+           "Books (*.epub *.fb2 *.fb2.zip *.azw3 *.azw *.mobi);;Text (*.txt *.md *.html *.htm);;"
            "PDF documents (*.pdf);;Comics (*.cbz *.cbr *.cb7 *.cbt);;All files (*.*)"));
     if (f.isEmpty()) return;
     openDocumentPath(f);

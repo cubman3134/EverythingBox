@@ -640,6 +640,13 @@ int main(int argc, char** argv)
         // Deliberate refusals, each with a cost behind it (BookLibrary.h).
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.cb7")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/a.cbt")));
+        // Issue #259: a single-file HTML book, in either spelling - and not an .xhtml (an EPUB's insides
+        // unpacked) or a .html.zip (whose suffix is "zip", refused above).
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/essay.html")));
+        CHECK(BookLibrary::isReadingFile(QStringLiteral("/x/essay.HTM")));
+        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/chapter.xhtml")));
+        CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/essay.html.zip")));
+        CHECK(BookLibrary::kindFor(QStringLiteral("/x/essay.html")) == Kind::Book);
         // §11: no audio extension is ever claimed, whatever this root is pointed at.
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/track.mp3")));
         CHECK(!BookLibrary::isReadingFile(QStringLiteral("/x/book.m4b")));
@@ -1743,6 +1750,57 @@ int main(int argc, char** argv)
         perfect.year = 1969; perfect.pageCount = 300;
         const int best = BookLibrary::fillConfidence(everything, perfect);
         CHECK(best <= 100 && best >= BookLibrary::kFillAcceptThreshold);
+    }
+
+    // ---- §16 A SINGLE-FILE HTML BOOK ON THE SHELF (issue #259) ------------------------------------------
+    // ITS OWN ROOT, for §14's reason. One HTML book that states a title, an author and two chapters; one that
+    // states nothing; and an .xhtml beside them that the scan must not claim.
+    {
+        const QString lib259 = base + QStringLiteral("/lib259");
+        CHECK(writeFile(lib259 + QStringLiteral("/An Essay.html"),
+                        QByteArrayLiteral("<html><head><title>On Reading</title>"
+                                          "<meta name=\"author\" content=\"Ada Byron\"></head><body>"
+                                          "<h1>I</h1><p>a</p><h1>II</h1><p>b</p></body></html>")));
+        CHECK(writeFile(lib259 + QStringLiteral("/loose leaf.htm"), QByteArrayLiteral("<p>No title here.</p>")));
+        CHECK(writeFile(lib259 + QStringLiteral("/chapter.xhtml"), QByteArrayLiteral("<p>not a book</p>")));
+
+        ScanStats s;
+        const QVector<BookLibrary::FileEntry> e = BookLibrary::scanFolder(lib259, {}, &s);
+        const Index r = BookLibrary::buildIndex(e);
+        CHECK(s.files == 2);                   // the .html and the .htm; never the .xhtml
+        CHECK(r.bookCount == 2);
+        CHECK(r.comicCount == 0);
+
+        // What the file states, and nothing it does not: <title>, the author <meta>, one page per chapter.
+        const BookMeta::Info essay = BookMeta::read(lib259 + QStringLiteral("/An Essay.html"));
+        CHECK(essay.title == QStringLiteral("On Reading"));
+        CHECK(essay.author == QStringLiteral("Ada Byron"));
+        CHECK(essay.pageCount == 2);
+        CHECK(!essay.hasCover);
+        CHECK(BookMeta::coverBytes(lib259 + QStringLiteral("/An Essay.html")).isEmpty());
+        // A page that states nothing scans like a .txt: an empty Info, and the same coverless card.
+        const BookMeta::Info loose = BookMeta::read(lib259 + QStringLiteral("/loose leaf.htm"));
+        CHECK(loose.isEmpty());
+        CHECK(!loose.hasCover);
+        CHECK(loose.pageCount == 0);
+
+        const Book* onReading = findBook(r, QStringLiteral("On Reading"));
+        CHECK(onReading != nullptr);
+        if (onReading)
+        {
+            CHECK(onReading->kind == Kind::Book);
+            CHECK(!onReading->titleFromFilename);
+            CHECK(onReading->author == QStringLiteral("Ada Byron"));
+            CHECK(!onReading->hasCover);               // the coverless placeholder, as a .txt gets
+        }
+        const Book* leaf = findBook(r, QStringLiteral("loose leaf"));
+        CHECK(leaf != nullptr);
+        if (leaf)
+        {
+            CHECK(leaf->kind == Kind::Book);
+            CHECK(leaf->titleFromFilename);
+            CHECK(!leaf->hasCover);
+        }
     }
 
     QDir(base).removeRecursively();

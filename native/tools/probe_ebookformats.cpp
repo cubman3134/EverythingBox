@@ -35,12 +35,18 @@
 //      keeping their asterisks, and the chapter split — including a '#' inside a fenced block that must not
 //      become a chapter.
 //   9. THE ROUTING LIST: what opens in the book reader, and the three things deliberately left out of it.
+//  10. SINGLE-FILE HTML (issue #259, src/ebook/HtmlText + TextBook): each branch of the chapter rule, the title
+//      and author fallbacks, the declared charset beating the ladder and a BOM beating the declaration, and THE
+//      PRIVACY LINE one rule per case - remote, protocol-relative, UNC, absolute and ".."-escaping images
+//      dropped, a sibling image kept, scripts / frames / objects / stylesheets / event handlers stripped - with
+//      a sweep over every staged document for any location-bearing attribute that names a remote place.
 //
 // Prints EBOOKFMT-OK on success; any failure prints EBOOKFMT-FAIL <cond> (line) and exits non-zero.
 #include "BookFixtures.h"   // the Palm/MOBI byte placer, shared with probe_cbr/probe_books
 #include "EbookFormats.h"
 #include "Fb2Book.h"
 #include "Fb2Meta.h"
+#include "HtmlText.h"
 #include "MarkdownHtml.h"
 #include "MobiBook.h"
 #include "MobiHeader.h"
@@ -50,9 +56,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 #include <QVector>
 #include <cstdio>
 #include <cstring>
@@ -699,6 +707,478 @@ int main()
         for (const char* no : { "/x/a.pdf", "/x/a.cbz", "/x/a.cbr", "/x/a.cb7", "/x/a.cbt", "/x/a.zip",
                                 "/x/a.mp3", "/x/a.mkv", "" })
             CHECK(!EbookFormats::opensInBookReader(QString::fromLatin1(no)));
+
+        // Issue #259: a single-file HTML document, in either spelling and either case...
+        for (const char* yes : { "/x/a.html", "/x/a.htm", "/X/A.HTML", "/x/a.HTM" })
+            CHECK(EbookFormats::opensInBookReader(QString::fromLatin1(yes)));
+        // ...and NOT the things whose names merely end in "html". An .xhtml is an EPUB's insides, an .mht is a
+        // MIME archive, and a .html.zip is a zip (the bare-zip refusal above, unchanged).
+        for (const char* no : { "/x/a.xhtml", "/x/a.shtml", "/x/a.html.zip", "/x/a.mht", "/x/a.mhtml" })
+            CHECK(!EbookFormats::opensInBookReader(QString::fromLatin1(no)));
+    }
+
+    // =====================================================================================================
+    // §10 Single-file HTML (issue #259)
+    // =====================================================================================================
+    // Every document here is hand-written in this file and every expectation is a literal. The cases go
+    // through TextBook::open() and read back the chapter files it STAGED, because those files are exactly what
+    // the reader renders: a check against them is a check against what the page would show and fetch.
+    {
+        const QString hdir = base + QStringLiteral("/htmlbook");
+        // The files a relative image may and may not reach. All of them EXIST, so every refusal below is the
+        // rule refusing - never just a missing file.
+        const QByteArray png = QByteArray::fromHex("89504e470d0a1a0a0000000d49484452");
+        CHECK(writeFile(hdir + QStringLiteral("/pic.png"), png));
+        CHECK(writeFile(hdir + QStringLiteral("/images/inner.png"), png));
+        CHECK(writeFile(base + QStringLiteral("/secret.png"), png));   // one level ABOVE the book's folder
+        const QString hdirCanon = QFileInfo(hdir).canonicalFilePath();
+
+        // Every staged chapter, joined: what the reader will render for this document.
+        QString err;
+        auto stage = [&](TextBook& b, const QString& name, const QByteArray& bytes) -> QString {
+            const QString p = hdir + QLatin1Char('/') + name;
+            if (!writeFile(p, bytes) || !b.open(p, &err)) return QString();
+            QString all;
+            for (const QString& f : b.chapterFiles()) all += readAll(f);
+            return all;
+        };
+        // Every src= the staged HTML carries. Read the way the reader reads it: an attribute, quoted.
+        auto srcs = [](const QString& html) {
+            QStringList out;
+            static const QRegularExpression re(QStringLiteral("src=\"([^\"]*)\""));
+            auto it = re.globalMatch(html);
+            while (it.hasNext()) out << it.next().captured(1);
+            return out;
+        };
+        // An image source is LOCAL AND INSIDE the book's folder: a file URL whose file exists and sits under it.
+        auto insideBookDir = [&](const QString& src) {
+            const QUrl u(src);
+            if (!u.isLocalFile()) return false;
+            const QString canon = QFileInfo(u.toLocalFile()).canonicalFilePath();
+            return !canon.isEmpty() && canon.startsWith(hdirCanon + QLatin1Char('/'));
+        };
+        // THE PRIVACY SWEEP, applied to every document below: no attribute that could name a location carries
+        // a remote or protocol-relative one. Written against the raw staged bytes, not against a parse of them.
+        static const QRegularExpression reRemote(QStringLiteral(
+            "(?i)(src|href|srcset|background|poster|data|action|cite)\\s*=\\s*[\"']?\\s*(https?:|ftp:|//|\\\\\\\\)"));
+        QStringList all;   // every staged document, for the sweep at the end
+
+        // ---- (a) several top-level headings: one chapter each, and the <head>'s title and author ----------
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("three parts.html"),
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>The Glass &amp; Stone</title>"
+                "<meta name=\"author\" content=\"Ada Byron\"></head><body>"
+                "<h1>Part One</h1><p>First <b>bold</b> words.</p>"
+                "<h1>Part Two</h1><p>Second.</p>"
+                "<h1>Part Three</h1><p>Third.</p></body></html>");
+            all << h;
+            CHECK(b.chapterFiles().size() == 3);
+            CHECK(b.toc().size() == 3);
+            if (b.toc().size() == 3)
+            {
+                CHECK(b.toc().at(0).title == QStringLiteral("Part One"));
+                CHECK(b.toc().at(1).title == QStringLiteral("Part Two"));
+                CHECK(b.toc().at(2).title == QStringLiteral("Part Three"));
+                CHECK(b.chapterIndexForHref(b.toc().at(2).href) == 2);
+            }
+            // <title> beats the first heading; its entity is decoded for the shelf, not shown as "&amp;".
+            CHECK(b.title() == QStringLiteral("The Glass & Stone"));
+            CHECK(b.author() == QStringLiteral("Ada Byron"));
+            CHECK(h.contains(QStringLiteral("<b>bold</b>")));   // inline formatting survives
+            if (b.chapterFiles().size() == 3)
+            {
+                const QString two = readAll(b.chapterFiles().at(1));
+                CHECK(two.contains(QStringLiteral("Second.")));
+                CHECK(!two.contains(QStringLiteral("First")));
+                CHECK(two.contains(QStringLiteral("<h1>Part Two</h1>")));
+                // The <title> is metadata, never a line of body text on page one.
+                CHECK(!readAll(b.chapterFiles().at(0)).contains(QStringLiteral("Glass")));
+            }
+        }
+
+        // ---- (b) ONE top-level heading is the document's title: split at the next level down -------------
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("titled.html"),
+                "<meta name=\"generator\" content=\"Some Word Processor\">"
+                "<h1>The Whole Book</h1><p>A preface.</p>"
+                "<h2>One</h2><p>alpha</p><h2>Two</h2><p>beta</p>");
+            all << h;
+            // The front matter (the title heading and the preface) is a chapter of its own, named by that
+            // heading, and then one chapter per <h2>.
+            CHECK(b.chapterFiles().size() == 3);
+            CHECK(b.toc().size() == 3);
+            if (b.toc().size() == 3)
+            {
+                CHECK(b.toc().at(0).title == QStringLiteral("The Whole Book"));
+                CHECK(b.toc().at(1).title == QStringLiteral("One"));
+                CHECK(b.toc().at(2).title == QStringLiteral("Two"));
+            }
+            if (b.chapterFiles().size() == 3)
+            {
+                CHECK(readAll(b.chapterFiles().at(0)).contains(QStringLiteral("A preface.")));
+                CHECK(readAll(b.chapterFiles().at(1)).contains(QStringLiteral("alpha")));
+                CHECK(!readAll(b.chapterFiles().at(1)).contains(QStringLiteral("beta")));
+            }
+            CHECK(b.title() == QStringLiteral("The Whole Book"));   // no <title>: the first heading
+            CHECK(b.author().isEmpty());                              // a generator is not an author
+        }
+
+        // ---- (c) no headings at all: one chapter, no contents panel, the filename as the title -----------
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("loose leaf.htm"),
+                "<html><head><title>   </title><meta name=\"Author\" content=\"  Mary Shelley \"></head>"
+                "<body><p>Just prose.</p><p>More prose.</p></body></html>");
+            all << h;
+            CHECK(b.chapterFiles().size() == 1);
+            CHECK(b.toc().isEmpty());
+            CHECK(b.title() == QStringLiteral("loose leaf"));        // blank <title>, no heading: the filename
+            CHECK(b.author() == QStringLiteral("Mary Shelley"));     // the name attribute is case-insensitive
+            CHECK(h.contains(QStringLiteral("<p>Just prose.</p>")));
+            CHECK(!h.contains(QStringLiteral("&lt;p&gt;")));         // markup is markup, not escaped text
+        }
+
+        // ---- (d) the shallowest level PRESENT is the top level, whatever its number -----------------------
+        {
+            TextBook b;
+            all << stage(b, QStringLiteral("h2 book.html"),
+                "<h2>Alpha</h2><p>x</p><h3>sub</h3><p>y</p><h2>Beta</h2><p>z</p>");
+            CHECK(b.toc().size() == 2);
+            if (b.toc().size() == 2)
+            {
+                CHECK(b.toc().at(0).title == QStringLiteral("Alpha"));
+                CHECK(b.toc().at(1).title == QStringLiteral("Beta"));
+            }
+            CHECK(b.title() == QStringLiteral("Alpha"));
+        }
+
+        // ---- (e) "the next level down" is the next level that is THERE: one <h1>, then only <h3>s ---------
+        {
+            TextBook b;
+            all << stage(b, QStringLiteral("gap.html"),
+                "<h1>Solo</h1><h3>i</h3><p>one</p><h3>ii</h3><p>two</p>");
+            CHECK(b.toc().size() == 3);
+            if (b.toc().size() == 3)
+            {
+                CHECK(b.toc().at(0).title == QStringLiteral("Solo"));
+                CHECK(b.toc().at(1).title == QStringLiteral("i"));
+                CHECK(b.toc().at(2).title == QStringLiteral("ii"));
+            }
+        }
+
+        // ---- (f) a single heading and nothing below it: one chapter, and <title> still wins ---------------
+        {
+            TextBook b;
+            all << stage(b, QStringLiteral("one heading.html"),
+                "<title>Named</title><h1>Only Heading</h1><p>body</p>");
+            CHECK(b.chapterFiles().size() == 1);
+            CHECK(b.toc().isEmpty());
+            CHECK(b.title() == QStringLiteral("Named"));
+        }
+
+        // ---- (g) a split inside a wrapper keeps every chapter balanced -----------------------------------
+        {
+            TextBook b;
+            all << stage(b, QStringLiteral("wrapped.html"),
+                "<body><div id=\"book\"><h1>A</h1><p>1</p><h1>B</h1><p>2</p></div></body>");
+            CHECK(b.chapterFiles().size() == 2);
+            for (const QString& f : b.chapterFiles())
+            {
+                const QString c = readAll(f);
+                CHECK(c.count(QStringLiteral("<div")) >= 1);
+                CHECK(c.count(QStringLiteral("<div")) == c.count(QStringLiteral("</div>")));
+            }
+        }
+
+        // ---- (h) a declared charset BEATS the ladder ------------------------------------------------------
+        // The body bytes are valid UTF-8, so the ladder alone would read "café". The document says Latin-1,
+        // and a document that says what it is gets believed: C3 A9 is "Ã©" in it.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("declared.html"),
+                "<meta charset=\"iso-8859-1\"><p>caf\xC3\xA9</p>");
+            CHECK(h.contains(QString::fromUtf8("caf\xC3\x83\xC2\xA9")));   // "cafÃ©"
+            CHECK(!h.contains(QString::fromUtf8("caf\xC3\xA9")));
+        }
+        // ...in the http-equiv spelling as well.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("http-equiv.html"),
+                "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\">"
+                "<p>caf\xC3\xA9</p>");
+            CHECK(h.contains(QString::fromUtf8("caf\xC3\x83\xC2\xA9")));
+        }
+        // "iso-8859-1" MEANS windows-1252 on the web (the Encoding Standard maps the label), so its curly
+        // quotes are curly quotes and not two invisible C1 controls. The same on every platform.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("quotes.html"),
+                "<meta charset=\"ISO-8859-1\"><p>\x93quoted\x94</p>");
+            CHECK(h.contains(QString::fromUtf8("\xE2\x80\x9Cquoted\xE2\x80\x9D")));
+        }
+        // A BOM beats the declaration: the bytes' own mark outranks a claim written inside them.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("bom.html"),
+                "\xEF\xBB\xBF<meta charset=\"iso-8859-1\"><p>caf\xC3\xA9</p>");
+            CHECK(h.contains(QString::fromUtf8("caf\xC3\xA9")));
+            CHECK(!h.contains(QString::fromUtf8("caf\xC3\x83\xC2\xA9")));
+        }
+        // A declaration inside a comment is not a declaration, and a label nobody can decode is not one either:
+        // both fall through to the ladder, which reads valid UTF-8 as UTF-8.
+        {
+            TextBook b;
+            CHECK(stage(b, QStringLiteral("commented.html"),
+                        "<!-- <meta charset=\"iso-8859-1\"> --><p>caf\xC3\xA9</p>")
+                      .contains(QString::fromUtf8("caf\xC3\xA9")));
+            TextBook c;
+            CHECK(stage(c, QStringLiteral("unknown label.html"),
+                        "<meta charset=\"x-no-such-codec\"><p>caf\xC3\xA9</p>")
+                      .contains(QString::fromUtf8("caf\xC3\xA9")));
+        }
+
+        // ---- (p) THE PRIVACY LINE, one case per rule ------------------------------------------------------
+        // (p1) A remote image is dropped - an <img> that loads from a server is a tracking pixel.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p1.html"),
+                "<p>a</p><img src=\"https://tracker.example/pixel.gif\"><IMG SRC='http://tracker.example/p2.gif'>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("tracker.example")));
+            CHECK(!h.contains(QStringLiteral("<img"), Qt::CaseInsensitive));
+            CHECK(h.contains(QStringLiteral("<p>a</p>")));
+        }
+        // (p2) ...and so is a protocol-relative one, which is the same fetch with the scheme left off.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p2.html"), "<img src=\"//tracker.example/proto.gif\"><p>b</p>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("tracker.example")));
+            CHECK(!h.contains(QStringLiteral("<img")));
+        }
+        // (p3) A UNC path is a network fetch too (SMB, and on Windows it hands over the user's credentials).
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p3.html"),
+                "<img src=\"\\\\tracker-host\\share\\x.png\"><img src=\"file://tracker-host/share/y.png\"><p>c</p>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("tracker-host")));
+            CHECK(!h.contains(QStringLiteral("<img")));
+        }
+        // (p4) An absolute path, a drive letter or a file: URL is outside the book whatever it names.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p4.html"),
+                "<img src=\"/etc/passwd.png\"><img src=\"C:/Windows/x.png\"><img src=\"c:\\x.png\">"
+                "<img src=\"file:///C:/x.png\"><p>d</p>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("<img")));
+        }
+        // (p5) A relative path that climbs OUT of the book's folder is refused - the file exists, it is refused.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p5.html"),
+                "<img src=\"../secret.png\"><img src=\"images/../../secret.png\"><img src=\"..%2Fsecret.png\"><p>e</p>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("secret")));
+            CHECK(!h.contains(QStringLiteral("<img")));
+        }
+        // (p6) A sibling image, and one in a subfolder, are KEPT - resolved against the book's own folder, not
+        // against wherever the reader staged the chapter.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p6.html"),
+                "<p>f</p><img src=\"pic.png\" alt=\"a sibling\"><img src=\"images/inner.png\">"
+                "<img src=\"not-there.png\">");
+            all << h;
+            const QStringList s = srcs(h);
+            CHECK(s.size() == 2);                  // the two that exist; a dangling reference is dropped
+            for (const QString& v : s) CHECK(insideBookDir(v));
+            if (s.size() == 2)
+            {
+                CHECK(QFileInfo(QUrl(s.at(0)).toLocalFile()).fileName() == QStringLiteral("pic.png"));
+                CHECK(QFileInfo(QUrl(s.at(1)).toLocalFile()).fileName() == QStringLiteral("inner.png"));
+            }
+            CHECK(h.contains(QStringLiteral("alt=\"a sibling\"")));
+        }
+        // (p7) A script is stripped WITH its body - including a '<' and a fake heading inside it, neither of
+        // which may become markup or a chapter.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p7.html"),
+                "<p>before</p><script>if (a<b) trackMe('<h1>fake</h1>');</script>"
+                "<SCRIPT type=\"text/javascript\">trackMe()</SCRIPT><noscript><p>after</p></noscript>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("trackMe")));
+            CHECK(!h.contains(QStringLiteral("<script"), Qt::CaseInsensitive));
+            CHECK(!h.contains(QStringLiteral("fake")));
+            CHECK(b.chapterFiles().size() == 1);
+            CHECK(h.contains(QStringLiteral("before")));
+            CHECK(h.contains(QStringLiteral("after")));
+        }
+        // (p8) Event-handler attributes are stripped, in any case, from elements that are kept.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p8.html"),
+                "<body ONLOAD=\"trackMe()\"><p onclick=\"trackMe()\">x</p>"
+                "<img src=\"pic.png\" onerror=\"trackMe()\"><a href=\"#n\" OnMouseOver=\"trackMe()\">y</a></body>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("trackme"), Qt::CaseInsensitive));
+            for (const char* on : { "onload", "onclick", "onerror", "onmouseover" })
+                CHECK(!h.contains(QString::fromLatin1(on), Qt::CaseInsensitive));
+            CHECK(srcs(h).size() == 1);           // the image stays; only its handler went
+            CHECK(h.contains(QStringLiteral(">x</p>")));
+        }
+        // (p9) Frames, objects and embeds are stripped, and so is what they would have loaded.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p9.html"),
+                "<iframe src=\"https://frame.example/\">inner</iframe>"
+                "<object data=\"https://obj.example/x.swf\"><param name=\"movie\" value=\"https://obj.example/x.swf\">"
+                "<embed src=\"https://embed.example/y.swf\"></object>"
+                "<embed src=\"https://embed.example/z.swf\"><frameset><frame src=\"https://frame.example/f\"></frameset>"
+                "<p>kept</p>");
+            all << h;
+            for (const char* bad : { "frame.example", "obj.example", "embed.example", "<iframe", "<object",
+                                     "<embed", "<param", "<frame" })
+                CHECK(!h.contains(QString::fromLatin1(bad), Qt::CaseInsensitive));
+            CHECK(h.contains(QStringLiteral("<p>kept</p>")));
+        }
+        // (p10) Stylesheets go, linked or inline or in an attribute: CSS is a second way to name a URL.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p10.html"),
+                "<link rel=\"stylesheet\" href=\"https://cdn.example/s.css\">"
+                "<style>@import url(https://cdn.example/i.css); p{background:url(https://tracker.example/bg.png)}</style>"
+                "<p style=\"background-image:url(https://tracker.example/i.png)\">styled</p>"
+                "<table background=\"https://tracker.example/t.gif\"><tr><td background=\"https://tracker.example/c.gif\">cell</td></tr></table>");
+            all << h;
+            for (const char* bad : { "cdn.example", "tracker.example", "<style", "<link", "style=" })
+                CHECK(!h.contains(QString::fromLatin1(bad), Qt::CaseInsensitive));
+            CHECK(h.contains(QStringLiteral("styled")));
+            CHECK(h.contains(QStringLiteral("cell")));
+        }
+        // (p11) Media, responsive sources, SVG and a <base> or refresh that would redirect everything else.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p11.html"),
+                "<base href=\"https://evil.example/\"><meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\">"
+                "<video src=\"https://media.example/v.mp4\" poster=\"https://media.example/p.jpg\">"
+                "<source src=\"https://media.example/v.webm\">Your reader cannot play video.</video>"
+                "<audio src=\"https://media.example/a.mp3\"></audio>"
+                "<picture><source srcset=\"https://tracker.example/a.webp\">"
+                "<img src=\"pic.png\" srcset=\"https://tracker.example/b.png 2x\"></picture>"
+                "<svg><image href=\"https://tracker.example/s.png\"/></svg><p>g</p>");
+            all << h;
+            for (const char* bad : { "evil.example", "media.example", "tracker.example", "srcset", "<video",
+                                     "<audio", "<source", "<svg", "cannot play" })
+                CHECK(!h.contains(QString::fromLatin1(bad), Qt::CaseInsensitive));
+            const QStringList s = srcs(h);
+            CHECK(s.size() == 1);                  // the <picture>'s own <img>, from the book's folder
+            for (const QString& v : s) CHECK(insideBookDir(v));   // <base> did not re-root it
+        }
+        // (p12) A link keeps its text but only an in-document href: a javascript: or web href is removed.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p12.html"),
+                "<p><a href=\"javascript:trackMe()\">js</a> <a href=\"https://site.example/\">web</a> "
+                "<a href=\"#note1\">note</a></p>");
+            all << h;
+            CHECK(!h.contains(QStringLiteral("javascript"), Qt::CaseInsensitive));
+            CHECK(!h.contains(QStringLiteral("site.example")));
+            CHECK(h.contains(QStringLiteral("href=\"#note1\"")));
+            CHECK(h.contains(QStringLiteral(">js<")));
+            CHECK(h.contains(QStringLiteral(">web<")));
+        }
+
+        // (p13) An image carried INSIDE the file is not a fetch: it is staged beside the chapters under a name
+        // this code chose, and loads from there. A data: URI that is not an image is refused like any scheme.
+        {
+            TextBook b;
+            const QString h = stage(b, QStringLiteral("p13.html"),
+                QByteArray("<p>h</p><img src=\"data:image/png;base64,") + png.toBase64()
+                    + QByteArray("\"><img src=\"data:text/html;base64,PHNjcmlwdD4=\">"));
+            all << h;
+            const QStringList s = srcs(h);
+            CHECK(s.size() == 1);
+            if (s.size() == 1 && !b.chapterFiles().isEmpty())
+            {
+                CHECK(!s.first().contains(QLatin1Char(':')));
+                CHECK(!s.first().contains(QLatin1Char('/')));
+                QFile f(QFileInfo(b.chapterFiles().first()).absolutePath() + QLatin1Char('/') + s.first());
+                CHECK(f.open(QIODevice::ReadOnly));
+                CHECK(f.readAll() == png);
+            }
+        }
+
+        // THE SWEEP: across every document above, no location-bearing attribute names a remote place.
+        for (const QString& h : all)
+            CHECK(!reRemote.match(h).hasMatch());
+        CHECK(all.size() >= 18);
+
+        // ---- (u) the pieces underneath, directly -----------------------------------------------------------
+        {
+            using Enc = TextBook::Encoding;
+            Enc used = Enc::Latin1;
+            // The declared rung answers and SAYS so; a BOM answers over it; no label is the plain ladder.
+            CHECK(TextBook::decode(QByteArray("caf\xC3\xA9"), QByteArray("iso-8859-1"), &used)
+                  == QString::fromUtf8("caf\xC3\x83\xC2\xA9"));
+            CHECK(used == Enc::Declared);
+            CHECK(TextBook::decode(QByteArray("\xEF\xBB\xBF" "caf\xC3\xA9"), QByteArray("iso-8859-1"), &used)
+                  == QString::fromUtf8("caf\xC3\xA9"));
+            CHECK(used == Enc::Utf8Bom);
+            CHECK(TextBook::decode(QByteArray("caf\xC3\xA9"), QByteArray(), &used) == QString::fromUtf8("caf\xC3\xA9"));
+            CHECK(used == Enc::Utf8);
+            // A declared UTF-8 that is NOT UTF-8 falls through to the ladder instead of into U+FFFD.
+            CHECK(!TextBook::decode(QByteArray("caf\xE9 cr\xE8me"), QByteArray("utf-8"), &used).contains(QChar(0xFFFD)));
+            CHECK(used != Enc::Declared);
+            // ...and so does one whose last character is cut short (a stateful decoder would hold it back and
+            // report no error at all).
+            TextBook::decode(QByteArray("caf\xC3"), QByteArray("utf-8"), &used);
+            CHECK(used != Enc::Declared);
+            // A UTF-16 label found by an ASCII scan contradicts itself and is read as UTF-8.
+            CHECK(TextBook::decode(QByteArray("caf\xC3\xA9"), QByteArray("UTF-16LE"), &used)
+                  == QString::fromUtf8("caf\xC3\xA9"));
+            CHECK(used == Enc::Declared);
+            CHECK(std::strcmp(TextBook::encodingName(Enc::Declared), TextBook::encodingName(Enc::Utf8)) != 0);
+
+            // open() reports the rung that answered for the file it read.
+            TextBook declared, bom, plain;
+            CHECK(declared.open(hdir + QStringLiteral("/declared.html"), &err));
+            CHECK(declared.encoding() == Enc::Declared);
+            CHECK(bom.open(hdir + QStringLiteral("/bom.html"), &err));
+            CHECK(bom.encoding() == Enc::Utf8Bom);
+            CHECK(plain.open(hdir + QStringLiteral("/commented.html"), &err));
+            CHECK(plain.encoding() == Enc::Utf8);
+
+            // Where a declaration is found, and where it is not.
+            CHECK(HtmlText::declaredCharset(QByteArray("<html><head><meta charset='Shift_JIS'>")) == "shift_jis");
+            CHECK(HtmlText::declaredCharset(QByteArray(
+                      "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">")) == "utf-8");
+            CHECK(HtmlText::declaredCharset(QByteArray("<!-- <meta charset=\"koi8-r\"> --><p>x</p>")).isEmpty());
+            CHECK(HtmlText::declaredCharset(QByteArray("<metadata charset=\"koi8-r\">")).isEmpty());
+            CHECK(HtmlText::declaredCharset(QByteArray(5000, ' ') + QByteArray("<meta charset=\"koi8-r\">")).isEmpty());
+
+            // The Latin-1 entity names are a table indexed by its own order: its first and last entries pin it.
+            CHECK(HtmlText::decodeEntities(QStringLiteral("&nbsp;")) == QString(QChar(0xA0)));
+            CHECK(HtmlText::decodeEntities(QStringLiteral("caf&eacute; &yuml; &#8212; &#x2019; &amp;amp; &bogus;"))
+                  == QString::fromUtf8("caf\xC3\xA9 \xC3\xBF \xE2\x80\x94 \xE2\x80\x99 &amp; &bogus;"));
+
+            // The split level, as a number, for each branch of the rule.
+            CHECK(HtmlText::parse(QStringLiteral("<h1>A</h1><h1>B</h1>"), QString()).splitLevel == 1);
+            CHECK(HtmlText::parse(QStringLiteral("<h1>T</h1><h2>A</h2><h2>B</h2>"), QString()).splitLevel == 2);
+            CHECK(HtmlText::parse(QStringLiteral("<h1>T</h1><h3>A</h3><h3>B</h3>"), QString()).splitLevel == 3);
+            CHECK(HtmlText::parse(QStringLiteral("<h1>T</h1><p>x</p>"), QString()).splitLevel == 0);
+            CHECK(HtmlText::parse(QStringLiteral("<p>x</p>"), QString()).splitLevel == 0);
+            CHECK(HtmlText::parse(QString(), QString()).chapters.size() == 1);   // never none
+            // No folder, no images: a metadata pass resolves nothing, not even a sibling that exists.
+            const HtmlText::Document noDir =
+                HtmlText::parse(QStringLiteral("<p>x</p><img src=\"pic.png\">"), QString());
+            CHECK(!noDir.chapters.first().html.contains(QStringLiteral("<img")));
+            CHECK(noDir.images.isEmpty());
+        }
     }
 
     QDir(base).removeRecursively();

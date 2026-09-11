@@ -7,6 +7,7 @@
 #include "../ebook/MarkdownHtml.h"     // .md — top-level headings, without rendering the document (#144)
 #include "../ebook/MobiHeader.h"       // .mobi / .azw / .azw3 — the container walk MobiBook reads (#144)
 #include "../ebook/TextBook.h"         // .txt / .md — the encoding ladder, shared with the reader (#144)
+#include "../ebook/HtmlText.h"         // .html / .htm — title, author and chapters, as the reader reads them (#259)
 
 #include <QBuffer>
 #include <QFile>
@@ -235,9 +236,28 @@ namespace
     // Info and appears under its own filename, exactly as an untagged EPUB does. A .md is the one difference:
     // an author's own top-level headings ARE its chapters, and the first of them is as close to a stated
     // title as the format has.
+    //
+    // An .html (issue #259) states more than either: a <title> (else its first heading) and an author <meta>,
+    // read through the SAME pass the reader renders with - its declared charset, then the ladder - so the shelf
+    // and the book cannot disagree about what the title is. No folder is passed, so no image is resolved: a
+    // scan touches nothing but the file itself. Chapters are the pages when the document splits; one that does
+    // not reports 0, as a heading-less .md does. No cover, ever: the same coverless card a .txt gets.
     Info readTextBook(const QString& path)
     {
         Info i;
+        if (TextBook::isHtmlPath(path))
+        {
+            QFile f(path);
+            if (!f.open(QIODevice::ReadOnly)) return i;
+            const QByteArray bytes = f.readAll();
+            f.close();
+            const HtmlText::Document d =
+                HtmlText::parse(TextBook::decode(bytes, HtmlText::declaredCharset(bytes), nullptr), QString());
+            i.title     = d.title.trimmed();
+            i.author    = d.author.trimmed();
+            i.pageCount = d.splitLevel > 0 ? int(d.chapters.size()) : 0;
+            return i;
+        }
         if (!TextBook::isMarkdownPath(path)) return i;
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) return i;
