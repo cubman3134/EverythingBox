@@ -1,6 +1,7 @@
 #include "JellyfinMusicClient.h"
 
 #include "AppBrand.h"
+#include "CoverFetch.h"
 #include "Jellyfin.h"
 #include "JellyfinServerStore.h"
 #include "MetaCache.h"
@@ -291,12 +292,17 @@ QString JellyfinMusicClient::streamUrl(const QString& qualifiedTrackId) const
 
 void JellyfinMusicClient::prefetchAlbumCover(const QString& albumKey, std::function<void()> then)
 {
-    if (!MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) { if (then) then(); return; }
+    // NOTHING LANDED, SO `then` DOES NOT FIRE (#370) — not for a cover already on disk, not for a server that
+    // is gone, not for a failure. `then` re-renders the level and the re-render re-runs this prefetch, so
+    // firing it on any of those paths made a level with one cached cover reload itself every 400 ms for as
+    // long as it was on screen. CoverFetch.h has the whole rule.
+    if (!MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
+    if (coverMissing_.contains(albumKey)) return;   // the server already said "no picture" this session
     JellyfinServer srv;
     QString itemId;
-    if (!liveServerFor(albumKey, srv, &itemId)) { if (then) then(); return; }
+    if (!liveServerFor(albumKey, srv, &itemId)) return;
     const QString root = Jellyfin::normalizeRoot(srv.url, srv.allowPlainHttp);
-    if (root.isEmpty()) { if (then) then(); return; }
+    if (root.isEmpty()) return;
 
     const QString tag = QStringLiteral("cover|") + albumKey;
     if (inflight_.contains(tag)) return;
@@ -308,14 +314,27 @@ void JellyfinMusicClient::prefetchAlbumCover(const QString& albumKey, std::funct
     QNetworkRequest req{ QUrl(root + QStringLiteral("/Items/") + itemId
                               + QStringLiteral("/Images/Primary?maxHeight=600")) };
     applyCommonHeaders(req, srv.token);
+    req.setTransferTimeout(CoverFetch::kTransferTimeoutMs);   // a timeout is Retry, never "no art"
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, albumKey, tag, then] {
         reply->deleteLater();
         inflight_.remove(tag);
-        if (reply->error() == QNetworkReply::NoError)
-            MetaCache::storeImage(albumKey, QStringLiteral("cover"), QStringLiteral("cover.jpg"),
-                                  reply->header(QNetworkRequest::ContentTypeHeader).toString(),
-                                  reply->readAll());
+        const bool       transportOk = reply->error() == QNetworkReply::NoError;
+        const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body   = transportOk ? reply->readAll() : QByteArray();
+        switch (CoverFetch::classify(transportOk, status, body))
+        {
+            case CoverFetch::Answer::Image:
+                MetaCache::storeImage(albumKey, QStringLiteral("cover"), QStringLiteral("cover.jpg"),
+                                      reply->header(QNetworkRequest::ContentTypeHeader).toString(), body);
+                break;
+            case CoverFetch::Answer::Absent:   // an album with no Primary image answers 404
+                coverMissing_.insert(albumKey);
+                break;
+            case CoverFetch::Answer::Retry:
+                break;
+        }
+        if (MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;   // nothing landed
         if (then) then();
     });
 }

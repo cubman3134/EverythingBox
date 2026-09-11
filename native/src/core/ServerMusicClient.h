@@ -92,8 +92,14 @@ public:
     // The album's cover, fetched into MetaCache under the qualified album key. The shelf sends an ordinary
     // image url on the album row; it is fetched rather than rendered from, because a MediaItem's thumbnail
     // url is copied into caches and item records and a shelf's url may be signed.
+    //
+    // `then` fires ONLY when artwork actually landed on disk (#370): it re-renders the level, which re-runs
+    // this, so firing it for a cached cover, a missing url or a failure is a loop. CoverFetch.h has the rule.
     void prefetchAlbumCover(const QString& albumKey, std::function<void()> then = {});
     QString albumCoverPath(const QString& albumKey) const;
+
+    // The album keys this session has been told have no cover. For the probe's no-credential scan only.
+    QSet<QString> coversKnownMissing() const { return coverMissing_; }
 
 signals:
     void indexChanged(const QString& sourceId);
@@ -121,4 +127,7 @@ private:
     QHash<QString, QString>       trackUrls_;
     QSet<QString>                 inflight_;
     QHash<QString, QVector<Done>> waiting_;
+    // Album keys whose cover the shelf ANSWERED with nothing, this session (#370). In memory only, keyed on
+    // the album key — never the image url, which may be signed. A failure never lands here.
+    QSet<QString>                 coverMissing_;
 };

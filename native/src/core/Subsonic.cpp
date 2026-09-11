@@ -385,6 +385,26 @@ bool Subsonic::isAuthCode(int code)
     return code == 40 || code == 41 || code == 42 || code == 43 || code == 44;
 }
 
+CoverFetch::Answer Subsonic::coverAnswer(bool transportOk, int httpStatus, const QByteArray& body)
+{
+    if (transportOk)
+    {
+        // Only a body that COULD be an envelope is parsed. A picture starts with its format's magic bytes,
+        // never with markup or a brace, so the ordinary reply costs a glance at its first bytes.
+        const QByteArray head = body.left(64).trimmed();
+        if (head.startsWith('<') || head.startsWith('{'))
+        {
+            bool parsed = false;
+            const Envelope env = envelopeOf(parseBody(body, &parsed));
+            if (parsed && env.status == Status::Failed)
+                return env.code == kNotFoundCode ? CoverFetch::Answer::Absent : CoverFetch::Answer::Retry;
+            if (parsed && env.status == Status::Ok)
+                return CoverFetch::Answer::Absent;
+        }
+    }
+    return CoverFetch::classify(transportOk, httpStatus, body);
+}
+
 // ==================================================================================================
 // The payloads
 // ==================================================================================================
