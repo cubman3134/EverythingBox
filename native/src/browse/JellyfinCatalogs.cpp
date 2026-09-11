@@ -167,6 +167,39 @@ browse::JellyfinDownloadTarget jellyfinDownloadTargetFor(const MediaItem& it)
     return t;
 }
 
+// #310. The fields are exactly the ones HomeView's open…Level functions set inline before this existed, so
+// the drill pushes byte-for-byte the level it always did; probe_browse pins each one.
+MediaItem jellyfinSeriesLevelItem(const QString& seriesRef, const QString& title)
+{
+    MediaItem it;
+    it.id         = seriesRef;
+    it.title      = title;
+    it.type       = QString::fromLatin1(kJellyfinSeriesType);
+    it.expandable = true;
+    it.mime       = QString::fromLatin1(kJellyfinSeriesPrefix) + seriesRef;
+    return it;
+}
+
+MediaItem jellyfinSeasonLevelItem(const QString& marker, const QString& title)
+{
+    MediaItem it;
+    it.id         = marker;
+    it.title      = title;
+    it.type       = QString::fromLatin1(kJellyfinSeasonType);
+    it.expandable = true;
+    it.mime       = QString::fromLatin1(kJellyfinSeasonPrefix) + marker;
+    return it;
+}
+
+bool jellyfinLevelOffersDownload(const MediaItem& level)
+{
+    // THE BATCH KINDS ONLY. Item is the single-file verb, and no Jellyfin level is ever a leaf (a film or an
+    // episode plays; it does not open a level) — so a level that somehow resolved to Item would be offering
+    // a download of something it is not showing.
+    const JellyfinDownloadTarget t = jellyfinDownloadTargetFor(level);
+    return t.kind == JellyfinDownloadTarget::Kind::Series || t.kind == JellyfinDownloadTarget::Kind::Season;
+}
+
 MediaCatalog jellyfinSeasonsCatalog(const QString& seriesTitle, const QString& seriesRef,
                                             const QVector<Jellyfin::UnionItem>& seasons)
 {

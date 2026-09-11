@@ -1740,6 +1740,105 @@ int main(int argc, char** argv)
                   "jellyfin: an episode row carries no url either");
         }
 
+        // ---- #310: the classic series / season level's own Download door. --------------------------------
+        // Enter on a container row DRILLS (activateItem's _jfseries / _jfseason arms), so the level it opens is
+        // where the batch verbs have to be offered on the classic layout. Held here: the level the drill pushes
+        // IS the row it was pressed on; that level offers the action; and pressing it asks for exactly what
+        // the Start-menu door asks for on that row — same kind, same ref, same seasonRef — so the two doors
+        // cannot mean different things. The HomeView half (the header card, Up landing on it, the press
+        // ending in MainWindow::downloadJellyfinBatch) is the runner's "jellyfin container download door" gate.
+        {
+            using Kind = browse::JellyfinDownloadTarget::Kind;
+            // The Start-menu door reads a ROW through HomeView::browseJellyfinDownload, which is
+            // jellyfinDownloadTargetFor(items_[row]) and nothing else; the level's door reads the LEVEL'S item
+            // through startDownload, which is jellyfinDownloadTargetFor again. One table, two items.
+            auto sameTarget = [](const browse::JellyfinDownloadTarget& a,
+                                 const browse::JellyfinDownloadTarget& b) {
+                return a.kind == b.kind && a.ref == b.ref && a.seasonRef == b.seasonRef;
+            };
+
+            // A series row as a library level builds it, and the level Enter on it opens — activateItem's arm
+            // exactly: the key read off the row's mime, the row's own title.
+            QVector<Jellyfin::UnionItem> titles;
+            titles << item(srvA, QStringLiteral("Attic"), QStringLiteral("s1"), QStringLiteral("Trek"),
+                           QStringLiteral("Series"));
+            const MediaItem seriesRow =
+                browse::jellyfinLibraryCatalog(QStringLiteral("Shows"), titles, false, {}).items.value(0);
+            const QString seriesKey = browse::jellyfinKeyOf(seriesRow.mime, browse::kJellyfinSeriesPrefix);
+            const MediaItem seriesLevel = browse::jellyfinSeriesLevelItem(seriesKey, seriesRow.title);
+            CHECK(seriesRow.type == QString::fromLatin1(browse::kJellyfinSeriesType) && seriesRow.expandable,
+                  "jellyfin #310: a series row is still the drilling container type (Enter drills)");
+            CHECK(seriesLevel.type == QString::fromLatin1(browse::kJellyfinSeriesType) && seriesLevel.expandable
+                      && seriesLevel.id == seriesKey && seriesLevel.title == seriesRow.title
+                      && seriesLevel.mime == seriesRow.mime,
+                  "jellyfin #310: the series level the drill pushes is the row it was pressed on, field for field");
+            CHECK(browse::jellyfinLevelOffersDownload(seriesLevel),
+                  "jellyfin #310: a series level offers the Download action");
+            const browse::JellyfinDownloadTarget seriesByRow   = browse::jellyfinDownloadTargetFor(seriesRow);
+            const browse::JellyfinDownloadTarget seriesByLevel = browse::jellyfinDownloadTargetFor(seriesLevel);
+            CHECK(seriesByLevel.kind == Kind::Series && seriesByLevel.ref == titles[0].id
+                      && seriesByLevel.seasonRef.isEmpty(),
+                  "jellyfin #310: the series level's action is the whole-series batch, on the qualified series id");
+            CHECK(sameTarget(seriesByLevel, seriesByRow),
+                  "jellyfin #310: the series level's action resolves what the Start-menu door resolves on its row");
+
+            // A season row as that series level builds it, and the level Enter on it opens.
+            QVector<Jellyfin::UnionItem> seasons;
+            seasons << item(srvA, QStringLiteral("Attic"), QStringLiteral("se1"), QStringLiteral("Season 1"),
+                            QStringLiteral("Season"));
+            const MediaItem seasonRow =
+                browse::jellyfinSeasonsCatalog(seriesLevel.title, seriesKey, seasons).items.value(0);
+            const QString seasonKey = browse::jellyfinKeyOf(seasonRow.mime, browse::kJellyfinSeasonPrefix);
+            const MediaItem seasonLevel = browse::jellyfinSeasonLevelItem(seasonKey, seasonRow.title);
+            CHECK(seasonRow.type == QString::fromLatin1(browse::kJellyfinSeasonType) && seasonRow.expandable,
+                  "jellyfin #310: a season row is still the drilling container type (Enter drills)");
+            CHECK(seasonLevel.type == QString::fromLatin1(browse::kJellyfinSeasonType) && seasonLevel.expandable
+                      && seasonLevel.id == seasonKey && seasonLevel.title == seasonRow.title
+                      && seasonLevel.mime == seasonRow.mime,
+                  "jellyfin #310: the season level the drill pushes is the row it was pressed on, field for field");
+            CHECK(browse::jellyfinLevelOffersDownload(seasonLevel),
+                  "jellyfin #310: a season level offers the Download action");
+            const browse::JellyfinDownloadTarget seasonByRow   = browse::jellyfinDownloadTargetFor(seasonRow);
+            const browse::JellyfinDownloadTarget seasonByLevel = browse::jellyfinDownloadTargetFor(seasonLevel);
+            CHECK(seasonByLevel.kind == Kind::Season && seasonByLevel.ref == titles[0].id
+                      && seasonByLevel.seasonRef == seasons[0].id,
+                  "jellyfin #310: the season level's action is the batch narrowed to this season, on its series");
+            CHECK(sameTarget(seasonByLevel, seasonByRow),
+                  "jellyfin #310: the season level's action resolves what the Start-menu door resolves on its row");
+
+            // ...and no other level offers it. A door on the library or the root would be a batch verb with
+            // no series under it; one on an episode is the single-file verb, which is not this action.
+            MediaItem libraryLevel;
+            libraryLevel.type = QString::fromLatin1(browse::kJellyfinLibType);
+            libraryLevel.mime = QString::fromLatin1(browse::kJellyfinLibPrefix)
+                              + Jellyfin::qualify(srvA, QStringLiteral("l1"));
+            libraryLevel.expandable = true;
+            MediaItem rootLevel;
+            rootLevel.type = QString::fromLatin1(browse::kJellyfinRootType);
+            rootLevel.mime = QString::fromLatin1(browse::kJellyfinRootPrefix);
+            rootLevel.expandable = true;
+            QVector<Jellyfin::UnionItem> eps;
+            eps << item(srvA, QStringLiteral("Attic"), QStringLiteral("e1"), QStringLiteral("The Cage"),
+                        QStringLiteral("Episode"));
+            const MediaItem episodeRow = browse::jellyfinEpisodesCatalog(seasonRow.title, eps).items.value(0);
+            CHECK(!browse::jellyfinLevelOffersDownload(libraryLevel),
+                  "jellyfin #310: a library level has no batch Download door");
+            CHECK(!browse::jellyfinLevelOffersDownload(rootLevel),
+                  "jellyfin #310: the Jellyfin root has no batch Download door");
+            CHECK(browse::jellyfinDownloadTargetFor(episodeRow).kind == Kind::Item
+                      && !browse::jellyfinLevelOffersDownload(episodeRow),
+                  "jellyfin #310: an episode is the single-file verb, never the level's batch door");
+            // A season marker that lost its season half would be a door that downloads the wrong thing.
+            CHECK(!browse::jellyfinLevelOffersDownload(browse::jellyfinSeasonLevelItem(seriesKey, QStringLiteral("x"))),
+                  "jellyfin #310: a season level whose marker has no season half offers nothing");
+            MediaItem addonSeries;
+            addonSeries.type = QStringLiteral("series");
+            addonSeries.id = QStringLiteral("tt0060028");
+            addonSeries.expandable = true;
+            CHECK(!browse::jellyfinLevelOffersDownload(addonSeries),
+                  "jellyfin #310: an addon's series level is not a Jellyfin door (its own header already has one)");
+        }
+
         // ---- Continue Watching: only what the user is actually part-way through. -------------------------
         {
             QVector<Jellyfin::UnionItem> items;

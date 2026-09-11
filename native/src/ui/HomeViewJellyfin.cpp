@@ -34,7 +34,12 @@
 #include "../core/JellyfinClient.h"
 #include "../core/JellyfinServerStore.h"
 
+#include <QBoxLayout>
+#include <QFrame>
+#include <QLabel>
+#include <QPushButton>
 #include <QStringList>
+#include <QTextBrowser>
 
 namespace {
 
@@ -161,11 +166,9 @@ void HomeView::openJellyfinSeriesLevel(const QString& seriesRef, const QString& 
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true; lvl.title = title;
-    lvl.item.id    = seriesRef;
-    lvl.item.title = title;
-    lvl.item.type  = QString::fromLatin1(browse::kJellyfinSeriesType);
-    lvl.item.expandable = true;
-    lvl.item.mime  = QString::fromLatin1(browse::kJellyfinSeriesPrefix) + seriesRef;
+    // The builder probe_browse holds against the row this was opened from (#310) — the same five fields
+    // this site used to set inline, so the drill pushes exactly the level it always did.
+    lvl.item = browse::jellyfinSeriesLevelItem(seriesRef, title);
     stack_.push_back(lvl);
     populateJellyfinSeries(seriesRef, title);
 }
@@ -173,12 +176,15 @@ void HomeView::openJellyfinSeriesLevel(const QString& seriesRef, const QString& 
 void HomeView::populateJellyfinSeries(const QString& seriesRef, const QString& title)
 {
     const int gen = ++jellyfinFetchGen_;
+    // Every render below is followed by the header, for the reason presentJellyfinLevelHeader states.
     showJellyfinLoading(title);
+    presentJellyfinLevelHeader();
     JellyfinClient::instance().fetchSeasons(seriesRef, kLevelBudgetMs,
         [this, gen, title, seriesRef](const QVector<Jellyfin::UnionItem>& seasons, const QString& error) {
             if (gen != jellyfinFetchGen_) return;
-            if (!error.isEmpty()) { showJellyfinError(title, error); return; }
+            if (!error.isEmpty()) { showJellyfinError(title, error); presentJellyfinLevelHeader(); return; }
             showSyntheticCatalog(browse::jellyfinSeasonsCatalog(title, seriesRef, seasons));
+            presentJellyfinLevelHeader();
         });
 }
 
@@ -190,11 +196,7 @@ void HomeView::openJellyfinSeasonLevel(const QString& marker, const QString& tit
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true; lvl.title = title;
-    lvl.item.id    = marker;
-    lvl.item.title = title;
-    lvl.item.type  = QString::fromLatin1(browse::kJellyfinSeasonType);
-    lvl.item.expandable = true;
-    lvl.item.mime  = QString::fromLatin1(browse::kJellyfinSeasonPrefix) + marker;
+    lvl.item = browse::jellyfinSeasonLevelItem(marker, title);   // see openJellyfinSeriesLevel (#310)
     stack_.push_back(lvl);
     populateJellyfinSeason(marker, title);
 }
@@ -209,12 +211,60 @@ void HomeView::populateJellyfinSeason(const QString& marker, const QString& titl
     const QString seasonRef = nl < 0 ? QString() : marker.mid(nl + 1);
     const int gen = ++jellyfinFetchGen_;
     showJellyfinLoading(title);
+    presentJellyfinLevelHeader();
     JellyfinClient::instance().fetchEpisodes(seriesRef, seasonRef, kLevelBudgetMs,
         [this, gen, title](const QVector<Jellyfin::UnionItem>& episodes, const QString& error) {
             if (gen != jellyfinFetchGen_) return;
-            if (!error.isEmpty()) { showJellyfinError(title, error); return; }
+            if (!error.isEmpty()) { showJellyfinError(title, error); presentJellyfinLevelHeader(); return; }
             showSyntheticCatalog(browse::jellyfinEpisodesCatalog(title, episodes));
+            presentJellyfinLevelHeader();
         });
+}
+
+// ---- The classic layout's Download door on a series or season level (#310) --------------------------------
+//
+// WHERE IT SITS, AND WHOSE SHAPE IT IS. An addon's series level on the classic layout is a detail level with
+// its header card above the child grid — cover, title and the action row, whose "⬇ Download" takes the
+// whole container. A Jellyfin series or season is also a detail level, but it is drawn through
+// showSyntheticCatalog, which hides that card, so the level had rows and no verbs. This puts the same card
+// back, narrowed to its one button that means something here. It is NOT a row in the grid: a leading tile
+// would shift every episode one place along a wrapping poster grid and move where each arrow press lands.
+//
+// WHY THE CARD AND NOT A NEW CONTROL. Everything a D-pad needs already exists for it: Up from the grid's top
+// row lands on the card's action (the container-detail rule in the grid's key filter), Down drops back into
+// the grid, Left/Right walk the visible buttons, and Backspace is Back. The press is downloadBtn_'s own
+// clicked -> startDownload, whose Jellyfin arm asks browse::jellyfinDownloadTargetFor of THIS level's item
+// and hands MainWindow the same (kind, ref, seasonRef) the Start-menu door reads off the row — ending in
+// MainWindow::downloadJellyfinBatch either way. One table, one verb, one chooser.
+//
+// WHY IT IS RE-APPLIED AFTER EVERY RENDER. showSyntheticCatalog calls hideMeta(), and both of these levels
+// render two or three times (Loading, then the rows or the error), so a header set once would be taken down
+// by the level's own next paint.
+//
+// Every widget the card holds is set here, not inherited from whatever page used it last: requestMeta sets
+// each of its buttons explicitly on every build, and this does the same in the other direction, so neither
+// page can leave a stale button showing on the other.
+void HomeView::presentJellyfinLevelHeader()
+{
+    if (stack_.isEmpty() || !meta_ || !actionRow_ || !downloadBtn_) return;
+    const MediaItem& level = stack_.last().item;
+    if (!browse::jellyfinLevelOffersDownload(level)) return;
+
+    metaTitle_->setText(level.title.toHtmlEscaped());
+    metaFacts_->clear();    metaFacts_->setVisible(false);
+    metaOverview_->clear(); metaOverview_->setVisible(false);
+    if (metaFailure_) metaFailure_->setVisible(false);
+    // No cover: a level has none of its own, and a type placeholder the size of a poster would push the
+    // episodes half a screen down to show nothing. The theme's own "text" detail layout, in effect.
+    metaImage_->hide();
+    metaLayout_->setDirection(QBoxLayout::LeftToRight);
+
+    for (QPushButton* b : actionRow_->findChildren<QPushButton*>(Qt::FindDirectChildrenOnly))
+        b->setVisible(false);
+    // The detail page's own gate, for the level's own item — classicActionGates answers Download for a
+    // Jellyfin row from jellyfinDownloadTargetFor, the table every other door asks.
+    downloadBtn_->setVisible(classicActionGates(level).download);
+    meta_->setVisible(true);
 }
 
 // ---- Continue Watching, merged into the home list ----------------------------------------------------------

@@ -941,6 +941,10 @@ private:
     // failure. Both are type "info", so both are inert on both layouts.
     void showJellyfinLoading(const QString& title);
     void showJellyfinError(const QString& title, const QString& message);
+    // #310: the series / season level's own Download door on the classic layout — the detail header card,
+    // narrowed to "⬇ Download". Re-applied after every render of those two levels, because each render
+    // goes through showSyntheticCatalog and that hides the header.
+    void presentJellyfinLevelHeader();
     // The server's own Continue Watching, refreshed in the background and rendered as a section of the
     // Recents list (renderJellyfinContinue). Held between renders because renderRecents is called on every
     // Back and a fetch per Back would hammer the server.

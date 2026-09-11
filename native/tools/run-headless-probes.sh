@@ -2970,6 +2970,109 @@ else
   fi
 fi
 echo
+# Jellyfin container Download door (issue #310). On the classic layout, Enter on a Jellyfin series or season
+# DRILLS, so the level it opens has to carry the batch Download verb itself: the header card an addon's series
+# level shows above its episodes, narrowed to "Download". probe_browse holds the pure half (the level the drill
+# pushes is the row it was pressed on, it offers the action, and the action resolves the same
+# JellyfinDownloadTarget the Start-menu door reads off that row). This is the half that lives in HomeView and
+# MainWindow, which link nothing headlessly:
+#
+#  1. ENTER STILL DRILLS, INTO THE PROBED BUILDERS. activateItem's kJellyfinSeriesType / kJellyfinSeasonType
+#     arms call open...Level, and those push browse::jellyfinSeriesLevelItem / jellyfinSeasonLevelItem.
+#     Otherwise probe_browse is checking a level nothing opens.
+#  2. EVERY RENDER OF BOTH LEVELS RE-PRESENTS THE HEADER. showSyntheticCatalog hides the card, so a render not
+#     followed by presentJellyfinLevelHeader() leaves the level with no door once its rows arrive: the state
+#     the issue describes, reached one paint later.
+#  3. THE HEADER IS GATED ON THE TABLE AND SHOWS THE CARD: jellyfinLevelOffersDownload, downloadBtn_ shown,
+#     meta_ shown.
+#  4. UP REACHES IT, AND NO EXISTING LANDING MOVES. detailActionButton (where Up from the grid's top row lands
+#     on a card) returns downloadBtn_, and returns it AFTER every button it already returned.
+#  5. THE PRESS REACHES THE BATCH VERB. startDownload's Jellyfin arm hands over before any crawl, and
+#     MainWindow's jellyfinDownloadRequested handler calls downloadJellyfinBatch, the Start-menu door's call.
+#
+# Comments are stripped first, as in the gates above. No "| grep -q" anywhere: under pipefail an early exit on
+# a match can fail the pipeline, so every test counts instead.
+echo "=== jellyfin container download door (#310) ==="
+JD_V="$HERE/../src/ui/HomeView.cpp"
+JD_J="$HERE/../src/ui/HomeViewJellyfin.cpp"
+JD_M="$HERE/../src/ui/MainWindow.cpp"
+jd_fail=0
+jd_note() { echo "  $1"; jd_fail=1; }
+if [ ! -f "$JD_V" ] || [ ! -f "$JD_J" ] || [ ! -f "$JD_M" ]; then
+  echo "FAIL: jellyfin container download door (HomeView.cpp / HomeViewJellyfin.cpp / MainWindow.cpp not found under $HERE/../src)"; fail=1
+else
+  jd_v="$(mktemp)"; jd_j="$(mktemp)"; jd_m="$(mktemp)"; jd_fn="$(mktemp)"
+  sed -E 's://.*$::' "$JD_V" > "$jd_v"
+  sed -E 's://.*$::' "$JD_J" > "$jd_j"
+  sed -E 's://.*$::' "$JD_M" > "$jd_m"
+  # One function's body: from the line that STARTS with its signature to the first lone closing brace.
+  jd_body() { awk -v sig="$2" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$1" </dev/null > "$jd_fn"; }
+  jd_has() { [ "$(grep -cF -- "$1" "$jd_fn")" -ge 1 ]; }
+
+  # --- 1. Enter drills, into the probed builders. ---
+  jd_body "$jd_v" 'void HomeView::activateItem('
+  [ "$(grep -A2 -F 'kJellyfinSeriesType))' "$jd_fn" | grep -cF 'openJellyfinSeriesLevel(')" -ge 1 ] \
+    || jd_note "the activateItem arm for _jfseries no longer calls openJellyfinSeriesLevel. Enter on a Jellyfin series has stopped drilling."
+  [ "$(grep -A2 -F 'kJellyfinSeasonType))' "$jd_fn" | grep -cF 'openJellyfinSeasonLevel(')" -ge 1 ] \
+    || jd_note "the activateItem arm for _jfseason no longer calls openJellyfinSeasonLevel. Enter on a Jellyfin season has stopped drilling."
+  jd_body "$jd_j" 'void HomeView::openJellyfinSeriesLevel('
+  jd_has 'browse::jellyfinSeriesLevelItem(' \
+    || jd_note "openJellyfinSeriesLevel does not push browse::jellyfinSeriesLevelItem. probe_browse proves THAT builder's level resolves the Start-menu door's target; a level built anywhere else is one nothing checks."
+  jd_body "$jd_j" 'void HomeView::openJellyfinSeasonLevel('
+  jd_has 'browse::jellyfinSeasonLevelItem(' \
+    || jd_note "openJellyfinSeasonLevel does not push browse::jellyfinSeasonLevelItem (see the series clause)."
+
+  # --- 2. Every render of both levels is followed by the header. ---
+  for jd_f in populateJellyfinSeries populateJellyfinSeason; do
+    jd_body "$jd_j" "void HomeView::$jd_f("
+    jd_nr="$(grep -oE 'show(SyntheticCatalog|JellyfinLoading|JellyfinError)\(' "$jd_fn" | wc -l | tr -d '[:space:]')"
+    jd_nh="$(grep -oF 'presentJellyfinLevelHeader()' "$jd_fn" | wc -l | tr -d '[:space:]')"
+    [ "$jd_nr" -ge 3 ] || jd_note "HomeView::$jd_f renders $jd_nr time(s); expected Loading, the error and the rows. The function changed shape and this clause is checking almost nothing."
+    [ "$jd_nr" = "$jd_nh" ] || jd_note "HomeView::$jd_f renders $jd_nr time(s) but presents the header $jd_nh time(s). showSyntheticCatalog hides the card, so a render with no header after it leaves the level with no Download door."
+  done
+
+  # --- 3. The header is gated on the table and shows the card. ---
+  jd_body "$jd_j" 'void HomeView::presentJellyfinLevelHeader('
+  jd_nfn="$(wc -l < "$jd_fn" | tr -d '[:space:]')"
+  if [ "$jd_nfn" -lt 8 ]; then
+    jd_note "HomeView::presentJellyfinLevelHeader came out as $jd_nfn line(s): renamed, or moved out of HomeViewJellyfin.cpp. It is not being checked."
+  else
+    jd_has 'browse::jellyfinLevelOffersDownload(' || jd_note "presentJellyfinLevelHeader does not ask browse::jellyfinLevelOffersDownload. The header is deciding on its own which levels get a door."
+    jd_has 'downloadBtn_->setVisible(' || jd_note "presentJellyfinLevelHeader never shows downloadBtn_. The card appears with no verb on it."
+    jd_has 'meta_->setVisible(true)' || jd_note "presentJellyfinLevelHeader never shows the header card."
+  fi
+
+  # --- 4. Up reaches it, and it is the last resort. ---
+  jd_body "$jd_v" 'QWidget* HomeView::detailActionButton('
+  jd_dl="$(grep -nF 'return downloadBtn_' "$jd_fn" | head -1 | cut -d: -f1)"
+  jd_prev="$(grep -nE 'return (retryBtn_|playBtn_|favBtn_|editMetaBtn_)' "$jd_fn" | tail -1 | cut -d: -f1)"
+  if [ -z "$jd_dl" ]; then
+    jd_note "detailActionButton never returns downloadBtn_. Up from a Jellyfin level's top row skips a card whose only action is Download, so the door is mouse-only."
+  elif [ -z "$jd_prev" ] || [ "$jd_dl" -lt "$jd_prev" ]; then
+    jd_note "detailActionButton returns downloadBtn_ before the buttons it already returned. Up from the top row of every page that offers Download would land somewhere new."
+  fi
+
+  # --- 5. The press reaches the batch verb. ---
+  jd_body "$jd_v" 'void HomeView::startDownload('
+  jd_em="$(grep -nF 'emit jellyfinDownloadRequested(' "$jd_fn" | head -1 | cut -d: -f1)"
+  jd_cr="$(grep -nF 'dlNext()' "$jd_fn" | head -1 | cut -d: -f1)"
+  if [ -z "$jd_em" ]; then
+    jd_note "startDownload no longer hands a Jellyfin level to MainWindow. The door would crawl a null addon and report that nothing could be downloaded."
+  elif [ -n "$jd_cr" ] && [ "$jd_cr" -lt "$jd_em" ]; then
+    jd_note "startDownload starts the crawl before its Jellyfin arm."
+  fi
+  awk '/connect\(home_, &HomeView::jellyfinDownloadRequested/ { p = 1 } p { print } p && /^    \}\);/ { exit }' "$jd_m" </dev/null > "$jd_fn"
+  jd_has 'downloadJellyfinBatch(' \
+    || jd_note "the MainWindow handler for jellyfinDownloadRequested does not call downloadJellyfinBatch. The level's door and the Start-menu door no longer end in the same verb."
+
+  rm -f "$jd_v" "$jd_j" "$jd_m" "$jd_fn"
+  if [ "$jd_fail" -eq 0 ]; then
+    echo "PASS: jellyfin container download door (Enter drills; both levels re-present the header after every render; Up reaches it last; the press ends in downloadJellyfinBatch)"
+  else
+    echo "FAIL: jellyfin container download door: a classic series or season level has lost its Download door, or Enter has stopped drilling."; fail=1
+  fi
+fi
+echo
 
 # Appearance theme-gallery reachability gate. openAppearance() has TWO builders — a themed one (PanelRows)
 # and a classic one (QWidgets) — and CONTRIBUTING.md names that split as the thing most often half-done. The
