@@ -9780,15 +9780,24 @@ void HomeView::openFavorite(const MediaItem& favItem)
             if (s->manifest.id == addonId) { addon = s; return true; }
         return false;
     };
+    // #369: the local music index — the one openMusicAlbum plays a local album out of — so a starred local
+    // track can be found on its album. Not yet scanned, it is empty and every local track falls back below.
+    world.localMusic  = &MusicLibrary::index();
     const browse::FavoriteRoute route = browse::favoriteRouteFor(favItem, FavoritesStore::list(), world);
     switch (route.how)
     {
+        // #369: a MUSIC TRACK the local index holds opens its ALBUM — disc-then-track order, both discs of a
+        // set split across disc folders, starting at this track — through the door a library track row plays
+        // by (MainWindow::openMusicAlbum), not its folder by file name.
+        case browse::FavoriteOpen::LocalAlbum:
+            emit playMusicAlbumRequested(route.albumKey, route.path);
+            return;
         // A favourited local game (starred from the Recent/Downloads menu) re-opens by path — openRecent
         // recovers its console from the Recent/Downloads store. A Live TV channel and a channel file their
         // identity as the path, and re-open the same way.
         case browse::FavoriteOpen::ReopenByPath:
-        // #364: a MUSIC TRACK on this machine re-opens by its file as kind "audio" — the route that track's own
-        // Recents row takes.
+        // #364: a MUSIC TRACK on this machine that the local index does NOT hold re-opens by its file as kind
+        // "audio" — the route that track's own Recents row takes.
         case browse::FavoriteOpen::LocalTrack:
         // #364: a SUBSONIC TRACK re-opens by its qualified id, which openRecent's qualified-track arm mints a
         // fresh stream url from — with no index fetched first, so a star from last session opens cold.

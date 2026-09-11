@@ -174,4 +174,16 @@ namespace CueSheet
     // file. Passing a too-large length instead makes mpv report THAT as the duration — `…,240,999;` loads
     // with duration=999 on a 300-second file — so the progress bar would lie for the whole of the last track.
     QString mpvClipUrl(const QString& filePath, int startMs, int endMs);
+
+    // THE FILE A CLIP URL NAMES — mpvClipUrl read backwards (issue #369). For the one caller that holds a cue
+    // track's url and nothing else: a starred cue track whose album a rescan has dropped from the index, so
+    // IndexTrack::sourcePath is not there to ask. It answers the question the ★ Favorites shelf has to ask
+    // before it opens one — is the album's file still on disk — so a moved rip says so instead of failing
+    // inside the player.
+    //
+    // Reads the %<bytes>% form mpvClipUrl writes, counting BYTES of the UTF-8 for the reason it counts them,
+    // and the plain unquoted form (`edl://file,start,len;`) up to the first ',' or ';'. EMPTY for anything
+    // else — not an edl url, a byte count that overruns the url or does not end on a field boundary — and
+    // empty means "cannot tell", never "the file is gone": a caller must not refuse a track on it.
+    QString clipFile(const QString& clipUrl);
 }

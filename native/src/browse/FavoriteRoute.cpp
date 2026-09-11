@@ -1,8 +1,10 @@
 #include "FavoriteRoute.h"
 #include "MusicCatalogs.h"          // kMusicTrackType — the one spelling of a track row's type
 #include "../core/Jellyfin.h"       // Jellyfin::isQualified — each supplier's own reader, never a prefix test
+#include "../core/MusicLibrary.h"   // #369: Index::track — which album a local track is on
 #include "../core/ServerMusic.h"    // ServerMusic::isQualified
 #include "../core/Subsonic.h"       // Subsonic::isQualified / serverOf
+#include "../media/CueSheet.h"      // #369: clipFile — the file a cue track's clip url names
 
 #include <QCoreApplication>
 #include <QLatin1String>
@@ -66,14 +68,31 @@ FavoriteRoute favoriteRouteFor(const MediaItem& favItem, const QVector<FavoriteI
         }
         else
         {
-            // LOCAL. A clip url ("edl://…", a cue track) names a span of a file rather than a file, so it is not
-            // asked about as one — openRecent's own "://" test for telling a link from a path.
+            // LOCAL. The local music index is asked first (#369): a track it holds opens its ALBUM below, and
+            // its sourcePath is the real file on disk — the shared file, for a cue track.
+            const MusicLibrary::IndexTrack* t = world.localMusic ? world.localMusic->track(id) : nullptr;
+            // THE FILE TO ASK ABOUT. A clip url ("edl://…", a cue track) names a span of a file rather than a
+            // file, so the url itself is never asked about — the file it names is: the index's sourcePath, else
+            // the one CueSheet reads back out of the url. ("://" is openRecent's own test for a link.)
             const bool isUrl = id.contains(QLatin1String("://"));
-            if (!isUrl && !(world.fileExists && world.fileExists(id)))
+            const QString file = (t && !t->sourcePath.isEmpty()) ? t->sourcePath
+                                                                 : (isUrl ? CueSheet::clipFile(id) : id);
+            // Empty only for a clip url nothing could read a file out of. That is "cannot tell", never "gone":
+            // it opens exactly as it did before #369, unchecked.
+            if (!file.isEmpty() && !(world.fileExists && world.fileExists(file)))
             {
                 r.how = FavoriteOpen::TrackFileGone;
                 return r;
             }
+            // THE ALBUM, in its disc-then-track order, starting at this track: openMusicAlbum(albumKey, path).
+            if (t && !t->albumKey.isEmpty())
+            {
+                r.how = FavoriteOpen::LocalAlbum;
+                r.albumKey = t->albumKey;
+                r.path = id; r.title = favItem.title; r.thumb = favItem.thumbnailUrl;
+                return r;
+            }
+            // Not in the index: #364's route, unchanged — the track's own Recents-row door.
             r.how = FavoriteOpen::LocalTrack;
         }
         // The id in BOTH path and resume key: openRecent consults the key first for a music identity (so a
@@ -103,6 +122,7 @@ QString favoriteOpenSentence(FavoriteOpen how, const QString& title)
             return QCoreApplication::translate("HomeView", "“%1” is on a music source Favorites can't open "
                                                            "yet — play it from Music.").arg(title);
         case FavoriteOpen::ReopenByPath: case FavoriteOpen::NativeStore: case FavoriteOpen::LocalTrack:
+        case FavoriteOpen::LocalAlbum:
         case FavoriteOpen::ServerTrack:  case FavoriteOpen::Addon:       case FavoriteOpen::AddonMissing:
             break;
     }

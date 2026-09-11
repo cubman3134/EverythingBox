@@ -30,8 +30,18 @@
 //     a lone track of theirs by id today, so it SAYS so rather than being sent at a door that fails in
 //     silence — openRecent's own failure lines go to a status bar the app keeps hidden.
 //   * An unqualified id is LOCAL by definition (MusicSupply's own rule, and structural: see Subsonic.h) and is
-//     the file — or, for a cue track, mpv's clip url of it. It re-opens by openRecent with kind "audio": the
-//     route that same track's own Recents row takes (startLocalAudioQueue files it under that kind).
+//     the file — or, for a cue track, mpv's clip url of it (MusicLibrary::IndexTrack::path either way).
+//     - WHEN THE LOCAL MUSIC INDEX HOLDS IT (issue #369) it opens its ALBUM, starting at it: LocalAlbum,
+//       which the caller hands to MainWindow::openMusicAlbum(albumKey, path) — the door a library track row
+//       plays by. The album's tracks are already in disc-then-track order (MusicLibrary::Album::tracks), so
+//       a disc-2 favourite queues both discs, in track order, whatever the files are called. The album is
+//       found by MusicLibrary::Index::track — the index walked, not a second path -> album table beside it.
+//     - WHEN IT DOES NOT (not scanned yet, outside the library roots, or dropped by a rescan) it re-opens by
+//       openRecent with kind "audio" exactly as #364 made it: the route that same track's own Recents row
+//       takes (startLocalAudioQueue files it under that kind). Never worse than before #369.
+//     Either way the FILE is checked first: the track's own file, or for a cue track the one file its clip
+//     url names (IndexTrack::sourcePath, else CueSheet::clipFile) — so a moved rip says so instead of failing
+//     inside the player. A clip url whose file cannot be read out of it is opened as before, unchecked.
 //
 // NOTHING HERE WRITES THE STORE, and neither may the caller. FavoritesStore's love hook sends a server star
 // when a "track" favourite is added, and pressing Play is not starring.
@@ -49,13 +59,16 @@
 #include <QVector>
 #include <functional>
 
+namespace MusicLibrary { struct Index; }   // the local music index the router looks a track up in (#369)
+
 namespace browse
 {
     enum class FavoriteOpen
     {
         ReopenByPath,     // the stored record's path/kind -> openRecent (arm 2)
         NativeStore,      // steam: / epic: -> the store's info page (arm 3)
-        LocalTrack,       // a track on this machine -> openRecent(file, "audio")
+        LocalAlbum,       // a track the local music index holds -> openMusicAlbum(its album, the track) (#369)
+        LocalTrack,       // a track on this machine the index does not hold -> openRecent(file, "audio")
         ServerTrack,      // a Subsonic track -> openRecent(qualified id, "audio") -> a fresh stream url
         TrackFileGone,    // a local track whose file has been moved or deleted
         TrackServerGone,  // a Subsonic track whose server is no longer set up
@@ -67,8 +80,10 @@ namespace browse
     struct FavoriteRoute
     {
         FavoriteOpen how = FavoriteOpen::AddonMissing;
-        // What openRecent is handed, for ReopenByPath / LocalTrack / ServerTrack. Empty otherwise.
+        // What openRecent is handed, for ReopenByPath / LocalTrack / ServerTrack. Empty otherwise — except that
+        // LocalAlbum carries the track's `path` too (openMusicAlbum's start row), with its title and cover.
         QString path, kind, resumeKey, title, thumb;
+        QString albumKey; // LocalAlbum: the album the track is ON — openMusicAlbum's first argument
         QString addonId;  // Addon / AddonMissing: the source add-on the favourite names
     };
 
@@ -78,6 +93,10 @@ namespace browse
         std::function<bool(const QString& file)>     fileExists;   // a local track's file is on disk
         std::function<bool(const QString& serverId)> serverKnown;  // a Subsonic server is configured
         std::function<bool(const QString& addonId)>  sourceKnown;  // an add-on is among the loaded sources
+        // The local music library's index (#369) — the one MainWindow::openMusicAlbum plays a local album out
+        // of (MusicSupply::indexFor answers MusicLibrary::index() for an unqualified key). Unset: no track is
+        // in it, and a local track opens by openRecent as it did before #369.
+        const MusicLibrary::Index* localMusic = nullptr;
     };
 
     // The ★ Favorites shelf row for one stored favourite: the fields the router reads back (id, type, and the
