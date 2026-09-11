@@ -41,28 +41,23 @@ ReadAloudController::ReadAloudController(ReadAloudTarget* target, QObject* paren
 
 // ---- Voices ------------------------------------------------------------------------------------------------
 
-// Offer the voices for the preferred language when there ARE any, and every voice otherwise. Falling back to
-// all rather than to none is the important half: a book whose language has no installed voice is still worth
-// hearing in another one, and a picker that offers nothing looks broken.
+// Plumbing only. WHICH voices are offered and which is picked is ReadAloud::chooseVoices (pure, and pinned by
+// probe_readaloud since #283): this converts the engine's voices into its plain records, asks, and maps the
+// answer back onto the same voice objects.
 void ReadAloudController::loadVoices()
 {
-    voices_.clear();
-    const QString pref = target_ ? target_->raPreferredLanguage() : QString();
-    if (!pref.isEmpty())
-    {
-        const QLocale want(pref);
-        for (const QVoice& v : tts_->availableVoices())
-            if (v.locale().language() == want.language()) voices_.append(v);
-    }
-    if (voices_.isEmpty()) voices_ = tts_->availableVoices();
+    const QList<QVoice> installed = tts_->availableVoices();
+    QVector<ReadAloud::VoiceOption> options;
+    options.reserve(installed.size());
+    for (const QVoice& v : installed) options.append(ReadAloud::VoiceOption{ v.name(), v.locale() });
 
-    // Restore the stored pick BY NAME: a voice's index moves when the system gains or loses one, and resuming
-    // on "whatever is third today" is how a setting quietly stops meaning anything.
-    voiceIdx_ = 0;
-    const QString stored = store().value(kVoiceKey).toString();
-    if (!stored.isEmpty())
-        for (int i = 0; i < voices_.size(); ++i)
-            if (voices_[i].name() == stored) { voiceIdx_ = i; break; }
+    const QString pref = target_ ? target_->raPreferredLanguage() : QString();
+    const ReadAloud::VoiceChoice choice =
+        ReadAloud::chooseVoices(options, pref, store().value(kVoiceKey).toString());
+
+    voices_.clear();
+    for (int i : choice.offered) voices_.append(installed[i]);
+    voiceIdx_ = choice.selected;
 }
 
 QStringList ReadAloudController::voiceNames() const

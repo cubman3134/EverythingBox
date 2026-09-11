@@ -282,6 +282,34 @@ int indexForAnchor(const QVector<Utterance>& utterances, const ReaderAnchor& a)
     return indexForOffset(utterances, a.offset);
 }
 
+VoiceChoice chooseVoices(const QVector<VoiceOption>& installed, const QString& preferredLanguage,
+                         const QString& storedName)
+{
+    VoiceChoice out;
+
+    // The voices for the preferred LANGUAGE, when there are any. Language only: comparing the whole locale
+    // would hide a fr_CA voice from a "fr" book, and a "fr-CA" book from the fr_FR voices.
+    if (!preferredLanguage.isEmpty())
+    {
+        const QLocale want(preferredLanguage);
+        for (int i = 0; i < installed.size(); ++i)
+            if (installed[i].locale.language() == want.language()) out.offered.append(i);
+    }
+    // Otherwise every voice. Falling back to all rather than to none is the important half: a book whose
+    // language has no installed voice is still worth hearing in another one, and a picker that offers nothing
+    // looks broken.
+    if (out.offered.isEmpty())
+        for (int i = 0; i < installed.size(); ++i) out.offered.append(i);
+
+    // Restore the stored pick BY NAME: a voice's index moves when the system gains or loses one, and resuming
+    // on "whatever is third today" is how a setting quietly stops meaning anything.
+    out.selected = 0;
+    if (!storedName.isEmpty())
+        for (int i = 0; i < out.offered.size(); ++i)
+            if (installed[out.offered[i]].name == storedName) { out.selected = i; break; }
+    return out;
+}
+
 QVector<double> speedSteps()
 {
     return { 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 };

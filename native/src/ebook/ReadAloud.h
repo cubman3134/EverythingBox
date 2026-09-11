@@ -13,6 +13,7 @@
 // asked to say (artifact-stripped, whitespace-collapsed); the RANGE stays in raw document coordinates so the
 // highlight lands on the real words on the page.
 #pragma once
+#include <QLocale>
 #include <QString>
 #include <QVector>
 #include "ReaderAnchor.h"
@@ -99,6 +100,39 @@ namespace ReadAloud
     // in a plan — indexForAnchor(u, anchorFor(s, u[i])) == i — which is what makes "stop, and you are where the
     // narrator was" true rather than approximately true.
     int indexForAnchor(const QVector<Utterance>& utterances, const ReaderAnchor& a);
+
+    // ---- Voice choice (issues #137 / #283) -------------------------------------------------------------------
+    // WHICH of the installed voices the reader offers, and which of them is picked. Lifted out of
+    // ReadAloudController::loadVoices (issue #283) so the rule has a probe: the engine's voice type lives in the
+    // optional speech module, so the controller converts each installed voice into this plain record, calls
+    // chooseVoices, and maps the result back. The record keeps the voice's locale exactly as the engine reported
+    // it, so the comparison below is the one the controller always made, over the same values.
+    struct VoiceOption
+    {
+        QString name;     // the engine's display name; also the key the stored pick is kept under
+        QLocale locale;   // the engine's locale for the voice (language AND region; only the language is read)
+    };
+
+    struct VoiceChoice
+    {
+        QVector<int> offered;   // indices into the installed list, in the engine's order: the voices offered
+        int          selected = 0;   // index into `offered` of the voice to use; 0 when nothing is restored
+    };
+
+    // THE RULE, as #137 wired it and #283 pins it:
+    //   * `preferredLanguage` is the book's declared language (EbookView::bookLanguage, which already turned a
+    //     book declaring NOTHING into the system locale's name, so that case never reaches here empty).
+    //   * Offered: the installed voices whose LANGUAGE matches QLocale(preferredLanguage)'s, in the engine's
+    //     order. Language only, never region: a fr_CA voice is a French voice for a "fr" book, and a "fr-CA"
+    //     book is offered the fr_FR voices too.
+    //   * When none match — or the preference is empty — EVERY installed voice is offered, in the engine's
+    //     order. NOT the system locale's voices: all of them. A book whose language has no installed voice is
+    //     still worth hearing in another one, and a picker that offers nothing looks broken.
+    //   * Selected: the offered voice whose name equals `storedName` (the first, if several share it), else 0.
+    //     By NAME because an index moves when the system gains or loses a voice; a stored voice that is
+    //     installed but not OFFERED for this book (an English pick, a French book) is not restored either.
+    VoiceChoice chooseVoices(const QVector<VoiceOption>& installed, const QString& preferredLanguage,
+                             const QString& storedName);
 
     // ---- Speed (issue #140's per-book memory, shared) --------------------------------------------------------
     // The speeds the reader's speed control steps through. Deliberately the SAME set the player's speed button
