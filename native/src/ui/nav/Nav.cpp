@@ -278,6 +278,21 @@ QVector<QWidget*> NavRing::widgets() const
     return out;
 }
 
+// The Left/Right rule (#351; contract in Nav.h). "Beside" is the edge-to-edge test rowBand below uses for
+// Up/Down, turned sideways with the same tolerance: touching counts, and so does a one-pixel overlap. "In its
+// row" is plain overlap of the two vertical extents, which is symmetric — so it cannot matter which of the two
+// is taller, and it cannot move with the font: a header that stops short of the row is out whatever its
+// height, and a side button centred on the row is in however short it gets.
+bool NavRing::besideInRow(const QRect& from, const QRect& target, int key)
+{
+    int gap = 0;
+    if (key == Qt::Key_Right) gap = target.left() - from.right();
+    else if (key == Qt::Key_Left) gap = from.left() - target.right();
+    else return false;
+    if (gap < 0) return false;                                             // not clear of it on that side
+    return target.bottom() >= from.top() && target.top() <= from.bottom(); // the vertical extents overlap
+}
+
 // The band a vertical step lands in: the NEXT ROW. Up/Down are resolved in two stages — first find the row
 // (the candidate whose top/bottom edge is nearest in the pressed direction, plus everything whose vertical
 // extent overlaps it), then choose within that row by sideways distance. Two stages rather than one score,
@@ -287,9 +302,8 @@ QVector<QWidget*> NavRing::widgets() const
 // whole rows become unreachable. Rows are a real property of the layout, so read them off the geometry
 // instead of guessing at a tolerance.
 //
-// Left/Right deliberately do NOT use this: horizontal runs have no comparable "next column" structure (a
-// vertical list is one column of full-width rows), and the sideways-dominance test below is load-bearing
-// there — it is what stops a header Back button, sitting up-and-slightly-right of a row, winning a Right.
+// Left/Right do NOT use this band: horizontal runs have no comparable "next column" structure (a vertical list
+// is one column of full-width rows). They use sameRowBand below — the widget's OWN row — instead.
 static QVector<QWidget*> rowBand(QWidget* from, const QVector<QWidget*>& candidates, bool up)
 {
     const QRect fr(from->mapToGlobal(QPoint(0, 0)), from->size());
@@ -319,26 +333,42 @@ static QVector<QWidget*> rowBand(QWidget* from, const QVector<QWidget*>& candida
     return band;
 }
 
+// The band a horizontal step lands in: this widget's OWN row — every candidate besideInRow says is beside it in
+// the pressed direction (#351). Left/Right used to score every candidate, with a centre-based "more sideways
+// than in-direction" filter standing in for "is it in my row?". That filter is a tolerance read off centres,
+// so it moves with the font: at QT_FONT_DPI=72 the header Back button above a profile row (wider than the row,
+// which shares its width with ✎ and ✕, so Back's centre sits right of the row's) was short enough to pass it —
+// 33 px up against 40 across — and then outscored the ✎ level with the row, 172 to 186. Reading the row off
+// the geometry, as rowBand does for Up/Down, leaves no tolerance to drift.
+static QVector<QWidget*> sameRowBand(QWidget* from, const QVector<QWidget*>& candidates, int key)
+{
+    const QRect fr(from->mapToGlobal(QPoint(0, 0)), from->size());
+    QVector<QWidget*> band;
+    for (QWidget* w : candidates)
+        if (w != from && NavRing::besideInRow(fr, QRect(w->mapToGlobal(QPoint(0, 0)), w->size()), key))
+            band.push_back(w);
+    return band;
+}
+
 QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, int key)
 {
     if (!from) return candidates.isEmpty() ? nullptr : candidates.first();
     const QPoint c = from->mapToGlobal(from->rect().center());
-    // Up/Down: only the next row competes (see rowBand). Left/Right: every candidate does, filtered by the
-    // sideways-dominance test below.
+    // Up/Down: only the next row competes (see rowBand). Left/Right: only this widget's own row does (see
+    // sameRowBand).
     //
-    // An EMPTY band means nothing sits clear of this widget's own row in that direction — only widgets whose
-    // vertical extent overlaps it. There is no row to step to, so fall back to the whole list and let the
-    // pre-existing scoring answer it. That keeps this change strictly ADDITIVE: every move that worked before
-    // still works, and the rows that were unreachable now are not. (Overlapping rows are the case: a short
-    // control beside a tall one, a hand-placed widget straddling two rows.)
+    // An EMPTY band falls back to the whole list and the pre-existing scoring, sideways-dominance filter and
+    // all. Vertically, empty means nothing sits clear of this widget's own row in that direction — only
+    // widgets whose vertical extent overlaps it (a short control beside a tall one, a hand-placed widget
+    // straddling two rows). Horizontally, it means nothing in this row lies that way: the end of a row, or a
+    // full-width row in a list, where Right still reaches whatever it reached before. A band only ever narrows
+    // the choice to widgets that plainly ARE in the pressed direction, so a move without one is unchanged.
     QVector<QWidget*> pool = candidates;
-    bool vertical = (key == Qt::Key_Up || key == Qt::Key_Down);
-    if (vertical)
-    {
-        const QVector<QWidget*> band = rowBand(from, candidates, key == Qt::Key_Up);
-        if (band.isEmpty()) vertical = false;   // no row to step to: score against everything, as before
-        else pool = band;
-    }
+    const bool vertical = (key == Qt::Key_Up || key == Qt::Key_Down);
+    const QVector<QWidget*> band = vertical ? rowBand(from, candidates, key == Qt::Key_Up)
+                                            : sameRowBand(from, candidates, key);
+    const bool banded = !band.isEmpty();
+    if (banded) pool = band;
     QWidget* best = nullptr;
     double bestScore = std::numeric_limits<double>::max();
     for (QWidget* w : pool)
@@ -355,11 +385,12 @@ QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, i
         default: return nullptr;
         }
         if (primary <= 0) continue;                      // not in that direction
-        // A candidate that's more SIDEWAYS than in-direction isn't really "that way" (e.g. the header Back
-        // button sitting up-and-slightly-right of a row must not win a Right press) — skip it so we land on
-        // the widget actually in the pressed direction. Vertical steps have already been narrowed to one
-        // row, where "more sideways than down" is exactly the reachable-only-from-the-middle bug.
-        if (!vertical && orth > primary + 4) continue;
+        // Unbanded only: a candidate that's more SIDEWAYS than in-direction isn't really "that way" — skip it so
+        // we land on the widget actually in the pressed direction. A band has already answered "is it that
+        // way?" from the geometry, and inside one this test is harmful: "more sideways than down" is exactly the
+        // reachable-only-from-the-middle bug, and "more sideways than across" would strand a short button beside
+        // the top of a tall panel.
+        if (!banded && orth > primary + 4) continue;
         // Among the rest, prefer the nearest, weighting sideways drift heavily so a grid/row steps straight
         // (stay in the column on Up/Down, on the row for Left/Right) instead of drifting diagonally.
         const double score = primary + 4.0 * orth;

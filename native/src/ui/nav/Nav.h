@@ -105,6 +105,13 @@ public:
     // Exposed for reuse (overlays, tests).
     static QWidget* pickNext(QWidget* from, const QVector<QWidget*>& candidates, int key);
 
+    // The Left/Right rule (#351), pure over rects so it can be tested directly: is `target` a neighbour of
+    // `from` IN ITS ROW in direction `key` (Qt::Key_Left / Qt::Key_Right; any other key answers false)?
+    // Beside = clear of `from` on that side, edge to edge (touching counts). In its row = the two vertical
+    // extents overlap at all, whichever of the two is taller. Both rects in one coordinate space. When any
+    // candidate passes this, pickNext chooses among those alone.
+    static bool besideInRow(const QRect& from, const QRect& target, int key);
+
 private:
     void activate(QWidget* w);          // Return pressed on w
     QPointer<QWidget> container_;

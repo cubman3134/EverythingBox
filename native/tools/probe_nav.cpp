@@ -21,6 +21,7 @@
 #include <QListView>
 #include <QListWidget>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -39,8 +40,12 @@
 #include <utility>
 
 static int failures = 0;
+// NAV_VERBOSE=1 also prints every check that PASSES, so two runs can be compared check by check (#351's DPI
+// table). Off by default: the gate reads NAV-OK / NAV-FAIL only.
+static const bool navVerbose = qEnvironmentVariableIsSet("NAV_VERBOSE");
 #define CHECK(cond, what) do { \
     if (!(cond)) { std::fprintf(stderr, "NAV-FAIL %s (line %d)\n", what, __LINE__); ++failures; } \
+    else if (navVerbose) std::fprintf(stderr, "NAV-PASS %s (line %d)\n", what, __LINE__); \
 } while (0)
 
 // Stand-in for a themed page's QML root item (ThemeEngine::buildView exposes the real one through the
@@ -85,6 +90,102 @@ protected:
 
 static void pump() { QApplication::processEvents(); QApplication::processEvents(); }
 
+// The Profiles-screen shape, built identically by §13 and by §13b's DPI child runs (#351): header Back, then
+// rows of [wide pick | ✎ 36px | ✕ 36px], a Create button and a Cancel button. The pick button's height is
+// pinned (44) but the side buttons' and the header's come from the FONT, so one shape is a different geometry
+// at every font DPI — which is why it is run at several.
+struct ProfilePage
+{
+    QWidget* page = nullptr;
+    QPushButton* back = nullptr;
+    QPushButton* pick0 = nullptr;
+    QPushButton* edit0 = nullptr;
+    QPushButton* del0 = nullptr;
+};
+
+static ProfilePage buildProfilePage(QWidget* parent)
+{
+    ProfilePage p;
+    p.page = new QWidget(parent);
+    auto* v = new QVBoxLayout(p.page);
+    p.back = new QPushButton(QStringLiteral("‹ Back"), p.page);
+    v->addWidget(p.back);
+    for (int r = 0; r < 3; ++r)
+    {
+        auto* row = new QHBoxLayout;
+        auto* pick = new QPushButton(QStringLiteral("🐱   Profile %1").arg(r), p.page);
+        pick->setMinimumHeight(44);
+        row->addWidget(pick, 1);
+        auto* edit = new QPushButton(QStringLiteral("✎"), p.page); edit->setFixedWidth(36); row->addWidget(edit);
+        auto* del  = new QPushButton(QStringLiteral("✕"), p.page); del->setFixedWidth(36);  row->addWidget(del);
+        v->addLayout(row);
+        if (r == 0) { p.pick0 = pick; p.edit0 = edit; p.del0 = del; }
+    }
+    auto* create = new QPushButton(QStringLiteral("＋  Create New Profile"), p.page);
+    v->addWidget(create);
+    v->addWidget(new QPushButton(QStringLiteral("Cancel"), p.page));
+    v->addStretch(1);
+    p.page->setGeometry(0, 0, 420, 460);
+    p.page->show(); p.page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
+    pump();
+    return p;
+}
+
+// Intuitive geometry on the profile rows (the reported bug: Down from a profile row dropped into the tiny ✎ edit
+// button instead of the row below it; #351: at QT_FONT_DPI=72, Right from the row landed on the header Back
+// instead of its ✎). Down from the wide "pick" button lands on the row DIRECTLY below, never the narrow side
+// button; the ✎/✕ are reached with Right, not Down, and Left from ✎ goes back to its own row.
+static void checkProfileRowGeometry(NavContext& ctx, const ProfilePage& p)
+{
+    p.pick0->setFocus(); pump();
+    ctx.routeKey(Qt::Key_Right);
+    CHECK(QApplication::focusWidget() == p.edit0, "Right from a profile row reaches its ✎ edit button");
+    p.edit0->setFocus(); pump();
+    ctx.routeKey(Qt::Key_Right);
+    CHECK(QApplication::focusWidget() == p.del0, "Right from ✎ reaches the same row's ✕");
+    p.edit0->setFocus(); pump();
+    ctx.routeKey(Qt::Key_Left);
+    CHECK(QApplication::focusWidget() == p.pick0, "Left from ✎ returns to its own profile row");
+    p.pick0->setFocus(); pump();
+    ctx.routeKey(Qt::Key_Down);
+    CHECK(QApplication::focusWidget() != p.edit0, "Down from a profile row does NOT drop into the ✎ button");
+    // Walk straight down the wide column: Profile0 -> Profile1 -> Profile2 -> Create -> Cancel, never a
+    // side button, and clamping at Cancel.
+    p.back->setFocus(); pump();
+    ctx.routeKey(Qt::Key_Down); // Profile 0
+    for (int i = 0; i < 5; ++i)
+    {
+        ctx.routeKey(Qt::Key_Down);
+        auto* now = qobject_cast<QPushButton*>(QApplication::focusWidget());
+        CHECK(now && now->width() > 60, "Down stays on full-width rows (never a 36px side button)");
+    }
+    auto* bottom = qobject_cast<QPushButton*>(QApplication::focusWidget()); // reached the bottom
+    CHECK(bottom && bottom->text() == QStringLiteral("Cancel"), "walking Down lands on Cancel and clamps there");
+}
+
+// §13b's child mode (#351). QT_FONT_DPI is read once, when the QGuiApplication starts, so the only honest way to
+// run the profile rows at another font DPI is another process: the parent sets the variable and relaunches this
+// exe with --profile-row-only; the child builds the same page, runs the same checks, and reports the DPI it
+// actually got (logical DPI x device pixel ratio: above 96 Qt turns the font DPI into a scale factor instead),
+// so the parent can refuse a run where the variable was silently ignored.
+static int profileRowChild()
+{
+    QWidget win;
+    win.resize(1280, 720);
+    NavContext ctx(&win);
+    win.show();
+    win.activateWindow();
+    pump();
+    const ProfilePage p = buildProfilePage(&win);
+    NavRing ring(p.page);
+    ctx.setActiveRing(&ring);
+    checkProfileRowGeometry(ctx, p);
+    std::printf("PROFILEROW-DPI %d\n", qRound(p.page->logicalDpiY() * p.page->devicePixelRatioF()));
+    ctx.setActiveRing(nullptr);
+    delete p.page;
+    return failures == 0 ? 0 : 1;
+}
+
 // Every ring member that arrow keys can NEVER land on, starting from the ring's own initial selection.
 // This is a CLOSURE, not a walk: from each reached widget it presses all four arrows and follows wherever
 // focus goes, until nothing new appears. A hand-written walk can only prove the paths its author thought
@@ -115,6 +216,8 @@ static QVector<QWidget*> navUnreachable(NavRing& ring, NavContext& ctx)
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    // §13b's DPI child (#351): only the profile-row checks, at this process's font DPI.
+    if (QCoreApplication::arguments().contains(QStringLiteral("--profile-row-only"))) return profileRowChild();
 
     QWidget win;
     win.resize(1280, 720);
@@ -1130,58 +1233,16 @@ int main(int argc, char** argv)
 
     // ------------------------------------------- 13. profile-menu shape: selection NEVER lost
     {
-        // Mirror of the Profiles screen: header Back, then rows of [wide pick | ✎ 36px | ✕ 36px],
-        // a Create button and a Cancel button. Hammering arrows in any pattern must always leave the
+        // Mirror of the Profiles screen (buildProfilePage). Hammering arrows in any pattern must always leave the
         // focus on a live ring member — the selection can never vanish.
-        auto* page = new QWidget(&win);
-        auto* v = new QVBoxLayout(page);
-        auto* back = new QPushButton(QStringLiteral("‹ Back"), page);
-        v->addWidget(back);
-        QPushButton* pick0 = nullptr; QPushButton* edit0 = nullptr;
-        for (int r = 0; r < 3; ++r)
-        {
-            auto* row = new QHBoxLayout;
-            auto* pick = new QPushButton(QStringLiteral("🐱   Profile %1").arg(r), page);
-            pick->setMinimumHeight(44);
-            row->addWidget(pick, 1);
-            auto* edit = new QPushButton(QStringLiteral("✎"), page); edit->setFixedWidth(36); row->addWidget(edit);
-            auto* del  = new QPushButton(QStringLiteral("✕"), page); del->setFixedWidth(36);  row->addWidget(del);
-            v->addLayout(row);
-            if (r == 0) { pick0 = pick; edit0 = edit; }
-        }
-        auto* create = new QPushButton(QStringLiteral("＋  Create New Profile"), page);
-        v->addWidget(create);
-        v->addWidget(new QPushButton(QStringLiteral("Cancel"), page));
-        v->addStretch(1);
-        page->setGeometry(0, 0, 420, 460);
-        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
-        pump();
+        const ProfilePage prof = buildProfilePage(&win);
+        QWidget* page = prof.page;
 
         NavRing ring(page);
         ctx.setActiveRing(&ring);
 
-        // Intuitive geometry (the reported bug: Down from a profile row dropped into the tiny ✎ edit button
-        // instead of the row below it). Down from the wide "pick" button lands on the row DIRECTLY below,
-        // never the narrow side button; the ✎/✕ are reached with Right, not Down.
-        pick0->setFocus(); pump();
-        ctx.routeKey(Qt::Key_Right);
-        CHECK(QApplication::focusWidget() == edit0, "Right from a profile row reaches its ✎ edit button");
-        pick0->setFocus(); pump();
-        ctx.routeKey(Qt::Key_Down);
-        CHECK(QApplication::focusWidget() != edit0, "Down from a profile row does NOT drop into the ✎ button");
-        // Walk straight down the wide column: Profile0 -> Profile1 -> Profile2 -> Create -> Cancel, never a
-        // side button, and clamping at Cancel.
-        back->setFocus(); pump();
-        ctx.routeKey(Qt::Key_Down); // Profile 0
-        for (int i = 0; i < 5; ++i)
-        {
-            ctx.routeKey(Qt::Key_Down);
-            auto* now = qobject_cast<QPushButton*>(QApplication::focusWidget());
-            CHECK(now && now->width() > 60, "Down stays on full-width rows (never a 36px side button)");
-        }
-        auto* bottom = qobject_cast<QPushButton*>(QApplication::focusWidget()); // reached the bottom
-        CHECK(bottom && bottom->text() == QStringLiteral("Cancel"),
-              "walking Down lands on Cancel and clamps there");
+        // At this process's font DPI; §13b runs the same checks again at 72, 96, 120 and 144.
+        checkProfileRowGeometry(ctx, prof);
 
         ring.ensureSelection();
         static const int walk[] = { Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Right, Qt::Key_Down,
@@ -1209,6 +1270,68 @@ int main(int argc, char** argv)
         ctx.setActiveRing(nullptr);
         delete page;
         pump();
+    }
+
+    // ------------------------------------------- 13b. #351: Left/Right find the row's own neighbour, at any font DPI
+    {
+        // (a) The rule itself, over rect pairs (NavRing::besideInRow). `row` is §13's wide "pick" button as it
+        // laid out at QT_FONT_DPI=72 on the machine that found the bug, and the first "header" is that run's Back
+        // button: WIDER than the row (the row shares its width with ✎ and ✕), so its centre sits right of the
+        // row's although it is above it — and at 72 DPI it is short enough that the old centre-based "more
+        // sideways than in-direction" filter let it through, where it outscored ✎ (172 against 186). These are
+        // fixed rects, not measurements: nothing here depends on a font.
+        const QRect row(8, 27, 328, 44);
+        const int R = Qt::Key_Right, L = Qt::Key_Left;
+        CHECK(NavRing::besideInRow(row, QRect(340, 41, 36, 15), R),
+              "beside: a SHORTER target within the row's vertical span is to its right (the ✎ button)");
+        CHECK(NavRing::besideInRow(QRect(0, 0, 36, 20), QRect(50, 0, 100, 400), R),
+              "beside: a TALLER target whose extent covers the current widget is to its right");
+        CHECK(NavRing::besideInRow(QRect(0, 0, 100, 400), QRect(110, 380, 36, 20), R),
+              "beside: a short target at the foot of a tall current widget is to its right");
+        CHECK(!NavRing::besideInRow(row, QRect(8, 8, 408, 15), R),
+              "beside: the 72-DPI header Back (wider, above the row) is NOT to its right");
+        // The next two are horizontally CLEAR of the row, so only the vertical half of the rule can reject them.
+        CHECK(!NavRing::besideInRow(row, QRect(340, 8, 36, 15), R),
+              "beside: a target clear to the right but with no vertical overlap at all is NOT to its right");
+        CHECK(!NavRing::besideInRow(row, QRect(340, 12, 36, 15), R),
+              "beside: a target exactly touching the row's top edge (no shared pixel row) is NOT to its right");
+        CHECK(NavRing::besideInRow(row, QRect(340, 13, 36, 15), R),
+              "beside: a single shared pixel row is overlap");
+        CHECK(NavRing::besideInRow(QRect(0, 0, 100, 20), QRect(100, 0, 36, 20), R),
+              "beside: a target exactly touching the right edge is beside it");
+        CHECK(!NavRing::besideInRow(QRect(0, 0, 100, 20), QRect(50, 0, 100, 20), R),
+              "beside: a target overlapping the current widget horizontally is not beside it");
+        CHECK(!NavRing::besideInRow(row, QRect(340, 41, 36, 15), L), "beside: a target on the right is not to the LEFT");
+        CHECK(NavRing::besideInRow(QRect(340, 41, 36, 15), row, L), "beside: Left from ✎ finds its own, taller row");
+        CHECK(!NavRing::besideInRow(row, QRect(340, 41, 36, 15), Qt::Key_Down), "beside: answers Left/Right only");
+
+        // (b) The profile rows themselves at several font DPIs, each in its own process (profileRowChild). Every
+        // assertion there is a relationship — where the focus lands — never a pixel count, so it means the same
+        // thing on any machine's fonts; only the geometry it runs against changes with the DPI.
+        for (int dpi : { 72, 96, 120, 144 })
+        {
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("QT_FONT_DPI"), QString::number(dpi));
+            QProcess child;
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(QCoreApplication::applicationFilePath(),
+                        { QStringLiteral("-platform"), QApplication::platformName(),
+                          QStringLiteral("--profile-row-only") });
+            const bool finished = child.waitForFinished(60000);
+            if (!finished) { child.kill(); child.waitForFinished(5000); }
+            int got = -1;
+            for (const QByteArray& raw : child.readAll().split('\n'))
+            {
+                const QByteArray line = raw.trimmed();
+                if (line.startsWith("NAV-")) std::fprintf(stderr, "  [QT_FONT_DPI=%d] %s\n", dpi, line.constData());
+                else if (line.startsWith("PROFILEROW-DPI ")) got = line.mid(15).toInt();
+            }
+            const QByteArray at = " (QT_FONT_DPI=" + QByteArray::number(dpi) + ")";
+            CHECK(finished && child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0,
+                  ("the profile-row checks all pass" + at).constData());
+            CHECK(got == dpi, ("the profile-row child really ran at that font DPI" + at).constData());
+        }
     }
 
     // ------------------------------------------- 14. one Back rule: Escape == Backspace, everywhere
