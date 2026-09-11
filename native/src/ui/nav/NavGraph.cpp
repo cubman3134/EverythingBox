@@ -19,7 +19,8 @@ void NavGraph::registerZone(const QString& id, int count, int row, int col, Qt::
     const bool isNew = !m_zones.contains(id);
     if (isNew) { z.order = m_order.size(); m_order.push_back(id); }
     else       { const Zone& old = m_zones[id];   // a rebuild re-registers: keep identity + wiring + memory
-                 z.order = old.order; z.unsel = old.unsel; z.memory = old.memory; z.edges = old.edges; }
+                 z.order = old.order; z.unsel = old.unsel; z.memory = old.memory; z.edges = old.edges;
+                 z.boundary = old.boundary; }
     m_zones[id] = z;
 
     if (m_defaultZone.isEmpty()) m_defaultZone = id;
@@ -98,6 +99,17 @@ void NavGraph::addEdge(const QString& fromZone, Qt::Key arrow, const QString& to
     it->edges.push_back({ int(arrow), toZone });
 }
 
+void NavGraph::addBoundaryEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone)
+{
+    auto it = m_zones.find(fromZone);
+    // A self boundary edge would mean "consume at the edge", which geometry already does when nothing sits
+    // beside the zone — and a real containment pin is addEdge's job. Refuse it rather than give it a meaning.
+    if (it == m_zones.end() || toZone.isEmpty() || toZone == fromZone) return;
+    for (const auto& e : it->boundary)
+        if (e.first == int(arrow) && e.second == toZone) return;   // idempotent
+    it->boundary.push_back({ int(arrow), toZone });
+}
+
 // ---------------------------------------------------------------------------------------- accessors
 
 QString NavGraph::zone() const { return m_zone; }
@@ -138,6 +150,14 @@ int NavGraph::stepSelectable(const QString& zone, int from, int dir) const
 // Nearest zone in an arrow direction. (dRow,dCol) is the unit arrow vector; exactly one component is
 // non-zero. Candidates are zones strictly past `from` along that axis; rank by (primary distance, secondary
 // distance, registration order).
+//
+// Left/Right consider ONLY zones in the same row (issue #355, the themed twin of #353's NavRing::pickBeside):
+// with nothing beside the zone in its own row the press finds no candidate and is consumed, instead of hopping
+// diagonally into whichever row happens to hold the nearest column. Ranking by column distance with the row as
+// a mere tiebreak is exactly what carried the themed home's Right onto the audio page's lyric list (row 21,
+// col 1 — the nearest column to the right of every home zone) whenever that list was counted up under the
+// home. A crossing that genuinely needs a diagonal declares it (addBoundaryEdge). Up/Down are unchanged: the
+// nearest row wins and the column is only the tiebreak, so a vertical stack may still shift column.
 QString NavGraph::nearestZone(const QString& from, int dRow, int dCol) const
 {
     auto fit = m_zones.constFind(from);
@@ -150,7 +170,7 @@ QString NavGraph::nearestZone(const QString& from, int dRow, int dCol) const
         const int dr = it->row - fr, dc = it->col - fc;
         int primary, secondary;
         if (dRow != 0) { if (dr * dRow <= 0) continue; primary = std::abs(dr); secondary = std::abs(dc); }
-        else           { if (dc * dCol <= 0) continue; primary = std::abs(dc); secondary = std::abs(dr); }
+        else           { if (dc * dCol <= 0 || dr != 0) continue; primary = std::abs(dc); secondary = 0; }
         if (primary < bestPrimary ||
             (primary == bestPrimary && (secondary < bestSecondary ||
              (secondary == bestSecondary && it->order < bestOrder)))) {
@@ -271,7 +291,16 @@ bool NavGraph::move(int arrow)
         }
     }
 
-    // 3. Geometric crossing (carries the index). Hidden zones are not navigable targets.
+    // 3. Geometric crossing (carries the index). Hidden zones are not navigable targets. A declared BOUNDARY
+    //    edge for this key is consulted first — it is a named geometric crossing (see addBoundaryEdge), so it
+    //    carries the index exactly as geometry does; a hidden target makes it inert and geometry decides.
+    for (const auto& e : z.boundary) {
+        if (e.first != arrow) continue;
+        auto tit = m_zones.constFind(e.second);
+        if (tit == m_zones.constEnd() || tit->count <= 0) continue;
+        setSelection(e.second, snapIndex(e.second, m_index));
+        return true;
+    }
     QString nz = nearestZone(m_zone, dRow, dCol);
     if (nz.isEmpty()) return false;
     if (m_zones[nz].count <= 0) return false;
@@ -389,9 +418,13 @@ bool NavGraph::validate(QString* whyNot) const
     // structural property (a declared A->B transition proves the pair is one navigable surface even when
     // the reverse leg is an activation/dismissal rather than an arrow, e.g. the inline action chooser).
     QHash<QString, QSet<QString>> declared;   // undirected declared adjacency (both endpoints registered)
-    for (auto it = m_zones.constBegin(); it != m_zones.constEnd(); ++it)
+    // Boundary edges (addBoundaryEdge) are real arrow transitions too, so they join the declared set.
+    for (auto it = m_zones.constBegin(); it != m_zones.constEnd(); ++it) {
         for (const auto& e : it->edges)
             if (m_zones.contains(e.second)) { declared[it.key()].insert(e.second); declared[e.second].insert(it.key()); }
+        for (const auto& e : it->boundary)
+            if (m_zones.contains(e.second)) { declared[it.key()].insert(e.second); declared[e.second].insert(it.key()); }
+    }
 
     QString start = m_zones.contains(m_defaultZone) ? m_defaultZone : m_order.front();
     QSet<QString> seen{start};

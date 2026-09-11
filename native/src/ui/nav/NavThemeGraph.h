@@ -201,10 +201,10 @@ inline void buildAudioPageNavGraph(NavGraph& g)
     g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("lyrics"));
     // TRIPWIRE, and deliberately unkillable today — say so, because a mutation run reports it as a survivor
     // and a survivor with no explanation gets deleted. Removing this line changes NOTHING right now: with the
-    // lyric zone hidden, geometric crossing to the right of the queue finds `lyrics` FIRST (column 1, against
-    // detailActions' column 8), sees count 0 and refuses, so the arrow is contained anyway. It is here for the
-    // day something else is registered in a column right of the queue, when the absence of this line would
-    // silently become an escape onto a live home zone from a modal page. Same reasoning as every other SELF
+    // lyric zone hidden, geometric crossing to the right of the queue finds `lyrics` FIRST (column 1 — and the
+    // only candidate at all, since Left/Right never leave the row, issue #355), sees count 0 and refuses, so
+    // the arrow is contained anyway. It is here for the day something else is registered right of the queue in
+    // row 21, when the absence of this line would silently become an escape from a modal page. Same reasoning as every other SELF
     // pin above; those are killable only because something IS reachable in their direction.
     g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("queue"));
     // The lyric list's own containment. Left returns to the queue (the reverse of the crossing above); Right is
@@ -252,15 +252,17 @@ enum class ReaderKind { Book, Pdf, Comic };
 //     Count-gated (fed from the ReaderBridge's bookmarkCount); a book/pdf/comic with no bookmarks holds it at
 //     0, so it is never a crossing target and focus can never strand on an empty list (the empty-state IS the
 //     hidden zone). Reachable from the ToC by Left/Right (the two panels sit side by side) AND from the settings
-//     row by geometry Right — the latter is what makes it reachable on a Pdf/Comic, where readerToc is gated
-//     off so the ToC can't be the bridge to it.
+//     row by Right off its last control — the latter is what makes it reachable on a Pdf/Comic, where readerToc
+//     is gated off so the ToC can't be the bridge to it.
 //
 // Declared edges: just readerNav --Up--> readerSettings (chosen so none blocks a zone's ALONG-axis internal
 // stepping — a declared edge is consulted before axis stepping, so declaring Up/Down on a Vertical list zone
-// would freeze its scrolling). Everything else is GEOMETRIC: readerToc/readerSettings/readerNav are stacked in
-// col 0 (crossed by Up/Down at a list's edge) and readerBookmarks sits at col 1, so the ToC↔bookmark-list
-// switch and the settings-row→bookmark-list reach are the nearest-zone crossing in the cross-axis direction —
-// no declared edge needed (and a declared same-index cross would report "no move", swallowing the step's feel).
+// would freeze its scrolling), plus ONE boundary edge, readerSettings --Right--> readerBookmarks (see below).
+// Everything else is GEOMETRIC: readerToc/readerSettings/readerNav are stacked in col 0 (crossed by Up/Down at
+// a list's edge) and readerBookmarks sits at col 1 in the ToC's row, so the ToC↔bookmark-list switch is the
+// same-row nearest-zone crossing — no declared edge needed (and a declared same-index cross would report "no
+// move", swallowing the step's feel). The settings row sits a row BELOW the bookmark list, and Left/Right never
+// cross rows by geometry (issue #355), so its reach is the boundary edge.
 // Containment SELF edges pin the OUTWARD arrows that would otherwise run off the surface into nothing (mirrors
 // the detail view's SELF-edge pins).
 inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
@@ -292,10 +294,16 @@ inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
     // only at the list's edge.
     //
     // readerSettings gets NO horizontal pin, and must not: Left/Right are its along axis. Left at the first
-    // control and Right at the last fall through to geometry — nothing sits left of col 0, so Left is a
-    // contained no-op on its own, while Right resolves to readerBookmarks (col 1). That crossing is the ONLY
-    // path to the bookmark list on a Pdf/Comic (their ToC is gated, so the toc↔bookmarks bridge is inert
-    // there); with an empty list it too is gated and the step is simply a no-op.
+    // control and Right at the last fall through past the row's own stepping — nothing sits left of col 0, so
+    // Left is a contained no-op on its own, while Right reaches readerBookmarks (row 0, col 1). That crossing is
+    // the ONLY path to the bookmark list on a Pdf/Comic (their ToC is gated, so the toc↔bookmarks bridge is
+    // inert there); with an empty list it too is gated and the step is simply a no-op.
+    //
+    // It is a DIAGONAL (row 1 -> row 0), which geometry no longer takes: a Left/Right with nothing beside it in
+    // its own row is consumed (issue #355). So it is declared as a BOUNDARY edge — consulted only once the row's
+    // stepping is exhausted, i.e. exactly where geometry used to resolve it, carrying the index as geometry did.
+    // A plain addEdge here would be the freezing mistake above: it is consulted BEFORE axis stepping.
+    g.addBoundaryEdge(QStringLiteral("readerSettings"), Qt::Key_Right, QStringLiteral("readerBookmarks"));
     g.addEdge(QStringLiteral("readerNav"), Qt::Key_Down, QStringLiteral("readerNav"));
     g.addEdge(QStringLiteral("readerToc"), Qt::Key_Left,  QStringLiteral("readerToc"));
     g.addEdge(QStringLiteral("readerBookmarks"), Qt::Key_Right, QStringLiteral("readerBookmarks"));
