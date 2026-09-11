@@ -5640,9 +5640,16 @@ void MainWindow::openBrowseContextMenu()
                              && home_->trackFavoriteForRow(-1, &trackFav);
     const browse::TrackFavVerb trackFavVerb =
         browse::trackFavoriteVerb(trackFav, hasTrackFav && FavoritesStore::isFavorite(trackFav.itemId));
+    // #365: the rest of that track row's verbs — Add to playlist (the P key's picker) and Download, the second
+    // only on a track whose download actually happens (browse::trackMenuVerbsFor says which, and why). Classic
+    // only, for #297's reason: the themed chooser carries both. The row is COPIED here, before the menu opens.
+    browse::TrackMenuVerbs trackVerbs;
+    MediaItem trackRow;
+    const bool hasTrackVerbs = jfThemedIdx < 0 && stack_->currentWidget() == home_
+                               && home_->trackMenuForRow(-1, &trackVerbs, &trackRow);
 
     enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow,
-                RemoveMusicServer, TrackFavorite };
+                RemoveMusicServer, TrackFavorite, TrackPlaylist, TrackDownload };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5665,6 +5672,8 @@ void MainWindow::openBrowseContextMenu()
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
     if (trackFavVerb != browse::TrackFavVerb::None) offer(TrackFavorite, trackFavoriteVerbLabel(trackFavVerb));
+    if (hasTrackVerbs && trackVerbs.playlist) offer(TrackPlaylist, trackPlaylistVerbLabel());
+    if (hasTrackVerbs && trackVerbs.download) offer(TrackDownload, trackDownloadVerbLabel());
     if (hasPort) offer(NativePort, tr("Native port…"));
     if (hasJfDownload)
         offer(JellyfinDl, jfKind == int(browse::JellyfinDownloadTarget::Kind::Item)
@@ -5692,6 +5701,10 @@ void MainWindow::openBrowseContextMenu()
         // #297. The track was resolved before the menu opened (above), so a grid that moved under the nested
         // loop cannot make this star a different row. Through the store, so the love hook sends any server star.
         case TrackFavorite: pressTrackFavorite(trackFav); break;
+        // #365. Both act on the row COPIED before the menu opened. The playlist picker is a nested loop of its
+        // own, so it runs a turn later, on that copy — the P key's shape (HomeView::queueAddToPlaylist).
+        case TrackPlaylist: home_->queueAddToPlaylist(trackRow); break;
+        case TrackDownload: home_->downloadBrowseItem(trackRow); break;
         // Resolved BEFORE the menu opened, for the reason the native-port arm below states: the grid can
         // move under a NavMenu, and re-reading the cursor here would download whatever it moved to.
         case JellyfinDl:
@@ -13044,8 +13057,9 @@ bool MainWindow::browseQueueTarget(browse::QueueTarget* out) const
 void MainWindow::showBrowseQueueMenu(int itemsRow)
 {
     if (NavOverlay::topmost()) return;
+    if (!home_) return;
     browse::QueueTarget t;
-    if (!home_ || !home_->queueTargetForRow(itemsRow, &t)) return;
+    const bool hasQueue = home_->queueTargetForRow(itemsRow, &t);
     // #297: a TRACK row also stars from here — the classic layout's twin of the themed chooser's Favorite
     // row. Resolved BEFORE the menu opens, like the queue target above it: the menu is a nested loop and the
     // row it was opened on is the one it must act on. An album row answers None and gets only the queue verbs.
@@ -13053,12 +13067,33 @@ void MainWindow::showBrowseQueueMenu(int itemsRow)
     const bool hasFav = home_->trackFavoriteForRow(itemsRow, &fav);
     const browse::TrackFavVerb favVerb =
         browse::trackFavoriteVerb(fav, hasFav && FavoritesStore::isFavorite(fav.itemId));
-    QStringList labels{ queueVerbLabel(false), queueVerbLabel(true) };
-    if (favVerb != browse::TrackFavVerb::None) labels << trackFavoriteVerbLabel(favVerb);
-    const int pick = NavMenu::pick(favVerb != browse::TrackFavVerb::None ? tr("Track") : tr("Queue"), labels, this);
-    if (pick < 0) return;
-    if (pick == 2) { pressTrackFavorite(fav); return; }
-    queueMusic(t, /*playNext*/ pick == 1);
+    // #365: Add to playlist, and Download where it downloads — over a COPY of the row taken now, for the same
+    // reason. An add-on's track reaches this menu too (it has no queue verbs, and gets only these two).
+    browse::TrackMenuVerbs trackVerbs;
+    MediaItem trackRow;
+    const bool hasTrackVerbs = home_->trackMenuForRow(itemsRow, &trackVerbs, &trackRow);
+    if (!hasQueue && !hasTrackVerbs) return;
+
+    enum Verb { AddToQueue, PlayNext, TrackFavorite, TrackPlaylist, TrackDownload };
+    QVector<int> verbs;
+    QStringList labels;
+    auto offer = [&](int v, const QString& label) { verbs.push_back(v); labels << label; };
+    if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
+    if (favVerb != browse::TrackFavVerb::None) offer(TrackFavorite, trackFavoriteVerbLabel(favVerb));
+    if (hasTrackVerbs && trackVerbs.playlist) offer(TrackPlaylist, trackPlaylistVerbLabel());
+    if (hasTrackVerbs && trackVerbs.download) offer(TrackDownload, trackDownloadVerbLabel());
+    const bool isTrack = favVerb != browse::TrackFavVerb::None || hasTrackVerbs;
+    const int pick = NavMenu::pick(isTrack ? tr("Track") : tr("Queue"), labels, this);
+    if (pick < 0 || pick >= verbs.size()) return;
+    switch (verbs.at(pick))
+    {
+        case AddToQueue:    queueMusic(t, /*playNext*/ false); break;
+        case PlayNext:      queueMusic(t, /*playNext*/ true); break;
+        case TrackFavorite: pressTrackFavorite(fav); break;
+        // #365: the P key's picker on the copied row, a turn later; the themed Download's crawl on the same copy.
+        case TrackPlaylist: home_->queueAddToPlaylist(trackRow); break;
+        case TrackDownload: home_->downloadBrowseItem(trackRow); break;
+    }
 }
 
 // THE VERB. Everything above is reach; this is what "Add to queue" / "Play next" mean.

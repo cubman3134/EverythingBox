@@ -2923,6 +2923,116 @@ else
     echo "FAIL: favourites shelf open routing (#364) — HomeView::openFavorite has drifted from the probed router."; fail=1
   fi
 fi
+
+# Classic track-row verbs (issue #365). #297 put Favorite in the classic layout's two menus on a music track row
+# and named two more verbs the themed chooser has: Add to playlist (reachable only through P / the pad's R) and
+# Download (not at all). browse::trackMenuVerbsFor decides which rows get them, and probe_leafroute §9 pins it,
+# together with browse::queueOnRowCopy, the P key's copy-and-queue shape. HomeView and MainWindow link nothing
+# headlessly, so this is the half that lives there:
+#
+#  1. BOTH MENUS READ THE ROW BEFORE THEY OPEN. openBrowseContextMenu (Start) and showBrowseQueueMenu (the
+#     right-click / long-press) each call home_->trackMenuForRow ahead of their NavMenu::pick, so the row is a
+#     copy taken before a nested loop can rebuild the list under it.
+#  2. BOTH MENUS PRESS THROUGH THE SHARED ENTRIES: home_->queueAddToPlaylist (the P key's picker, on a copy, a
+#     turn later) and home_->downloadBrowseItem (the themed Download's crawl). Neither hands a classic row to a
+#     themed-index verb (addBrowseItemToPlaylist / downloadThemedLeaf).
+#  3. THE ROW READER ASKS THE PROBED FUNCTION. HomeView::trackMenuForRow calls browse::trackMenuVerbsFor, and
+#     refuses the Home list and the Recent / Downloaded levels, where both verbs would only toast.
+#  4. THE PLAYLIST ENTRY IS THE PROBED SHAPE. HomeView::queueAddToPlaylist goes through browse::queueOnRowCopy,
+#     which still takes its row BY VALUE and still queues.
+#  5. ONE DOWNLOAD BODY. downloadThemedLeaf hands its row to downloadBrowseItem.
+#  6. THE RIGHT-CLICK ROUTES AN ADD-ON'S TRACK ROW, before its Home-list guard (which returns first on every
+#     browse row).
+#
+# Comments are stripped first, as in the gates above. Every test counts rather than "| grep -q", and line
+# numbers come from awk, so pipefail cannot turn a match into a failure.
+echo "=== classic track-row verbs (#365) ==="
+TV_V="$HERE/../src/ui/HomeView.cpp"
+TV_M="$HERE/../src/ui/MainWindow.cpp"
+TV_Q="$HERE/../src/browse/QueuedRowVerb.h"
+tv_fail=0
+tv_note() { echo "  $1"; tv_fail=1; }
+if [ ! -f "$TV_V" ] || [ ! -f "$TV_M" ] || [ ! -f "$TV_Q" ]; then
+  echo "FAIL: classic track-row verbs (HomeView.cpp / MainWindow.cpp / QueuedRowVerb.h not found under $HERE/../src)"; fail=1
+else
+  tv_v="$(mktemp)"; tv_m="$(mktemp)"; tv_q="$(mktemp)"; tv_fn="$(mktemp)"
+  sed -E 's://.*$::' "$TV_V" > "$tv_v"
+  sed -E 's://.*$::' "$TV_M" > "$tv_m"
+  sed -E 's://.*$::' "$TV_Q" > "$tv_q"
+  # One function's body: from the line that STARTS with its signature to the first lone closing brace.
+  tv_body() { awk -v sig="$2" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$1" </dev/null > "$tv_fn"; }
+  tv_count() { grep -cF -- "$1" "$tv_fn" || true; }
+  tv_line() { awk -v s="$1" 'index($0, s) { print NR; exit }' "$tv_fn" </dev/null; }
+
+  # --- 1 + 2. Both menus read the row before they open, and press through the shared entries. ---
+  for tv_f in 'void MainWindow::openBrowseContextMenu(' 'void MainWindow::showBrowseQueueMenu('; do
+    tv_body "$tv_m" "$tv_f"
+    tv_n="$(wc -l < "$tv_fn" | tr -d '[:space:]')"
+    if [ "$tv_n" -lt 15 ]; then
+      tv_note "${tv_f#void } came out as $tv_n line(s): renamed or moved, and nothing below is being checked for it."
+      continue
+    fi
+    tv_ask="$(tv_line 'home_->trackMenuForRow(')"
+    tv_pick="$(tv_line 'NavMenu::pick(')"
+    [ -n "$tv_ask" ] || tv_note "${tv_f#void } never asks home_->trackMenuForRow: the menu offers no Add to playlist / Download on a track row again."
+    [ -n "$tv_pick" ] || tv_note "${tv_f#void } no longer calls NavMenu::pick, so clause 1's ordering is checking nothing."
+    if [ -n "$tv_ask" ] && [ -n "$tv_pick" ] && [ "$tv_ask" -gt "$tv_pick" ]; then
+      tv_note "${tv_f#void } reads the track row AFTER its NavMenu::pick. The pick is a nested loop; the row it acts on must be the copy taken before it opened."
+    fi
+    [ "$(tv_count 'home_->queueAddToPlaylist(')" -ge 1 ] \
+      || tv_note "${tv_f#void } does not press Add to playlist through home_->queueAddToPlaylist (the P key's copy-and-queue shape)."
+    [ "$(tv_count 'home_->downloadBrowseItem(')" -ge 1 ] \
+      || tv_note "${tv_f#void } does not press Download through home_->downloadBrowseItem (the themed Download's one crawl entry)."
+    [ "$(grep -cE '(addBrowseItemToPlaylist|downloadThemedLeaf)[[:space:]]*\(' "$tv_fn" || true)" -eq 0 ] \
+      || tv_note "${tv_f#void } calls a THEMED-index verb (addBrowseItemToPlaylist / downloadThemedLeaf). A classic menu's row is an items_ row, not a themed browse index."
+  done
+
+  # --- 3. The row reader asks the probed function, and refuses the lists where both verbs only toast. ---
+  tv_body "$tv_v" 'bool HomeView::trackMenuForRow('
+  if [ "$(wc -l < "$tv_fn" | tr -d '[:space:]')" -lt 8 ]; then
+    tv_note "HomeView::trackMenuForRow was not found (or shrank): nothing is checking the row reader both menus use."
+  else
+    [ "$(tv_count 'browse::trackMenuVerbsFor(')" -ge 1 ] \
+      || tv_note "HomeView::trackMenuForRow does not ask browse::trackMenuVerbsFor. It is deciding on its own which rows get Download, and probe_leafroute §9 is checking a function nothing calls."
+    for tv_g in 'recentView_' 'atRecentsLevel()' 'atDownloadsLevel()'; do
+      [ "$(tv_count "$tv_g")" -ge 1 ] \
+        || tv_note "HomeView::trackMenuForRow no longer refuses $tv_g. Both verbs only toast there, and a menu row that only toasts is what #365 declined to add."
+    done
+  fi
+
+  # --- 4. The playlist entry is the probed shape. ---
+  tv_body "$tv_v" 'void HomeView::queueAddToPlaylist('
+  [ "$(tv_count 'browse::queueOnRowCopy(')" -ge 1 ] \
+    || tv_note "HomeView::queueAddToPlaylist does not go through browse::queueOnRowCopy. probe_leafroute §9e pins THAT shape (a copy, a turn later); anything else is the P key's use-after-free waiting to come back."
+  [ "$(grep -cE 'void queueOnRowCopy\(QObject\* context, MediaItem row,' "$tv_q" || true)" -ge 1 ] \
+    || tv_note "browse::queueOnRowCopy no longer takes its row BY VALUE. A reference would alias items_ straight through the picker's nested loops."
+  [ "$(grep -cF 'Qt::QueuedConnection' "$tv_q" || true)" -ge 1 ] \
+    || tv_note "browse::queueOnRowCopy no longer queues. The picker would open inside the press that asked for it."
+
+  # --- 5. One download body. ---
+  tv_body "$tv_v" 'void HomeView::downloadThemedLeaf('
+  [ "$(tv_count 'downloadBrowseItem(')" -ge 1 ] \
+    || tv_note "downloadThemedLeaf no longer hands its row to downloadBrowseItem: the two layouts' Download verbs have two bodies again."
+
+  # --- 6. The right-click routes an add-on's track row, before the Home-list guard. ---
+  tv_body "$tv_v" 'void HomeView::showItemContextMenu('
+  tv_rt="$(tv_line 'trackMenuForRow(')"
+  tv_gd="$(tv_line 'if (!recentView_) return;')"
+  if [ -z "$tv_rt" ]; then
+    tv_note "showItemContextMenu never asks trackMenuForRow: a right-click on an add-on's track row does nothing again."
+  elif [ -z "$tv_gd" ]; then
+    tv_note "showItemContextMenu's Home-list guard was not found, so clause 6's ordering is checking nothing."
+  elif [ "$tv_rt" -gt "$tv_gd" ]; then
+    tv_note "showItemContextMenu asks trackMenuForRow only AFTER its Home-list guard, which returns first on every browse row."
+  fi
+
+  rm -f "$tv_v" "$tv_m" "$tv_q" "$tv_fn"
+  if [ "$tv_fail" -eq 0 ]; then
+    echo "PASS: classic track-row verbs (#365) (both menus copy the row before they open and press through queueAddToPlaylist / downloadBrowseItem; the row reader asks the probed function)"
+  else
+    echo "FAIL: classic track-row verbs (#365) — the classic menus have drifted from the probed decision."; fail=1
+  fi
+fi
 echo
 
 # Jellyfin play-site gate (issue #83). Two facts that live in MainWindow, which links nothing headlessly

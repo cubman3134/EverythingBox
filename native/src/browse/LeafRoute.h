@@ -186,4 +186,34 @@ namespace browse
     // saying the opposite of what it does is worse than no verb, so the label is decided here, not guessed.
     enum class TrackFavVerb { None, Add, Remove };
     TrackFavVerb trackFavoriteVerb(const FavoriteItem& fav, bool alreadyFavorite);
+
+    // ---- The rest of a TRACK row's verbs on the classic menus: Add to playlist, Download (issue #365) ------
+    // #297 put Favorite in the classic layout's two menus (Start, and the right-click / long-press) and named two
+    // more verbs the themed chooser has that those menus lacked. This is the decision behind both, out of HomeView
+    // so a probe can state it; HomeView::trackMenuForRow supplies the one fact it cannot see (the add-on).
+    //
+    // WHICH ROWS ARE TRACK ROWS. Exactly two families:
+    //   * a LIBRARY track — local, or a Subsonic / Jellyfin / EverythingBox-server track merged into the same
+    //     artists — which is what queueTargetFor calls a Track, the reading #297's Favorite already makes;
+    //   * an ADD-ON's track: a leaf typed track / song / music on a level (or a row) that names an add-on.
+    //
+    // ADD TO PLAYLIST on both: the picker the P key has always opened on any such row.
+    //
+    // DOWNLOAD ONLY WHERE A DOWNLOAD HAPPENS. #365 drove the themed Download verb on each kind first:
+    //   a local library track   "Nothing here could be downloaded." — and it is already on this machine
+    //   a Subsonic track        the same sentence; no request ever reaches the server
+    //   a SCRIPT add-on's track (the AIO catalog's MusicBrainz rows: metadata, no url) — the same sentence
+    //   a REMOTE add-on's track whose /stream answers — downloaded, byte for byte
+    // because HomeView's download crawl has an arm for a remote add-on's leaf (its /stream) and none for a row
+    // with no add-on or for a script add-on's track. So Download is offered for exactly the last kind: a verb
+    // that can only say "nothing here" is not copied onto a second surface. The themed chooser offering it on
+    // every leaf is #372.
+    enum class TrackAddon { None, Script, Remote };   // the add-on the row's download crawl would walk
+    struct TrackMenuVerbs
+    {
+        bool playlist = false;   // "Add to playlist…"
+        bool download = false;   // "Download"
+        bool any() const { return playlist || download; }
+    };
+    TrackMenuVerbs trackMenuVerbsFor(const MediaItem& it, TrackAddon addon);
 }

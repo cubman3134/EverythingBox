@@ -34,3 +34,10 @@ void MainWindow::pressTrackFavorite(const FavoriteItem& fav)
     notify(nowFavorite ? tr("Added “%1” to Favorites.").arg(fav.title) : tr("Removed from Favorites."),
            kFeedbackShort);
 }
+
+// ---- #365: the rest of a track row's verbs, in the same two menus -----------------------------------------
+// Which rows get them is browse::trackMenuVerbsFor (LeafRoute.h, with the evidence #365 drove for Download);
+// the presses are HomeView's own entries — queueAddToPlaylist (the P key's picker, on a copy, a turn later) and
+// downloadBrowseItem (the themed Download's crawl). Only the words live here, said once for both menus.
+QString MainWindow::trackPlaylistVerbLabel() const { return tr("Add to playlist…"); }
+QString MainWindow::trackDownloadVerbLabel() const { return tr("Download"); }

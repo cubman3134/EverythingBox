@@ -149,6 +149,35 @@ TrackFavVerb trackFavoriteVerb(const FavoriteItem& fav, bool alreadyFavorite)
     return alreadyFavorite ? TrackFavVerb::Remove : TrackFavVerb::Add;
 }
 
+TrackMenuVerbs trackMenuVerbsFor(const MediaItem& it, TrackAddon addon)
+{
+    TrackMenuVerbs v;
+    // Not media, or not a row a playlist could ever re-open: a synthetic '_' row, a guidance line, a Recent
+    // divider (the three addItemToPlaylistInteractive refuses itself), a container, or a row with no id to file.
+    if (it.type.startsWith(QLatin1Char('_')) || it.type == QLatin1String("info")
+        || it.type == QLatin1String("rechdr") || it.expandable || it.id.isEmpty())
+        return v;
+    // A LIBRARY track, asked of queueTargetFor exactly as trackFavoriteFor asks it. NEVER Download, whatever
+    // add-on a caller believes is behind it: a local file is already local, and a Subsonic / Jellyfin / server
+    // track has no add-on for the crawl to walk, so the press could only say "Nothing here could be downloaded."
+    if (queueTargetFor(it).what == QueueAdd::Track) { v.playlist = true; return v; }
+    // A row in the library track's own spelling that is not a usable Track names no file. It is a library row
+    // that names nothing, not an add-on's — so nothing, for queueTargetFor's reason.
+    if (it.mime.startsWith(QLatin1String(kMusicTrackPrefix))) return v;
+    // An ADD-ON's track: a music leaf, under an add-on. The three spellings are the music-leaf types
+    // core::mediaCategory files under "audio" (an album is a container, and caught above).
+    if (addon == TrackAddon::None) return v;
+    static const char* const kAddonTrackTypes[] = { "track", "song", "music" };
+    bool track = false;
+    for (const char* t : kAddonTrackTypes)
+        if (it.type == QLatin1String(t)) { track = true; break; }
+    if (!track) return v;
+    v.playlist = true;
+    // ...and Download only where the crawl downloads: a REMOTE add-on's leaf, through its /stream.
+    v.download = (addon == TrackAddon::Remote);
+    return v;
+}
+
 ThemedEnter themedEnterFor(const QString& type, bool expandable)
 {
     if (expandable) return ThemedEnter::Drill;                        // a container: series / console / volume

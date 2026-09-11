@@ -59,12 +59,20 @@
 //      sentence and never the add-on one; an add-on's favourite — including one TYPED "track" — still routes
 //      to its add-on and still reports it missing; the path, Steam and Epic arms are untouched; and routing
 //      every row fires no love hook and leaves the store exactly as it was.
+//   §9 ADD TO PLAYLIST AND DOWNLOAD ON A CLASSIC TRACK ROW (issue #365). Which rows the classic menus offer the
+//      two verbs on (browse::trackMenuVerbsFor): Add to playlist on every library track — local and Subsonic,
+//      asked of the real album builder's rows — and on an add-on's track; Download ONLY on a remote add-on's
+//      track, the one kind whose download actually happens, and never on a library track in any add-on context.
+//      Plus the shape the playlist verb is reached through (browse::queueOnRowCopy): not run inside the press,
+//      run once a turn later, and run on the row as it was when pressed even after the list it came from has
+//      been overwritten at that index and reallocated. That last clause is the P key's use-after-free.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
 #include "FavoriteRoute.h"
 #include "JellyfinCatalogs.h"
 #include "LeafRoute.h"
 #include "MusicCatalogs.h"
+#include "QueuedRowVerb.h"
 #include "ServerMusic.h"
 #include "Subsonic.h"
 #include "SyntheticCatalogs.h"
@@ -941,6 +949,173 @@ int main(int argc, char** argv)
         FavoritesStore::setLoveHook({});
         for (const FavoriteItem& f : all) FavoritesStore::remove(f.itemId);
         CHECK(FavoritesStore::list().isEmpty());
+    }
+
+    // ---- §9 ADD TO PLAYLIST AND DOWNLOAD ON A CLASSIC TRACK ROW (issue #365) ------------------------------
+    // #297 gave a track row Favorite in both classic menus and left two verbs the themed chooser has: Add to
+    // playlist (reachable only through P / the pad's R) and Download (not at all). Download was driven on the
+    // themed layout before being offered here, and it only ever did anything on a remote add-on's track — so
+    // this pins the rows, and pins that Download is NOT spread to the kinds where it can only say "Nothing here
+    // could be downloaded."
+    {
+        using browse::TrackAddon;
+        using browse::TrackMenuVerbs;
+        const TrackAddon kAll[] = { TrackAddon::None, TrackAddon::Script, TrackAddon::Remote };
+        const QString dawnPath = QStringLiteral("C:/music/Vol 1/01 Dawn.flac");
+
+        // 9a. EVERY LOCAL TRACK ROW OF A REAL ALBUM: Add to playlist, and no Download — in ANY add-on context. A
+        // library level has no add-on, but the answer must not depend on that: a local file is already local.
+        // The album's own action row ("Play album", a '_' row) gets neither.
+        const MusicLibrary::Index idx = oneAlbumIndex();
+        const MediaCatalog album = browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover);
+        int localTracks = 0, others = 0;
+        MediaItem dawn;
+        for (const MediaItem& it : album.items)
+        {
+            const bool isTrack = browse::queueTargetFor(it).what == browse::QueueAdd::Track;
+            for (TrackAddon a : kAll)
+            {
+                const TrackMenuVerbs v = browse::trackMenuVerbsFor(it, a);
+                CHECK(v.playlist == isTrack);    // the queue's reading of "a track" and this one agree, row for row
+                CHECK(!v.download);
+                CHECK(v.any() == isTrack);
+            }
+            if (isTrack) ++localTracks; else ++others;
+            if (it.url == dawnPath) dawn = it;
+        }
+        CHECK(localTracks == 2);
+        CHECK(others >= 1);                      // the Play-album row really was asked
+        CHECK(dawn.url == dawnPath);
+
+        // 9b. A SUBSONIC TRACK ROW, from the SAME builder over an index whose ids are Subsonic's own — the shape
+        // SubsonicClient's index has (IndexTrack::path is the qualified id, never a signed url). Add to playlist,
+        // and no Download: #365 pressed the themed Download on exactly this row and no request reached the server.
+        {
+            const QString srv = QStringLiteral("3f2b8c1e-6a4d-4e0b-9a51-2c7d8e9f0a1b");
+            MusicLibrary::Index sub = oneAlbumIndex();
+            MusicLibrary::Album& b = sub.artists[0].albums[0];
+            b.key = Subsonic::qualify(srv, Subsonic::Kind::Album, QStringLiteral("al-1"));
+            b.tracks[0].path = Subsonic::qualify(srv, Subsonic::Kind::Track, QStringLiteral("tr-1"));
+            b.tracks[1].path = Subsonic::qualify(srv, Subsonic::Kind::Track, QStringLiteral("tr-2"));
+            CHECK(Subsonic::isQualified(b.key) && Subsonic::isQualified(b.tracks[0].path));   // fixture sanity
+            const MediaCatalog subAlbum = browse::musicAlbumCatalog(sub, b.key, noCover);
+            int subTracks = 0;
+            for (const MediaItem& it : subAlbum.items)
+            {
+                if (!Subsonic::isQualified(it.url)) continue;
+                ++subTracks;
+                CHECK(browse::queueTargetFor(it).what == browse::QueueAdd::Track);
+                for (TrackAddon a : kAll)
+                {
+                    const TrackMenuVerbs v = browse::trackMenuVerbsFor(it, a);
+                    CHECK(v.playlist);
+                    CHECK(!v.download);
+                }
+            }
+            CHECK(subTracks == 2);   // a builder that emitted nothing would pass the loop above vacuously
+        }
+
+        // 9c. AN ADD-ON'S TRACK, typed any of the three music-leaf spellings an add-on uses. With no add-on behind
+        // it, nothing (it is not an add-on's row then, and not a library row either). Under a SCRIPT add-on — the
+        // AIO catalog's MusicBrainz track shape, metadata with no url — Add to playlist but no Download: the crawl
+        // has no arm for it and the themed press said "Nothing here could be downloaded." Under a REMOTE add-on,
+        // both: its /stream is what the crawl downloads, and the themed press did download it.
+        for (const char* type : { "track", "song", "music" })
+        {
+            MediaItem t;
+            t.id = QStringLiteral("fx-song-1"); t.title = QStringLiteral("Addon Song One");
+            t.type = QString::fromLatin1(type); t.expandable = false;
+            const TrackMenuVerbs none = browse::trackMenuVerbsFor(t, TrackAddon::None);
+            CHECK(!none.playlist && !none.download);
+            const TrackMenuVerbs script = browse::trackMenuVerbsFor(t, TrackAddon::Script);
+            CHECK(script.playlist && !script.download);
+            const TrackMenuVerbs remote = browse::trackMenuVerbsFor(t, TrackAddon::Remote);
+            CHECK(remote.playlist && remote.download);
+        }
+
+        // 9d. NOTHING THAT IS NOT A TRACK ROW. Without this, 9a-9c are satisfied by a function that offers both
+        // verbs on everything under a remote add-on — and the Start menu would grow Download on a film, which is
+        // not this menu's verb to carry.
+        {
+            auto row = [](const QString& type, bool expandable, const QString& id) {
+                MediaItem m; m.type = type; m.expandable = expandable; m.id = id; m.title = QStringLiteral("x");
+                return m;
+            };
+            const MediaItem film      = row(QStringLiteral("movie"), false, QStringLiteral("tt0816692"));
+            const MediaItem episode   = row(QStringLiteral("episode"), false, QStringLiteral("tt1:1:1"));
+            const MediaItem book      = row(QStringLiteral("audiobook"), false, QStringLiteral("ab-1"));
+            const MediaItem albumRow  = row(QStringLiteral("music"), true, QStringLiteral("al-1"));   // a container
+            const MediaItem artist    = row(QStringLiteral("track"), true, QStringLiteral("ar-1"));   // expandable
+            const MediaItem synthetic = row(QStringLiteral("_playlists"), false, QStringLiteral("_playlists"));
+            const MediaItem guidance  = row(QStringLiteral("info"), false, QStringLiteral("info:empty"));
+            const MediaItem divider   = row(QStringLiteral("rechdr"), false, QStringLiteral("hdr"));
+            const MediaItem noId      = row(QStringLiteral("track"), false, QString());   // unfileable
+            // A row carrying the LIBRARY track mime that names no file: a library row, never an add-on's, so an
+            // add-on context must not rescue it into a Download (§7's noFile row, asked here in every context).
+            MediaItem noFile; noFile.type = QString::fromLatin1(browse::kMusicTrackType);
+            noFile.mime = QString::fromLatin1(browse::kMusicTrackPrefix) + QString::fromLatin1(kAlbumKey);
+            noFile.id = QStringLiteral("C:/music/gone.flac");
+            for (const MediaItem& it : { film, episode, book, albumRow, artist, synthetic, guidance, divider, noId,
+                                         noFile })
+                for (TrackAddon a : kAll)
+                {
+                    const TrackMenuVerbs v = browse::trackMenuVerbsFor(it, a);
+                    CHECK(!v.playlist && !v.download && !v.any());
+                }
+            // ...and the album-list rows of a real artist (the album row, Play all, Shuffle all).
+            const MediaCatalog artistCat = browse::musicArtistCatalog(idx, QStringLiteral("the hollows"), noCover);
+            CHECK(!artistCat.items.isEmpty());
+            for (const MediaItem& it : artistCat.items)
+                for (TrackAddon a : kAll)
+                    CHECK(!browse::trackMenuVerbsFor(it, a).any());
+        }
+
+        // 9e. THE PLAYLIST VERB'S SHAPE — the P key's, lifted into browse::queueOnRowCopy. The picker it opens is a
+        // nested loop, so it must not run inside the press; and addItemToPlaylistInteractive reads its item AFTER
+        // those loops, so what it gets must be a copy taken at the press, not a view into the list the row came
+        // from. The list is overwritten at the SAME index (a re-present filing a different row there) and then
+        // reallocated, both after the call and before the turn: a reference would see the other row, or freed
+        // memory holding it.
+        {
+            QVector<MediaItem> rows = album.items;
+            int at = -1;
+            for (int i = 0; i < rows.size(); ++i)
+                if (rows[i].url == dawnPath) at = i;
+            CHECK(at >= 0);
+            if (at >= 0)
+            {
+                const MediaItem pressed = rows[at];
+                QObject owner;
+                QVector<MediaItem> seen;
+                browse::queueOnRowCopy(&owner, rows[at], [&seen](const MediaItem& m) { seen.push_back(m); });
+                CHECK(seen.isEmpty());                                      // QUEUED: nothing ran in the press
+                rows[at].title = QStringLiteral("Somebody Else");
+                rows[at].id = rows[at].url = QStringLiteral("C:/music/elsewhere.flac");
+                rows[at].type = QStringLiteral("movie");
+                rows.resize(rows.size() + 256);                             // ...and the list reallocates
+                QCoreApplication::sendPostedEvents(nullptr, 0);
+                CHECK(seen.size() == 1);                                    // once, a turn later
+                if (seen.size() == 1)
+                {
+                    CHECK(seen.at(0).id == pressed.id);
+                    CHECK(seen.at(0).url == pressed.url);
+                    CHECK(seen.at(0).title == pressed.title);
+                    CHECK(seen.at(0).type == pressed.type);
+                    CHECK(seen.at(0).mime == pressed.mime);
+                    CHECK(seen.at(0).id == dawnPath);
+                }
+                QCoreApplication::sendPostedEvents(nullptr, 0);
+                CHECK(seen.size() == 1);                                    // and never again
+            }
+            // The owner going first cancels it: a menu's HomeView torn down before the turn must not be called into.
+            bool ran = false;
+            {
+                QObject gone;
+                browse::queueOnRowCopy(&gone, dawn, [&ran](const MediaItem&) { ran = true; });
+            }
+            QCoreApplication::sendPostedEvents(nullptr, 0);
+            CHECK(!ran);
+        }
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }
