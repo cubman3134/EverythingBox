@@ -559,6 +559,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # playThemedLeaf), and the themed Enter fork. Pure, and deliberately free of the music TU's
         # link edge so the lean browse probes can keep it.
         src/browse/LeafRoute.cpp src/browse/LeafRoute.h
+        # #364: what a row on the Favorites shelf opens. Its own TU, not LeafRoute's, because it reads the
+        # music suppliers' id parsers and LeafRoute is linked by probes that carry none of them.
+        src/browse/FavoriteRoute.cpp src/browse/FavoriteRoute.h
         # THE ONE EPG GRID, and its two suppliers (#75 inc 3 / #179 inc 2). GuideGrid holds the builder;
         # LiveTvGuide feeds it from an M3U + XMLTV, ChannelGuide from a computed personal-channel day.
         src/browse/GuideGrid.cpp    src/browse/GuideGrid.h
@@ -3032,7 +3035,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/RecentStore.cpp src/core/RecentStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
-        src/core/Tombstones.cpp src/core/Tombstones.h)
+        src/core/Tombstones.cpp src/core/Tombstones.h
+        # #364: what a row on the Favorites shelf opens (FavoriteRoute), and the id readers it routes a
+        # track by (Subsonic.h / ServerMusic.h; Jellyfin is above). All pure QtCore units.
+        src/browse/FavoriteRoute.cpp src/browse/FavoriteRoute.h
+        src/core/Subsonic.cpp src/core/Subsonic.h
+        src/core/ServerMusic.cpp src/core/ServerMusic.h)
     target_include_directories(probe_leafroute PRIVATE src src/core src/media src/addons src/browse src/ebook src/theme2)
     target_link_libraries(probe_leafroute PRIVATE Qt6::Core Qt6::Network Qt6::Gui tag)
 

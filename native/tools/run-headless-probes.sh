@@ -2843,6 +2843,88 @@ else
 fi
 echo
 
+# Favourites-shelf open routing (issue #364). A starred music track opened from Home's ★ Favorites shelf said
+# "That favourite's source addon isn't available": HomeView::openFavorite had no track arm, so a track
+# favourite (id + type "track", no path, no add-on) fell through to the add-on lookup. The decision now lives in
+# browse::favoriteRouteFor (src/browse/FavoriteRoute.cpp), which probe_leafroute §8 pins. HomeView links nothing
+# headlessly, so this is the half that lives there:
+#
+#  1. openFavorite ASKS THE ROUTER, and the merged-PC-game arm (which nothing pure can see) still runs first.
+#  2. EVERY ROUTE IS HANDLED. Each FavoriteOpen enumerator, read out of the enum itself, appears in
+#     openFavorite: a route the router returns and the shelf ignores is a press that does nothing.
+#  3. A TRACK THAT CANNOT OPEN SAYS ITS OWN SENTENCE, and the add-on sentence stays where it was: openFavorite
+#     shows browse::favoriteOpenSentence, and "source addon isn't available" appears in it exactly once.
+#  4. OPENING WRITES NOTHING. No FavoritesStore add / addFromSource / remove / toggle in openFavorite: the love
+#     hook sends a server star on add, and pressing Play is not starring.
+#  5. THE SHELF BUILDS ITS ROWS WITH THE PROBED BUILDER. buildFavorites calls browse::favoriteShelfRow, so the
+#     row §8 routes is the row the shelf draws.
+#
+# Comments are stripped first, as in the gates above. Every test counts rather than "| grep -q", and line
+# numbers come from awk rather than a "| head" pipeline, so pipefail cannot turn a match into a failure.
+echo "=== favourites shelf open routing (#364) ==="
+FO_H="$HERE/../src/browse/FavoriteRoute.h"
+FO_V="$HERE/../src/ui/HomeView.cpp"
+fo_fail=0
+fo_note() { echo "  $1"; fo_fail=1; }
+if [ ! -f "$FO_H" ] || [ ! -f "$FO_V" ]; then
+  echo "FAIL: favourites shelf open routing (FavoriteRoute.h / HomeView.cpp not found under $HERE/../src)"; fail=1
+else
+  fo_h="$(mktemp)"; fo_v="$(mktemp)"; fo_fn="$(mktemp)"; fo_bf="$(mktemp)"
+  sed -E 's://.*$::' "$FO_H" > "$fo_h"
+  sed -E 's://.*$::' "$FO_V" > "$fo_v"
+  awk '/^void HomeView::openFavorite\(/ { p = 1 } p { print } p && /^\}/ { exit }' "$fo_v" </dev/null > "$fo_fn"
+  awk '/auto buildFavorites[[:space:]]*=/ { p = 1 } p { print } p && /^    \};/ { exit }' "$fo_v" </dev/null > "$fo_bf"
+  fo_n="$(wc -l < "$fo_fn" | tr -d '[:space:]')"
+  fo_nb="$(wc -l < "$fo_bf" | tr -d '[:space:]')"
+  # Floors well under today's sizes. An empty region makes every clause below vacuously true.
+  [ "$fo_n" -ge 30 ] || fo_note "HomeView::openFavorite came out as $fo_n line(s): its signature changed or it moved, and nothing below is being checked."
+  [ "$fo_nb" -ge 5 ] || fo_note "the buildFavorites lambda came out as $fo_nb line(s): it was renamed or reshaped, and clause 5 is checking nothing."
+
+  # --- 1. The router is asked, after the merged-PC-game arm. ---
+  fo_pc="$(awk '/isMergedPcGame\(/ { print NR; exit }' "$fo_fn" </dev/null)"
+  fo_rt="$(awk '/browse::favoriteRouteFor\(/ { print NR; exit }' "$fo_fn" </dev/null)"
+  [ -n "$fo_rt" ] || fo_note "HomeView::openFavorite does not call browse::favoriteRouteFor. It is deciding on its own again, and a starred track goes back to asking for an add-on it never had."
+  [ -n "$fo_pc" ] || fo_note "HomeView::openFavorite no longer checks isMergedPcGame. A favourited merged PC game has no path and no launch in its id; without that arm it opens nothing."
+  if [ -n "$fo_pc" ] && [ -n "$fo_rt" ] && [ "$fo_pc" -gt "$fo_rt" ]; then
+    fo_note "HomeView::openFavorite asks the router BEFORE the merged-PC-game arm. A merged game that has gained a path would re-open by it instead of through the picker that chooses which copy runs."
+  fi
+
+  # --- 2. Every route is handled. ---
+  fo_enums="$(awk '/enum class FavoriteOpen/ { p = 1; next } p && /\}/ { exit } p' "$fo_h" </dev/null \
+              | tr ',' '\n' | sed -E 's/[^A-Za-z]//g' | grep -E '^[A-Za-z]+$' | sort -u)"
+  fo_nenum="$(printf '%s\n' "$fo_enums" | grep -c . || true)"
+  [ "$fo_nenum" -ge 5 ] || fo_note "found $fo_nenum FavoriteOpen enumerator(s), expected the whole enum. It was renamed or reshaped and this clause compares almost nothing."
+  for fo_e in $fo_enums; do
+    # A word boundary after the name, so AddonMissing cannot stand in for a missing Addon arm.
+    [ "$(grep -cE "FavoriteOpen::${fo_e}([^A-Za-z0-9_]|\$)" "$fo_fn" || true)" -ge 1 ] \
+      || fo_note "route FavoriteOpen::$fo_e is not handled in HomeView::openFavorite. browse::favoriteRouteFor can return it, and the shelf would do nothing at all when it does."
+  done
+
+  # --- 3. A track that cannot open says its own sentence; the add-on one stays single. ---
+  [ "$(grep -cF 'browse::favoriteOpenSentence(' "$fo_fn" || true)" -ge 1 ] \
+    || fo_note "HomeView::openFavorite never shows browse::favoriteOpenSentence. A moved file or a removed server would open nothing and say nothing."
+  fo_ao="$(grep -cF "source addon isn't available" "$fo_fn" || true)"
+  [ "$fo_ao" -eq 1 ] \
+    || fo_note "HomeView::openFavorite says \"source addon isn't available\" $fo_ao time(s); expected exactly once, for AddonMissing. A second copy is a track arm borrowing the add-on sentence, which sends somebody looking for an add-on the track never had."
+
+  # --- 4. Opening writes nothing. ---
+  fo_w="$(grep -cE 'FavoritesStore::(add|addFromSource|remove|toggle)[[:space:]]*\(' "$fo_fn" || true)"
+  [ "$fo_w" -eq 0 ] \
+    || fo_note "HomeView::openFavorite writes the favourites store ($fo_w call(s)). Opening a favourite must not add, remove or toggle it: the love hook sends a server star on add, and pressing Play is not starring."
+
+  # --- 5. The shelf builds its rows with the probed builder. ---
+  [ "$(grep -cF 'browse::favoriteShelfRow(' "$fo_bf" || true)" -ge 1 ] \
+    || fo_note "buildFavorites does not build its rows with browse::favoriteShelfRow. probe_leafroute §8 routes THAT builder's rows; a shelf building its own is a shelf nothing checks."
+
+  rm -f "$fo_h" "$fo_v" "$fo_fn" "$fo_bf"
+  if [ "$fo_fail" -eq 0 ]; then
+    echo "PASS: favourites shelf open routing (#364) ($fo_nenum route(s) handled in openFavorite, router after the PC-game arm, no store writes)"
+  else
+    echo "FAIL: favourites shelf open routing (#364) — HomeView::openFavorite has drifted from the probed router."; fail=1
+  fi
+fi
+echo
+
 # Jellyfin play-site gate (issue #83). Two facts that live in MainWindow, which links nothing headlessly
 # -- so they are text gates, the same answer this suite already gives for the local-leaf routing parity and
 # the synthetic-level Back markers. Both were LIVE DEFECTS found on the fixture drive, not hypotheses.
