@@ -9,7 +9,10 @@
 // Vertical (an XMB item column): Up/Down step the index and cross by row only at an edge; Left/Right always
 // cross by column. GEOMETRIC zone crossing carries the index (clamped + divider-snapped). "Nearest" =
 // smallest primary-axis grid distance in the arrow's direction, then smallest secondary-axis distance, then
-// registration order. A hidden zone (count 0) is never a crossing target.
+// registration order. Left/Right only ever consider zones in the SAME ROW (issue #355): with nothing beside
+// the zone in its row the press is consumed, never a diagonal hop into another row. Up/Down may still land in
+// another column. The nearest candidate is chosen regardless of count, and a hidden one (count 0) refuses the
+// crossing: a hidden zone is never a crossing target, and it also blocks the zones behind it.
 //
 // Declared edges (addEdge): a screen can declare "from zone A, this key crosses to zone B" transitions that
 // pure geometry cannot express — the themed screens carry TWO independent always-visible cursors (the XMB
@@ -87,6 +90,14 @@ public:
     // no move, no geometric fallthrough. Used by modal surfaces (the themed detail view) to pin arrows that
     // would otherwise geometrically escape onto the zones they cover.
     void addEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone);
+    // Boundary transition: from `fromZone`, key `arrow` crosses to `toZone` ONLY where geometric crossing would
+    // otherwise run — after the zone's own along-axis stepping (and wrap) is exhausted. Unlike addEdge it never
+    // pre-empts stepping, so it may name a strip's ALONG-axis key without freezing the strip. The crossing
+    // behaves like a geometric one (it carries the index, clamped + divider-snapped) and is inert while the
+    // target is hidden (count 0), falling through to geometry. It exists for the crossing the same-row rule
+    // (above) would otherwise remove where a surface genuinely needs it: the reader's settings row -> bookmark
+    // list, a row apart, the only way to the bookmarks on a Pdf/Comic. validate() walks it like a declared edge.
+    void addBoundaryEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone);
 
     QString zone() const;   int index() const;
     // arrow is a Qt::Key (int for QML): declared-edge, then axis, then geometric resolution; returns false
@@ -138,7 +149,8 @@ private:
     struct Zone { int count = 0; int row = 0; int col = 0; Qt::Orientation axis = Qt::Horizontal;
                   bool wraps = false; int order = 0; QSet<int> unsel;
                   int memory = 0;                                  // last index when the selection left (NavRing::rememberSelection per zone)
-                  QVector<QPair<int, QString>> edges; };           // declared transitions: (key, target zone)
+                  QVector<QPair<int, QString>> edges;              // declared transitions: (key, target zone)
+                  QVector<QPair<int, QString>> boundary; };        // boundary transitions (addBoundaryEdge)
     struct Level { QString name; std::function<void()> onPop; };
 
     // Grid resolution helpers.

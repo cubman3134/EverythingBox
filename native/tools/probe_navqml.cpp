@@ -2868,6 +2868,304 @@ static void runHelpModeAsserts()
 }
 #endif // EB_HAVE_QML
 
+// ---------------------------------------------------------------- §27. Left/Right never cross ROWS (issue #355)
+//
+// #353 made a classic-surface Left/Right with nothing beside it in its row STAY PUT. The themed surfaces resolve
+// arrows through NavGraph instead, whose geometric step used to rank Left/Right candidates by column distance
+// with the row only as a tiebreak, so a press with no same-row zone hopped DIAGONALLY into another row.
+//
+// Where that actually bit (the enumeration in the #355 report): every themed home/browse graph carries the audio
+// page's `lyrics` zone at row 21, col 1 — the NEAREST column to the right of every home zone. It is meant to be
+// counted only while the audio page is open, but MainWindow::pushTrackLyrics recounts it from audioLyricCount on
+// every track change whenever the themed home is the current page, and audioLyricCount is not gated on the view.
+// So after Back from the audio page (the music plays on, #193) a queue advancing onto a track with synced lyrics
+// counts `lyrics` up UNDER the home, and Right off the last XMB category, off the last button of a grid theme's
+// bar, or Left off a one-button detail row, landed on that invisible list — where Enter seeks the music and
+// every arrow but Up/Down is refused, so the cursor is stranded until a mouse click.
+//
+// The rule now: a zone in the SAME ROW wins; with none, the press is consumed. Up/Down are unchanged. The one
+// crossing that genuinely needed a diagonal (the reader's settings row -> bookmark list, the only way to the
+// bookmarks on a Pdf/Comic) is kept by a declared boundary edge. The XMB's own column crossings were never
+// geometric (they are declared edges), and they are pinned here exactly as they were.
+static QString zid(const char* s) { return QString::fromLatin1(s); }
+
+// Directed BFS over (zone, index) states applying all four arrows — the set of zones arrow presses can reach.
+static std::set<QString> reachFrom(NavGraph& g, const QString& zone, int index)
+{
+    std::set<QString> reached;
+    std::set<std::pair<QString, int>> seen;
+    std::deque<std::pair<QString, int>> q;
+    g.select(zone, index);
+    q.push_back({ g.zone(), g.index() });
+    seen.insert({ g.zone(), g.index() });
+    reached.insert(g.zone());
+    static const Qt::Key arr[] = { Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right };
+    while (!q.empty()) {
+        auto [z, i] = q.front(); q.pop_front();
+        for (Qt::Key k : arr) {
+            g.select(z, i);
+            g.move(k);
+            auto st = std::make_pair(g.zone(), g.index());
+            if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+        }
+    }
+    return reached;
+}
+
+static std::set<QString> zoneSet(std::initializer_list<const char*> ids)
+{
+    std::set<QString> s;
+    for (const char* id : ids) s.insert(zid(id));
+    return s;
+}
+
+static void runSameRowAsserts()
+{
+    // (a) THE PURE RULE on a synthetic grid.
+    {
+        NavGraph g;
+        g.registerZone(zid("a"), 2, 0, 0);          // a Horizontal strip in row 0
+        g.registerZone(zid("diag"), 2, 1, 1);       // one row down, one column right: the diagonal candidate
+        g.select(zid("a"), 1);                      // the strip's LAST item: along-axis stepping is exhausted
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("a") && g.index() == 1,
+              "samerow: Right with nothing beside it in its row stays put (no diagonal hop)");
+        g.select(zid("diag"), 0);
+        CHECK(!g.move(Qt::Key_Left) && g.zone() == zid("diag") && g.index() == 0,
+              "samerow: Left with nothing beside it in its row stays put (no diagonal hop)");
+
+        // A same-row zone wins even when a zone in another row sits in a NEARER column.
+        g.registerZone(zid("beside"), 2, 0, 3);
+        g.select(zid("a"), 1);
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("beside") && g.index() == 1,
+              "samerow: a same-row zone 3 columns away beats a diagonal one 1 column away (index carried)");
+        g.select(zid("beside"), 0);
+        CHECK(g.move(Qt::Key_Left) && g.zone() == zid("a") && g.index() == 0,
+              "samerow: Left crosses back to the same-row zone");
+        // Among same-row zones the nearer column still wins.
+        g.registerZone(zid("near"), 2, 0, 2);
+        g.select(zid("a"), 1);
+        g.move(Qt::Key_Right);
+        CHECK(g.zone() == zid("near"), "samerow: among same-row zones the nearest column wins");
+
+        // A Vertical zone's Left/Right is always cross-axis: the same rule applies.
+        g.registerZone(zid("col"), 3, 5, 0, Qt::Vertical);
+        g.registerZone(zid("off"), 3, 6, 1);        // right of it, one row down
+        g.select(zid("col"), 1);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("col") && g.index() == 1,
+              "samerow: a vertical column's Right with no same-row zone stays put");
+
+        // Up/Down are UNCHANGED: nearest row first, column only as the tiebreak, then registration order.
+        g.select(zid("a"), 0);
+        CHECK(g.move(Qt::Key_Down) && g.zone() == zid("diag"),
+              "samerow: Down still crosses to the nearest row below, whatever its column");
+        g.select(zid("diag"), 1);
+        g.move(Qt::Key_Up);
+        CHECK(g.zone() == zid("a"), "samerow: Up still resolves row, then column, then registration order");
+        CHECK(g.validate(nullptr), "samerow: the synthetic grid still validates");
+    }
+
+    // (a2) A HIDDEN same-row zone still BLOCKS (unchanged, and load-bearing: the audio page's queue relies on the
+    //      hidden lyric zone being the nearest thing to its right — see buildAudioPageNavGraph's tripwire note).
+    {
+        NavGraph g;
+        g.registerZone(zid("q"), 3, 0, 0, Qt::Vertical);
+        g.registerZone(zid("l"), 0, 0, 1, Qt::Vertical);   // hidden
+        g.registerZone(zid("far"), 2, 0, 4);
+        g.select(zid("q"), 0);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("q"),
+              "samerow: a hidden same-row zone is still the nearest candidate and refuses the move");
+    }
+
+    // (b) THE XMB CROSSINGS, exactly as they were. They are declared edges (never geometry), so the rule cannot
+    //     touch them — pinned anyway, press by press, on the shipped builder.
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.select(zid("categories"), 2);
+        g.select(zid("items"), 5);                  // categories remembers 2
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("categories") && g.index() == 3,
+              "xmb: Right from the item column switches to AND steps the category axis (2 -> 3)");
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("categories") && g.index() == 4,
+              "xmb: Right along the category axis steps it (3 -> 4)");
+        CHECK(g.move(Qt::Key_Down) && g.zone() == zid("items") && g.index() == 6,
+              "xmb: Down from the category axis switches to AND steps the column (5 -> 6)");
+        CHECK(g.move(Qt::Key_Left) && g.zone() == zid("categories") && g.index() == 3,
+              "xmb: Left from the column switches to AND steps the category axis back (4 -> 3)");
+        CHECK(g.move(Qt::Key_Up) && g.zone() == zid("items") && g.index() == 5,
+              "xmb: Up from the category axis switches to AND steps up the column (6 -> 5)");
+        g.select(zid("categories"), 0);
+        CHECK(!g.move(Qt::Key_Left) && g.zone() == zid("categories") && g.index() == 0,
+              "xmb: Left off the first category is a no-op");
+        g.select(zid("categories"), 5);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("categories") && g.index() == 5,
+              "xmb: Right off the last category is a no-op");
+    }
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12, DetailState{}, CategoriesNav::Sidebar);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.setZoneCount(zid("buttons"), 3);
+        g.select(zid("categories"), 2);
+        g.select(zid("items"), 8);
+        g.move(Qt::Key_Left);
+        CHECK(g.zone() == zid("categories") && g.index() == 2,
+              "sidebar: Left from the grid enters the sidebar at its remembered row");
+        CHECK(!g.move(Qt::Key_Left) && g.zone() == zid("categories") && g.index() == 2,
+              "sidebar: Left in the sidebar is contained");
+        g.move(Qt::Key_Right);
+        CHECK(g.zone() == zid("items") && g.index() == 8, "sidebar: Right returns to the grid's remembered cell");
+    }
+
+    // (c) THE HARMFUL LANDINGS from the enumeration: the `lyrics` zone counted up under the home (the state
+    //     pushTrackLyrics leaves after Back from the audio page). Each press must now stay put.
+    {
+        NavGraph g;                                 // XMB home, last category
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.setZoneCount(zid("lyrics"), 7);           // stale: counted while the home is showing
+        g.select(zid("categories"), 5);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("categories") && g.index() == 5,
+              "stale-lyrics: Right off the last XMB category stays put (never the invisible lyric list)");
+        CHECK(reachFrom(g, zid("items"), 0) == zoneSet({ "items", "categories" }),
+              "stale-lyrics: no arrow sequence from the XMB home reaches the lyric zone");
+    }
+    {
+        NavGraph g;                                 // XMB home whose categories are not counted yet
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("lyrics"), 7);
+        g.select(zid("items"), 4);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("items") && g.index() == 4,
+              "stale-lyrics: Right from an XMB column with no category axis stays put");
+    }
+    {
+        NavGraph g;                                 // grid theme: the bottom button bar
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("buttons"), 3);
+        g.setZoneCount(zid("lyrics"), 7);
+        g.select(zid("buttons"), 2);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("buttons") && g.index() == 2,
+              "stale-lyrics: Right off the last button of a grid theme's bar stays put");
+        CHECK(reachFrom(g, zid("items"), 0) == zoneSet({ "items", "buttons" }),
+              "stale-lyrics: no arrow sequence from the grid home reaches the lyric zone");
+    }
+    {
+        NavGraph g;                                 // the detail view with a single action (it cannot wrap)
+        buildThemedNavGraph(g, 12, DetailState{ true, 1, 0 });
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.setZoneCount(zid("lyrics"), 7);
+        g.select(zid("detailActions"), 0);
+        CHECK(!g.move(Qt::Key_Left) && g.zone() == zid("detailActions") && g.index() == 0,
+              "stale-lyrics: Left off a one-button detail row stays put (the modal page does not leak)");
+        g.select(zid("detailActions"), 0);           // independent of the Left above
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("detailActions") && g.index() == 0,
+              "stale-lyrics: Right off a one-button detail row stays put");
+    }
+
+    // (d) THE INTENDED DIAGONAL, kept: the reader's settings row -> bookmark list (the only path to the bookmarks
+    //     on a Pdf/Comic, whose ToC is gated off). It still crosses only at the row's END, carrying the index.
+    {
+        NavGraph g;
+        buildReaderNavGraph(g, ReaderKind::Comic);
+        g.setZoneCount(zid("readerSettings"), 4);
+        g.setZoneCount(zid("readerToc"), 0);
+        g.setZoneCount(zid("readerBookmarks"), 2);
+        g.select(zid("readerSettings"), 3);
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("readerBookmarks") && g.index() == 1,
+              "reader: Right off the END of the settings row still reaches the bookmark list (index carried)");
+        g.select(zid("readerSettings"), 1);
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("readerSettings") && g.index() == 2,
+              "reader: Right mid-row still steps along the settings row (not frozen)");
+        g.select(zid("readerBookmarks"), 0);
+        CHECK(!g.move(Qt::Key_Left) && g.zone() == zid("readerBookmarks"),
+              "reader: Left off the bookmark list with the ToC gated stays put, as before");
+        CHECK(reachFrom(g, zid("readerNav"), 0) == zoneSet({ "readerNav", "readerSettings", "readerBookmarks" }),
+              "reader(comic): arrows reach nav + settings + bookmark list");
+        g.setZoneCount(zid("readerBookmarks"), 0);
+        g.select(zid("readerSettings"), 3);
+        CHECK(!g.move(Qt::Key_Right) && g.zone() == zid("readerSettings") && g.index() == 3,
+              "reader: with no bookmarks, Right off the settings row's end is a no-op");
+    }
+    {
+        NavGraph g;
+        buildReaderNavGraph(g, ReaderKind::Book);
+        g.setZoneCount(zid("readerSettings"), 5);
+        g.setZoneCount(zid("readerToc"), 5);
+        g.setZoneCount(zid("readerBookmarks"), 2);
+        g.select(zid("readerToc"), 1);
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("readerBookmarks") && g.index() == 1,
+              "reader(book): Right off the ToC crosses to the bookmark list beside it");
+        g.select(zid("readerBookmarks"), 0);
+        CHECK(g.move(Qt::Key_Left) && g.zone() == zid("readerToc") && g.index() == 0,
+              "reader(book): Left off the bookmark list crosses back to the ToC");
+        g.select(zid("readerSettings"), 4);
+        CHECK(g.move(Qt::Key_Right) && g.zone() == zid("readerBookmarks"),
+              "reader(book): Right off the settings row's end reaches the bookmark list");
+        CHECK(reachFrom(g, zid("readerNav"), 0)
+                  == zoneSet({ "readerNav", "readerSettings", "readerToc", "readerBookmarks" }),
+              "reader(book): arrows reach all four reader zones");
+    }
+
+    // (e) REACHABILITY over every other graph the rule touches: each live zone stays reachable by arrows.
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        CHECK(reachFrom(g, zid("items"), 0) == zoneSet({ "items", "categories" }),
+              "reach: XMB home -> item column + category axis");
+    }
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("buttons"), 3);
+        CHECK(reachFrom(g, zid("items"), 0) == zoneSet({ "items", "buttons" }),
+              "reach: grid home -> grid + button bar");
+    }
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12, DetailState{}, CategoriesNav::Sidebar);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.setZoneCount(zid("buttons"), 3);
+        CHECK(reachFrom(g, zid("items"), 0) == zoneSet({ "items", "categories", "buttons" }),
+              "reach: sidebar home -> grid + sidebar + button bar");
+    }
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12, DetailState{ true, 4, 5 });
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        CHECK(reachFrom(g, zid("detailActions"), 0) == zoneSet({ "detailActions", "detailBody", "detailChildren" }),
+              "reach: detail view -> action row + body + children, and nothing under it");
+    }
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(zid("categories"), 6);
+        g.setZoneCount(zid("chrome"), 1);
+        g.setZoneCount(zid("transport"), 8);
+        g.setZoneCount(zid("queue"), 5);
+        g.setZoneCount(zid("lyrics"), 7);
+        CHECK(reachFrom(g, zid("transport"), 0) == zoneSet({ "chrome", "transport", "queue", "lyrics" }),
+              "reach: audio page -> chrome + transport + queue + lyrics, and nothing under it");
+    }
+    {
+        NavGraph g;
+        buildPanelNavGraph(g, 14);
+        CHECK(reachFrom(g, zid("panelRows"), 0) == zoneSet({ "panelRows", "panelBack" }),
+              "reach: themed panel -> rows + header Back");
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");   // the runner loop invokes us without a -platform arg
@@ -4204,6 +4502,9 @@ int main(int argc, char** argv)
                   "panel-restore: pop re-selects the parent's remembered row (5), not row 0");
         }
     }
+
+    // §27: Left/Right with nothing beside it in its row stays put (issue #355) — pure NavGraph, both builds.
+    runSameRowAsserts();
 
 #ifdef EB_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
