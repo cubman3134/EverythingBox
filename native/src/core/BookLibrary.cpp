@@ -126,7 +126,8 @@ bool isReadingFile(const QString& path)
         || e == QStringLiteral("azw3") || e == QStringLiteral("azw") || e == QStringLiteral("mobi")
         || e == QStringLiteral("txt")  || e == QStringLiteral("text")
         || e == QStringLiteral("md")   || e == QStringLiteral("markdown")
-        || e == QStringLiteral("mdown")|| e == QStringLiteral("mkd");
+        || e == QStringLiteral("mdown")|| e == QStringLiteral("mkd")
+        || e == QStringLiteral("html") || e == QStringLiteral("htm");   // #259: a single-file HTML book
 }
 
 Kind kindFor(const QString& path)

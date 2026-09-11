@@ -1,4 +1,5 @@
 #include "TextBook.h"
+#include "HtmlText.h"
 #include "MarkdownHtml.h"
 
 #include <QCryptographicHash>
@@ -25,10 +26,41 @@ namespace
         s.replace(QLatin1Char('>'), QLatin1String("&gt;"));
         return s;
     }
+
+    // The WHATWG Encoding Standard's labels for windows-1252. "iso-8859-1" and "us-ascii" are among them: on
+    // the web those names MEAN windows-1252, and the pages that say them were written by tools that meant it.
+    bool isWindows1252Label(const QByteArray& label)
+    {
+        for (const char* x : { "windows-1252", "cp1252", "x-cp1252", "iso-8859-1", "iso8859-1", "iso88591",
+                               "iso_8859-1", "iso_8859-1:1987", "iso-ir-100", "latin1", "l1", "csisolatin1",
+                               "ibm819", "cp819", "us-ascii", "ascii", "ansi_x3.4-1968" })
+            if (label == x) return true;
+        return false;
+    }
+
+    // windows-1252, decoded here rather than through the platform's codec list, so that it means the same
+    // thing on every platform (Qt's own list has no windows-1252 where it is built without ICU). It is Latin-1
+    // except for 0x80-0x9F, where Latin-1 has invisible C1 controls and windows-1252 has the typographic set.
+    QString windows1252(const QByteArray& bytes)
+    {
+        static const char16_t high[32] = {
+            0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+            0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+            0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+            0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178 };
+        QString s(bytes.size(), Qt::Uninitialized);
+        for (qsizetype i = 0; i < bytes.size(); ++i)
+        {
+            const quint8 c = quint8(bytes.at(i));
+            s[i] = (c >= 0x80 && c < 0xA0) ? QChar(high[c - 0x80]) : QChar(c);
+        }
+        return s;
+    }
 }
 
 bool TextBook::isPlainTextPath(const QString& path) { return hasSuffix(path, { "txt", "text" }); }
 bool TextBook::isMarkdownPath(const QString& path)  { return hasSuffix(path, { "md", "markdown", "mdown", "mkd" }); }
+bool TextBook::isHtmlPath(const QString& path)      { return hasSuffix(path, { "html", "htm" }); }
 
 const char* TextBook::encodingName(Encoding e)
 {
@@ -40,11 +72,17 @@ const char* TextBook::encodingName(Encoding e)
     case Encoding::Utf8:       return "UTF-8";
     case Encoding::System:     return "system 8-bit codec";
     case Encoding::Latin1:     return "Latin-1";
+    case Encoding::Declared:   return "the document's declared charset";
     }
     return "";
 }
 
 QString TextBook::decode(const QByteArray& bytes, Encoding* used)
+{
+    return decode(bytes, QByteArray(), used);
+}
+
+QString TextBook::decode(const QByteArray& bytes, const QByteArray& declaredCharset, Encoding* used)
 {
     auto answer = [&](Encoding e, const QString& s) { if (used) *used = e; return s; };
 
@@ -61,6 +99,25 @@ QString TextBook::decode(const QByteArray& bytes, Encoding* used)
     {
         QStringDecoder d(QStringConverter::Utf16BE);
         return answer(Encoding::Utf16BeBom, d(bytes.mid(2)));
+    }
+
+    // 1b. The document's own statement (issue #259; the header says why it sits exactly here). A label that
+    //     names nothing decodable, or bytes that fail the decoder it names, fall through to rung 2.
+    const QByteArray label = declaredCharset.trimmed().toLower();
+    if (!label.isEmpty())
+    {
+        if (isWindows1252Label(label)) return answer(Encoding::Declared, windows1252(bytes));
+        // A UTF-16 label found by an ASCII scan contradicts itself (UTF-16 text is not ASCII-readable, and a
+        // UTF-16 file has a BOM, handled above); the Encoding Standard reads it as UTF-8, and so does this.
+        const QByteArray name = (label.startsWith("utf-16") || label == "unicode") ? QByteArray("utf-8") : label;
+        // STATELESS, so a sequence cut short at the end of the file is an error here rather than bytes the
+        // decoder quietly holds back waiting for more that never come.
+        QStringDecoder d(name.constData(), QStringConverter::Flag::Stateless);
+        if (d.isValid())
+        {
+            const QString s = d(bytes);
+            if (!d.hasError()) return answer(Encoding::Declared, s);
+        }
     }
 
     // 2. Strict UTF-8: the ERROR FLAG, not a look at the output. A file that decodes clean here is UTF-8 to
@@ -125,23 +182,44 @@ bool TextBook::open(const QString& path, QString* error)
     const QByteArray bytes = f.readAll();
     f.close();
 
-    const QString text = decode(bytes);
+    // An .html may say what its encoding is, and is asked (issue #259); a .txt or .md cannot, and is not.
+    const bool html = isHtmlPath(path);
+    const QString text = html ? decode(bytes, HtmlText::declaredCharset(bytes), &encoding_)
+                              : decode(bytes, &encoding_);
 
-    // Chapter bodies + their TOC titles, from whichever of the two formats this is.
+    // Chapter bodies + their TOC titles, from whichever of the three formats this is.
     QVector<QPair<QString, QString>> chapters;   // (title, html)
-    if (isMarkdownPath(path))
+    HtmlText::Document htmlDoc;
+    if (html)
+    {
+        // Relative images resolve against the file's OWN folder, not the staging folder the chapters land in.
+        htmlDoc = HtmlText::parse(text, QFileInfo(path).absolutePath());
+        for (const HtmlText::Chapter& c : htmlDoc.chapters)
+            chapters.append({ c.title, c.html });
+    }
+    else if (isMarkdownPath(path))
     {
         for (const MarkdownHtml::Section& s : MarkdownHtml::render(text))
             chapters.append({ s.title, s.html });
     }
-    if (chapters.isEmpty())
-        chapters.append({ QString(), plainTextToHtml(text) });   // .txt, and a .md with nothing in it
+    if (chapters.isEmpty())   // .txt, and a .md with nothing in it (HtmlText::parse never returns none)
+        chapters.append({ QString(), html ? QStringLiteral("<p></p>") : plainTextToHtml(text) });
 
     const QString hash = QString::fromLatin1(
         QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
     rootDir_ = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
                    .filePath(QStringLiteral("eb-text-") + hash);
     if (!QDir().mkpath(rootDir_)) return fail(QStringLiteral("Couldn't stage the book for reading."));
+
+    // Images an .html carried INSIDE itself (data: URIs), staged beside the chapters under the names
+    // HtmlText chose and the chapter HTML already uses - the same way an FB2's <binary> images are.
+    for (const HtmlText::StagedImage& img : htmlDoc.images)
+    {
+        QFile out(rootDir_ + QLatin1Char('/') + img.name);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) continue;
+        out.write(img.bytes);
+        out.close();
+    }
 
     chapterFiles_.clear();
     toc_.clear();
@@ -178,5 +256,11 @@ bool TextBook::open(const QString& path, QString* error)
     title_ = isMarkdownPath(path) && !chapters.first().first.isEmpty() ? chapters.first().first
                                                                       : QFileInfo(path).completeBaseName();
     author_.clear();
+    // An .html can state both: its <title> (else its first heading) and an author <meta>. Never guessed.
+    if (html)
+    {
+        if (!htmlDoc.title.trimmed().isEmpty()) title_ = htmlDoc.title.trimmed();
+        author_ = htmlDoc.author.trimmed();
+    }
     return true;
 }

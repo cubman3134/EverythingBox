@@ -257,7 +257,7 @@ namespace BookLibrary
     {
         QVector<Author> authors;    // sorted by display name; the unknown-author bucket LAST
         QVector<Series> series;     // EMPTY unless something named a series
-        int bookCount  = 0;         // .epub / .pdf / .fb2 / .mobi-family / .txt / .md
+        int bookCount  = 0;         // .epub / .pdf / .fb2 / .mobi-family / .txt / .md / .html
         int comicCount = 0;         // .cbz / .cbr
 
         // Deliberately only about `authors`: every book is filed under exactly one author bucket (an
@@ -280,7 +280,7 @@ namespace BookLibrary
     // ------------------------------------------------------------------------------------------------
 
     // "Is this a file this library scans": .epub / .pdf / .cbz / .cbr / .fb2 (and .fb2.zip / .fbz) /
-    // .mobi / .azw / .azw3 / .txt / .md, and nothing else. The remaining exclusions are deliberate and the
+    // .mobi / .azw / .azw3 / .txt / .md / .html / .htm, and nothing else. The remaining exclusions are deliberate and the
     // header says why for each — .cb7 and .cbt cost a whole-archive extraction to reach page one, and a bare
     // .zip is not claimed at all because "a zip in a books folder is a comic" is a guess with no marker
     // behind it. .fb2.zip IS claimed, and by whole NAME rather than by suffix, because the name says FB2 in
