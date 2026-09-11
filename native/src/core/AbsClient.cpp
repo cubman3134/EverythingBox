@@ -1,5 +1,6 @@
 #include "AbsClient.h"
 #include "AppBrand.h"
+#include "CoverFetch.h"
 #include "MetaCache.h"
 #include "RemoteAudiobook.h"
 
@@ -503,38 +504,46 @@ void AbsClient::prefetchCover(const QString& qualifiedId, std::function<void()> 
 
     const QString tag = QStringLiteral("cover|") + itemKey;
     if (inflight_.contains(tag)) return;
-    // ...and ASKED ONCE. A server that answers a cover request with something MetaCache cannot store — an
-    // empty body, a 200 that is really an error page — leaves imagePath() empty, so the "already on disk"
-    // test above says no on the next pass and this refetches. With `then` wired to a debounced re-render
-    // (which is what a browse level does with it) that is a fetch every few hundred milliseconds, for ever,
-    // against a server that has already said no. Found on the first live drive of this feature, where the
-    // fixture's empty cover produced exactly that loop.
+    // ...and ASKED ONCE A SESSION once the server has ANSWERED "no picture" — an empty body, a 404. Asking again
+    // on every repaint, with `then` wired to a debounced re-render (which is what a browse level does with it),
+    // is a fetch every few hundred milliseconds against a server that has already said no: the loop the first
+    // live drive of this feature walked into. But ONLY an answer is remembered. A failure — a dropped
+    // connection, a server restarting, a timeout, a proxy's error page — may well work on the next pass, and
+    // remembering it blanked the cover for the rest of the session though the art was there (#376).
+    // CoverFetch.h has the whole rule.
     if (coverMissing_.contains(itemKey)) return;
     inflight_.insert(tag);
 
     QNetworkRequest req{ QUrl(Abs::coverUrl(root, ref.itemId, srv.token)) };
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+    // Bounded, so a hung request cannot hold `tag` — and every later ask for this cover — all session. A
+    // timeout is a failure, not an answer.
+    req.setTransferTimeout(CoverFetch::kTransferTimeoutMs);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, itemKey, tag, then] {
         reply->deleteLater();
         inflight_.remove(tag);
-        if (reply->error() == QNetworkReply::NoError)
+        const bool       transportOk = reply->error() == QNetworkReply::NoError;
+        const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body   = transportOk ? reply->readAll() : QByteArray();
+        switch (CoverFetch::classify(transportOk, status, body))
         {
-            // storeImage records the FILE NAME, never the url it came from — which is what makes routing
-            // the cover through MetaCache safe at all, since that url carries the token.
-            MetaCache::storeImage(itemKey, QStringLiteral("cover"), QStringLiteral("cover.jpg"),
-                                  reply->header(QNetworkRequest::ContentTypeHeader).toString(),
-                                  reply->readAll());
+            case CoverFetch::Answer::Image:
+                // storeImage records the FILE NAME, never the url it came from — which is what makes routing
+                // the cover through MetaCache safe at all, since that url carries the token.
+                MetaCache::storeImage(itemKey, QStringLiteral("cover"), QStringLiteral("cover.jpg"),
+                                      reply->header(QNetworkRequest::ContentTypeHeader).toString(), body);
+                break;
+            case CoverFetch::Answer::Absent:   // the server said "no picture": remembered, by the ITEM key
+                coverMissing_.insert(itemKey);
+                break;
+            case CoverFetch::Answer::Retry:    // nobody answered: not remembered, asked again on a later pass
+                break;
         }
         // DID ANYTHING LAND? `then` means "new artwork is on disk, re-render", and firing it when nothing
-        // was stored is what makes the loop above possible. A cover that did not land is remembered as
-        // absent for this session rather than asked for again on every repaint.
-        if (MetaCache::imagePath(itemKey, QStringLiteral("cover")).isEmpty())
-        {
-            coverMissing_.insert(itemKey);
-            return;
-        }
+        // was stored is what makes the loop above possible. Only the disk says so.
+        if (MetaCache::imagePath(itemKey, QStringLiteral("cover")).isEmpty()) return;
         if (then) then();
     });
 }

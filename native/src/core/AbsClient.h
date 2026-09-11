@@ -146,6 +146,9 @@ public:
     // when it is cached or a fetch is in flight. `then` fires once the bytes have landed, so a level can
     // re-render with pictures on it.
     void prefetchCover(const QString& qualifiedId, std::function<void()> then = {});
+    // What this session remembers as "the server has no cover for this item" — item keys, never a url (the
+    // cover url carries the token). For probe_absclient, which holds it to exactly the answers that said so.
+    QSet<QString> coversKnownMissing() const { return coverMissing_; }
 
     // The LOCAL FILE MetaCache holds for this item's cover, or empty. Deliberately NOT a fallback to the
     // remote url: a MediaItem's thumbnailUrl is copied into caches and item records, and the remote url
@@ -194,8 +197,10 @@ private:
     QHash<QString, Abs::Session>    sessions_;    // qualified id -> its open play session
     QHash<QString, Reported>        reported_;    // qualified id -> what the server was last told
     QSet<QString>                   inflight_;    // "<what>|<target>" — coalesces duplicate fetches
-    // Items whose cover the server had nothing usable for. Remembered so a level does not re-ask on every
-    // repaint — see prefetchCover, and the loop the first live drive of this feature walked into.
+    // Items whose cover the server ANSWERED "no picture" for (an empty body, a 404/410) — this session only,
+    // in memory, never persisted. Remembered so a level does not re-ask on every repaint (see prefetchCover).
+    // A failure never lands here (#376), and nor does a url: item keys only, since the cover url carries the
+    // token. CoverFetch.h has the rule.
     QSet<QString>                   coverMissing_;
     QHash<QString, QVector<Done>>   waiting_;     // the callbacks a coalesced fetch still owes
 };

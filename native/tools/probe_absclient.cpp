@@ -40,6 +40,8 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "Audiobookshelf.h"
+#include "CoverFetch.h"
+#include "MetaCache.h"
 #include "PlaybackSession.h"
 #include "RemoteAudiobook.h"
 #include "ResumeStore.h"
@@ -55,6 +57,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -64,6 +68,7 @@
 #include <QUrlQuery>
 
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 
 static int g_fail = 0;
@@ -91,7 +96,18 @@ public:
     bool    refuseLogin = false;
     QString publishedServerId;
 
+    // #376: what a cover request for each item gets. An item not listed gets a real picture (coverBytes).
+    enum class Cover { Image, Empty, Http404, ServerError, HtmlPage, Hang };
+    QHash<QString, Cover> covers;
+    QByteArray coverBytes;
+    int hungAbandoned = 0;   // hung cover requests the CLIENT gave up on - which only its own timeout does
+
     explicit AbsStub(QObject* parent = nullptr) : QTcpServer(parent) {}
+
+    int coverAsks(const QString& itemId) const
+    {
+        return countOf(QStringLiteral("GET"), QStringLiteral("/api/items/") + itemId + QStringLiteral("/cover"));
+    }
 
     int countOf(const QString& method, const QString& pathPrefix) const
     {
@@ -271,7 +287,26 @@ private:
                             "\"progress\":0.5555,\"isFinished\":false}");
             return;
         }
-        if (path.contains(QLatin1String("/cover"))) { send(sock, 200, "JPEGBYTES", "image/jpeg"); return; }
+        if (path.startsWith(QLatin1String("/api/items/")) && path.endsWith(QLatin1String("/cover")))
+        {
+            switch (covers.value(path.section(QLatin1Char('/'), 3, 3), Cover::Image))
+            {
+                case Cover::Image:       send(sock, 200, coverBytes, "image/jpeg"); return;
+                case Cover::Empty:       send(sock, 200, QByteArray(), "image/jpeg"); return;
+                case Cover::Http404:     send(sock, 404, "Not Found", "text/plain"); return;
+                case Cover::ServerError: send(sock, 503, "Service Unavailable", "text/plain"); return;
+                // A reverse proxy's page, answered 200 and labelled as a picture (#377): only the bytes tell.
+                case Cover::HtmlPage:
+                    send(sock, 200, "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>"
+                                    "<body>The server is restarting.</body></html>\n", "image/jpeg");
+                    return;
+                // Say NOTHING and hold the socket open. Only the client's own transfer timeout ends this, and
+                // when it does the socket closes from the client's side - an event, counted, never a clock.
+                case Cover::Hang:
+                    connect(sock, &QTcpSocket::disconnected, this, [this] { ++hungAbandoned; });
+                    return;
+            }
+        }
         if (path.contains(QLatin1String("/file/")))  { send(sock, 200, "AUDIOBYTES", "audio/mpeg"); return; }
         send(sock, 404, "{}");
     }
@@ -1105,8 +1140,257 @@ static void testTokenNeverLands(const AbsStub& stub, const QString& scratchIni)
     }
 }
 
+// ==================================================================================================
+// COVER ANSWERS (#376) — what a cover reply is remembered as
+// ==================================================================================================
+// AbsClient kept its own "no art" set and put an item into it whenever nothing landed, WHATEVER the reason:
+// one dropped connection, one server restart, one timeout while the shelf was open, and that cover stayed
+// blank for the rest of the session though the art was there. The rule is CoverFetch::classify (#370): only
+// the server ANSWERING "no picture" (an empty 200, a 404/410) is remembered, and only for the session; a
+// failure is asked again. Every assertion here is a request count the stub saw, or bytes on disk.
+
+// A real picture - a complete 1x1 JPEG. Since #377 a body is a picture only if its own bytes say so.
+static const char* kCoverJpegBase64 =
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8Q"
+    "EBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=";
+
+// How many times `then` said "new artwork landed", per key. Static, because a reply that lands after its test
+// returned still calls back.
+static QHash<QString, int>& coverLandings() { static QHash<QString, int> h; return h; }
+
+// One pass of a level over one row: what HomeView::prefetchAbsCovers does for each row it draws.
+static void coverPass(const QString& key)
+{
+    AbsClient::instance().prefetchCover(key, [key] { ++coverLandings()[key]; });
+}
+static int landingsOf(const QString& key) { return coverLandings().value(key); }
+
+// What is ON DISK, as bytes: a cover is "stored" only if the file holds the picture, and "not stored" is
+// asserted over the whole folder, since #377's broken picture was a real file.
+static QByteArray coverFileBytes(const QString& key)
+{
+    QFile f(MetaCache::dirFor(key) + QStringLiteral("/cover.jpg"));   // AbsClient names every cover cover.jpg
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+static int coverFiles(const QString& key)
+{
+    return int(QDir(MetaCache::dirFor(key)).entryList({ QStringLiteral("cover.*") }, QDir::Files).size());
+}
+
+// Keep passing over the row - as a level re-rendering for other reasons does - until the stub has been asked
+// for it `n` times. A pass made while the earlier request is still in flight asks nothing, so this is also
+// how a failure is waited out without a clock: a failure that was REMEMBERED is never asked for again, and the
+// bound expires with the count short.
+static bool passUntilAsked(const AbsStub& stub, const QString& key, const QString& itemId, int n)
+{
+    return waitFor([&] {
+        if (stub.coverAsks(itemId) >= n) return true;
+        coverPass(key);
+        return stub.coverAsks(itemId) >= n;
+    }, 15000);
+}
+
+// Passes that must NOT reach the server, each watched for long enough that a request it caused would have been
+// answered. (The bound is only how long "nothing happens" is watched; nothing is asserted about time.)
+static void passesThatMustNotAsk(const QString& key, int passes)
+{
+    for (int i = 0; i < passes; ++i) { coverPass(key); waitFor([] { return false; }, 100); }
+}
+
+// THE NEXT SESSION, for real: a second PROCESS over the same data directory, so the only "no art" it could
+// know about is one that had been written down - which it never is.
+static int coverSessionChild(const QString& serverId, const QString& itemId)
+{
+    const QString key = Abs::qualify(serverId, itemId);
+    AbsServer srv;
+    if (key.isEmpty() || !AbsServerStore::get(serverId, srv)) return 2;   // the first session's row, same data dir
+    if (!AbsClient::instance().coverPath(key).isEmpty()) return 3;        // the first session stored nothing
+    bool landed = false;
+    AbsClient::instance().prefetchCover(key, [&] { landed = true; });
+    if (!waitFor([&] { return landed; }, 15000)) return 4;
+    return AbsClient::instance().coverPath(key).isEmpty() ? 5 : 0;
+}
+
+static void testCoverAnswers376(AbsStub& stub)
+{
+    AbsClient& c = AbsClient::instance();
+    stub.coverBytes = QByteArray::fromBase64(kCoverJpegBase64);
+    CHECK(stub.coverBytes.startsWith(QByteArray::fromHex("ffd8ff")) && stub.coverBytes.endsWith(QByteArray::fromHex("ffd9")));
+    const QString hang = QStringLiteral("li_cov_hang"), refused = QStringLiteral("li_cov_refused"),
+                  busy = QStringLiteral("li_cov_503"), page = QStringLiteral("li_cov_page"),
+                  gone = QStringLiteral("li_cov_404"), empty = QStringLiteral("li_cov_empty"),
+                  art = QStringLiteral("li_cov_art");
+    auto key = [](const QString& item) { return Abs::qualify(g_serverId, item); };
+    CHECK(!key(hang).isEmpty());
+
+    // ---- A TIMEOUT. Started first: the only thing that ends it is the client's own transfer timeout, and
+    // the cases below run while that runs. Until it ends, the request holds the in-flight tag - so a client
+    // with no timeout never asks for this cover again all session.
+    stub.covers[hang] = AbsStub::Cover::Hang;
+    coverPass(key(hang));
+    CHECK(waitFor([&] { return stub.coverAsks(hang) >= 1; }));
+
+    // ---- A REFUSED CONNECTION: the server is down for one pass (its row points at a port nothing listens on).
+    {
+        AbsServer srv;
+        CHECK(AbsServerStore::get(g_serverId, srv));
+        const QString liveUrl = srv.url;
+        quint16 deadPort = 0;
+        { QTcpServer door; if (door.listen(QHostAddress::LocalHost, 0)) deadPort = door.serverPort(); }
+        CHECK(deadPort != 0);
+        srv.url = QStringLiteral("http://127.0.0.1:%1").arg(deadPort);
+        AbsServerStore::update(srv);
+        coverPass(key(refused));
+        srv.url = liveUrl;
+        AbsServerStore::update(srv);                 // ...and it is back
+        // NOT VACUOUS: that pass really did ask (the dead port). A second pass made before any event can be
+        // delivered finds it in flight and asks nothing - had the first pass asked nothing, this one would
+        // reach the live stub at once.
+        coverPass(key(refused));
+        waitFor([] { return false; }, 300);
+        CHECK(stub.coverAsks(refused) == 0);
+        CHECK(passUntilAsked(stub, key(refused), refused, 1));   // a later pass asks again...
+        CHECK(waitFor([&] { return landingsOf(key(refused)) >= 1; }));
+        std::printf("376 abs: refused connection, then the server is back -> %d request(s) reached it, %d landing(s)\n",
+                    stub.coverAsks(refused), landingsOf(key(refused)));
+        CHECK(stub.coverAsks(refused) == 1);
+        CHECK(landingsOf(key(refused)) == 1);
+        CHECK(coverFileBytes(key(refused)) == stub.coverBytes);   // ...and the art ends up stored
+    }
+
+    // ---- A 5xx: the server is restarting. Not "no art"; the next pass gets the picture.
+    {
+        stub.covers[busy] = AbsStub::Cover::ServerError;
+        coverPass(key(busy));
+        CHECK(waitFor([&] { return stub.coverAsks(busy) >= 1; }));
+        stub.covers[busy] = AbsStub::Cover::Image;
+        CHECK(passUntilAsked(stub, key(busy), busy, 2));
+        CHECK(waitFor([&] { return landingsOf(key(busy)) >= 1; }));
+        std::printf("376 abs: 503, then the server is back -> %d request(s), %d landing(s)\n",
+                    stub.coverAsks(busy), landingsOf(key(busy)));
+        CHECK(stub.coverAsks(busy) == 2);
+        CHECK(landingsOf(key(busy)) == 1);
+        CHECK(coverFileBytes(key(busy)) == stub.coverBytes);
+    }
+
+    // ---- #377 THROUGH THIS CLIENT: a 200 that is a proxy's page, labelled image/jpeg. Not stored, not
+    // remembered, and the next pass gets the picture.
+    {
+        stub.covers[page] = AbsStub::Cover::HtmlPage;
+        coverPass(key(page));
+        CHECK(waitFor([&] { return stub.coverAsks(page) >= 1; }));
+        stub.covers[page] = AbsStub::Cover::Image;
+        CHECK(passUntilAsked(stub, key(page), page, 2));
+        CHECK(waitFor([&] { return landingsOf(key(page)) >= 1; }));
+        std::printf("376 abs: 200 + an HTML error page, then the real art -> %d request(s), %d landing(s)\n",
+                    stub.coverAsks(page), landingsOf(key(page)));
+        CHECK(stub.coverAsks(page) == 2);
+        CHECK(landingsOf(key(page)) == 1);
+        CHECK(coverFileBytes(key(page)) == stub.coverBytes);   // the picture, never the page
+    }
+
+    // ---- A GENUINE 404: the server answered "no such cover". Remembered for the session - even once the
+    // server has art, this session does not ask again (the next one does; see below).
+    {
+        stub.covers[gone] = AbsStub::Cover::Http404;
+        coverPass(key(gone));
+        CHECK(waitFor([&] { return c.coversKnownMissing().contains(key(gone)); }));
+        stub.covers[gone] = AbsStub::Cover::Image;
+        passesThatMustNotAsk(key(gone), 5);
+        std::printf("376 abs: 404, then 5 more passes -> %d request(s), %d landing(s)\n",
+                    stub.coverAsks(gone), landingsOf(key(gone)));
+        CHECK(stub.coverAsks(gone) == 1);
+        CHECK(landingsOf(key(gone)) == 0);           // `then` fires only for art on disk
+        CHECK(coverFiles(key(gone)) == 0);
+    }
+
+    // ---- AN EMPTY 200: also an answer. Remembered, asked once.
+    {
+        stub.covers[empty] = AbsStub::Cover::Empty;
+        coverPass(key(empty));
+        CHECK(waitFor([&] { return c.coversKnownMissing().contains(key(empty)); }));
+        passesThatMustNotAsk(key(empty), 3);
+        CHECK(stub.coverAsks(empty) == 1);
+        CHECK(landingsOf(key(empty)) == 0);
+        CHECK(coverFiles(key(empty)) == 0);
+    }
+
+    // ---- A REAL PICTURE: lands once, says so once, and a pass over the cached cover asks and fires nothing.
+    {
+        coverPass(key(art));
+        CHECK(waitFor([&] { return landingsOf(key(art)) >= 1; }));
+        passesThatMustNotAsk(key(art), 3);
+        CHECK(stub.coverAsks(art) == 1);
+        CHECK(landingsOf(key(art)) == 1);
+        CHECK(coverFileBytes(key(art)) == stub.coverBytes);
+    }
+
+    // ---- ...and back to the TIMEOUT. The client gives up (the stub sees the socket close from the client's
+    // side - an event, not a clock); that is Retry, never "no art", so a later pass gets the picture.
+    {
+        const bool gaveUp = waitFor([&] { return stub.hungAbandoned >= 1; }, CoverFetch::kTransferTimeoutMs + 15000);
+        std::printf("376 abs: hung cover request -> the client %s it\n", gaveUp ? "gave up on" : "NEVER gave up on");
+        CHECK(gaveUp);
+        stub.covers[hang] = AbsStub::Cover::Image;
+        CHECK(passUntilAsked(stub, key(hang), hang, 2));
+        CHECK(waitFor([&] { return landingsOf(key(hang)) >= 1; }));
+        CHECK(stub.coverAsks(hang) == 2);
+        CHECK(landingsOf(key(hang)) == 1);
+        CHECK(coverFileBytes(key(hang)) == stub.coverBytes);
+    }
+
+    // ---- EXACTLY what was answered "no picture" is remembered, and nothing that failed.
+    const QSet<QString> missing = c.coversKnownMissing();
+    CHECK(missing.contains(key(gone)) && missing.contains(key(empty)));
+    for (const QString& failed : { hang, refused, busy, page, art }) CHECK(!missing.contains(key(failed)));
+    CHECK(missing.size() == 2);
+
+    // ---- A NEW SESSION ASKS AGAIN: the 404'd item, whose server has art now.
+    {
+        QProcess child;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("EB_PROBE_DATA_DIR"), AppPaths::dataDir());
+        child.setProcessEnvironment(env);
+        child.start(QCoreApplication::applicationFilePath(), { QStringLiteral("cover-session"), g_serverId, gone });
+        CHECK(waitFor([&] { return child.state() == QProcess::NotRunning; }, 30000));
+        std::printf("376 abs: next session -> exit %d, %d request(s) for the 404'd cover in total\n",
+                    child.exitCode(), stub.coverAsks(gone));
+        CHECK(child.exitStatus() == QProcess::NormalExit);
+        CHECK(child.exitCode() == 0);
+        CHECK(stub.coverAsks(gone) == 2);
+        CHECK(coverFileBytes(key(gone)) == stub.coverBytes);
+    }
+
+    // ---- NO CREDENTIAL IN THE NEW STATE. The cover url carries the token; "no art" keys on the item key.
+    // Not vacuous: the token really did go out on the cover requests.
+    int tokenBearing = 0;
+    for (const AbsStub::Seen& s : stub.seen)
+        if (s.path.contains(QLatin1String("/cover")) && s.path.contains(QLatin1String(kToken))) ++tokenBearing;
+    CHECK(tokenBearing > 0);
+    QByteArray scanned;
+    for (const QString& k : missing) scanned += k.toUtf8() + '\n';
+    CHECK(!scanned.isEmpty());
+    for (const char* needle : { kToken, "token=", "http", "/api/", "127.0.0.1" })
+        CHECK(!scanned.contains(QByteArray(needle)));
+    // ...and nothing written beside the covers carries it either (testTokenNeverLands then sweeps the tree).
+    for (const QString& item : { hang, refused, busy, page, gone, empty, art })
+    {
+        QDirIterator it(MetaCache::dirFor(key(item)), QDir::Files);
+        while (it.hasNext())
+        {
+            QFile f(it.next());
+            if (f.open(QIODevice::ReadOnly)) CHECK(!f.readAll().contains(QByteArray(kToken)));
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
+    if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
+    {
+        QCoreApplication child(argc, argv);
+        return coverSessionChild(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
+    }
     QCoreApplication app(argc, argv);
 
     AbsStub stub;
@@ -1127,6 +1411,7 @@ int main(int argc, char** argv)
     testStore();
     testLive(stub, port);
     testSessionHooks(scratchIni);
+    testCoverAnswers376(stub);   // before the token sweep, so the sweep covers what the covers wrote
     testTokenNeverLands(stub, scratchIni);
 
     // The saved server goes at the end rather than in a destructor: the scan above has to run while the row
