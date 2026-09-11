@@ -303,7 +303,7 @@ bool NavRing::besideInRow(const QRect& from, const QRect& target, int key)
 // instead of guessing at a tolerance.
 //
 // Left/Right do NOT use this band: horizontal runs have no comparable "next column" structure (a vertical list
-// is one column of full-width rows). They use sameRowBand below — the widget's OWN row — instead.
+// is one column of full-width rows). They use pickBeside below — the widget's OWN row, or nowhere — instead.
 static QVector<QWidget*> rowBand(QWidget* from, const QVector<QWidget*>& candidates, bool up)
 {
     const QRect fr(from->mapToGlobal(QPoint(0, 0)), from->size());
@@ -333,40 +333,62 @@ static QVector<QWidget*> rowBand(QWidget* from, const QVector<QWidget*>& candida
     return band;
 }
 
-// The band a horizontal step lands in: this widget's OWN row — every candidate besideInRow says is beside it in
-// the pressed direction (#351). Left/Right used to score every candidate, with a centre-based "more sideways
-// than in-direction" filter standing in for "is it in my row?". That filter is a tolerance read off centres,
-// so it moves with the font: at QT_FONT_DPI=72 the header Back button above a profile row (wider than the row,
-// which shares its width with ✎ and ✕, so Back's centre sits right of the row's) was short enough to pass it —
-// 33 px up against 40 across — and then outscored the ✎ level with the row, 172 to 186. Reading the row off
-// the geometry, as rowBand does for Up/Down, leaves no tolerance to drift.
-static QVector<QWidget*> sameRowBand(QWidget* from, const QVector<QWidget*>& candidates, int key)
+// The Left/Right choice (#351, #353; contract in Nav.h). Only this widget's OWN row competes: every candidate
+// besideInRow puts beside it on the pressed side. Left/Right used to score every candidate, with a centre-based
+// "more sideways than in-direction" filter standing in for "is it in my row?". That filter is a tolerance read
+// off centres, so it moved with the font (#351: at QT_FONT_DPI=72 the header Back above a profile row passed it
+// and outscored the ✎ level with the row, 172 to 186). #351 read the row off the geometry, as rowBand does for
+// Up/Down — but kept the old scoring for a row with NOTHING beside it on that side, and that leftover is #353:
+// Right on the full-width "Create New Profile" button has no row neighbour, so every widget up-and-right of its
+// centre competed and a profile row's side button won. A D-pad user cannot see where a press will land before
+// making it, so a sideways press that leaves its row is a guess made on their behalf, and there the guess was a
+// button that deletes or opens a profile. With no neighbour in the row the answer is now "stay put". Nothing is
+// stranded by that: Up/Down step between rows (rowBand) and in-row Left/Right walks each row; probe_nav closes
+// over every arrow from every member of the profile pages, at several font DPIs, to prove it.
+int NavRing::pickBeside(const QRect& from, const QVector<QRect>& candidates, int key)
 {
-    const QRect fr(from->mapToGlobal(QPoint(0, 0)), from->size());
-    QVector<QWidget*> band;
-    for (QWidget* w : candidates)
-        if (w != from && NavRing::besideInRow(fr, QRect(w->mapToGlobal(QPoint(0, 0)), w->size()), key))
-            band.push_back(w);
-    return band;
+    if (key != Qt::Key_Left && key != Qt::Key_Right) return -1;
+    const QPoint c = from.center();
+    int best = -1;
+    double bestScore = std::numeric_limits<double>::max();
+    for (int i = 0; i < candidates.size(); ++i)
+    {
+        const QRect& r = candidates.at(i);
+        if (!besideInRow(from, r, key)) continue;          // not in this row on that side: never a candidate
+        const QPoint p = r.center();
+        const int primary = (key == Qt::Key_Right) ? p.x() - c.x() : c.x() - p.x();
+        if (primary <= 0) continue;                         // a sliver sharing from's centre column
+        // The nearest, weighting sideways drift heavily so the step stays level with the row.
+        const double score = primary + 4.0 * qAbs(p.y() - c.y());
+        if (score < bestScore) { bestScore = score; best = i; }
+    }
+    return best;
 }
 
 QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, int key)
 {
     if (!from) return candidates.isEmpty() ? nullptr : candidates.first();
+    // Left/Right: this widget's own row, or nowhere (pickBeside).
+    if (key == Qt::Key_Left || key == Qt::Key_Right)
+    {
+        QVector<QWidget*> others;
+        QVector<QRect> rects;
+        for (QWidget* w : candidates)
+            if (w != from) { others.push_back(w); rects.push_back(QRect(w->mapToGlobal(QPoint(0, 0)), w->size())); }
+        const int i = pickBeside(QRect(from->mapToGlobal(QPoint(0, 0)), from->size()), rects, key);
+        return i < 0 ? nullptr : others.at(i);
+    }
+    if (key != Qt::Key_Up && key != Qt::Key_Down) return nullptr;
     const QPoint c = from->mapToGlobal(from->rect().center());
-    // Up/Down: only the next row competes (see rowBand). Left/Right: only this widget's own row does (see
-    // sameRowBand).
+    // Up/Down: only the next row competes (see rowBand).
     //
     // An EMPTY band falls back to the whole list and the pre-existing scoring, sideways-dominance filter and
-    // all. Vertically, empty means nothing sits clear of this widget's own row in that direction — only
-    // widgets whose vertical extent overlaps it (a short control beside a tall one, a hand-placed widget
-    // straddling two rows). Horizontally, it means nothing in this row lies that way: the end of a row, or a
-    // full-width row in a list, where Right still reaches whatever it reached before. A band only ever narrows
-    // the choice to widgets that plainly ARE in the pressed direction, so a move without one is unchanged.
+    // all. Empty means nothing sits clear of this widget's own row in that direction — only widgets whose
+    // vertical extent overlaps it (a short control beside a tall one, a hand-placed widget straddling two rows).
+    // A band only ever narrows the choice to widgets that plainly ARE in the pressed direction, so a move without
+    // one is unchanged.
     QVector<QWidget*> pool = candidates;
-    const bool vertical = (key == Qt::Key_Up || key == Qt::Key_Down);
-    const QVector<QWidget*> band = vertical ? rowBand(from, candidates, key == Qt::Key_Up)
-                                            : sameRowBand(from, candidates, key);
+    const QVector<QWidget*> band = rowBand(from, candidates, key == Qt::Key_Up);
     const bool banded = !band.isEmpty();
     if (banded) pool = band;
     QWidget* best = nullptr;
@@ -375,24 +397,16 @@ QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, i
     {
         if (w == from) continue;
         const QPoint p = w->mapToGlobal(w->rect().center());
-        int primary = 0, orth = 0;
-        switch (key)
-        {
-        case Qt::Key_Up:    primary = c.y() - p.y(); orth = qAbs(p.x() - c.x()); break;
-        case Qt::Key_Down:  primary = p.y() - c.y(); orth = qAbs(p.x() - c.x()); break;
-        case Qt::Key_Left:  primary = c.x() - p.x(); orth = qAbs(p.y() - c.y()); break;
-        case Qt::Key_Right: primary = p.x() - c.x(); orth = qAbs(p.y() - c.y()); break;
-        default: return nullptr;
-        }
+        const int primary = (key == Qt::Key_Up) ? c.y() - p.y() : p.y() - c.y();
+        const int orth = qAbs(p.x() - c.x());
         if (primary <= 0) continue;                      // not in that direction
         // Unbanded only: a candidate that's more SIDEWAYS than in-direction isn't really "that way" — skip it so
         // we land on the widget actually in the pressed direction. A band has already answered "is it that
         // way?" from the geometry, and inside one this test is harmful: "more sideways than down" is exactly the
-        // reachable-only-from-the-middle bug, and "more sideways than across" would strand a short button beside
-        // the top of a tall panel.
+        // reachable-only-from-the-middle bug.
         if (!banded && orth > primary + 4) continue;
-        // Among the rest, prefer the nearest, weighting sideways drift heavily so a grid/row steps straight
-        // (stay in the column on Up/Down, on the row for Left/Right) instead of drifting diagonally.
+        // Among the rest, prefer the nearest, weighting sideways drift heavily so a column steps straight
+        // instead of drifting diagonally.
         const double score = primary + 4.0 * orth;
         if (score < bestScore) { bestScore = score; best = w; }
     }
