@@ -13250,9 +13250,10 @@ void MainWindow::pushTrackLyrics(const LyricSources::Choice& choice)
         // Re-count the `lyrics` nav zone for THIS track. syncAudioPageZone only runs when the view flips, and a
         // queue advances from a track with synced lyrics to one without while the page stays open — leaving the
         // zone counted up over a list that is no longer there, with a cursor that could still fire a seek.
+        // ...and only while the audio page is the page SHOWING (#357): the music plays on after Back, so an ungated
+        // recount counted the lyric list up under the home. The helper asks syncAudioPageZone's own question.
         if (QWidget* cur = themedAudioHost())
-            if (NavGraph* g = ThemeEngine::navGraph(cur))
-                g->setZoneCount(QStringLiteral("lyrics"), r->property("audioLyricCount").toInt());
+            ThemeEngine::recountAudioLyricZone(cur);
     }
     // The classic player page's panel, which has no QML anywhere near it.
     updateClassicLyrics();

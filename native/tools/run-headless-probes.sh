@@ -3422,6 +3422,31 @@ else
 fi
 if [ "$ap_fail" -eq 0 ]; then echo "PASS: audio leaf refuses a non-audio payload"; else echo "FAIL: audio leaf refuses a non-audio payload"; fail=1; fi
 echo
+# The audio page's lyric zone is counted only while that page is SHOWING (issue #357). probe_navqml §28 pins
+# ThemeEngine::recountAudioLyricZone on a real buildView scene; what no probe links is the CALL, in
+# MainWindow::pushTrackLyrics. Put back the direct `setZoneCount("lyrics", audioLyricCount)` write that used to
+# be there and the lyric list is counted up under the themed home after Back, with every probe still green —
+# so this gate asks that the recount goes through the helper and that MainWindow writes the count nowhere else.
+echo "=== lyric zone recount asks the page (#357) ==="
+LZ_MW="$HERE/../src/ui/MainWindow.cpp"
+lz_fail=0
+lz_note() { echo "  $1"; lz_fail=1; }
+if [ ! -f "$LZ_MW" ]; then
+  echo "FAIL: lyric zone recount asks the page (MainWindow.cpp not found)"; fail=1
+else
+  # Comments stripped (the prose around pushTrackLyrics discusses the old write), and matched with
+  # `grep -c -F` against a FILE, never `printf | grep -q` (SIGPIPE under pipefail fails ON a match).
+  lz_tmp="$(mktemp)"
+  sed -E 's://.*$::' "$LZ_MW" > "$lz_tmp"
+  [ "$(wc -l < "$lz_tmp")" -gt 100 ] || lz_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
+  [ "$(grep -c -F 'ThemeEngine::recountAudioLyricZone(' "$lz_tmp")" -ge 1 ] \
+    || lz_note "MainWindow never calls ThemeEngine::recountAudioLyricZone: a track change no longer recounts the lyric zone through the page gate."
+  [ "$(grep -c -F 'setZoneCount(QStringLiteral("lyrics")' "$lz_tmp")" -eq 0 ] \
+    || lz_note "MainWindow writes the lyrics zone count directly: only ThemeEngine::recountAudioLyricZone may, or the list is counted up under the home after Back (#357)."
+  rm -f "$lz_tmp"
+fi
+if [ "$lz_fail" -eq 0 ]; then echo "PASS: lyric zone recount asks the page (#357)"; else echo "FAIL: lyric zone recount asks the page (#357)"; fail=1; fi
+echo
 # A multi-file audiobook is played as a BOOK, not as one of its files (issue #214). The DECISIONS are pure
 # and probe_remotebook pins them (which files are parts, in what order, and the token a part is filed
 # under). What no probe can reach is the WIRING, and the wiring is where this defect actually lived: every

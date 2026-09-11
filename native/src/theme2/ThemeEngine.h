@@ -140,6 +140,18 @@ namespace ThemeEngine
     // its presence and drive selection. Mirrors rootItem(); null for a non-themed widget.
     NavGraph* navGraph(QWidget* view);
 
+    // Is the audio now-playing page the page ON SCREEN on this themed root? (issue #357). The page's state is the
+    // root's own `currentView`; this is the one reading of it the lyric zone uses. ThemeBridge::syncAudioPageZone
+    // asks it on every view flip, and recountAudioLyricZone asks it on every track change, so the two cannot
+    // disagree about whether the lyric list is up.
+    bool audioPageShowing(const QQuickItem* root);
+
+    // Re-count the audio page's `lyrics` nav zone for the track now on the page (issue #142): the synced line
+    // count while the page is showing, 0 otherwise (issue #357). The page's zones share the home's graph and the
+    // music plays on after Back, so a recount that ignored the view counted the lyric list up UNDER the home.
+    // The one call MainWindow::pushTrackLyrics makes; probe_navqml §28 drives it on a real buildView scene.
+    void recountAudioLyricZone(QWidget* view);
+
     // True if the theme's `home` view contains an `xmb` element (so the host drives it as an XMB cross).
     bool homeIsXmb(const QString& themeDir);
 

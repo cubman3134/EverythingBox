@@ -2866,6 +2866,200 @@ static void runHelpModeAsserts()
 
     InputMode::instance().notePointer();     // leave the singleton as any later section expects
 }
+
+// ---------------------------------------------------------------- §28. the lyric zone follows the PAGE (issue #357)
+// The audio page's zones live on the themed home's own graph (buildAudioPageNavGraph), count-gated by the view:
+// syncAudioPageZone counts them up when currentView flips to "nowplayingAudio" and zeroes them when it flips
+// away. The `lyrics` zone is ALSO recounted on every track change (MainWindow::pushTrackLyrics ->
+// ThemeEngine::recountAudioLyricZone), because the page stays open while a queue advances from a track with
+// synced lyrics to one without. That recount used to ignore the view, and pushTrackLyrics DOES run with the
+// page closed: a late online-lyrics reply for the still-playing track lands after Back (the session keeps its
+// lyric cache), and the page opening pushes the lyrics before it flips the view. Synced lines pushed then were
+// counted up UNDER the home: a live zone nothing draws, which select(), a reassignment or a reachability walk
+// could land on. #355 took the arrows' route away, not the zone.
+//
+// Driven on a REAL buildView scene (the shipped graph, the bridge's currentView wiring and ThemeView's own
+// audioLyricCount), through recountAudioLyricZone: the exact call pushTrackLyrics makes, on the same kind of
+// widget. NavGraph has no count getter, so counts are read by where select() lands: select() is refused on a
+// count-0 zone, and select(zone, 1000) clamps onto the last index, so "lands on index N-1" IS "counted N".
+// Nothing here measures text or pixels.
+static void runAudioLyricZoneAsserts()
+{
+    QTemporaryDir dir;
+    CHECK(dir.isValid(), "lyric-zone: a scratch theme dir exists");
+    if (!dir.isValid()) return;
+    // An XMB home (Triple's shape: the one the stale list sat beside) plus the audio page view.
+    const char* themeJson =
+        "{ \"name\": \"LyricZone\", \"views\": {"
+        "  \"home\": { \"background\": { \"color\": \"#101014\" },"
+        "    \"elements\": [ { \"type\": \"xmb\", \"id\": \"cross\", \"pos\": [0, 0], \"size\": [1, 1] } ] },"
+        "  \"nowplayingAudio\": { \"background\": { \"color\": \"#101014\" }, \"elements\": [] } } }";
+    QFile tf(dir.filePath(QStringLiteral("theme.json")));
+    if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "lyric-zone: scratch theme.json writable"); return; }
+    tf.write(themeJson);
+    tf.close();
+
+    QVariantList items;
+    for (int i = 0; i < 12; ++i)
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Track %1").arg(i) } };
+    const QVariantList cats{ QVariantMap{ { QStringLiteral("title"), QStringLiteral("Music") } },
+                             QVariantMap{ { QStringLiteral("title"), QStringLiteral("Movies") } },
+                             QVariantMap{ { QStringLiteral("title"), QStringLiteral("Settings") } } };
+    QWidget* w = ThemeEngine::buildView(dir.path(), items, QVariantMap(), nullptr);
+    auto* qw = qobject_cast<QQuickWidget*>(w);
+    QQuickItem* root = ThemeEngine::rootItem(w);
+    NavGraph* g = ThemeEngine::navGraph(w);
+    CHECK(qw && root && g, "lyric-zone: the fixture built (widget, root, graph)");
+    if (!qw || !root || !g) { if (w) delete w; return; }
+    qw->resize(1280, 720);
+    qw->show();
+    pump(); pump();
+    root->setProperty("categories", cats);
+    pump();
+
+    auto sheet = [](int n) {
+        QVariantList out;
+        for (int i = 0; i < n; ++i)
+        {
+            QVariantMap m;
+            m.insert(QStringLiteral("time"), 10.0 * i);
+            m.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(i));
+            out << m;
+        }
+        return out;
+    };
+    // A track's lyrics arriving: what pushTrackLyrics writes onto the root, then its recount, in its order.
+    auto track = [&](int lines, bool synced) {
+        root->setProperty("lyrics", sheet(lines));
+        root->setProperty("lyricsSynced", synced);
+        ThemeEngine::recountAudioLyricZone(w);
+    };
+    // The lyric zone's live count, read by where select() lands; the selection is put back afterwards.
+    auto lyricCount = [&]() -> int {
+        const QString z = g->zone();
+        const int i = g->index();
+        g->select(QStringLiteral("lyrics"), 1000);
+        const int n = (g->zone() == QStringLiteral("lyrics")) ? g->index() + 1 : 0;
+        g->select(z, i);
+        return n;
+    };
+    // Every zone a directed arrow walk from (z0, i0) reaches.
+    auto reachFrom = [&](const QString& z0, int i0) {
+        std::set<QString> reached;
+        std::set<std::pair<QString, int>> seen;
+        std::deque<std::pair<QString, int>> q;
+        g->select(z0, i0);
+        q.push_back({ g->zone(), g->index() });
+        seen.insert({ g->zone(), g->index() });
+        reached.insert(g->zone());
+        static const Qt::Key arr[] = { Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right };
+        while (!q.empty())
+        {
+            auto [z, i] = q.front(); q.pop_front();
+            for (Qt::Key k : arr)
+            {
+                g->select(z, i);
+                g->move(k);
+                auto st = std::make_pair(g->zone(), g->index());
+                if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+            }
+        }
+        return reached;
+    };
+
+    CHECK(root->property("currentView").toString() == QStringLiteral("home")
+          && !ThemeEngine::audioPageShowing(root),
+          "lyric-zone: the scene starts on the home, with the audio page not showing");
+
+    // ---- (a) page CLOSED, synced lyrics arrive (a late online reply after Back, or the pre-flip push) -----
+    g->select(QStringLiteral("items"), 3);
+    track(7, true);
+    // The control: ThemeView really counts this sheet, so a 0 below is the page gate, not an empty sheet.
+    CHECK(root->property("audioLyricCount").toInt() == 7,
+          "lyric-zone(closed): control - ThemeView counts the synced sheet (audioLyricCount 7)");
+    CHECK(lyricCount() == 0,
+          "lyric-zone(closed): synced lyrics arriving behind the home leave the lyric zone at 0");
+    g->select(QStringLiteral("lyrics"), 0);
+    CHECK(g->zone() == QStringLiteral("items") && g->index() == 3,
+          "lyric-zone(closed): select() cannot land on the lyric list; the home cursor stays on item 3");
+    CHECK(!reachFrom(QStringLiteral("items"), 3).count(QStringLiteral("lyrics")),
+          "lyric-zone(closed): no arrow sequence from the home column reaches the lyric list");
+    CHECK(!reachFrom(QStringLiteral("categories"), 2).count(QStringLiteral("lyrics")),
+          "lyric-zone(closed): no arrow sequence from the category cross reaches the lyric list");
+    // Reassignment: the column the cursor is in empties (a reload) with no category axis beside it, so the
+    // graph re-homes the cursor on the nearest COUNTED zone. The lyric list must not be one.
+    root->setProperty("categories", QVariantList{});
+    g->select(QStringLiteral("items"), 3);
+    root->setProperty("items", QVariantList{});
+    pump();
+    CHECK(g->zone() != QStringLiteral("lyrics"),
+          "lyric-zone(closed): an emptied column never re-homes the cursor onto the lyric list");
+    root->setProperty("items", items);
+    root->setProperty("categories", cats);
+    pump();
+    g->select(QStringLiteral("items"), 3);
+
+    // ---- (b) the page OPENS: the flip counts the current track's lines up -------------------------------
+    root->setProperty("audioQueue", QVariantList{ QStringLiteral("Track 0"), QStringLiteral("Track 1"),
+                                                  QStringLiteral("Track 2") });
+    root->setProperty("audioTransportList", QVariantList{ QStringLiteral("seekBack"), QStringLiteral("playPause"),
+                                                          QStringLiteral("seekFwd"), QStringLiteral("stop"),
+                                                          QStringLiteral("speed") });
+    root->setProperty("currentView", QStringLiteral("nowplayingAudio"));   // -> syncAudioPageZone
+    pump();
+    CHECK(ThemeEngine::audioPageShowing(root), "lyric-zone(open): the audio page is showing");
+    CHECK(g->zone() == QStringLiteral("transport") && g->index() == 1,
+          "lyric-zone(open): control - the flip ran syncAudioPageZone (cursor parked on Play/Pause)");
+    CHECK(lyricCount() == 7, "lyric-zone(open): opening the page counts the current track's 7 synced lines");
+
+    // ---- (c) the queue ADVANCES while the page stays open: synced -> unsynced -> synced ------------------
+    // The reason the per-track recount exists. The cursor is IN the lyric list when its lines go away.
+    g->select(QStringLiteral("lyrics"), 5);
+    track(3, false);
+    CHECK(lyricCount() == 0, "lyric-zone(open): the next track's UNSYNCED sheet recounts the zone to 0");
+    CHECK(g->zone() != QStringLiteral("lyrics"),
+          "lyric-zone(open): ...and the cursor leaves the vanished list");
+    track(4, true);
+    CHECK(lyricCount() == 4, "lyric-zone(open): the next SYNCED track recounts the zone to its 4 lines");
+    g->select(QStringLiteral("lyrics"), 2);
+    CHECK(g->zone() == QStringLiteral("lyrics") && g->index() == 2,
+          "lyric-zone(open): ...and its lines take the cursor");
+
+    // ---- (d) Back leaves the page: the zone is zeroed, whatever is playing -----------------------------
+    root->setProperty("currentView", QStringLiteral("home"));   // -> syncAudioPageZone's leave branch
+    pump();
+    CHECK(!ThemeEngine::audioPageShowing(root), "lyric-zone(back): the audio page is no longer showing");
+    CHECK(g->zone() == QStringLiteral("items"), "lyric-zone(back): the cursor is back on the home column");
+    CHECK(lyricCount() == 0, "lyric-zone(back): leaving the page zeroes the lyric zone");
+
+    // ---- (e) the music plays on: synced lyrics for the playing track arrive behind the home ------------
+    track(5, true);
+    CHECK(root->property("audioLyricCount").toInt() == 5,
+          "lyric-zone(back): control - ThemeView counts the new synced sheet (5)");
+    CHECK(lyricCount() == 0, "lyric-zone(back): lyrics arriving behind the home keep the lyric zone at 0");
+    const QString homeZone = g->zone();
+    const int homeIndex = g->index();
+    g->select(QStringLiteral("lyrics"), 0);
+    CHECK(g->zone() == homeZone && g->index() == homeIndex,
+          "lyric-zone(back): select() still cannot land on the lyric list");
+
+    // ---- (f) reopening restores the count for the CURRENT track --------------------------------------
+    // The app does not re-push the lyrics on reopen (loadTrackLyrics is cached per track), so the flip's own
+    // count is the only restore path, and it has to read the lyrics that arrived while the page was closed.
+    root->setProperty("currentView", QStringLiteral("nowplayingAudio"));
+    pump();
+    CHECK(lyricCount() == 5, "lyric-zone(reopen): reopening the page counts the current track's 5 lines");
+
+    // A non-themed widget (or none) is a no-op, not a crash: pushTrackLyrics only calls this on a themed host,
+    // but the helper must not assume it.
+    ThemeEngine::recountAudioLyricZone(nullptr);
+    CHECK(!ThemeEngine::audioPageShowing(nullptr), "lyric-zone: a null root is never a showing audio page");
+
+    root->setProperty("currentView", QStringLiteral("home"));
+    pump();
+    delete w;
+    pump();
+}
 #endif // EB_HAVE_QML
 
 // ---------------------------------------------------------------- §27. Left/Right never cross ROWS (issue #355)
@@ -4561,6 +4755,9 @@ int main(int argc, char** argv)
     // and HelpSystem.qml really asks it, driven through the REAL InputMode on a REAL buildView scene.
     // Restores pointer mode on the way out (the singleton has no reset).
     runHelpModeAsserts();
+    // §28: the audio page's lyric zone is counted only while that page is SHOWING (issue #357): lyrics
+    // arriving behind the themed home leave it at 0, and the open-page queue recount still follows the track.
+    runAudioLyricZoneAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

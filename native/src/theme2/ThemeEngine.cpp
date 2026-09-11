@@ -242,7 +242,8 @@ void ThemeBridge::syncDetailZone()
 void ThemeBridge::syncAudioPageZone()
 {
     if (!graph || !root) return;
-    const bool nowAudio = root->property("currentView").toString() == QStringLiteral("nowplayingAudio");
+    // ThemeEngine::audioPageShowing: the SAME question recountAudioLyricZone asks on a track change (#357).
+    const bool nowAudio = ThemeEngine::audioPageShowing(root);
     if (nowAudio)
     {
         graph->setZoneCount(QStringLiteral("chrome"), 1);   // the Back affordance, always present on this page
@@ -250,8 +251,8 @@ void ThemeBridge::syncAudioPageZone()
         graph->setZoneCount(QStringLiteral("queue"), root->property("audioQueueCount").toInt());
         // The lyric zone's count comes from audioLyricCount, which QML computes as "the number of lines, but
         // only if they are SYNCED" — so an unsynced sheet counts to 0 and the zone is not enterable. Recounted
-        // on every track change as well as here (updateThemedAudioLyricZone), because the page stays open while
-        // a queue advances from a track with lyrics to one without.
+        // on every track change as well as here (ThemeEngine::recountAudioLyricZone), because the page stays
+        // open while a queue advances from a track with lyrics to one without.
         graph->setZoneCount(QStringLiteral("lyrics"), root->property("audioLyricCount").toInt());
         // Land on Play/Pause, not on the first button. This is the ONLY place that decides it: the page
         // sets audioTransportIndex before flipping the view, and this select runs after and overwrites it —
@@ -585,6 +586,19 @@ NavGraph* navGraph(QWidget* view)
     auto* qw = qobject_cast<QQuickWidget*>(view->property("mmvQuickView").value<QObject*>());
     if (!qw) return nullptr;
     return qobject_cast<NavGraph*>(qw->property("mmvNavGraph").value<QObject*>());
+}
+
+bool audioPageShowing(const QQuickItem* root)
+{
+    return root && root->property("currentView").toString() == QStringLiteral("nowplayingAudio");
+}
+
+void recountAudioLyricZone(QWidget* view)
+{
+    NavGraph* g = navGraph(view);
+    QQuickItem* r = rootItem(view);
+    if (!g || !r) return;
+    g->setZoneCount(QStringLiteral("lyrics"), audioPageShowing(r) ? r->property("audioLyricCount").toInt() : 0);
 }
 
 bool homeIsXmb(const QString& themeDir)
