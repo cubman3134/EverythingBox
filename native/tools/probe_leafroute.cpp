@@ -50,16 +50,30 @@
 //      write (the row's own id — its path — and type "track"), and that the press goes through the REAL store
 //      with the love hook installed: it fires for FavoritesStore::toggle and does NOT fire for addFromSource.
 //      That last pair is the silent failure — a favourite that lands on the shelf and never reaches the server.
+//   §8 OPENING A ROW ON THE ★ FAVORITES SHELF (issue #364). The other half of §7: a starred track opened from
+//      the shelf said "That favourite's source addon isn't available", because the shelf's open path
+//      (HomeView::openFavorite, routed by browse::favoriteRouteFor) had no track arm and fell through to the
+//      add-on lookup. Pins, over rows the shelf's own builder makes from records the REAL store holds: a local
+//      track opens by its file as kind "audio"; a Subsonic track opens by its qualified id through the
+//      qualified-track door; a moved file, a removed server and a supplier with no door each say their OWN
+//      sentence and never the add-on one; an add-on's favourite — including one TYPED "track" — still routes
+//      to its add-on and still reports it missing; the path, Steam and Epic arms are untouched; and routing
+//      every row fires no love hook and leaves the store exactly as it was.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
+#include "FavoriteRoute.h"
 #include "JellyfinCatalogs.h"
 #include "LeafRoute.h"
 #include "MusicCatalogs.h"
+#include "ServerMusic.h"
+#include "Subsonic.h"
 #include "SyntheticCatalogs.h"
 #include "OpdsFeed.h"
 
 #include <QCoreApplication>
+#include <QHash>
 #include <QString>
+#include <QStringList>
 #include <cstdio>
 
 static int g_fails = 0;
@@ -684,6 +698,249 @@ int main(int argc, char** argv)
         CHECK(loves.isEmpty());
         CHECK(FavoritesStore::list().isEmpty());
         FavoritesStore::setLoveHook({});
+    }
+
+    // ---- §8 OPENING A ROW ON THE ★ FAVORITES SHELF (issue #364) ------------------------------------------
+    // §7 puts a track on the shelf; this is what pressing it there does. The records are put in the REAL store
+    // and read back out of it, the rows are built by the shelf's own builder (favoriteShelfRow), and each is
+    // routed the way HomeView::openFavorite routes it — so "the record the writers write" and "the record the
+    // shelf reads" are one record here, as they are in the app.
+    {
+        using browse::FavoriteOpen;
+        using browse::FavoriteRoute;
+
+        const QString dawnPath = QStringLiteral("C:/music/Vol 1/01 Dawn.flac");
+        const QString gonePath = QStringLiteral("C:/music/Moved Away/03 Gone.flac");
+        // A cue track's id is mpv's clip url of the shared file (MusicLibrary::IndexTrack::path).
+        const QString clipUrl  = QStringLiteral("edl://%27%C:/music/Live/live.flac,start=12.5,length=200");
+        const QString srvHere  = QStringLiteral("3f2b8c1e-6a4d-4e0b-9a51-2c7d8e9f0a1b");
+        const QString srvGone  = QStringLiteral("9d0c6b7a-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
+        const QString subHere  = Subsonic::qualify(srvHere, Subsonic::Kind::Track, QStringLiteral("tr-42"));
+        const QString subGone  = Subsonic::qualify(srvGone, Subsonic::Kind::Track, QStringLiteral("tr-7"));
+        const QString jfTrack  = Jellyfin::qualify(QStringLiteral("0123456789abcdef0123456789abcdef"),
+                                                   QStringLiteral("song1"));
+        const QString ebsTrack = ServerMusic::qualify(QStringLiteral("shelf-1"), ServerMusic::Kind::Track,
+                                                      QStringLiteral("t9"));
+        // FIXTURE SANITY. An id that failed to qualify would be read as a local path, and every server case
+        // below would be quietly testing the local arm instead.
+        CHECK(Subsonic::isQualified(subHere) && Subsonic::serverOf(subHere) == srvHere);
+        CHECK(Subsonic::isQualified(subGone) && Subsonic::serverOf(subGone) == srvGone);
+        CHECK(Jellyfin::isQualified(jfTrack) && !Subsonic::isQualified(jfTrack));
+        CHECK(ServerMusic::isQualified(ebsTrack) && !Subsonic::isQualified(ebsTrack));
+        for (const QString& local : { dawnPath, gonePath, clipUrl })
+            CHECK(!Subsonic::isQualified(local) && !Jellyfin::isQualified(local) && !ServerMusic::isQualified(local));
+
+        // The world the router asks. `asked` records every file question, so a server id can be shown never
+        // to have been treated as a path.
+        const QStringList files   = { dawnPath };
+        const QStringList servers = { srvHere };
+        const QStringList sources = { QStringLiteral("com.example.films"), QStringLiteral("com.example.radio") };
+        QStringList asked;
+        browse::FavoriteWorld world;
+        world.fileExists  = [&](const QString& f) { asked << f; return files.contains(f); };
+        world.serverKnown = [&](const QString& s) { return servers.contains(s); };
+        world.sourceKnown = [&](const QString& a) { return sources.contains(a); };
+
+        // THE LOCAL TRACK, exactly as the classic menu (#297) and the themed chooser write it — asked of the
+        // real album builder's row, not typed out here.
+        const MusicLibrary::Index idx = oneAlbumIndex();
+        const MediaCatalog album = browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover);
+        FavoriteItem localFav;
+        for (const MediaItem& it : album.items)
+            if (it.url == dawnPath) localFav = browse::trackFavoriteFor(it);
+        CHECK(localFav.itemId == dawnPath && localFav.type == QLatin1String("track"));
+        // The record #364 is about: no path, no kind, no add-on. A route that needed any of them is a route
+        // that cannot open the stars people already have.
+        CHECK(localFav.path.isEmpty() && localFav.kind.isEmpty() && localFav.addonId.isEmpty());
+
+        // Every other track record in adoptStarredFavourites' shape: id, title, artist, type "track".
+        auto trackRec = [](const QString& id, const QString& title) {
+            FavoriteItem f;
+            f.itemId = id; f.title = title; f.subtitle = QStringLiteral("An Artist");
+            f.type = QStringLiteral("track"); f.thumbnailUrl = QStringLiteral("C:/covers/") + title + ".png";
+            return f;
+        };
+        const FavoriteItem subFav     = trackRec(subHere,  QStringLiteral("Night Drive"));
+        const FavoriteItem subGoneFav = trackRec(subGone,  QStringLiteral("Old Server Song"));
+        const FavoriteItem goneFav    = trackRec(gonePath, QStringLiteral("Gone"));
+        const FavoriteItem clipFav    = trackRec(clipUrl,  QStringLiteral("Live Opener"));
+        const FavoriteItem jfFav      = trackRec(jfTrack,  QStringLiteral("Jelly Song"));
+        const FavoriteItem ebsFav     = trackRec(ebsTrack, QStringLiteral("Shelf Song"));
+        // AN ADD-ON'S favourites: a film, and an item of the add-on's own that happens to be TYPED "track" —
+        // it names its add-on, so it is the add-on's to open and must not be taken by the track arm.
+        auto addonRec = [](const QString& addon, const QString& id, const QString& type, const QString& title) {
+            FavoriteItem f;
+            f.addonId = addon; f.itemId = id; f.type = type; f.title = title;
+            return f;
+        };
+        const FavoriteItem filmFav      = addonRec(QStringLiteral("com.example.films"), QStringLiteral("tt0816692"),
+                                                   QStringLiteral("movie"), QStringLiteral("Interstellar"));
+        const FavoriteItem radioFav     = addonRec(QStringLiteral("com.example.radio"), QStringLiteral("radio:1"),
+                                                   QStringLiteral("track"), QStringLiteral("Radio Track"));
+        const FavoriteItem lostFilmFav  = addonRec(QStringLiteral("com.example.gone"), QStringLiteral("tt0133093"),
+                                                   QStringLiteral("movie"), QStringLiteral("The Matrix"));
+        const FavoriteItem lostRadioFav = addonRec(QStringLiteral("com.example.gone-radio"), QStringLiteral("radio:9"),
+                                                   QStringLiteral("track"), QStringLiteral("Lost Radio Track"));
+        // The arms that were there before: a path-carrying local game, and the two native stores.
+        FavoriteItem gameFav;
+        gameFav.itemId = QStringLiteral("C:/roms/nes/a.nes"); gameFav.path = gameFav.itemId;
+        gameFav.kind = QStringLiteral("game"); gameFav.type = QStringLiteral("game");
+        gameFav.system = QStringLiteral("nes"); gameFav.title = QStringLiteral("A Game");
+        gameFav.thumbnailUrl = QStringLiteral("C:/covers/a.png");
+        FavoriteItem steamFav; steamFav.itemId = QStringLiteral("steam:1145360"); steamFav.type = QStringLiteral("game");
+        steamFav.title = QStringLiteral("Hades");
+        FavoriteItem epicFav;  epicFav.itemId = QStringLiteral("epic:Fortnite");  epicFav.type = QStringLiteral("game");
+        epicFav.title = QStringLiteral("Fortnite");
+
+        const QVector<FavoriteItem> all = { localFav, subFav, subGoneFav, goneFav, clipFav, jfFav, ebsFav,
+                                            filmFav, radioFav, lostFilmFav, lostRadioFav, gameFav, steamFav, epicFav };
+        for (const FavoriteItem& f : all) FavoritesStore::addFromSource(f);   // seeding, not starring: quiet
+        CHECK(FavoritesStore::list().size() == all.size());
+
+        // Route EVERY row the shelf would draw, with the love hook watching.
+        struct Love { FavoriteItem f; bool loved; };
+        QVector<Love> loves;
+        FavoritesStore::setLoveHook([&loves](const FavoriteItem& f, bool loved) { loves.push_back({ f, loved }); });
+        const QVector<FavoriteItem> before = FavoritesStore::list();
+        QHash<QString, FavoriteRoute> routes;
+        QHash<QString, MediaItem> rows;
+        for (const FavoriteItem& f : before)
+        {
+            const MediaItem row = browse::favoriteShelfRow(f);
+            rows.insert(f.itemId, row);
+            routes.insert(f.itemId, browse::favoriteRouteFor(row, FavoritesStore::list(), world));
+        }
+        CHECK(routes.size() == all.size());
+
+        // 8a. OPENING CHANGES NOTHING. No love, no un-love, and the store holds exactly what it held — same
+        // records, same order, same timestamps. A route that re-added the favourite on the way in would send a
+        // server star every time somebody pressed Play.
+        CHECK(loves.isEmpty());
+        const QVector<FavoriteItem> after = FavoritesStore::list();
+        CHECK(after.size() == before.size());
+        for (int i = 0; i < qMin(after.size(), before.size()); ++i)
+            CHECK(after.at(i).itemId == before.at(i).itemId && after.at(i).ts == before.at(i).ts
+                  && after.at(i).type == before.at(i).type && after.at(i).path == before.at(i).path);
+
+        // 8b. THE SHELF ROW A TRACK BECOMES carries what the router reads: its id, type "track", and a "fav:"
+        // marker naming NO add-on.
+        {
+            const MediaItem row = rows.value(localFav.itemId);
+            CHECK(row.id == dawnPath);
+            CHECK(row.type == QLatin1String("track"));
+            CHECK(row.mime == QLatin1String("fav:"));
+        }
+
+        // 8c. A LOCAL TRACK OPENS BY ITS FILE, as kind "audio" — openRecent's file route, the one this track's
+        // own Recents row re-opens by. The shelf row's title and cover travel with it.
+        {
+            const FavoriteRoute r = routes.value(localFav.itemId);
+            const MediaItem row = rows.value(localFav.itemId);
+            CHECK(r.how == FavoriteOpen::LocalTrack);
+            CHECK(r.path == dawnPath);
+            CHECK(r.kind == QLatin1String("audio"));
+            CHECK(r.resumeKey == dawnPath);
+            CHECK(r.title == row.title && r.thumb == row.thumbnailUrl);
+            CHECK(asked.contains(dawnPath));                       // the file WAS asked about
+        }
+
+        // 8d. A SUBSONIC TRACK OPENS BY ITS QUALIFIED ID, through the qualified-TRACK door: openRecent consults
+        // the resume key first, and a Track-kind id there is minted into a fresh stream url.
+        {
+            const FavoriteRoute r = routes.value(subFav.itemId);
+            CHECK(r.how == FavoriteOpen::ServerTrack);
+            CHECK(r.path == subHere && r.resumeKey == subHere);
+            CHECK(r.kind == QLatin1String("audio"));
+            CHECK(Subsonic::parse(r.resumeKey).kind == Subsonic::Kind::Track);
+            CHECK(r.title == QLatin1String("Night Drive"));
+            CHECK(!asked.contains(subHere));                       // never mistaken for a file
+        }
+
+        // 8e. A CUE TRACK is local, and opens by its clip url without being asked about as a file (it is not
+        // one — the url names a span of one).
+        {
+            const FavoriteRoute r = routes.value(clipFav.itemId);
+            CHECK(r.how == FavoriteOpen::LocalTrack);
+            CHECK(r.path == clipUrl && r.kind == QLatin1String("audio"));
+            CHECK(!asked.contains(clipUrl));
+        }
+
+        // 8f. A TRACK THAT CANNOT BE OPENED SAYS WHY, and it is its own sentence each time. None of them hands
+        // openRecent anything, and none of them is the add-on message.
+        CHECK(routes.value(goneFav.itemId).how == FavoriteOpen::TrackFileGone);
+        CHECK(routes.value(subGoneFav.itemId).how == FavoriteOpen::TrackServerGone);
+        CHECK(routes.value(jfFav.itemId).how == FavoriteOpen::TrackNoDoor);
+        CHECK(routes.value(ebsFav.itemId).how == FavoriteOpen::TrackNoDoor);
+        CHECK(!asked.contains(jfTrack) && !asked.contains(ebsTrack) && !asked.contains(subGone));
+        for (const FavoriteItem& f : { goneFav, subGoneFav, jfFav, ebsFav })
+        {
+            const FavoriteRoute r = routes.value(f.itemId);
+            CHECK(r.path.isEmpty() && r.kind.isEmpty() && r.resumeKey.isEmpty());
+        }
+        const QString title = QStringLiteral("Dawn");
+        const QString sFile = browse::favoriteOpenSentence(FavoriteOpen::TrackFileGone, title);
+        const QString sSrv  = browse::favoriteOpenSentence(FavoriteOpen::TrackServerGone, title);
+        const QString sDoor = browse::favoriteOpenSentence(FavoriteOpen::TrackNoDoor, title);
+        for (const QString& s : { sFile, sSrv, sDoor })
+        {
+            CHECK(!s.isEmpty());
+            CHECK(s.contains(title));                              // it names the track
+            CHECK(!s.contains(QLatin1String("addon"), Qt::CaseInsensitive));
+            CHECK(!s.contains(QLatin1String("add-on"), Qt::CaseInsensitive));
+        }
+        CHECK(sFile != sSrv && sFile != sDoor && sSrv != sDoor);
+        CHECK(sFile.contains(QLatin1String("moved or deleted")));
+        CHECK(sSrv.contains(QLatin1String("music server")));
+        for (FavoriteOpen quiet : { FavoriteOpen::ReopenByPath, FavoriteOpen::NativeStore, FavoriteOpen::LocalTrack,
+                                    FavoriteOpen::ServerTrack, FavoriteOpen::Addon, FavoriteOpen::AddonMissing })
+            CHECK(browse::favoriteOpenSentence(quiet, title).isEmpty());
+
+        // 8g. AN ADD-ON'S FAVOURITE STILL ROUTES TO ITS ADD-ON, and still reports it missing when it has gone —
+        // INCLUDING the ones typed "track", which name their add-on and so are not the track arm's.
+        {
+            const FavoriteRoute film = routes.value(filmFav.itemId);
+            CHECK(film.how == FavoriteOpen::Addon && film.addonId == QLatin1String("com.example.films"));
+            const FavoriteRoute radio = routes.value(radioFav.itemId);
+            CHECK(radio.how == FavoriteOpen::Addon && radio.addonId == QLatin1String("com.example.radio"));
+            const FavoriteRoute lostFilm = routes.value(lostFilmFav.itemId);
+            CHECK(lostFilm.how == FavoriteOpen::AddonMissing && lostFilm.addonId == QLatin1String("com.example.gone"));
+            const FavoriteRoute lostRadio = routes.value(lostRadioFav.itemId);
+            CHECK(lostRadio.how == FavoriteOpen::AddonMissing
+                  && lostRadio.addonId == QLatin1String("com.example.gone-radio"));
+            for (const FavoriteRoute& r : { film, radio, lostFilm, lostRadio }) CHECK(r.path.isEmpty());
+        }
+
+        // 8h. THE ARMS THAT WERE THERE BEFORE ARE UNTOUCHED. A path-carrying record re-opens by the STORED
+        // record's path, kind, id, title and cover; Steam and Epic ids go to their stores.
+        {
+            const FavoriteRoute g = routes.value(gameFav.itemId);
+            CHECK(g.how == FavoriteOpen::ReopenByPath);
+            CHECK(g.path == gameFav.path && g.kind == QLatin1String("game") && g.resumeKey == gameFav.itemId);
+            CHECK(g.title == gameFav.title && g.thumb == gameFav.thumbnailUrl);
+            CHECK(routes.value(steamFav.itemId).how == FavoriteOpen::NativeStore);
+            CHECK(routes.value(epicFav.itemId).how == FavoriteOpen::NativeStore);
+            // The track arm sits AFTER the path arm: a record that carries a path re-opens by it whatever its
+            // type — the order openFavorite always had.
+            FavoriteItem pathTrack = trackRec(QStringLiteral("C:/music/x.flac"), QStringLiteral("X"));
+            pathTrack.path = pathTrack.itemId; pathTrack.kind = QStringLiteral("audio");
+            const FavoriteRoute pt = browse::favoriteRouteFor(browse::favoriteShelfRow(pathTrack), { pathTrack }, world);
+            CHECK(pt.how == FavoriteOpen::ReopenByPath && pt.path == pathTrack.path);
+        }
+
+        // 8i. AN UNANSWERED WORLD answers false: nothing opens that nobody said was there.
+        {
+            const browse::FavoriteWorld blind;
+            CHECK(browse::favoriteRouteFor(browse::favoriteShelfRow(localFav), {}, blind).how
+                  == FavoriteOpen::TrackFileGone);
+            CHECK(browse::favoriteRouteFor(browse::favoriteShelfRow(subFav), {}, blind).how
+                  == FavoriteOpen::TrackServerGone);
+            CHECK(browse::favoriteRouteFor(browse::favoriteShelfRow(filmFav), {}, blind).how
+                  == FavoriteOpen::AddonMissing);
+        }
+
+        FavoritesStore::setLoveHook({});
+        for (const FavoriteItem& f : all) FavoritesStore::remove(f.itemId);
+        CHECK(FavoritesStore::list().isEmpty());
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

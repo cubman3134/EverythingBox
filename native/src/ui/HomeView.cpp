@@ -88,6 +88,7 @@
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/MusicCatalogs.h"   // issue #74: the Artists/Albums/Tracks browse over the music index
 #include "../browse/LeafRoute.h"       // the ONE table both this file's two Enter paths route a local leaf by
+#include "../browse/FavoriteRoute.h"   // #364: what a row on the Favorites shelf opens
 #include "../browse/JellyfinCatalogs.h" // issue #83: the Jellyfin browse levels + the keyed leaf kind
 #include "../browse/RomhackTarget.h"   // the console a base-ROM crawl carries, from the system the verb was offered on
 #include "../browse/RemoteLeafResolve.h" // a remote source's leaf: resolve by id, else by title+console
@@ -8026,14 +8027,10 @@ void HomeView::renderRecents()
         g.header = tr("★ Favorites");
         for (const FavoriteItem& f : FavoritesStore::list())
         {
-            MediaItem it;
-            it.id = f.itemId;
-            it.type = f.type;
-            it.title = f.title;
-            it.subtitle = f.subtitle;
+            // The row the router reads back (id, type, the "fav:<addonId>" marker): browse::favoriteShelfRow,
+            // the builder probe_leafroute §8 routes (#364).
+            MediaItem it = browse::favoriteShelfRow(f);
             it.thumbnailUrl = MetaCache::scrapedImage(f.itemId, f.thumbnailUrl); // offline-first artwork
-            it.expandable = f.expandable;
-            it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
             if (isHiddenItem(it)) continue;               // hidden mark hides it from the Favorites shelf too
             // The favourite's title/subtitle are the copy FavoritesStore saved when it was starred, so this
             // shelf is a scraped source like any other and needs the same ingress composite the catalog rows
@@ -9764,46 +9761,73 @@ void HomeView::openFavorite(const MediaItem& favItem)
     // It is checked FIRST because a merged favourite can also be reached by the path loop below once a
     // downloaded copy has stamped a path onto it.
     if (isMergedPcGame(favItem)) { playPcGame(favItem); return; }
-    // A favourited local game (starred from the Recent/Downloads menu) re-opens by path — openRecent recovers
-    // its console from the Recent/Downloads store.
-    for (const FavoriteItem& f : FavoritesStore::list())
-        if (f.itemId == favItem.id && !f.path.isEmpty())
+
+    // Everything else is decided by browse::favoriteRouteFor — FavoriteRoute.h has the order and the reasons,
+    // probe_leafroute §8 pins it, and the "favourites shelf open routing (#364)" gate holds this call site to
+    // it. The router asks three questions of the world; they are answered here. NOTHING ON THIS PATH WRITES THE
+    // STORE: FavoritesStore's love hook sends a server star on add, and pressing Play is not starring.
+    LoadedAddon* addon = nullptr;   // the source add-on sourceKnown finds, for the Addon arm below
+    browse::FavoriteWorld world;
+    world.fileExists  = [](const QString& file) { return QFileInfo::exists(file); };
+    world.serverKnown = [](const QString& serverId) { SubsonicServer s; return SubsonicServerStore::get(serverId, s); };
+    world.sourceKnown = [this, &addon](const QString& addonId) {
+        for (LoadedAddon* s : mgr_->sources())
+            if (s->manifest.id == addonId) { addon = s; return true; }
+        return false;
+    };
+    const browse::FavoriteRoute route = browse::favoriteRouteFor(favItem, FavoritesStore::list(), world);
+    switch (route.how)
+    {
+        // A favourited local game (starred from the Recent/Downloads menu) re-opens by path — openRecent
+        // recovers its console from the Recent/Downloads store. A Live TV channel and a channel file their
+        // identity as the path, and re-open the same way.
+        case browse::FavoriteOpen::ReopenByPath:
+        // #364: a MUSIC TRACK on this machine re-opens by its file as kind "audio" — the route that track's own
+        // Recents row takes.
+        case browse::FavoriteOpen::LocalTrack:
+        // #364: a SUBSONIC TRACK re-opens by its qualified id, which openRecent's qualified-track arm mints a
+        // fresh stream url from — with no index fetched first, so a star from last session opens cold.
+        case browse::FavoriteOpen::ServerTrack:
+            emit openRecent(route.path, route.kind, route.resumeKey, route.title, route.thumb);
+            return;
+        // #364: a track that cannot be opened says why, in its own sentence — never the add-on one below,
+        // which would send somebody looking for an add-on the track never had.
+        case browse::FavoriteOpen::TrackFileGone:
+        case browse::FavoriteOpen::TrackServerGone:
+        case browse::FavoriteOpen::TrackNoDoor:
+            showToast(browse::favoriteOpenSentence(route.how, favItem.title), kFeedbackLong);
+            return;
+        // A favourited native-store game with no local file (Steam/Epic) has no source addon - reopen its
+        // native info page (rooted at Home); Play rebuilds the launch URL from the id. (A GOG favourite carries
+        // its exe as a path, so it re-opens by path above — the GogGame dispatch — and never lands here.)
+        case browse::FavoriteOpen::NativeStore:
         {
-            emit openRecent(f.path, f.kind, f.itemId, f.title, f.thumbnailUrl);
+            const bool isSteamFav = favItem.id.startsWith(QStringLiteral("steam:"));
+            recentView_ = false;
+            applyGridMode(/*recentList*/ false);
+            styleTypeButtons(QStringLiteral("home"));
+            stack_.clear();
+            MediaItem mi = favItem;
+            mi.mime = isSteamFav ? QStringLiteral("steamgame")
+                                 : QStringLiteral("epicgame"); // restore the marker (drops the "fav:" tag)
+            mi.url.clear();
+            Level lvl;
+            lvl.addon = nullptr; lvl.detail = true; lvl.item = mi; lvl.title = mi.title;
+            stack_.push_back(lvl);
+            loadTop();
             return;
         }
-    // A favourited native-store game with no local file (Steam/Epic) has no source addon - reopen its native
-    // info page (rooted at Home); Play rebuilds the launch URL from the id. (A GOG favourite carries its exe as
-    // a path, so it re-opened via the openRecent branch above — the GogGame dispatch — and never lands here.)
-    const bool isSteamFav = favItem.id.startsWith(QStringLiteral("steam:"));
-    const bool isEpicFav  = favItem.id.startsWith(QStringLiteral("epic:"));
-    if (isSteamFav || isEpicFav)
-    {
-        recentView_ = false;
-        applyGridMode(/*recentList*/ false);
-        styleTypeButtons(QStringLiteral("home"));
-        stack_.clear();
-        MediaItem mi = favItem;
-        mi.mime = isSteamFav ? QStringLiteral("steamgame")
-                             : QStringLiteral("epicgame"); // restore the marker (drops the "fav:" tag)
-        mi.url.clear();
-        Level lvl;
-        lvl.addon = nullptr; lvl.detail = true; lvl.item = mi; lvl.title = mi.title;
-        stack_.push_back(lvl);
-        loadTop();
-        return;
-    }
-    // Resolve the favourite's source addon and open its detail page (rooted at Home so Back returns here).
-    const QString addonId = favItem.mime.mid(4); // strip "fav:"
-    LoadedAddon* addon = nullptr;
-    for (LoadedAddon* s : mgr_->sources())
-        if (s->manifest.id == addonId) { addon = s; break; }
-    if (!addon)
-    {
-        showToast(tr("That favourite's source addon isn't available."), kFeedbackLong);
-        return;
+        // An add-on's item: its detail page, below. `addon` is what sourceKnown found when the router asked,
+        // on this same turn — the router answers Addon only when it did — so the fall-through is a guard.
+        case browse::FavoriteOpen::Addon:
+            if (addon) break;
+            [[fallthrough]];
+        case browse::FavoriteOpen::AddonMissing:
+            showToast(tr("That favourite's source addon isn't available."), kFeedbackLong);
+            return;
     }
 
+    // Open the favourite's source addon's detail page (rooted at Home so Back returns here).
     recentView_ = false;
     applyGridMode(/*recentList*/ false);
     styleTypeButtons(QStringLiteral("home")); // keep Home highlighted/themed - favourites live there
