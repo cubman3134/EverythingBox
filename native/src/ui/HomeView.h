@@ -138,6 +138,10 @@ public:
     // classic grid where it is standing", which is what the browse context menu does on that layout.
     bool browseQueueTarget(int themedIndex, browse::QueueTarget* out) const;
     bool queueTargetForRow(int itemsRow, browse::QueueTarget* out) const;   // an items_ row (right-click)
+    // #297 — the favourite a classic menu would write for a music TRACK row, answered by
+    // browse::trackFavoriteFor. `itemsRow` -1 = the classic grid's own cursor (the Start menu); >= 0 = that
+    // items_ row (the right-click). False = not a track row, so no Favorite verb is offered on it.
+    bool trackFavoriteForRow(int itemsRow, FavoriteItem* out) const;
     // The copy of this item already on disk, or empty — see the note on the definition.
     QString localCopyForItem(const MediaItem& it) const;
     // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it

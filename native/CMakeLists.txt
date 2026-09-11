@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.249 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.250 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -958,6 +958,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowLookup.cpp                        # in-book lookup: the vocabulary list + count, off the busiest TU (#137)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
         src/ui/MainWindowThemes.cpp                        # issue #91: the theme browser's update/remove/zip members, same rule
+        src/ui/MainWindowTrackFavorite.cpp                 # issue #297: the classic menus' Favorite verb on a track row, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.
@@ -3023,7 +3024,15 @@ if(EVERYTHINGBOX_BUILD_APP)
        
         src/core/Settings.cpp src/core/Settings.h                    # LocalLibrary::root() -> libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h            # Settings.cpp -> FormFactor::instance()
-        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h)           # SyntheticCatalogs -> groupByFolder (#102)
+        src/core/PhotoLibrary.cpp src/core/PhotoLibrary.h           # SyntheticCatalogs -> groupByFolder (#102)
+        # #297: starring a track from a classic menu goes through the REAL store, so the probe can watch the
+        # love hook fire (and not fire for addFromSource). FavoritesStore's own dependencies come with it:
+        # the per-profile namespace, list()'s Recent/Downloads backfill and remove()'s tombstone.
+        src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/RecentStore.cpp src/core/RecentStore.h
+        src/core/DownloadsStore.cpp src/core/DownloadsStore.h
+        src/core/Tombstones.cpp src/core/Tombstones.h)
     target_include_directories(probe_leafroute PRIVATE src src/core src/media src/addons src/browse src/ebook src/theme2)
     target_link_libraries(probe_leafroute PRIVATE Qt6::Core Qt6::Network Qt6::Gui tag)
 

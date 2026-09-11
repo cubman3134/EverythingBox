@@ -5625,8 +5625,20 @@ void MainWindow::openBrowseContextMenu()
     QString msId, msName;
     const bool hasMusicServer = jfSurfaceOk && home_->browseMusicServer(jfThemedIdx, &msId, &msName);
 
+    // #297: the music TRACK the CLASSIC grid is standing on can be starred from here — the twin of the themed
+    // chooser's Favorite row, which until now was the only way to star a track at all (and so the only door
+    // to #193 increment 6's server star, which FavoritesStore's love hook sends on any add of a "track").
+    // CLASSIC ONLY, on purpose: on the themed layout the chooser already carries the verb AND repaints the meta
+    // panel's heart after it, which a press from this menu would leave stale. Surface-gated like the Jellyfin
+    // verb above, and resolved before the menu opens for the reason its arm below gives.
+    FavoriteItem trackFav;
+    const bool hasTrackFav = jfThemedIdx < 0 && stack_->currentWidget() == home_
+                             && home_->trackFavoriteForRow(-1, &trackFav);
+    const browse::TrackFavVerb trackFavVerb =
+        browse::trackFavoriteVerb(trackFav, hasTrackFav && FavoritesStore::isFavorite(trackFav.itemId));
+
     enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow,
-                RemoveMusicServer };
+                RemoveMusicServer, TrackFavorite };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5648,6 +5660,7 @@ void MainWindow::openBrowseContextMenu()
     const bool hasEmu = (ctx.kind != emuscope::ContextKind::None);
     if (hasEmu) offer(EmuSettings, tr("Emulation settings"));
     if (hasQueue) { offer(AddToQueue, queueVerbLabel(false)); offer(PlayNext, queueVerbLabel(true)); }
+    if (trackFavVerb != browse::TrackFavVerb::None) offer(TrackFavorite, trackFavoriteVerbLabel(trackFavVerb));
     if (hasPort) offer(NativePort, tr("Native port…"));
     if (hasJfDownload)
         offer(JellyfinDl, jfKind == int(browse::JellyfinDownloadTarget::Kind::Item)
@@ -5672,6 +5685,9 @@ void MainWindow::openBrowseContextMenu()
         case EmuSettings: presentEmulationPanel(ctx); break;
         case AddToQueue:  queueMusic(qt, /*playNext*/ false); break;
         case PlayNext:    queueMusic(qt, /*playNext*/ true); break;
+        // #297. The track was resolved before the menu opened (above), so a grid that moved under the nested
+        // loop cannot make this star a different row. Through the store, so the love hook sends any server star.
+        case TrackFavorite: pressTrackFavorite(trackFav); break;
         // Resolved BEFORE the menu opened, for the reason the native-port arm below states: the grid can
         // move under a NavMenu, and re-reading the cursor here would download whatever it moved to.
         case JellyfinDl:
@@ -13026,9 +13042,18 @@ void MainWindow::showBrowseQueueMenu(int itemsRow)
     if (NavOverlay::topmost()) return;
     browse::QueueTarget t;
     if (!home_ || !home_->queueTargetForRow(itemsRow, &t)) return;
-    const QStringList labels{ queueVerbLabel(false), queueVerbLabel(true) };
-    const int pick = NavMenu::pick(tr("Queue"), labels, this);
+    // #297: a TRACK row also stars from here — the classic layout's twin of the themed chooser's Favorite
+    // row. Resolved BEFORE the menu opens, like the queue target above it: the menu is a nested loop and the
+    // row it was opened on is the one it must act on. An album row answers None and gets only the queue verbs.
+    FavoriteItem fav;
+    const bool hasFav = home_->trackFavoriteForRow(itemsRow, &fav);
+    const browse::TrackFavVerb favVerb =
+        browse::trackFavoriteVerb(fav, hasFav && FavoritesStore::isFavorite(fav.itemId));
+    QStringList labels{ queueVerbLabel(false), queueVerbLabel(true) };
+    if (favVerb != browse::TrackFavVerb::None) labels << trackFavoriteVerbLabel(favVerb);
+    const int pick = NavMenu::pick(favVerb != browse::TrackFavVerb::None ? tr("Track") : tr("Queue"), labels, this);
     if (pick < 0) return;
+    if (pick == 2) { pressTrackFavorite(fav); return; }
     queueMusic(t, /*playNext*/ pick == 1);
 }
 

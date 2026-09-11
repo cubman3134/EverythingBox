@@ -1458,6 +1458,11 @@ private:
     // three ways a browse surface asks for it (the themed XMB's inline chooser, the Start/Menu context menu
     // on BOTH layouts, and a right-click on the classic grid).
     QString queueVerbLabel(bool playNext) const;   // "Add to queue" / "Play next", said once for both menus
+    // #297 (MainWindowTrackFavorite.cpp): the classic menus' Favorite verb on a music track row — its label,
+    // said once for both menus, and the press itself, which goes through FavoritesStore::toggle so the love
+    // hook sends the server star exactly as it does from the themed chooser.
+    QString trackFavoriteVerbLabel(browse::TrackFavVerb verb) const;
+    void pressTrackFavorite(const FavoriteItem& fav);
     int  themedBrowseIndex() const;  // the themed column's highlighted row, or -1 (not a themed browse surface)
     bool browseQueueTarget(browse::QueueTarget* out) const;  // …resolved to a music row, on whichever layout
     void showBrowseQueueMenu(int itemsRow);   // the right-click route: the verbs over one classic grid row

@@ -184,6 +184,16 @@ QSet<QString> FavoritesStore::allKeys()
     return keys;
 }
 
+// add() and remove(), and nothing else: both fire the love hook, which is the point (issue #297). This is
+// a PRESS; addFromSource is the one entry that must not be reached from here.
+bool FavoritesStore::toggle(const FavoriteItem& item)
+{
+    if (item.itemId.isEmpty()) return false;
+    if (isFavorite(item.itemId)) { remove(item.itemId); return false; }
+    add(item);
+    return true;
+}
+
 bool FavoritesStore::isFavorite(const QString& itemId)
 {
     for (const FavoriteItem& it : list())

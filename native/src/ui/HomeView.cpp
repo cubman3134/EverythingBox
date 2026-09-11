@@ -11867,6 +11867,17 @@ bool HomeView::queueTargetForRow(int itemsRow, browse::QueueTarget* out) const
     return true;
 }
 
+// #297. The classic cursor is grid_->currentRow() unmapped, for the reason browseQueueTarget states below.
+bool HomeView::trackFavoriteForRow(int itemsRow, FavoriteItem* out) const
+{
+    if (itemsRow < 0) itemsRow = grid_ ? grid_->currentRow() : -1;
+    if (itemsRow < 0 || itemsRow >= items_.size()) return false;
+    const FavoriteItem f = browse::trackFavoriteFor(items_[itemsRow]);
+    if (f.itemId.isEmpty()) return false;
+    if (out) *out = f;
+    return true;
+}
+
 bool HomeView::browseQueueTarget(int themedIndex, browse::QueueTarget* out) const
 {
     // -1 = the classic grid, whose cursor is its own current row (an items_ index; the grid's rows and

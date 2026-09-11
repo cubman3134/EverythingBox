@@ -27,6 +27,7 @@
 // prefer-local lookup in playThemedLeaf, say) does that around this, not inside it.
 #pragma once
 #include "../addons/AddonModels.h"   // MediaItem
+#include "../core/FavoritesStore.h"  // FavoriteItem — the struct only; nothing here reads or writes the store
 
 #include <QString>
 #include <QVector>
@@ -163,4 +164,26 @@ namespace browse
     // addable (a track with no file, an album row with no key), for the same reason localLeafRoute refuses
     // those: offering a verb that can only no-op is worse than not offering it.
     QueueTarget queueTargetFor(const MediaItem& it);
+
+    // ---- Starring a music TRACK from a MENU (issue #297) ------------------------------------------------
+    // The classic layout's two menus on a browse row — Start (MainWindow::openBrowseContextMenu) and the
+    // right-click (showBrowseQueueMenu) — carried the queue verbs and nothing else, so a track could be starred
+    // only from the THEMED chooser's Favorite row. That row was also the only door #193 increment 6's server
+    // star had, because the star is not sent by any button: FavoritesStore's love hook sends it when a
+    // favourite of type "track" is ADDED. So the classic verb needs no server code, only a favourite.
+    //
+    // WHICH ROWS: exactly the ones queueTargetFor calls a Track. The same reading, so a row that queues as a
+    // track is a row that stars as one. An album row is not offered — the themed layout cannot star one
+    // either (it is a '_' row and drills), and this change adds the verb the themed row has, not a new one.
+    //
+    // THE RECORD is the shape the themed chooser's generic arm writes (HomeView::favoriteThemedLeaf): itemId
+    // is the row's id, which for a track is its path — the id adoptStarredFavourites files a server star
+    // under, and the one the love hook recovers the track's tags by. Two surfaces writing two shapes of one
+    // favourite would be two records for one track, and a heart that cannot find the other.
+    FavoriteItem trackFavoriteFor(const MediaItem& it);   // itemId empty = not a track row: offer nothing
+
+    // What the menu row SAYS, and does: Favorite on a track that is not one, Remove on a track that is. A verb
+    // saying the opposite of what it does is worse than no verb, so the label is decided here, not guessed.
+    enum class TrackFavVerb { None, Add, Remove };
+    TrackFavVerb trackFavoriteVerb(const FavoriteItem& fav, bool alreadyFavorite);
 }
