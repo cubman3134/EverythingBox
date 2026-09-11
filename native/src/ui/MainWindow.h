@@ -1463,6 +1463,9 @@ private:
     // hook sends the server star exactly as it does from the themed chooser.
     QString trackFavoriteVerbLabel(browse::TrackFavVerb verb) const;
     void pressTrackFavorite(const FavoriteItem& fav);
+    // #365 (same TU): the same menus' Add to playlist / Download labels on a track row, said once for both.
+    QString trackPlaylistVerbLabel() const;
+    QString trackDownloadVerbLabel() const;
     int  themedBrowseIndex() const;  // the themed column's highlighted row, or -1 (not a themed browse surface)
     bool browseQueueTarget(browse::QueueTarget* out) const;  // …resolved to a music row, on whichever layout
     void showBrowseQueueMenu(int itemsRow);   // the right-click route: the verbs over one classic grid row

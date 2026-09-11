@@ -119,6 +119,7 @@
 #include "../core/JellyfinMusicClient.h"  // #194 inc 3: a Jellyfin server's music as a supplier
 #include "../core/ServerMusic.h"          // #194 inc 3: the EverythingBox server's music shelf (ids, readers)
 #include "../core/ServerMusicClient.h"    // ...and its fetches
+#include "../browse/QueuedRowVerb.h"      // #365: a classic menu's playlist verb, on a copy, a turn later
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
 #include "../media/StreamResolver.h"   // parseM3u — turn a fetched playlist into channels (#75 inc 2)
@@ -9731,6 +9732,10 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
         QMetaObject::invokeMethod(this, [this, copy] { showFollowMenu(copy); }, Qt::QueuedConnection);
         return;
     }
+    // #365: an ADD-ON's track row gets the same track menu a library track does — Add to playlist, and Download
+    // where it downloads. (A library track already went there above, through the queue verbs' own test.) After
+    // the New-shelf and Follow arms, so neither loses its row; trackMenuForRow refuses the Home list itself.
+    if (trackMenuForRow(row, nullptr, nullptr)) { emit browseQueueMenuRequested(row); return; }
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
@@ -11606,7 +11611,15 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
 void HomeView::downloadThemedLeaf(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
-    const MediaItem it = items_[browseRowMap_[idx]];
+    downloadBrowseItem(items_[browseRowMap_[idx]]);
+}
+
+// #365: the body, for a row already resolved — the themed chooser above, and the classic layout's two menus,
+// which copy their row before the menu opens (trackMenuForRow). One crawl entry for both layouts, not two.
+void HomeView::downloadBrowseItem(const MediaItem& row)
+{
+    if (stack_.isEmpty()) return;
+    const MediaItem it = row;
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("“%1” is already saved.").arg(it.title), 4000); return; }
     // #110: the themed twin of startDownload's arm — same table, same reason. See there.
     if (const browse::JellyfinDownloadTarget t = browse::jellyfinDownloadTargetFor(it); t.ok())
@@ -11904,6 +11917,34 @@ bool HomeView::trackFavoriteForRow(int itemsRow, FavoriteItem* out) const
     if (f.itemId.isEmpty()) return false;
     if (out) *out = f;
     return true;
+}
+
+// #365. The row answers browse::trackMenuVerbsFor; the one thing it cannot see is the add-on, supplied here
+// exactly as downloadBrowseItem's crawl will find it — the level's, else the row's own sourceAddonId.
+bool HomeView::trackMenuForRow(int itemsRow, browse::TrackMenuVerbs* verbsOut, MediaItem* rowOut) const
+{
+    if (itemsRow < 0) itemsRow = grid_ ? grid_->currentRow() : -1;
+    if (itemsRow < 0 || itemsRow >= items_.size()) return false;
+    // The Home list and a catalogue's Recent / Downloaded levels: both verbs refuse those with a toast
+    // (addItemToPlaylistInteractive, downloadBrowseItem), and a menu row that only toasts is not offered.
+    if (recentView_ || atRecentsLevel() || atDownloadsLevel()) return false;
+    const MediaItem& it = items_[itemsRow];
+    const LoadedAddon* addon = stack_.isEmpty() ? nullptr : stack_.last().addon;
+    if (!addon && mgr_ && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId);
+    const browse::TrackAddon kind = !addon ? browse::TrackAddon::None
+                                  : addon->transport == LoadedAddon::RemoteHttp ? browse::TrackAddon::Remote
+                                                                                : browse::TrackAddon::Script;
+    const browse::TrackMenuVerbs v = browse::trackMenuVerbsFor(it, kind);
+    if (!v.any()) return false;
+    if (verbsOut) *verbsOut = v;
+    if (rowOut) *rowOut = it;   // a COPY, taken before any menu opens over it
+    return true;
+}
+
+// #365: the P key's picker from a classic menu, reached the P key's way — see QueuedRowVerb.h.
+void HomeView::queueAddToPlaylist(const MediaItem& row)
+{
+    browse::queueOnRowCopy(this, row, [this](const MediaItem& it) { addItemToPlaylistInteractive(it); });
 }
 
 bool HomeView::browseQueueTarget(int themedIndex, browse::QueueTarget* out) const

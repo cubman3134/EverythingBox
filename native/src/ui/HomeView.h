@@ -142,6 +142,17 @@ public:
     // browse::trackFavoriteFor. `itemsRow` -1 = the classic grid's own cursor (the Start menu); >= 0 = that
     // items_ row (the right-click). False = not a track row, so no Favorite verb is offered on it.
     bool trackFavoriteForRow(int itemsRow, FavoriteItem* out) const;
+    // #365 — the rest of a classic track row's verbs, Add to playlist and Download, answered by
+    // browse::trackMenuVerbsFor with the add-on downloadThemedLeaf's crawl would walk. `itemsRow` as above.
+    // `rowOut` gets a COPY of the row, taken now: both menus are nested loops and items_ can be rebuilt under
+    // them. False = neither verb (not a track row, or a Recent / Downloaded list, where both would only toast).
+    bool trackMenuForRow(int itemsRow, browse::TrackMenuVerbs* verbsOut, MediaItem* rowOut) const;
+    // #365: "Add to playlist…" from a classic menu — the P key's picker, reached the P key's way: on a copy of
+    // the row, one turn later (browse::queueOnRowCopy; QueuedRowVerb.h says why both halves are load-bearing).
+    void queueAddToPlaylist(const MediaItem& row);
+    // #365: Download on a row already resolved to a copy. downloadThemedLeaf's body, so the classic menus and
+    // the themed chooser run ONE crawl entry rather than two.
+    void downloadBrowseItem(const MediaItem& row);
     // The copy of this item already on disk, or empty — see the note on the definition.
     QString localCopyForItem(const MediaItem& it) const;
     // The console page the current level belongs to, or empty outside one. Walks DOWN from the top so it
