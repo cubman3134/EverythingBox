@@ -19,13 +19,20 @@
 //   4. position mapping — offsets are the reader's, ranges cover the source, and anchorFor/indexForAnchor
 //      round-trip for every utterance in a plan.
 //   5. the feature-absent build — the book's settings row is the historical 5 controls without the module.
+//   6. speed — the shared #140 presets, stepping, and the speed -> engine-rate map.
+//   7. voice choice (#137 / #283) — ReadAloud::chooseVoices over an INJECTED voice list (the runner has no
+//      voices): a book's declared language offers only its voices, regional variants included; no matching
+//      voice, or no preference, offers ALL voices (today's rule, pinned as-is); the stored pick is restored by
+//      name through a reordering; a stored name that is gone, or not offered, falls back to index 0.
 //
 // Prints READALOUD-OK on success; any failure prints READALOUD-FAIL <cond> (line) and exits non-zero.
 #include "ReadAloud.h"
 
 #include <QCoreApplication>
 #include <QByteArray>
+#include <QLocale>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <cstdio>
 
@@ -352,6 +359,106 @@ static void testSpeed()
     CHECK(qFuzzyCompare(ReadAloud::engineRateForSpeed(-3.0) + 1.0, 1.0));  // == 0.0
 }
 
+// ---- 7. Voice choice (#137 / #283) --------------------------------------------------------------------------
+
+// The offered voices by NAME, comma-joined in offered order, so a failure reads as the two lists side by side.
+static QString offeredNames(const QVector<ReadAloud::VoiceOption>& installed, const ReadAloud::VoiceChoice& c)
+{
+    QStringList names;
+    for (int i : c.offered)
+        names << ((i >= 0 && i < installed.size()) ? installed[i].name : QStringLiteral("<bad index>"));
+    return names.join(QLatin1Char(','));
+}
+
+static ReadAloud::VoiceOption voice(const char* name, const char* locale)
+{
+    return ReadAloud::VoiceOption{ QString::fromLatin1(name), QLocale(QString::fromLatin1(locale)) };
+}
+
+static void testVoiceChoice()
+{
+    // An engine's list, in the engine's order: two English, two French in DIFFERENT regions, one German.
+    const QVector<ReadAloud::VoiceOption> installed = {
+        voice("David",    "en_US"),
+        voice("Hortense", "fr_FR"),
+        voice("Zira",     "en_US"),
+        voice("Sylvie",   "fr_CA"),
+        voice("Hedda",    "de_DE"),
+    };
+    const QString all = QStringLiteral("David,Hortense,Zira,Sylvie,Hedda");
+
+    // A "fr" book offers ONLY the French voices, in the engine's order - and the fr_CA voice is one of them:
+    // the match is on language, not region. Nothing stored, so the first offered voice is the pick.
+    ReadAloud::VoiceChoice c = ReadAloud::chooseVoices(installed, QStringLiteral("fr"), QString());
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+    CHECK(c.selected == 0);
+
+    // A region-qualified preference is not narrowed by its region either, in both spellings a book carries:
+    // dc:language is BCP 47 ("fr-CA"), a system locale name is "fr_CA".
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("fr-CA"), QString());
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("fr_FR"), QString());
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+
+    // A French book with NO French voice installed offers EVERY voice, in the engine's order. This is the rule
+    // the code has today and it is pinned as-is: it is NOT "the system locale's voices" (#283 records the
+    // difference for the owner). An English-only machine: the French book is offered the English voices, as
+    // the whole list, not as a narrowing.
+    const QVector<ReadAloud::VoiceOption> noFrench = {
+        voice("David", "en_US"), voice("Hedda", "de_DE"), voice("Zira", "en_GB"),
+    };
+    c = ReadAloud::chooseVoices(noFrench, QStringLiteral("fr"), QString());
+    EXPECT_STR(offeredNames(noFrench, c), QStringLiteral("David,Hedda,Zira"));
+    CHECK(c.selected == 0);
+    // ...and the same for a language nothing on the machine speaks at all.
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("ja"), QString());
+    EXPECT_STR(offeredNames(installed, c), all);
+    CHECK(c.selected == 0);
+
+    // An EMPTY preference offers every voice. (EbookView::bookLanguage already turns a book that declares
+    // nothing into the system locale's name, so this is the no-target path - and it must stay "everything".)
+    c = ReadAloud::chooseVoices(installed, QString(), QString());
+    EXPECT_STR(offeredNames(installed, c), all);
+    CHECK(c.selected == 0);
+
+    // The stored pick is restored BY NAME, as an index into the OFFERED list...
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("fr"), QStringLiteral("Sylvie"));
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+    CHECK(c.selected == 1);
+    // ...and it survives the engine listing its voices in a different order (a voice installed, an update):
+    // the same name is found at its new place, not the old index.
+    const QVector<ReadAloud::VoiceOption> reordered = {
+        voice("Hedda",    "de_DE"),
+        voice("Sylvie",   "fr_CA"),
+        voice("Zira",     "en_US"),
+        voice("Hortense", "fr_FR"),
+        voice("David",    "en_US"),
+    };
+    c = ReadAloud::chooseVoices(reordered, QStringLiteral("fr"), QStringLiteral("Sylvie"));
+    EXPECT_STR(offeredNames(reordered, c), QStringLiteral("Sylvie,Hortense"));
+    CHECK(c.selected == 0);
+    c = ReadAloud::chooseVoices(reordered, QStringLiteral("fr"), QStringLiteral("Hortense"));
+    CHECK(c.selected == 1);
+    // In the all-voices fallback too.
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("ja"), QStringLiteral("Hedda"));
+    CHECK(c.selected == 4);
+
+    // A stored name that is no longer installed falls back to the first offered voice.
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("fr"), QStringLiteral("Amelie"));
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+    CHECK(c.selected == 0);
+    // So does one that IS installed but is not offered for this book: an English pick is not carried into a
+    // French book's French-only list.
+    c = ReadAloud::chooseVoices(installed, QStringLiteral("fr"), QStringLiteral("Zira"));
+    EXPECT_STR(offeredNames(installed, c), QStringLiteral("Hortense,Sylvie"));
+    CHECK(c.selected == 0);
+
+    // No voices at all: nothing offered, and the pick is still 0 (the controller's applyVoice bounds-checks it).
+    c = ReadAloud::chooseVoices(QVector<ReadAloud::VoiceOption>(), QStringLiteral("fr"), QStringLiteral("Sylvie"));
+    CHECK(c.offered.isEmpty());
+    CHECK(c.selected == 0);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -365,6 +472,7 @@ int main(int argc, char** argv)
     testPositionMapping();
     testSpeed();
     testFeatureAbsentRow();
+    testVoiceChoice();
     if (failures == 0) std::printf("READALOUD-OK\n");
     return failures == 0 ? 0 : 1;
 }
