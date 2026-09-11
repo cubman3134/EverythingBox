@@ -13807,6 +13807,9 @@ void MainWindow::showThemedXmb()
             {
                 r->setProperty("actionItem", itemIdx);
                 r->setProperty("actionFav", home_->isThemedLeafFavorite(itemIdx));
+                // #372: Download only where the press can act — HomeView::themedDownloadOffered, the answer the
+                // detail view's action row reads, so the chooser and the detail row cannot disagree.
+                r->setProperty("actionDownload", home_->themedDownloadOffered(itemIdx));
                 // Romhacks only where the leaf is a retro game with a resolvable system — the same gate the
                 // detail page's verb uses, asked here so the chooser can add the row.
                 r->setProperty("actionRomhack", home_->romhackTargetAt(itemIdx, nullptr, nullptr));

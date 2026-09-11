@@ -192,8 +192,8 @@ static const QSize kPoster(140, 200);
 // file provider by a different route below.)
 static bool isReadableChapter(const QString& t)
 {
-    static const QString kSuffix = QStringLiteral("_chapter");
-    return t.size() > kSuffix.size() && t.endsWith(kSuffix);   // a bare "_chapter" names no family
+    // One definition, beside the download arm table that also reads it (browse::downloadLeafArmFor, #372).
+    return browse::isReadableChapterType(t);
 }
 
 // Per-profile settings store (shared ini); used here to read media resume progress.
@@ -9351,18 +9351,23 @@ QString HomeView::localCopyForItem(const MediaItem& it) const
     return (!local.isEmpty() && QFileInfo::exists(local)) ? local : QString();
 }
 
+// The add-on a download crawl walks, as the kind browse::downloadLeafArmFor and trackMenuVerbsFor read it.
+static browse::TrackAddon crawlAddonKind(const LoadedAddon* addon)
+{
+    return !addon ? browse::TrackAddon::None
+         : addon->transport == LoadedAddon::RemoteHttp ? browse::TrackAddon::Remote : browse::TrackAddon::Script;
+}
+
 void HomeView::dlResolveLeaf(const DlNode& node)
 {
     const MediaItem it = node.item;
-    // Can't pull as a single file: a store-launcher game (Steam/Epic/GOG), or a page-based manga chapter.
-    if (it.mime == QStringLiteral("steamgame") || it.mime == QStringLiteral("epicgame")
-        || it.mime == QStringLiteral("goggame") || it.mime == QStringLiteral("battlenetgame")
-        || isReadableChapter(it.type)) { dlNext(); return; }
+    // WHICH ARM is browse::downloadLeafArmFor's answer: the table the Download OFFER reads too (#372), so neither
+    // themed surface can offer the verb on a row this crawl has no arm for.
+    const browse::DownloadLeafArm arm = browse::downloadLeafArmFor(it, crawlAddonKind(node.addon));
+    // Can't pull as a single file (a store-launcher game, a page-based manga chapter), or no arm claims the leaf.
+    if (arm == browse::DownloadLeafArm::None) { dlNext(); return; }
 
-    const bool localBridge = node.addon && node.addon->transport != LoadedAddon::RemoteHttp
-        && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
-            || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
-    if (localBridge)
+    if (arm == browse::DownloadLeafArm::LocalBridge)
     {
         const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
         QString query;
@@ -9395,7 +9400,7 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         });
         return;
     }
-    if (node.addon && node.addon->transport == LoadedAddon::RemoteHttp) // file provider OR Stremio: its /stream
+    if (arm == browse::DownloadLeafArm::RemoteStream) // file provider OR Stremio: its /stream
     {
         // The DOWNLOAD crawl, not playback: it writes the file to disk with the normal HTTP client — which is
         // exactly why the source's headers have to ride along (#59). They are declared for THIS url and go
@@ -9439,14 +9444,13 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         return;
     }
     // A movie/episode browsed from a local catalog (AIO): fetch its /meta to learn the IMDB id, then bridge.
-    if (it.type == QStringLiteral("movie") || it.type == QStringLiteral("episode")
-        || it.type == QStringLiteral("series") || it.type == QStringLiteral("tv"))
+    if (arm == browse::DownloadLeafArm::MetaBridge)
     {
         dlMetaNode_ = node;
         dlMetaReq_ = mgr_->requestMeta(node.addon, it); // -> onMetaReady crawl branch
         return;
     }
-    dlNext(); // unknown / non-downloadable leaf
+    dlNext(); // every arm returned above; kept so an arm added to the table and not handled here cannot stall
 }
 
 void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime,
@@ -11369,7 +11373,11 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
         out.insert(QStringLiteral("newCount"), unread);
         if (followed && unread > 0) verbs << QStringLiteral("markseen");
     }
-    if (gates.download && !localSaved) verbs << QStringLiteral("download");
+    // #372: Download is downloadOfferedFor's answer — the ONE the XMB chooser's Download row reads too (MainWindow
+    // writes it into actionDownload). It keeps every row classicActionGates offered and never offers a file
+    // already on disk (localSaved above), and it adds the leaves the crawl genuinely downloads that the classic
+    // gate never named: a remote add-on's track or game, an AIO Catalog film.
+    if (downloadOfferedFor(it)) verbs << QStringLiteral("download");
     // "Request" / "In your library" (issue #109), the themed twin of the classic requestBtn_. Offered on any
     // movie/series row carrying a TMDB or IMDB id when a request service is set up, and on nothing else — an
     // item with neither id gets no pill rather than a broken one. The LABEL carries the state, so the
@@ -11639,8 +11647,7 @@ void HomeView::downloadBrowseItem(const MediaItem& row)
     // Level's addon else the row's own — same fallback as playThemedLeaf and activateItem. A synthetic level
     // carries no addon, so a row that came from a server names its own; without this, Download on such a row
     // crawls with a null addon and finds nothing to fetch.
-    node.addon = stack_.last().addon;
-    if (!node.addon && mgr_ && !it.sourceAddonId.isEmpty()) node.addon = mgr_->sourceById(it.sourceAddonId);
+    node.addon = crawlAddonFor(it);
     node.item = it;
     node.parentTitle = stack_.last().item.title;               // the level this leaf hangs under
     node.parentType  = stack_.last().item.type;
@@ -11716,6 +11723,38 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     // Download verbs consult (browse::jellyfinDownloadTargetFor), so the two cannot answer differently.
     g.download = dlLeaf || dlContainer || browse::jellyfinDownloadTargetFor(item).ok();
     return g;
+}
+
+LoadedAddon* HomeView::crawlAddonFor(const MediaItem& it) const
+{
+    // Level's addon else the row's own — same fallback as playThemedLeaf and activateItem. A synthetic level
+    // carries no addon, so a row that came from a server names its own.
+    LoadedAddon* addon = stack_.isEmpty() ? nullptr : stack_.last().addon;
+    if (!addon && mgr_ && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId);
+    return addon;
+}
+
+// #372 — see HomeView.h. The facts browse::downloadOffered cannot see for itself, gathered the way the press
+// will meet them: the add-on is crawlAddonFor's (downloadBrowseItem's own), "already local" is themedDetailData's
+// localSaved, and the two providers are what the LocalBridge and MetaBridge arms end up asking for.
+bool HomeView::downloadOfferedFor(const MediaItem& it) const
+{
+    if (stack_.isEmpty()) return false;   // downloadBrowseItem refuses outright
+    browse::DownloadOfferFacts f;
+    f.addon          = crawlAddonKind(crawlAddonFor(it));
+    f.alreadyLocal   = isLocalGameLeaf(it) || atRecentsLevel() || atDownloadsLevel();
+    f.classicGate    = classicActionGates(it).download;
+    f.fileProvider   = mgr_ && mgr_->hasFileProvider();
+    // onMetaReady's resolveStreamByImdb asks for "movie" or "series" — the same split, the same providers.
+    f.streamProvider = mgr_ && mgr_->hasStreamProvider(it.type == QStringLiteral("movie") ? QStringLiteral("movie")
+                                                                                         : QStringLiteral("series"));
+    return browse::downloadOffered(it, f);
+}
+
+bool HomeView::themedDownloadOffered(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return false;
+    return downloadOfferedFor(items_[browseRowMap_[idx]]);
 }
 
 bool HomeView::canChooseStreamSource(const MediaItem& item) const
@@ -11938,12 +11977,7 @@ bool HomeView::trackMenuForRow(int itemsRow, browse::TrackMenuVerbs* verbsOut, M
     // (addItemToPlaylistInteractive, downloadBrowseItem), and a menu row that only toasts is not offered.
     if (recentView_ || atRecentsLevel() || atDownloadsLevel()) return false;
     const MediaItem& it = items_[itemsRow];
-    const LoadedAddon* addon = stack_.isEmpty() ? nullptr : stack_.last().addon;
-    if (!addon && mgr_ && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId);
-    const browse::TrackAddon kind = !addon ? browse::TrackAddon::None
-                                  : addon->transport == LoadedAddon::RemoteHttp ? browse::TrackAddon::Remote
-                                                                                : browse::TrackAddon::Script;
-    const browse::TrackMenuVerbs v = browse::trackMenuVerbsFor(it, kind);
+    const browse::TrackMenuVerbs v = browse::trackMenuVerbsFor(it, crawlAddonKind(crawlAddonFor(it)));
     if (!v.any()) return false;
     if (verbsOut) *verbsOut = v;
     if (rowOut) *rowOut = it;   // a COPY, taken before any menu opens over it

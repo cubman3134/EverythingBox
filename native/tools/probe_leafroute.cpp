@@ -75,6 +75,14 @@
 //      SOURCE file is checked (in the index or not) and a missing one says the moved-file sentence; a clip
 //      url nobody can read a file out of opens as before, unchecked; CueSheet::clipFile reads mpvClipUrl
 //      back; and routing all of it fires no love hook and leaves the store exactly as it was.
+//   §11 IS DOWNLOAD OFFERED ON THIS ROW (issue #372). The themed chooser offered Download on every leaf and the
+//      themed detail row asked classicActionGates; both now read browse::downloadOffered. The four track kinds
+//      #365 drove (local, Subsonic, script add-on: no Download; remote add-on: Download), in every add-on
+//      context and agreeing with the classic menus' trackMenuVerbsFor; the crawl's arm table
+//      (browse::downloadLeafArmFor, which dlResolveLeaf dispatches on) row by row; every leaf that genuinely
+//      downloads keeps it (an AIO film, a script add-on's book, a remote add-on's game); an arm that cannot
+//      work without its provider is not offered without it; everything classicActionGates offered is still
+//      offered, and nothing already on disk is.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
 #include "CueSheet.h"
@@ -1415,6 +1423,184 @@ int main(int argc, char** argv)
         FavoritesStore::setLoveHook({});
         for (const FavoriteItem& f : all) FavoritesStore::remove(f.itemId);
         CHECK(FavoritesStore::list().isEmpty());
+    }
+
+    // ---- §11 IS DOWNLOAD OFFERED ON THIS ROW (issue #372) ---------------------------------------------------
+    // The themed XMB chooser offered Download on every leaf; the themed detail row asked classicActionGates.
+    // Both now read browse::downloadOffered (through HomeView::downloadOfferedFor), and the crawl a press runs
+    // (HomeView::dlResolveLeaf) dispatches on browse::downloadLeafArmFor, the table downloadOffered reads.
+    {
+        using browse::DownloadLeafArm;
+        using browse::DownloadOfferFacts;
+        using browse::TrackAddon;
+        const TrackAddon kAll[] = { TrackAddon::None, TrackAddon::Script, TrackAddon::Remote };
+        auto leaf = [](const char* type, const char* mime = "") {
+            MediaItem m; m.type = QString::fromLatin1(type); m.mime = QString::fromLatin1(mime);
+            m.id = QStringLiteral("x-1"); m.title = QStringLiteral("x"); m.expandable = false;
+            return m;
+        };
+        // Every provider present: the most generous world. A row refused under this is refused because the
+        // crawl has no arm for it, never because a provider happened to be missing where the probe ran.
+        auto rich = [](TrackAddon a) {
+            DownloadOfferFacts f; f.addon = a; f.fileProvider = true; f.streamProvider = true; return f;
+        };
+        auto bare = [](TrackAddon a) { DownloadOfferFacts f; f.addon = a; return f; };
+
+        // 11a. THE FOUR TRACK KINDS #365 DROVE — and the classic menus (trackMenuVerbsFor) agree on every one.
+        //   local library track   no Download: already on this machine, and no add-on for the crawl to walk
+        //   Subsonic track        no Download: no add-on either; #365's press reached no server
+        //   script add-on track   no Download: the script arm covers comic issue / book / audiobook / game
+        //   remote add-on track   Download: its /stream is what the crawl downloads, byte for byte (#365)
+        // classicGate is false for all four: classicActionGates names no track type. HomeView asks it for real
+        // and the runner pins that it is asked; here it is the fact it yields for these rows.
+        {
+            const MusicLibrary::Index idx = oneAlbumIndex();
+            const MediaCatalog album = browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover);
+            int localTracks = 0;
+            for (const MediaItem& it : album.items)
+            {
+                if (browse::queueTargetFor(it).what != browse::QueueAdd::Track) continue;
+                ++localTracks;
+                // Asked in EVERY add-on context: a local file must not be rescued into a Download by one.
+                for (TrackAddon a : kAll)
+                {
+                    CHECK(!browse::downloadOffered(it, rich(a)));
+                    CHECK(browse::downloadOffered(it, rich(a)) == browse::trackMenuVerbsFor(it, a).download);
+                }
+            }
+            CHECK(localTracks == 2);   // a builder that emitted nothing would pass the loop vacuously
+
+            const QString srv = QStringLiteral("3f2b8c1e-6a4d-4e0b-9a51-2c7d8e9f0a1b");
+            MusicLibrary::Index sub = oneAlbumIndex();
+            MusicLibrary::Album& b = sub.artists[0].albums[0];
+            b.key = Subsonic::qualify(srv, Subsonic::Kind::Album, QStringLiteral("al-1"));
+            b.tracks[0].path = Subsonic::qualify(srv, Subsonic::Kind::Track, QStringLiteral("tr-1"));
+            b.tracks[1].path = Subsonic::qualify(srv, Subsonic::Kind::Track, QStringLiteral("tr-2"));
+            const MediaCatalog subAlbum = browse::musicAlbumCatalog(sub, b.key, noCover);
+            int subTracks = 0;
+            for (const MediaItem& it : subAlbum.items)
+            {
+                if (!Subsonic::isQualified(it.url)) continue;
+                ++subTracks;
+                for (TrackAddon a : kAll)
+                {
+                    CHECK(!browse::downloadOffered(it, rich(a)));
+                    CHECK(browse::downloadOffered(it, rich(a)) == browse::trackMenuVerbsFor(it, a).download);
+                }
+            }
+            CHECK(subTracks == 2);
+
+            for (const char* type : { "track", "song", "music" })
+            {
+                const MediaItem t = leaf(type);   // the AIO catalog's MusicBrainz shape: metadata, no url
+                CHECK(!browse::downloadOffered(t, rich(TrackAddon::None)));
+                CHECK(!browse::downloadOffered(t, rich(TrackAddon::Script)));
+                CHECK(browse::downloadOffered(t, rich(TrackAddon::Remote)));
+                CHECK(browse::downloadOffered(t, bare(TrackAddon::Remote)));   // needs no provider: its own /stream
+                for (TrackAddon a : kAll)
+                    CHECK(browse::downloadOffered(t, rich(a)) == browse::trackMenuVerbsFor(t, a).download);
+            }
+        }
+
+        // 11b. THE CRAWL'S ARM TABLE, row by row, in dlResolveLeaf's order.
+        {
+            // Can't be pulled as one file — under ANY add-on, whatever the type claims.
+            for (const char* mime : { "steamgame", "epicgame", "goggame", "battlenetgame" })
+                for (TrackAddon a : kAll)
+                {
+                    CHECK(browse::downloadLeafArmFor(leaf("game", mime), a) == DownloadLeafArm::None);
+                    CHECK(browse::downloadLeafArmFor(leaf("movie", mime), a) == DownloadLeafArm::None);
+                }
+            for (const char* type : { "manga_chapter", "comic_chapter" })
+                for (TrackAddon a : kAll)
+                    CHECK(browse::downloadLeafArmFor(leaf(type), a) == DownloadLeafArm::None);
+            CHECK(browse::isReadableChapterType(QStringLiteral("manga_chapter")));
+            CHECK(!browse::isReadableChapterType(QStringLiteral("_chapter")));   // names no family
+            CHECK(!browse::isReadableChapterType(QStringLiteral("chapter")));
+            CHECK(!browse::isReadableChapterType(QStringLiteral("comic_issue")));
+            // The script arm: exactly four types, and only under a script add-on.
+            for (const char* type : { "comic_issue", "book", "audiobook", "game" })
+            {
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::Script) == DownloadLeafArm::LocalBridge);
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::Remote) == DownloadLeafArm::RemoteStream);
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::None) == DownloadLeafArm::None);
+            }
+            // The remote arm: any leaf at all.
+            for (const char* type : { "movie", "episode", "track", "song", "game", "comic", "podcast" })
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::Remote) == DownloadLeafArm::RemoteStream);
+            // The meta arm: the four video kinds, from anything that is not a remote add-on.
+            for (const char* type : { "movie", "episode", "series", "tv" })
+            {
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::Script) == DownloadLeafArm::MetaBridge);
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::None) == DownloadLeafArm::MetaBridge);
+            }
+            // No arm: a track / song / music outside a remote add-on, and anything unknown.
+            for (const char* type : { "track", "song", "music", "podcast", "photo" })
+            {
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::Script) == DownloadLeafArm::None);
+                CHECK(browse::downloadLeafArmFor(leaf(type), TrackAddon::None) == DownloadLeafArm::None);
+            }
+        }
+
+        // 11c. EVERY LEAF THAT GENUINELY DOWNLOADS KEEPS IT — and an arm that needs a provider is offered only
+        // with one, because without it the press can only come back empty.
+        {
+            // The AIO Catalog film / episode (a SCRIPT catalog — the default Movies/TV shelf): classicActionGates
+            // never offered these, the chooser always did, and the MetaBridge arm downloads them.
+            for (const char* type : { "movie", "episode" })
+            {
+                CHECK(browse::downloadOffered(leaf(type), rich(TrackAddon::Script)));
+                CHECK(!browse::downloadOffered(leaf(type), bare(TrackAddon::Script)));   // no stream provider
+                // No add-on: requestMeta answers nothing without one (returns -1, never emits), so the press
+                // would sit on "Preparing download…" — not offered even with every provider present.
+                CHECK(!browse::downloadOffered(leaf(type), rich(TrackAddon::None)));
+            }
+            // A script add-on's comic issue / book / audiobook / game: the file provider's title search.
+            for (const char* type : { "comic_issue", "book", "audiobook", "game" })
+            {
+                CHECK(browse::downloadOffered(leaf(type), rich(TrackAddon::Script)));
+                CHECK(!browse::downloadOffered(leaf(type), bare(TrackAddon::Script)));   // no file provider
+            }
+            // A remote add-on's game (the ordinary Download verb dlResolveLeaf's comment names) and film.
+            CHECK(browse::downloadOffered(leaf("game"), bare(TrackAddon::Remote)));
+            CHECK(browse::downloadOffered(leaf("movie"), bare(TrackAddon::Remote)));
+            // ...and never a store-launcher game or a chapter, even under a remote add-on with everything present.
+            CHECK(!browse::downloadOffered(leaf("game", "steamgame"), rich(TrackAddon::Remote)));
+            CHECK(!browse::downloadOffered(leaf("manga_chapter"), rich(TrackAddon::Remote)));
+            CHECK(!browse::downloadOffered(leaf("photo"), rich(TrackAddon::Script)));   // no arm
+        }
+
+        // 11d. THE DETAIL ROW ONLY GAINS: whatever classicActionGates offered is still offered, in any context —
+        // unless the file is already on this machine, which refuses everything (the press would only say so).
+        {
+            for (const char* type : { "movie", "track", "game", "comic", "series", "manga_chapter", "photo" })
+                for (TrackAddon a : kAll)
+                    for (bool expandable : { false, true })
+                    {
+                        MediaItem it = leaf(type); it.expandable = expandable;
+                        DownloadOfferFacts f = bare(a); f.classicGate = true;
+                        CHECK(browse::downloadOffered(it, f));
+                        f.alreadyLocal = true;
+                        CHECK(!browse::downloadOffered(it, f));
+                        DownloadOfferFacts g = rich(a); g.alreadyLocal = true;
+                        CHECK(!browse::downloadOffered(it, g));
+                    }
+        }
+
+        // 11e. NO NEW OFFER ON A CONTAINER OR A SYNTHETIC ROW. A container's download is the classic gate's
+        // (series / season / comic volume) and nothing more; a '_' row, a guidance line and a Recent divider are
+        // not media — even under a remote add-on, whose arm claims any LEAF.
+        {
+            for (const char* type : { "series", "season", "comic", "album", "platform" })
+                for (TrackAddon a : kAll)
+                {
+                    MediaItem it = leaf(type); it.expandable = true;
+                    CHECK(!browse::downloadOffered(it, rich(a)));
+                }
+            for (const char* type : { "_playlists", "info", "rechdr" })
+                for (TrackAddon a : kAll)
+                    CHECK(!browse::downloadOffered(leaf(type), rich(a)));
+        }
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }

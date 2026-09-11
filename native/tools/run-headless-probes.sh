@@ -3051,6 +3051,108 @@ else
 fi
 echo
 
+# Themed Download offer (issue #372). The themed layout's XMB inline chooser offered Download on every leaf,
+# including the tracks where the press can only say "Nothing here could be downloaded", while the themed detail
+# view's action row asked classicActionGates. Both now read ONE C++ answer, HomeView::downloadOfferedFor
+# (browse::downloadOffered over the crawl's own arm table, browse::downloadLeafArmFor). probe_leafroute §11
+# pins the decision and probe_navqml §29 pins the chooser's drawn rows and codes on the real QML. HomeView and
+# MainWindow link nothing headlessly, so this is the half that lives there:
+#
+#  1. THE CHOOSER IS TOLD. MainWindow's leaf-open writes home_->themedDownloadOffered into ThemeView's
+#     actionDownload BEFORE it opens the chooser (the row list is rebuilt from it as it changes).
+#  2. THE DETAIL ROW ASKS THE SAME. themedDetailData pushes "download" on downloadOfferedFor, and no longer on a
+#     gates.download of its own.
+#  3. ONE ANSWER, ONE FACT-GATHERER. themedDownloadOffered answers through downloadOfferedFor, which asks
+#     browse::downloadOffered with classicActionGates' answer and crawlAddonFor's add-on.
+#  4. THE PRESS DISPATCHES ON THE SAME TABLE. dlResolveLeaf asks browse::downloadLeafArmFor and does not
+#     re-derive an arm from the add-on's transport; downloadBrowseItem walks crawlAddonFor's add-on.
+#  5. THE PRESS IS UNCHANGED AND THE ROW IS OPTIONAL. onAction's code 3 still runs home_->downloadThemedLeaf,
+#     and Xmb.qml draws its k: 3 row only behind host.actionDownload, never among the fixed rows.
+#
+# Comments are stripped first, as in the gates above. Every test counts rather than "| grep -q", and line
+# numbers come from awk, so pipefail cannot turn a match into a failure.
+echo "=== themed Download offer (#372) ==="
+DO_V="$HERE/../src/ui/HomeView.cpp"
+DO_M="$HERE/../src/ui/MainWindow.cpp"
+DO_X="$HERE/../src/theme2/qml/elements/Xmb.qml"
+do_fail=0
+do_note() { echo "  $1"; do_fail=1; }
+if [ ! -f "$DO_V" ] || [ ! -f "$DO_M" ] || [ ! -f "$DO_X" ]; then
+  echo "FAIL: themed Download offer (HomeView.cpp / MainWindow.cpp / Xmb.qml not found under $HERE/../src)"; fail=1
+else
+  do_v="$(mktemp)"; do_m="$(mktemp)"; do_x="$(mktemp)"; do_fn="$(mktemp)"
+  sed -E 's://.*$::' "$DO_V" > "$do_v"
+  sed -E 's://.*$::' "$DO_M" > "$do_m"
+  sed -E 's://.*$::' "$DO_X" > "$do_x"
+  # One function's body: from the line that STARTS with its signature to the first lone closing brace.
+  do_body() { awk -v sig="$2" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$1" </dev/null > "$do_fn"; }
+  do_count() { grep -cF -- "$1" "$do_fn" || true; }
+  do_lineof() { awk -v s="$2" 'index($0, s) { print NR; exit }' "$1" </dev/null; }
+
+  # --- 1. The chooser is told, before it opens. ---
+  do_w="$(do_lineof "$do_m" 'setProperty("actionDownload", home_->themedDownloadOffered(')"
+  do_o="$(do_lineof "$do_m" 'setProperty("actionsOpen", true)')"
+  if [ -z "$do_w" ]; then
+    do_note "MainWindow never writes home_->themedDownloadOffered into actionDownload: the chooser has no answer to draw its Download row from."
+  elif [ -z "$do_o" ]; then
+    do_note "MainWindow's setProperty(\"actionsOpen\", true) was not found, so clause 1's ordering is checking nothing."
+  elif [ "$do_w" -gt "$do_o" ] || [ $((do_o - do_w)) -gt 40 ]; then
+    do_note "MainWindow writes actionDownload at line $do_w and opens the chooser at line $do_o: the write must come first, in the same leaf-open block, or the chooser draws the previous leaf's answer."
+  fi
+
+  # --- 2. The detail row asks the same. ---
+  do_body "$do_v" 'QVariantMap HomeView::themedDetailData('
+  if [ "$(wc -l < "$do_fn" | tr -d '[:space:]')" -lt 40 ]; then
+    do_note "HomeView::themedDetailData was not found (or shrank): nothing is checking the detail row's Download verb."
+  else
+    [ "$(grep -cE 'if \(downloadOfferedFor\(it\)\) verbs << QStringLiteral\("download"\)' "$do_fn" || true)" -eq 1 ] \
+      || do_note "themedDetailData does not push \"download\" on downloadOfferedFor(it): the detail row and the chooser can disagree again."
+    [ "$(do_count 'gates.download')" -eq 0 ] \
+      || do_note "themedDetailData reads gates.download again: a second answer to \"is Download offered\" beside downloadOfferedFor."
+  fi
+
+  # --- 3. One answer, one fact-gatherer. ---
+  do_body "$do_v" 'bool HomeView::themedDownloadOffered('
+  [ "$(do_count 'downloadOfferedFor(')" -ge 1 ] \
+    || do_note "HomeView::themedDownloadOffered does not answer through downloadOfferedFor: the chooser's answer is not the detail row's."
+  do_body "$do_v" 'bool HomeView::downloadOfferedFor('
+  for do_g in 'browse::downloadOffered(' 'classicActionGates(' 'crawlAddonFor('; do
+    [ "$(do_count "$do_g")" -ge 1 ] \
+      || do_note "HomeView::downloadOfferedFor no longer asks $do_g: probe_leafroute §11 is pinning a decision this does not make."
+  done
+
+  # --- 4. The press dispatches on the same table, walking the same add-on. ---
+  do_body "$do_v" 'void HomeView::dlResolveLeaf('
+  [ "$(do_count 'browse::downloadLeafArmFor(')" -ge 1 ] \
+    || do_note "HomeView::dlResolveLeaf no longer dispatches on browse::downloadLeafArmFor: the offer and the press read two tables."
+  [ "$(do_count 'transport')" -eq 0 ] \
+    || do_note "HomeView::dlResolveLeaf reads an add-on's transport itself again: an arm re-derived beside the table the offer reads."
+  do_body "$do_v" 'void HomeView::downloadBrowseItem('
+  [ "$(do_count 'crawlAddonFor(')" -ge 1 ] \
+    || do_note "HomeView::downloadBrowseItem does not walk crawlAddonFor's add-on: the press could crawl a different add-on than the offer judged."
+
+  # --- 5. The press is unchanged, and the row is optional. ---
+  [ "$(grep -cE 'which == 3\)[[:space:]]*\{.*home_->downloadThemedLeaf\(idx\)' "$do_m" || true)" -eq 1 ] \
+    || do_note "MainWindow's onAction no longer runs home_->downloadThemedLeaf for code 3: the chooser's Download row does something else."
+  do_lit="$(awk '/var r = \[/ { p = 1 } p { print } p && /\]/ { exit }' "$do_x" </dev/null)"
+  for do_k in 'k: 0' 'k: 1' 'k: 2'; do
+    [ "$(printf '%s\n' "$do_lit" | grep -cF -- "$do_k" || true)" -eq 1 ] \
+      || do_note "Xmb.qml's fixed chooser rows no longer hold \"$do_k\": Play / Favorite / Add to playlist are drawn on every leaf, with their codes."
+  done
+  [ "$(printf '%s\n' "$do_lit" | grep -cF -- 'k: 3' || true)" -eq 0 ] \
+    || do_note "Xmb.qml draws the k: 3 (Download) row among the fixed rows again: on every leaf, including the ones where the press can only say \"Nothing here could be downloaded\"."
+  [ "$(grep -cE 'host\.actionDownload\).*k: 3' "$do_x" || true)" -eq 1 ] \
+    || do_note "Xmb.qml has no k: 3 row behind host.actionDownload: the chooser never offers Download, even where it works."
+
+  rm -f "$do_v" "$do_m" "$do_x" "$do_fn"
+  if [ "$do_fail" -eq 0 ]; then
+    echo "PASS: themed Download offer (#372) (the chooser is told themedDownloadOffered before it opens; the detail row asks downloadOfferedFor; the press dispatches on the same arm table)"
+  else
+    echo "FAIL: themed Download offer (#372) — the chooser and the detail row can answer Download differently again."; fail=1
+  fi
+fi
+echo
+
 # Jellyfin play-site gate (issue #83). Two facts that live in MainWindow, which links nothing headlessly
 # -- so they are text gates, the same answer this suite already gives for the local-leaf routing parity and
 # the synthetic-level Back markers. Both were LIVE DEFECTS found on the fixture drive, not hypotheses.

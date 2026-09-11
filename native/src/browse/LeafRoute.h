@@ -216,4 +216,45 @@ namespace browse
         bool any() const { return playlist || download; }
     };
     TrackMenuVerbs trackMenuVerbsFor(const MediaItem& it, TrackAddon addon);
+
+    // ---- Is Download OFFERED on this row? (issue #372) ----------------------------------------------------
+    // The themed layout had two surfaces answering this, differently. The detail view's action row asked
+    // HomeView::classicActionGates; the XMB inline chooser asked nothing and offered Download on every leaf —
+    // including the three track kinds #365 drove, where the press can only say "Nothing here could be
+    // downloaded." Both now read ONE answer, HomeView::downloadOfferedFor, which is downloadOffered() below fed
+    // the facts only HomeView can see (the add-ons, the disk).
+    //
+    // THE CRAWL'S OWN ARM TABLE. What a Download press does to a leaf is HomeView::dlResolveLeaf, and it
+    // DISPATCHES ON downloadLeafArmFor — so an offer cannot name an arm the press does not have:
+    //   None          a store-launcher game (Steam / Epic / GOG / Battle.net) or a page-based chapter, neither
+    //                 of which can be pulled as one file; or a leaf no arm claims
+    //   LocalBridge   a comic issue / book / audiobook / game under a SCRIPT add-on: the file provider's title
+    //                 search
+    //   RemoteStream  any leaf under a REMOTE add-on: its own /stream (a game falls back to the title search)
+    //   MetaBridge    a movie / episode / series / tv from anywhere else: its /meta names the IMDB id, and the
+    //                 stream add-ons resolve that
+    // `addon` is the add-on the crawl walks: the level's, else the row's own sourceAddonId (downloadBrowseItem).
+    //
+    // WHY NOT JUST classicActionGates. It was built for the classic info page's remote and bridged leaves, and
+    // it names fewer rows than the crawl downloads: a remote add-on's track (which #365 downloaded byte for
+    // byte), a remote add-on's game, an AIO Catalog film (the MetaBridge arm), a row that names its own add-on
+    // on a level with none. Pointing the chooser at it alone would have taken a working Download away from
+    // each of those. So its answer is KEPT (everything it offered is still offered) and the crawl's arms are
+    // added to it — which is why the detail row only ever gains.
+    enum class DownloadLeafArm { None, LocalBridge, RemoteStream, MetaBridge };
+    DownloadLeafArm downloadLeafArmFor(const MediaItem& it, TrackAddon addon);
+
+    // A page-based chapter ("manga_chapter", …): read page by page, never pulled as one file. The one
+    // definition; HomeView's own isReadableChapter answers through it.
+    bool isReadableChapterType(const QString& type);
+
+    struct DownloadOfferFacts
+    {
+        TrackAddon addon = TrackAddon::None; // the add-on the crawl would walk
+        bool alreadyLocal = false;    // a local game file, or a Recent / Downloaded row: it is already saved
+        bool classicGate = false;     // HomeView::classicActionGates(item).download — the detail row's old answer
+        bool fileProvider = false;    // an enabled file provider for the LocalBridge search to ask
+        bool streamProvider = false;  // a stream provider for the row's kind, which the MetaBridge resolve needs
+    };
+    bool downloadOffered(const MediaItem& it, const DownloadOfferFacts& facts);
 }

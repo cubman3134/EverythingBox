@@ -592,8 +592,11 @@ Item {
         readonly property var rows: {
             var r = [ { k: 0, label: "▶  Play" },
                       { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
-                      { k: 2, label: "＋  Add to playlist" },
-                      { k: 3, label: "⭳  Download" } ]
+                      { k: 2, label: "＋  Add to playlist" } ]
+            // #372: Download only where the press can act (host.actionDownload is HomeView::themedDownloadOffered,
+            // the detail view's own answer). ABSENT, not greyed, where it cannot — a local, Subsonic or file-less
+            // add-on track would only ever say "Nothing here could be downloaded." Still code 3 wherever it lands.
+            if (xmb.host && xmb.host.actionDownload) r.push({ k: 3, label: "⭳  Download" })
             if (xmb.host && xmb.host.actionRomhack) r.push({ k: 4, label: "🧩  Romhacks…" })
             // #193 increment 2, on a local music track: put it in the queue you are already listening to
             // instead of replacing it. Romhacks and these are mutually exclusive in practice (a retro game
@@ -626,7 +629,7 @@ Item {
         // clear of the panel — and fully on-screen (x = 0.30*width) — at any resolution or crossX value.
         x: xmb.mobile ? (xmb.width - width) / 2 : meta.x - width - xmb.width * 0.02
         // Beside the item column, as before — but never past either edge. The panel grows with its row count
-        // (4 fixed, +1 for Romhacks, +2 for the #193 queue verbs), so the position that suited the short one
+        // (3 fixed, +1 each for Download and Romhacks, +2 for the #193 queue verbs), so the position that suited the short one
         // can put a taller one off-screen: at the largest count this can produce — 7 rows, 0.63 of the height
         // — the bottom clamp alone would push y to 0.35*height and the top would still be on-screen, but the
         // top clamp is stated rather than argued so a future row cannot quietly make it false.

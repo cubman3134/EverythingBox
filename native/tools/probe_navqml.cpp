@@ -3360,6 +3360,133 @@ static void runSameRowAsserts()
     }
 }
 
+// §29 — the XMB inline chooser's rows (issue #372). The chooser (Xmb.qml's `actions`) offered Download on every
+// leaf, including the tracks where the press can only say "Nothing here could be downloaded." It is now a row
+// only while the host's `actionDownload` is true (MainWindow writes HomeView::themedDownloadOffered into it — the
+// answer the detail view's action row reads). The row list is QML's, and it publishes its codes into
+// `actionCodes`, which is what MainWindow's onAction maps a pick through and ThemeBridge counts the zone from —
+// so the codes it publishes ARE the chooser's behaviour. Asserted on the REAL ThemeView.qml + Xmb.qml: every
+// combination of the optional rows gives exactly the codes it should; Play / Favorite / Add to playlist are
+// always there as 0 / 1 / 2; Romhacks, the queue pair and Native port keep 4, 5-6 and 7; the drawn labels are
+// the ones they were; and the panel is sized for the rows it draws, with no gap where Download was.
+#ifdef EB_HAVE_QML
+#include <QJSValue>
+static QVariantList probeJsList(const QVariant& v)
+{
+    return v.canConvert<QJSValue>() && v.userType() == qMetaTypeId<QJSValue>()
+               ? v.value<QJSValue>().toVariant().toList() : v.toList();
+}
+
+static void runChooserRowsAsserts()
+{
+    const QVariantMap xmbEl{ { QStringLiteral("type"), QStringLiteral("xmb") },
+                             { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                             { QStringLiteral("size"), QVariantList{ 1, 1 } } };
+    QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                      { QStringLiteral("elements"), QVariantList{ xmbEl } } };
+    const QVariantMap theme{ { QStringLiteral("name"), QStringLiteral("Probe") },
+                             { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+    QVariantList items;
+    for (int i = 0; i < 4; ++i)
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) },
+                              { QStringLiteral("type"), QStringLiteral("track") } };
+
+    NavGraph g;
+    buildThemedNavGraph(g, 4);
+    buildAudioPageNavGraph(g);
+    QQuickWidget qw;
+    qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+    qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+    qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+    QQuickItem* root = qw.rootObject();
+    CHECK(root != nullptr, "chooser rows: ThemeView.qml instantiates from the qrc");
+    if (!root) return;
+    root->setProperty("categories", QVariantList{ QStringLiteral("Music") });
+    root->setProperty("items", items);
+    root->setProperty("currentIndex", 0);
+    root->setProperty("currentView", QStringLiteral("home"));
+    root->setProperty("theme", theme); // set last
+    qw.resize(1280, 720);
+    qw.show();
+    pump(); pump();
+    CHECK(root->property("xmbMode").toBool(), "chooser rows: the xmb element puts the view in xmbMode");
+
+    // The chooser panel: the item that carries the row list and the per-row height it sizes itself from.
+    QQuickItem* chooser = nullptr;
+    std::function<void(QQuickItem*)> walk = [&](QQuickItem* it) {
+        if (!it || chooser) return;
+        if (it->property("rowH").isValid() && it->property("rows").isValid()) { chooser = it; return; }
+        for (QQuickItem* c : it->childItems()) walk(c);
+    };
+    walk(root);
+    CHECK(chooser != nullptr, "chooser rows: Xmb.qml's chooser panel (rows + rowH) is in the scene");
+    if (!chooser) return;
+
+    struct Case { const char* what; bool download, romhack, queue, port; QList<int> codes; };
+    const Case cases[] = {
+        { "a leaf Download acts on (a remote add-on's track, a film): Play, Favorite, Add to playlist, Download",
+          true, false, false, false, { 0, 1, 2, 3 } },
+        { "a leaf Download cannot act on (a script add-on's track): Play, Favorite, Add to playlist — no Download",
+          false, false, false, false, { 0, 1, 2 } },
+        { "a retro game Download acts on: the four rows, then Romhacks as 4",
+          true, true, false, false, { 0, 1, 2, 3, 4 } },
+        { "a retro game Download cannot act on (a local ROM): Romhacks keeps code 4 with Download absent",
+          false, true, false, false, { 0, 1, 2, 4 } },
+        { "a local / Subsonic music track: the queue pair keeps 5 and 6, and there is no Download",
+          false, false, true, false, { 0, 1, 2, 5, 6 } },
+        { "every optional row at once: 3, then 5-6, then 7",
+          true, false, true, true, { 0, 1, 2, 3, 5, 6, 7 } },
+        { "a native port on a local ROM: Native port keeps code 7 with Download absent",
+          false, false, false, true, { 0, 1, 2, 7 } },
+        { "all five optional rows", true, true, true, true, { 0, 1, 2, 3, 4, 5, 6, 7 } },
+        { "and back to none: the Download row goes again (a DECLARED property, so the row list re-reads it)",
+          false, false, false, false, { 0, 1, 2 } },
+    };
+    for (const Case& c : cases)
+    {
+        root->setProperty("actionsOpen", false);
+        pump();
+        root->setProperty("actionItem", 0);
+        root->setProperty("actionFav", false);
+        root->setProperty("actionDownload", c.download);
+        root->setProperty("actionRomhack", c.romhack);
+        root->setProperty("actionQueue", c.queue);
+        root->setProperty("actionNativePort", c.port);
+        root->setProperty("actionIndex", 0);
+        root->setProperty("actionsOpen", true);
+        pump(); pump();
+        const QVariantList codes = probeJsList(root->property("actionCodes"));
+        QList<int> got;
+        for (const QVariant& v : codes) got << v.toInt();
+        if (got != c.codes)
+        {
+            QStringList g2; for (int k : got) g2 << QString::number(k);
+            std::fprintf(stderr, "  chooser codes drawn: [%s]\n", qPrintable(g2.join(QLatin1Char(','))));
+        }
+        CHECK(got == c.codes, c.what);
+        // The labels of what is drawn, row by row: each code still says what it always said.
+        const QVariantList rows = probeJsList(chooser->property("rows"));
+        CHECK(rows.size() == c.codes.size(), "chooser rows: the drawn list and the published codes are one list");
+        for (const QVariant& rv : rows)
+        {
+            const QVariantMap row = rv.toMap();
+            const int k = row.value(QStringLiteral("k")).toInt();
+            const QString label = row.value(QStringLiteral("label")).toString();
+            const char* want = k == 0 ? "Play" : k == 1 ? "Favorite" : k == 2 ? "Add to playlist" : k == 3 ? "Download"
+                             : k == 4 ? "Romhacks" : k == 5 ? "Add to queue" : k == 6 ? "Play next" : "Native port";
+            CHECK(label.contains(QLatin1String(want)), "chooser rows: a row's label is the verb its code runs");
+        }
+        // Sized for the rows it DRAWS: no blank slot where an absent Download row would have been.
+        const qreal rowH = chooser->property("rowH").toReal(), gap = chooser->property("gap").toReal();
+        CHECK(qAbs(chooser->height() - c.codes.size() * (rowH + gap)) < 0.5,
+              "chooser rows: the panel's height is its drawn row count, not the old fixed four");
+    }
+    root->setProperty("actionsOpen", false);
+    pump();
+}
+#endif // EB_HAVE_QML
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");   // the runner loop invokes us without a -platform arg
@@ -4758,6 +4885,9 @@ int main(int argc, char** argv)
     // §28: the audio page's lyric zone is counted only while that page is SHOWING (issue #357): lyrics
     // arriving behind the themed home leave it at 0, and the open-page queue recount still follows the track.
     runAudioLyricZoneAsserts();
+    // §29: the XMB inline chooser's rows (issue #372): Download is a row only where the host says the press
+    // can act, and every other row keeps its presence, its code and its label.
+    runChooserRowsAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
