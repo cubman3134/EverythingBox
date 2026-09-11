@@ -1343,6 +1343,7 @@ static const char* kUser    = "probe-user";
 static const char* kJfToken = "probe-fixture-jellyfin-token-3b7e";   // distinctive: a byte scan must not match by accident
 static const char* kJfServerId = "0123456789abcdef0123456789abcdef";  // Jellyfin ids are 32 hex digits
 static const char* kShelfId = "probe-shelf";
+static const char* kShelfSig = "probe-fixture-shelf-signature-5d20";   // #368: a signed track url's query value
 
 class CoverStub : public QTcpServer
 {
@@ -1439,6 +1440,28 @@ private:
             answerCover(sock, path.section(QLatin1Char('/'), 2, 2));
             return;
         }
+        // #368: the shelf's artists, and ONE album's tracks — each row carrying a url signed with a fixture
+        // signature, the shape EverythingBoxServer's file server hands out. Ahead of the generic /detail/ arm.
+        if (path.startsWith(QLatin1String("/catalog/")))
+        {
+            send(sock, 200, "application/json",
+                 "{\"title\":\"Music\",\"items\":[{\"id\":\"ar-1\",\"title\":\"Probe\",\"type\":\"artist\","
+                 "\"expandable\":true}]}");
+            return;
+        }
+        if (path.startsWith(QLatin1String("/detail/album/")))
+        {
+            if (path != QLatin1String("/detail/album/sm-5.json")) { send(sock, 200, "application/json", "{\"items\":[]}"); return; }
+            const QByteArray r = root.toUtf8();
+            send(sock, 200, "application/json",
+                 "{\"items\":["
+                 "{\"id\":\"t-1\",\"title\":\"First\",\"type\":\"track\",\"url\":\"" + r + "/files/t-1.wav?sig="
+                 + QByteArray(kShelfSig) + "\",\"meta\":{\"track\":1,\"disc\":1}},"
+                 "{\"id\":\"t-2\",\"title\":\"Second\",\"type\":\"track\",\"url\":\"" + r + "/files/t-2.wav?sig="
+                 + QByteArray(kShelfSig) + "\",\"meta\":{\"track\":2,\"disc\":1}}"
+                 "]}");
+            return;
+        }
         // The EverythingBox server's music shelf: one artist's albums, then each album's own image url.
         if (path.startsWith(QLatin1String("/detail/")))
         {
@@ -1448,7 +1471,8 @@ private:
                  "{\"id\":\"sm-1\",\"title\":\"Empty sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-1\"},"
                  "{\"id\":\"sm-2\",\"title\":\"No sleeve at all\",\"type\":\"album\"},"
                  "{\"id\":\"sm-3\",\"title\":\"Real sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-3\"},"
-                 "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"}"
+                 "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"},"
+                 "{\"id\":\"sm-5\",\"title\":\"Starred tracks' album\",\"type\":\"album\"}"   // #368: no sleeve, so no cover ask
                  "]}");
             return;
         }
@@ -1907,6 +1931,63 @@ static void testCoverStateHoldsNoCredential(const CoverStub& stub, const QString
     CHECK(!scanned.contains(QByteArray("http")));
 }
 
+// #368: A STARRED SHELF TRACK AFTER A RESTART fetches its ALBUM before any level has listed it, for the urls — which
+// this client holds for one session and nothing persists. Two things must hold: the urls land (so the track plays),
+// and the album is NOT marked loaded (so the level that lists it later still fetches its tracks rather than opening
+// empty). Listed first, the same fetch does mark it loaded, and files the tracks under their ids, never a url.
+static void testServerMusicColdAlbum368(CoverStub& stub)
+{
+    ServerMusicClient& cl = ServerMusicClient::instance();
+    ServerMusicClient::Shelf shelf;
+    shelf.id = QLatin1String(kShelfId); shelf.name = QStringLiteral("Fixture shelf");
+    shelf.baseUrl = stub.root; shelf.catalogId = QStringLiteral("music");
+    cl.setShelves({ shelf });
+    auto sm = [](ServerMusic::Kind k, const char* id) {
+        return ServerMusic::qualify(QLatin1String(kShelfId), k, QLatin1String(id));
+    };
+    auto fetched = [](const std::function<void(ServerMusicClient::Done)>& go) {
+        bool done = false, ok = false;
+        go([&](const ServerMusicClient::Result& r) { done = true; ok = r.ok; });
+        CHECK(waitFor([&] { return done; }));
+        return ok;
+    };
+    const QString shelfId = QLatin1String(kShelfId);
+    const QString album = sm(ServerMusic::Kind::Album, "sm-5");
+    const QString t1 = sm(ServerMusic::Kind::Track, "t-1"), t2 = sm(ServerMusic::Kind::Track, "t-2");
+    const QString want1 = stub.root + QStringLiteral("/files/t-1.wav?sig=") + QLatin1String(kShelfSig);
+
+    // COLD: nothing this session has fetched that album, or listed it.
+    CHECK(!cl.hasStreamUrl(t1) && cl.streamUrl(t1).isEmpty());
+    CHECK(!cl.albumTracksLoaded(album));
+    CHECK(cl.index(shelfId).album(album) == nullptr);
+
+    // 1. Fetched before anything listed it: the urls land, and the album is still not "loaded".
+    CHECK(fetched([&](ServerMusicClient::Done d) { cl.fetchAlbumTracks(album, d); }));
+    CHECK(cl.hasStreamUrl(t1) && cl.hasStreamUrl(t2));
+    CHECK(cl.streamUrl(t1) == want1);                   // compared, never printed
+    CHECK(cl.index(shelfId).album(album) == nullptr);
+    CHECK(!cl.albumTracksLoaded(album));
+
+    // 2. Listed first — the shelf's artists, then the artist's albums — the same fetch marks it loaded.
+    CHECK(fetched([&](ServerMusicClient::Done d) { cl.fetchArtists(shelfId, d); }));
+    CHECK(fetched([&](ServerMusicClient::Done d) { cl.fetchArtistAlbums(sm(ServerMusic::Kind::Artist, "ar-1"), d); }));
+    CHECK(cl.index(shelfId).album(album) != nullptr);
+    CHECK(!cl.albumTracksLoaded(album));
+    CHECK(fetched([&](ServerMusicClient::Done d) { cl.fetchAlbumTracks(album, d); }));
+    CHECK(cl.albumTracksLoaded(album));
+    const MusicLibrary::Album* a = cl.index(shelfId).album(album);
+    CHECK(a && a->tracks.size() == 2 && a->tracks.first().path == t1);
+    if (a)
+        for (const MusicLibrary::IndexTrack& t : a->tracks)
+            CHECK(!t.path.contains(QLatin1String(kShelfSig)) && !t.path.contains(QLatin1String("://")));
+
+    // 3. A shelf that is disconnected takes its urls with it, and hasStreamUrl says so as streamUrl does.
+    cl.setShelves({});
+    CHECK(!cl.hasStreamUrl(t1) && cl.streamUrl(t1).isEmpty());
+    cl.setShelves({ shelf });
+    CHECK(!cl.hasStreamUrl(t1));
+}
+
 static void testCoverAnswers370()
 {
     CoverStub stub;
@@ -1934,6 +2015,7 @@ static void testCoverAnswers370()
     testServerMusicCoverAnswers(stub);
     testCoverStateHoldsNoCredential(stub, serverId);
     testCoverAnswerRules();
+    testServerMusicColdAlbum368(stub);   // last: it re-lists the shelf, which the cover cases above read as cold
 }
 
 int main(int argc, char** argv)

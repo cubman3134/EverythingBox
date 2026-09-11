@@ -26,9 +26,18 @@
 //     needs no cached index, so a star adopted last session opens before any Music level has been browsed
 //     (the Starred level's own queue, openMusicAlbum over the starred record, needs that record fetched
 //     first and would otherwise say the album is no longer in the library).
-//   * Another music supplier's qualified id (Jellyfin music, the EverythingBox server's shelf): no door opens
-//     a lone track of theirs by id today, so it SAYS so rather than being sent at a door that fails in
-//     silence — openRecent's own failure lines go to a status bar the app keeps hidden.
+//   * A JELLYFIN music track (#368): the same door, with the same property — JellyfinMusicClient::streamUrl
+//     mints from the id and the server's stored sign-in, with nothing fetched first, so it opens straight after
+//     a restart. openRecent's Jellyfin arm would otherwise take the id for a VIDEO (Jellyfin ids carry no kind),
+//     so its remote-track arm sits ahead of that one and claims a Jellyfin id only with kind "audio". A server
+//     that has been removed says so; one that is switched off says THAT.
+//   * An EVERYTHINGBOX-SERVER track (#368) does NOT mint from its id: its url may be signed, so the client
+//     holds it for one session, filled when the track's ALBUM is fetched, and nothing persists it. And the id
+//     cannot name that album — it carries the shelf and the track, and the server answers a track id with
+//     nothing (its detail route expands artists and albums only). So the favourite carries it: every track
+//     favourite records the album its row was on (FavoriteItem::albumKey), and this hands openRecent the album
+//     as the path. Cold, openRecent fetches that album and then plays; warm, it plays at once. A star written
+//     before #368 has no album; it opens when this session already holds its url, and otherwise SAYS what to do.
 //   * An unqualified id is LOCAL by definition (MusicSupply's own rule, and structural: see Subsonic.h) and is
 //     the file — or, for a cue track, mpv's clip url of it (MusicLibrary::IndexTrack::path either way).
 //     - WHEN THE LOCAL MUSIC INDEX HOLDS IT (issue #369) it opens its ALBUM, starting at it: LocalAlbum,
@@ -69,10 +78,11 @@ namespace browse
         NativeStore,      // steam: / epic: -> the store's info page (arm 3)
         LocalAlbum,       // a track the local music index holds -> openMusicAlbum(its album, the track) (#369)
         LocalTrack,       // a track on this machine the index does not hold -> openRecent(file, "audio")
-        ServerTrack,      // a Subsonic track -> openRecent(qualified id, "audio") -> a fresh stream url
+        ServerTrack,      // a music server's track -> openRecent(…, "audio", qualified id) -> a fresh stream url
         TrackFileGone,    // a local track whose file has been moved or deleted
-        TrackServerGone,  // a Subsonic track whose server is no longer set up
-        TrackNoDoor,      // another music supplier's track: nothing opens one by id yet
+        TrackServerGone,  // a music server's track whose server is no longer set up
+        TrackServerOff,   // a Jellyfin track whose server is set up but switched off (#368)
+        TrackAlbumUnknown,// an EverythingBox-server track starred before #368, whose album nothing has fetched
         Addon,            // an add-on's item -> its detail page (arm 5)
         AddonMissing,     // ...whose add-on is not available here
     };
@@ -82,8 +92,10 @@ namespace browse
         FavoriteOpen how = FavoriteOpen::AddonMissing;
         // What openRecent is handed, for ReopenByPath / LocalTrack / ServerTrack. Empty otherwise — except that
         // LocalAlbum carries the track's `path` too (openMusicAlbum's start row), with its title and cover.
+        // For an EverythingBox-server track (#368) `path` is the ALBUM the track is on and `resumeKey` the
+        // track: openRecent reads the key first for a music identity, and the path is where it plays from.
         QString path, kind, resumeKey, title, thumb;
-        QString albumKey; // LocalAlbum: the album the track is ON — openMusicAlbum's first argument
+        QString albumKey; // LocalAlbum / a server-shelf ServerTrack: the album the track is ON
         QString addonId;  // Addon / AddonMissing: the source add-on the favourite names
     };
 
@@ -97,7 +109,37 @@ namespace browse
         // of (MusicSupply::indexFor answers MusicLibrary::index() for an unqualified key). Unset: no track is
         // in it, and a local track opens by openRecent as it did before #369.
         const MusicLibrary::Index* localMusic = nullptr;
+        // #368. A Jellyfin server is in the store / is switched on (JellyfinMusicClient::streamUrl mints
+        // nothing for one that is off).
+        std::function<bool(const QString& serverId)> jellyfinKnown;
+        std::function<bool(const QString& serverId)> jellyfinOn;
+        // #368. An EverythingBox server's music shelf is among the connected ones / this session already holds
+        // a url for a track of it (ServerMusicClient::has / hasStreamUrl).
+        std::function<bool(const QString& sourceId)> shelfKnown;
+        std::function<bool(const QString& trackId)>  shelfUrlReady;
     };
+
+    // THE OTHER HALF: WHAT MainWindow::openRecent OPENS (#368), for the (path, kind, resumeKey) it was handed —
+    // a Jellyfin music track or an EverythingBox-server track, by qualified id, plus the album to fetch for a
+    // shelf track this session holds no url for. Both empty = neither; openRecent's other arms own it. A
+    // Subsonic id keeps the arm #364 used, and a Jellyfin id with any kind but "audio" is a video, which
+    // openJellyfinItem opens (Jellyfin ids carry no kind, so the caller's kind is the only thing that can say).
+    struct RemoteTrackOpen { QString trackId, albumKey; };
+    RemoteTrackOpen remoteTrackOpenFor(const QString& path, const QString& kind, const QString& resumeKey);
+
+    // ...and the sequence it runs, with the doors handed in so a probe can walk it. A url is minted and played
+    // at once when one can be (a Jellyfin track always, from its id and the server's stored sign-in; a shelf
+    // track whose album this session fetched). Otherwise a shelf track's album is fetched first — its urls come
+    // with it — and then played. Every failure is ONE sentence of our own: never built from a url or a request.
+    struct RemoteTrackDoors
+    {
+        std::function<QString(const QString& trackId)> mint;        // MusicSupply::playUrl — THE url minter
+        std::function<void(const QString& albumKey,
+                           std::function<void(bool ok, const QString& sentence)> done)> fetchAlbum;
+        std::function<void(const QString& url, const QString& trackId)> play;   // openAudioStream
+        std::function<void(const QString& sentence)> say;                        // a visible notice
+    };
+    void openRemoteTrack(const RemoteTrackOpen& o, const QString& title, const RemoteTrackDoors& doors);
 
     // The ★ Favorites shelf row for one stored favourite: the fields the router reads back (id, type, and the
     // "fav:<addonId>" marker in mime) plus what the row shows. HomeView's buildFavorites calls this and then
@@ -108,8 +150,8 @@ namespace browse
     FavoriteRoute favoriteRouteFor(const MediaItem& favItem, const QVector<FavoriteItem>& stored,
                                    const FavoriteWorld& world);
 
-    // The one sentence a track that cannot be opened says (TrackFileGone / TrackServerGone / TrackNoDoor),
-    // naming it. Empty for every other route: those open something, or keep their own sentence (AddonMissing's
+    // The one sentence a track that cannot be opened says (TrackFileGone / TrackServerGone / TrackServerOff /
+    // TrackAlbumUnknown), naming it. Empty for every other route: those open something, or keep their own sentence (AddonMissing's
     // lives at its call site, unchanged). Here rather than in HomeView so a probe can hold each failure to its
     // OWN sentence, and hold all three away from the add-on message — which is wrong for a track, and sends
     // somebody looking for an add-on the track never had.

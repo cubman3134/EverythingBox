@@ -14626,6 +14626,11 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         if (!chan.isEmpty() && !LiveTvIdentity::isCredentialShaped(chan))
         { openLiveTvChannel(chan, title, thumb); return; }
     }
+    // #368: A JELLYFIN MUSIC TRACK OR AN EVERYTHINGBOX-SERVER TRACK, by qualified id — ahead of the Jellyfin arm
+    // below, which would take a Jellyfin id for a VIDEO (the id carries no kind; the caller's "audio" does).
+    // MainWindowTrackFavorite.cpp has it: a fresh url from MusicSupply::playUrl, and a shelf track whose album
+    // this session has not fetched fetches that album first.
+    if (openRemoteMusicTrack(path, kind, resumeKey, title, thumb)) return;
     // #83: A JELLYFIN ID IS NOT A FILE AND NOT A LINK EITHER, and it is resolved here for exactly the
     // reason the identities either side of it are: QFileInfo would call "jf:<server>:<item>" a missing
     // file and say so on screen. This is the ONE door — the browse leaf, a favourite, a playlist entry

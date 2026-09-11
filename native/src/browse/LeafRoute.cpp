@@ -130,7 +130,8 @@ FavoriteItem trackFavoriteFor(const MediaItem& it)
 {
     // Asked of queueTargetFor rather than of the mime a second time: a row that queues as a track is the row
     // that stars as one, and a rename of the track prefix cannot unroute one verb and leave the other.
-    if (queueTargetFor(it).what != QueueAdd::Track || it.id.isEmpty()) return {};
+    const QueueTarget target = queueTargetFor(it);
+    if (target.what != QueueAdd::Track || it.id.isEmpty()) return {};
     // The themed chooser's generic arm (HomeView::favoriteThemedLeaf), field for field. A music level has no
     // addon, so addonId is empty there too; no path/kind/system, because a track re-opens through neither.
     FavoriteItem f;
@@ -140,6 +141,10 @@ FavoriteItem trackFavoriteFor(const MediaItem& it)
     f.type         = it.type;        // kMusicTrackType, "track": the one type the love hook acts on
     f.thumbnailUrl = it.thumbnailUrl;
     f.expandable   = it.expandable;
+    // #368: the album the row is ON — the key its mime names, which queueTargetFor has just read. Recorded for
+    // every track (this unit links no supplier's id reader, and a key is not a credential), read back only for
+    // the supplier whose track id cannot name its album: FavoritesStore.h, at FavoriteItem::albumKey.
+    f.albumKey     = target.albumKey;
     return f;
 }
 

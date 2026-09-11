@@ -24,6 +24,11 @@ struct FavoriteItem
     QString path;          // absolute file path to re-open
     QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
     QString system;        // games: the SystemCatalog id (or "pc"), so favourites can be shown per-console
+    // Music tracks (#368): the album the starred row was ON — the music key its row's mime names. Read only
+    // where the id cannot name its own album (an EverythingBox server's shelf: its track id carries the shelf
+    // and the track, and its play url lives for one session, filled when that album is fetched). A key, never
+    // a url. Empty for everything else, and for a track starred before #368.
+    QString albumKey;
     qint64  ts = 0;        // epoch seconds this favourite was added/last written (multi-device merge: newest-ts wins)
 };
 

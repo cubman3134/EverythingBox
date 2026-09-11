@@ -233,7 +233,12 @@ void ServerMusicClient::fetchAlbumTracks(const QString& albumKey, Done done)
             {
                 Cache& c = caches_[sourceId];
                 ServerMusic::fillAlbumTracks(c.idx, sourceId, albumKey, songs);
-                c.loadedAlbums.insert(albumKey);
+                // LOADED ONLY WHEN THE INDEX HOLDS THE ALBUM (#368). fillAlbumTracks files the tracks under an
+                // album the index already lists and does nothing otherwise — which is a starred track's case
+                // after a restart: it fetches its album for the urls below before any level has listed it.
+                // Marking that album loaded would tell its level, once listed, that the tracks were already
+                // here, and it would open empty.
+                if (c.idx.album(albumKey)) c.loadedAlbums.insert(albumKey);
                 // THE URLS GO HERE, NOT INTO THE INDEX. See the header.
                 for (const ServerMusic::RemoteSong& s : songs)
                 {
@@ -255,6 +260,12 @@ QString ServerMusicClient::streamUrl(const QString& qualifiedTrackId) const
     const ServerMusic::Ref r = ServerMusic::parse(qualifiedTrackId);
     if (!r.ok || !has(r.sourceId)) return QString();
     return trackUrls_.value(qualifiedTrackId);
+}
+
+bool ServerMusicClient::hasStreamUrl(const QString& qualifiedTrackId) const
+{
+    const ServerMusic::Ref r = ServerMusic::parse(qualifiedTrackId);
+    return r.ok && has(r.sourceId) && trackUrls_.contains(qualifiedTrackId);   // only non-empty urls go in
 }
 
 void ServerMusicClient::prefetchAlbumCover(const QString& albumKey, std::function<void()> then)

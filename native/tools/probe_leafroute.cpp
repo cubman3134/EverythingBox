@@ -83,8 +83,21 @@
 //      downloads keeps it (an AIO film, a script add-on's book, a remote add-on's game); an arm that cannot
 //      work without its provider is not offered without it; everything classicActionGates offered is still
 //      offered, and nothing already on disk is.
+//   §12 A STARRED JELLYFIN OR EVERYTHINGBOX-SERVER TRACK OPENS FROM ★ FAVORITES (issue #368). §8 gave both a
+//      sentence ("can't open yet") instead of a door. Over records the REAL writer makes from rows the REAL album
+//      builder draws: the record carries the album its row was on, as a key and never a url, and the real store
+//      keeps it (byte-scanned); a Jellyfin track routes to the qualified-track door by its id, a removed server and
+//      a switched-off one each say their own sentence; a server-shelf track routes with its ALBUM as the path and
+//      itself as the key; a shelf that is gone says so; a star from before #368 opens when this session holds its
+//      url and otherwise says what to do; openRecent's half (remoteTrackOpenFor) reads those back and leaves a
+//      Jellyfin VIDEO, a Subsonic id and a file to their own arms; the sequence (openRemoteTrack) plays at once
+//      when a url can be minted, fetches a cold shelf track's album FIRST and then plays, and says one sentence of
+//      its own for every failure; Subsonic and local routes are unchanged; and nothing writes the store or fires
+//      the love hook.
 //
 // Prints LEAFROUTE-OK on success; any failure prints LEAFROUTE-FAIL <cond> (line) and exits non-zero.
+#include "AppBrand.h"                // #368: the ini FavoritesStore writes, byte-scanned in §12
+#include "AppPaths.h"
 #include "CueSheet.h"
 #include "FavoriteRoute.h"
 #include "JellyfinCatalogs.h"
@@ -97,7 +110,9 @@
 #include "OpdsFeed.h"
 
 #include <QCoreApplication>
+#include <QFile>
 #include <QHash>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
@@ -897,11 +912,13 @@ int main(int argc, char** argv)
         }
 
         // 8f. A TRACK THAT CANNOT BE OPENED SAYS WHY, and it is its own sentence each time. None of them hands
-        // openRecent anything, and none of them is the add-on message.
+        // openRecent anything, and none of them is the add-on message. (#368: a Jellyfin or EverythingBox-server
+        // track has a door now — §12 — so in THIS world, which answers none of the questions those doors ask,
+        // each says its server is not set up: an unanswered question answers false, never "open it anyway".)
         CHECK(routes.value(goneFav.itemId).how == FavoriteOpen::TrackFileGone);
         CHECK(routes.value(subGoneFav.itemId).how == FavoriteOpen::TrackServerGone);
-        CHECK(routes.value(jfFav.itemId).how == FavoriteOpen::TrackNoDoor);
-        CHECK(routes.value(ebsFav.itemId).how == FavoriteOpen::TrackNoDoor);
+        CHECK(routes.value(jfFav.itemId).how == FavoriteOpen::TrackServerGone);
+        CHECK(routes.value(ebsFav.itemId).how == FavoriteOpen::TrackServerGone);
         CHECK(!asked.contains(jfTrack) && !asked.contains(ebsTrack) && !asked.contains(subGone));
         for (const FavoriteItem& f : { goneFav, subGoneFav, jfFav, ebsFav })
         {
@@ -911,17 +928,22 @@ int main(int argc, char** argv)
         const QString title = QStringLiteral("Dawn");
         const QString sFile = browse::favoriteOpenSentence(FavoriteOpen::TrackFileGone, title);
         const QString sSrv  = browse::favoriteOpenSentence(FavoriteOpen::TrackServerGone, title);
-        const QString sDoor = browse::favoriteOpenSentence(FavoriteOpen::TrackNoDoor, title);
-        for (const QString& s : { sFile, sSrv, sDoor })
+        const QString sOff  = browse::favoriteOpenSentence(FavoriteOpen::TrackServerOff, title);
+        const QString sAlb  = browse::favoriteOpenSentence(FavoriteOpen::TrackAlbumUnknown, title);
+        const QStringList sentences = { sFile, sSrv, sOff, sAlb };
+        for (const QString& s : sentences)
         {
             CHECK(!s.isEmpty());
             CHECK(s.contains(title));                              // it names the track
             CHECK(!s.contains(QLatin1String("addon"), Qt::CaseInsensitive));
             CHECK(!s.contains(QLatin1String("add-on"), Qt::CaseInsensitive));
+            CHECK(sentences.count(s) == 1);                        // and no two failures share one
         }
-        CHECK(sFile != sSrv && sFile != sDoor && sSrv != sDoor);
         CHECK(sFile.contains(QLatin1String("moved or deleted")));
         CHECK(sSrv.contains(QLatin1String("music server")));
+        CHECK(sOff.contains(QLatin1String("switched off")));
+        // #368: the old "can't open yet" sentence is gone — every music source has a door or a reason now.
+        for (const QString& s : sentences) CHECK(!s.contains(QLatin1String("can't open yet")));
         for (FavoriteOpen quiet : { FavoriteOpen::ReopenByPath, FavoriteOpen::NativeStore, FavoriteOpen::LocalTrack,
                                     FavoriteOpen::ServerTrack, FavoriteOpen::Addon, FavoriteOpen::AddonMissing })
             CHECK(browse::favoriteOpenSentence(quiet, title).isEmpty());
@@ -1601,6 +1623,345 @@ int main(int argc, char** argv)
                 for (TrackAddon a : kAll)
                     CHECK(!browse::downloadOffered(leaf(type), rich(a)));
         }
+    }
+
+    // ---- §12 A STARRED JELLYFIN OR EVERYTHINGBOX-SERVER TRACK OPENS FROM ★ FAVORITES (issue #368) --------------
+    // §8 gave both a sentence instead of a door ("can't open yet"). Records here are the REAL writer's, made from
+    // rows the REAL album builder draws — over an index ServerMusic's own builders fill, for the server shelf.
+    {
+        using browse::FavoriteOpen;
+        using browse::FavoriteRoute;
+        const QString kSig = QStringLiteral("probe-leafroute-368-signature-7e1a");       // a signed url's query value
+        const QString kTok = QStringLiteral("probe-leafroute-368-jellyfin-token-2c9f");  // a Jellyfin api_key
+
+        const QString jfOn   = QStringLiteral("0123456789abcdef0123456789abcdef");   // set up, switched on
+        const QString jfOff  = QStringLiteral("fedcba9876543210fedcba9876543210");   // set up, switched off
+        const QString jfGone = QStringLiteral("00112233445566778899aabbccddeeff");   // removed
+        const QString shelf      = QStringLiteral("org.example.box");
+        const QString shelfOther = QStringLiteral("org.example.other-box");
+        const QString shelfGone  = QStringLiteral("org.example.gone-box");
+        auto sm = [](const QString& src, ServerMusic::Kind k, const char* id) {
+            return ServerMusic::qualify(src, k, QLatin1String(id));
+        };
+
+        // THE SERVER SHELF, through ServerMusic's own builders: artists, one artist's albums, one album's tracks.
+        ServerMusic::RemoteArtist ar; ar.id = QStringLiteral("ar-1"); ar.name = QStringLiteral("Mira Vale");
+        MusicLibrary::Index sIdx = ServerMusic::indexOfArtists(shelf, { ar });
+        const QString sArtist = sm(shelf, ServerMusic::Kind::Artist, "ar-1");
+        ServerMusic::RemoteAlbum al; al.id = QStringLiteral("al-7"); al.name = QStringLiteral("Harbor Lights");
+        al.artist = QStringLiteral("Mira Vale");
+        ServerMusic::fillArtistAlbums(sIdx, shelf, sArtist, { al });
+        const QString sAlbum = sm(shelf, ServerMusic::Kind::Album, "al-7");
+        QVector<ServerMusic::RemoteSong> songs;
+        for (int i = 1; i <= 2; ++i)
+        {
+            ServerMusic::RemoteSong s;
+            s.id = QStringLiteral("t-%1").arg(i);
+            s.title = i == 1 ? QStringLiteral("Tide") : QStringLiteral("Ember");
+            s.url = QStringLiteral("http://box.example/f/t-%1.flac?sig=").arg(i) + kSig;
+            s.artist = QStringLiteral("Mira Vale"); s.track = i; s.disc = 1;
+            songs << s;
+        }
+        ServerMusic::fillAlbumTracks(sIdx, shelf, sAlbum, songs);
+        const QString ebsId = sm(shelf, ServerMusic::Kind::Track, "t-2");
+        // FIXTURE SANITY: the builders took the album and both tracks. Without it every case below is vacuous.
+        const MusicLibrary::Album* sAlb = sIdx.album(sAlbum);
+        CHECK(sAlb && sAlb->tracks.size() == 2);
+
+        // THE JELLYFIN ALBUM, hand-built in the shape JellyfinMusic::fillAlbumTracks leaves: every key qualified.
+        const QString jAlbum = Jellyfin::qualify(jfOn, QStringLiteral("jf-al-1"));
+        const QString jfId   = Jellyfin::qualify(jfOn, QStringLiteral("jf-tr-1"));
+        MusicLibrary::Index jIdx;
+        {
+            MusicLibrary::IndexTrack t;
+            t.path = jfId; t.sourcePath = jfId; t.title = QStringLiteral("Once"); t.artist = QStringLiteral("Pearl Jam");
+            t.albumKey = jAlbum; t.disc = 1; t.track = 1;
+            MusicLibrary::Album b;
+            b.key = jAlbum; b.title = QStringLiteral("Ten"); b.albumArtist = QStringLiteral("Pearl Jam"); b.tracks << t;
+            MusicLibrary::Artist a;
+            a.key = Jellyfin::qualify(jfOn, QStringLiteral("jf-ar-1")); a.name = QStringLiteral("Pearl Jam"); a.albums << b;
+            jIdx.artists << a;
+        }
+        CHECK(Jellyfin::isQualified(jfId) && Jellyfin::serverOf(jfId) == jfOn);
+
+        // 12a. THE WRITER RECORDS THE ALBUM THE ROW WAS ON, as a key and never a url — asked of the real album
+        // builder's rows. (HomeView::favoriteThemedLeaf takes this field from trackFavoriteFor, so both layouts
+        // write it; the #364 runner gate holds that call site.)
+        auto starFrom = [](const MediaCatalog& cat, const QString& id) {
+            for (const MediaItem& it : cat.items)
+                if (it.id == id) return browse::trackFavoriteFor(it);
+            return FavoriteItem{};
+        };
+        const FavoriteItem ebsFav = starFrom(browse::musicAlbumCatalog(sIdx, sAlbum, noCover), ebsId);
+        const FavoriteItem jfFav  = starFrom(browse::musicAlbumCatalog(jIdx, jAlbum, noCover), jfId);
+        CHECK(ebsFav.itemId == ebsId && ebsFav.type == QLatin1String("track"));
+        CHECK(ebsFav.albumKey == sAlbum);
+        CHECK(jfFav.itemId == jfId && jfFav.albumKey == jAlbum);
+        CHECK(ebsFav.path.isEmpty() && ebsFav.kind.isEmpty() && ebsFav.addonId.isEmpty());   // still §7's shape
+        {
+            const MusicLibrary::Index idx = oneAlbumIndex();
+            const FavoriteItem loc = starFrom(browse::musicAlbumCatalog(idx, QString::fromLatin1(kAlbumKey), noCover),
+                                              QStringLiteral("C:/music/Vol 1/01 Dawn.flac"));
+            CHECK(loc.albumKey == QString::fromLatin1(kAlbumKey));
+        }
+        for (const QString& v : { ebsFav.itemId, ebsFav.albumKey, ebsFav.title, ebsFav.subtitle, ebsFav.thumbnailUrl })
+            CHECK(!v.contains(kSig) && !v.contains(QLatin1String("://")) && !v.contains(QLatin1String("sig=")));
+
+        // The rest, in adoptStarredFavourites' shape — and the ones with NO album, which is every server-shelf
+        // track starred before #368.
+        auto rec = [](const QString& id, const QString& title, const QString& album = QString()) {
+            FavoriteItem f;
+            f.itemId = id; f.title = title; f.subtitle = QStringLiteral("An Artist"); f.type = QStringLiteral("track");
+            f.albumKey = album;
+            return f;
+        };
+        const QString ebsWarm    = sm(shelf, ServerMusic::Kind::Track, "t-1");
+        const QString ebsCold    = sm(shelf, ServerMusic::Kind::Track, "t-9");
+        const QString ebsLost    = sm(shelfGone, ServerMusic::Kind::Track, "t-4");
+        const QString ebsForeign = sm(shelf, ServerMusic::Kind::Track, "t-5");
+        const QString ebsNotAlb  = sm(shelf, ServerMusic::Kind::Track, "t-6");
+        const FavoriteItem ebsWarmFav = rec(ebsWarm, QStringLiteral("Warm Song"));   // pre-#368, url held this session
+        const FavoriteItem ebsColdFav = rec(ebsCold, QStringLiteral("Cold Song"));   // pre-#368, nothing held
+        const FavoriteItem ebsLostFav = rec(ebsLost, QStringLiteral("Lost Box Song"), sm(shelfGone, ServerMusic::Kind::Album, "al-1"));
+        // An album field that is NOT this track's album — another shelf's album, and a track id — reads as no album:
+        // a key that sends the fetch to the wrong server, or to nothing, is worse than none.
+        const FavoriteItem ebsForeignFav = rec(ebsForeign, QStringLiteral("Foreign Album Song"),
+                                               sm(shelfOther, ServerMusic::Kind::Album, "al-7"));
+        const FavoriteItem ebsNotAlbFav  = rec(ebsNotAlb, QStringLiteral("Not An Album Song"), ebsWarm);
+        const FavoriteItem jfOffFav  = rec(Jellyfin::qualify(jfOff, QStringLiteral("jf-tr-2")), QStringLiteral("Off Song"));
+        const FavoriteItem jfGoneFav = rec(Jellyfin::qualify(jfGone, QStringLiteral("jf-tr-3")), QStringLiteral("Gone Song"));
+        const QString subSrv = QStringLiteral("3f2b8c1e-6a4d-4e0b-9a51-2c7d8e9f0a1b");
+        const FavoriteItem subFav = rec(Subsonic::qualify(subSrv, Subsonic::Kind::Track, QStringLiteral("tr-42")),
+                                        QStringLiteral("Night Drive"));
+        const QString localPath = QStringLiteral("C:/music/Vol 1/01 Dawn.flac");
+        const FavoriteItem localFav = rec(localPath, QStringLiteral("Dawn"));
+
+        QStringList asked;
+        browse::FavoriteWorld world;
+        world.fileExists    = [&](const QString& f) { asked << f; return f == localPath; };
+        world.serverKnown   = [&](const QString& s) { return s == subSrv; };
+        world.jellyfinKnown = [&](const QString& s) { return s == jfOn || s == jfOff; };
+        world.jellyfinOn    = [&](const QString& s) { return s == jfOn; };
+        world.shelfKnown    = [&](const QString& s) { return s == shelf || s == shelfOther; };
+        world.shelfUrlReady = [&](const QString& t) { return t == ebsWarm; };
+
+        const QVector<FavoriteItem> all = { ebsFav, jfFav, ebsWarmFav, ebsColdFav, ebsLostFav, ebsForeignFav,
+                                            ebsNotAlbFav, jfOffFav, jfGoneFav, subFav, localFav };
+        for (const FavoriteItem& f : all) FavoritesStore::addFromSource(f);   // seeding, not starring: quiet
+        CHECK(FavoritesStore::list().size() == all.size());
+
+        // 12b. THE STORE KEEPS THE ALBUM — read back through list(), the record the shelf reads — and the file it
+        // writes holds no url and no fixture credential (a byte scan of the real ini, not of a copy).
+        int kept = 0;
+        for (const FavoriteItem& s : FavoritesStore::list())
+            if (s.itemId == ebsId && s.albumKey == sAlbum) ++kept;
+        CHECK(kept == 1);
+        {
+            QFile ini(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile));
+            CHECK(ini.open(QIODevice::ReadOnly));
+            const QByteArray bytes = ini.readAll();
+            CHECK(bytes.contains("albumKey"));                           // not vacuous: the field is in the file
+            CHECK(!bytes.contains(kSig.toUtf8()) && !bytes.contains(kTok.toUtf8()));
+            CHECK(!bytes.contains("sig="));
+        }
+
+        // Route every row the shelf would draw, with the love hook watching.
+        struct Love { FavoriteItem f; bool loved; };
+        QVector<Love> loves;
+        FavoritesStore::setLoveHook([&loves](const FavoriteItem& f, bool loved) { loves.push_back({ f, loved }); });
+        const QVector<FavoriteItem> before = FavoritesStore::list();
+        QHash<QString, FavoriteRoute> routes;
+        QHash<QString, MediaItem> rows;
+        for (const FavoriteItem& f : before)
+        {
+            const MediaItem row = browse::favoriteShelfRow(f);
+            rows.insert(f.itemId, row);
+            routes.insert(f.itemId, browse::favoriteRouteFor(row, FavoritesStore::list(), world));
+        }
+        CHECK(routes.size() == all.size());
+
+        // 12c. A JELLYFIN TRACK OPENS BY ITS ID through the qualified-track door — §8d's shape exactly. A removed
+        // server and a switched-off one each say their OWN sentence.
+        {
+            const FavoriteRoute r = routes.value(jfId);
+            CHECK(r.how == FavoriteOpen::ServerTrack);
+            CHECK(r.path == jfId && r.resumeKey == jfId && r.kind == QLatin1String("audio"));
+            CHECK(r.title == jfFav.title && r.albumKey.isEmpty());
+            CHECK(routes.value(jfOffFav.itemId).how == FavoriteOpen::TrackServerOff);
+            CHECK(routes.value(jfGoneFav.itemId).how == FavoriteOpen::TrackServerGone);
+        }
+        // 12d. AN EVERYTHINGBOX-SERVER TRACK OPENS THROUGH ITS ALBUM: openRecent is handed the ALBUM as the path
+        // (where it plays from) and the TRACK as the key (what it is).
+        {
+            const FavoriteRoute r = routes.value(ebsId);
+            CHECK(r.how == FavoriteOpen::ServerTrack);
+            CHECK(r.path == sAlbum && r.resumeKey == ebsId && r.kind == QLatin1String("audio"));
+            CHECK(r.albumKey == sAlbum);
+            CHECK(r.title == rows.value(ebsId).title && r.thumb == rows.value(ebsId).thumbnailUrl);
+            // A star from before #368 whose url this session already holds opens by its id alone...
+            const FavoriteRoute w = routes.value(ebsWarm);
+            CHECK(w.how == FavoriteOpen::ServerTrack && w.path == ebsWarm && w.resumeKey == ebsWarm && w.albumKey.isEmpty());
+            // ...and cold, it says what to do rather than opening a player on nothing.
+            CHECK(routes.value(ebsCold).how == FavoriteOpen::TrackAlbumUnknown);
+            CHECK(routes.value(ebsForeign).how == FavoriteOpen::TrackAlbumUnknown);
+            CHECK(routes.value(ebsNotAlb).how == FavoriteOpen::TrackAlbumUnknown);
+            CHECK(routes.value(ebsLost).how == FavoriteOpen::TrackServerGone);   // its shelf is no longer connected
+        }
+        for (const QString& id : { jfOffFav.itemId, jfGoneFav.itemId, ebsCold, ebsForeign, ebsNotAlb, ebsLost })
+        {
+            const FavoriteRoute r = routes.value(id);
+            CHECK(r.path.isEmpty() && r.kind.isEmpty() && r.resumeKey.isEmpty());
+            CHECK(!browse::favoriteOpenSentence(r.how, QStringLiteral("X")).isEmpty());
+        }
+        for (const QString& id : { jfId, ebsId, ebsWarm, ebsCold, ebsLost, sAlbum })
+            CHECK(!asked.contains(id));                                  // never mistaken for a file
+
+        // 12e. SUBSONIC AND LOCAL ARE UNTOUCHED in this world too.
+        {
+            const FavoriteRoute s = routes.value(subFav.itemId);
+            CHECK(s.how == FavoriteOpen::ServerTrack && s.path == subFav.itemId && s.resumeKey == subFav.itemId);
+            CHECK(s.albumKey.isEmpty());
+            const FavoriteRoute l = routes.value(localPath);
+            CHECK(l.how == FavoriteOpen::LocalTrack && l.path == localPath && l.kind == QLatin1String("audio"));
+        }
+
+        // 12f. OPENRECENT'S HALF (remoteTrackOpenFor) reads each route back — and leaves everything else to the
+        // arm that owns it.
+        auto rto = [](const FavoriteRoute& r) { return browse::remoteTrackOpenFor(r.path, r.kind, r.resumeKey); };
+        {
+            const browse::RemoteTrackOpen j = rto(routes.value(jfId));
+            CHECK(j.trackId == jfId && j.albumKey.isEmpty());
+            const browse::RemoteTrackOpen e = rto(routes.value(ebsId));
+            CHECK(e.trackId == ebsId && e.albumKey == sAlbum);
+            const browse::RemoteTrackOpen w = rto(routes.value(ebsWarm));
+            CHECK(w.trackId == ebsWarm && w.albumKey.isEmpty());
+            CHECK(rto(routes.value(subFav.itemId)).trackId.isEmpty());   // Subsonic keeps #364's arm
+            CHECK(rto(routes.value(localPath)).trackId.isEmpty());       // a file is openRecent's file route
+            // A Jellyfin VIDEO: the browse leaf and a Continue Watching row hand kind "video", and a legacy row may
+            // hand none. openJellyfinItem opens those — only "audio" says music.
+            CHECK(browse::remoteTrackOpenFor(jfId, QStringLiteral("video"), jfId).trackId.isEmpty());
+            CHECK(browse::remoteTrackOpenFor(jfId, QString(), jfId).trackId.isEmpty());
+            // The Recents row openAudioStream files for either: the query-less url as the path, the id as the key.
+            const browse::RemoteTrackOpen re = browse::remoteTrackOpenFor(QStringLiteral("http://box.example/f/t-2.flac"),
+                                                                          QStringLiteral("audio"), ebsId);
+            CHECK(re.trackId == ebsId && re.albumKey.isEmpty());
+            CHECK(browse::remoteTrackOpenFor(QStringLiteral("http://jf.example/Audio/jf-tr-1/stream"),
+                                             QStringLiteral("audio"), jfId).trackId == jfId);
+            // An id in the path alone.
+            const browse::RemoteTrackOpen p = browse::remoteTrackOpenFor(ebsId, QStringLiteral("audio"), QString());
+            CHECK(p.trackId == ebsId && p.albumKey.isEmpty());
+            // Not a track: an album or an artist id names nothing a player opens.
+            CHECK(browse::remoteTrackOpenFor(sAlbum, QStringLiteral("audio"), sAlbum).trackId.isEmpty());
+            CHECK(browse::remoteTrackOpenFor(sArtist, QStringLiteral("audio"), sArtist).trackId.isEmpty());
+            // Another shelf's album in the path is no album of this track's.
+            CHECK(browse::remoteTrackOpenFor(sm(shelfOther, ServerMusic::Kind::Album, "al-7"), QStringLiteral("audio"),
+                                             ebsId).albumKey.isEmpty());
+        }
+
+        // 12g. THE SEQUENCE (openRemoteTrack), over recording doors: what is minted, fetched, played and said.
+        struct Rig
+        {
+            QString sig;
+            QHash<QString, QString> urls;      // what mint answers, by track id
+            QHash<QString, QString> onFetch;   // album key -> the track a successful fetch of it brings a url for
+            QStringList minted, fetched, said;
+            QVector<QPair<QString, QString>> played;   // (url, track id)
+            QString pendingAlbum;
+            std::function<void(bool, const QString&)> pending;
+            browse::RemoteTrackDoors doors()
+            {
+                browse::RemoteTrackDoors d;
+                d.mint = [this](const QString& t) { minted << t; return urls.value(t); };
+                d.fetchAlbum = [this](const QString& a, std::function<void(bool, const QString&)> done) {
+                    fetched << a; pendingAlbum = a; pending = std::move(done);
+                };
+                d.play = [this](const QString& u, const QString& t) { played.push_back({ u, t }); };
+                d.say  = [this](const QString& s) { said << s; };
+                return d;
+            }
+            void land(bool ok, const QString& sentence = QString())   // the fetch's reply arrives
+            {
+                if (ok && onFetch.contains(pendingAlbum))
+                    urls.insert(onFetch.value(pendingAlbum), QStringLiteral("http://box.example/f/x.flac?sig=") + sig);
+                auto done = std::move(pending);
+                pending = nullptr;
+                if (done) done(ok, sentence);
+            }
+        };
+        auto clean = [&](const Rig& g) {
+            for (const QString& s : g.said)
+                CHECK(!s.isEmpty() && !s.contains(QLatin1String("://")) && !s.contains(kSig) && !s.contains(kTok));
+        };
+        const QString jfUrl = QStringLiteral("http://jf.example/Audio/jf-tr-1/stream?static=true&api_key=") + kTok;
+        {   // A Jellyfin track: minted from its id and played at once. Nothing fetched first.
+            Rig g; g.sig = kSig; g.urls.insert(jfId, jfUrl);
+            browse::openRemoteTrack(rto(routes.value(jfId)), QStringLiteral("Once"), g.doors());
+            CHECK(g.played.size() == 1 && g.played.value(0).first == jfUrl && g.played.value(0).second == jfId);
+            CHECK(g.fetched.isEmpty() && g.said.isEmpty());
+        }
+        {   // A shelf track this session holds a url for: the same.
+            Rig g; g.sig = kSig; g.urls.insert(ebsId, QStringLiteral("http://box.example/f/t-2.flac?sig=") + kSig);
+            browse::openRemoteTrack(rto(routes.value(ebsId)), QStringLiteral("Ember"), g.doors());
+            CHECK(g.played.size() == 1 && g.played.value(0).second == ebsId);
+            CHECK(g.fetched.isEmpty() && g.said.isEmpty());
+        }
+        {   // COLD — the restart case: its ALBUM is fetched first, nothing plays until that lands, then it plays.
+            Rig g; g.sig = kSig; g.onFetch.insert(sAlbum, ebsId);
+            browse::openRemoteTrack(rto(routes.value(ebsId)), QStringLiteral("Ember"), g.doors());
+            CHECK(g.fetched == QStringList{ sAlbum });
+            CHECK(g.played.isEmpty() && g.said.isEmpty());
+            g.land(true);
+            CHECK(g.played.size() == 1 && g.played.value(0).second == ebsId
+                  && g.played.value(0).first.endsWith(kSig));            // the url the fetch brought
+            CHECK(g.said.isEmpty() && g.fetched.size() == 1);
+            CHECK(g.minted.count(ebsId) == 2);                           // asked before the fetch, and after
+        }
+        {   // A fetch that fails says the client's own sentence, and plays nothing.
+            Rig g; g.sig = kSig;
+            browse::openRemoteTrack(rto(routes.value(ebsId)), QStringLiteral("Ember"), g.doors());
+            g.land(false, QStringLiteral("That server is not connected any more."));
+            CHECK(g.played.isEmpty());
+            CHECK(g.said == QStringList{ QStringLiteral("That server is not connected any more.") });
+        }
+        {   // The album came back without this track (it was moved or removed on the server): says so, by name.
+            Rig g; g.sig = kSig;
+            browse::openRemoteTrack(rto(routes.value(ebsId)), QStringLiteral("Ember"), g.doors());
+            g.land(true);
+            CHECK(g.played.isEmpty() && g.said.size() == 1 && g.said.value(0).contains(QLatin1String("Ember")));
+            clean(g);
+        }
+        {   // Cold with no album to fetch (a Recents row, or a star from before #368): says so, fetches nothing.
+            Rig g; g.sig = kSig;
+            browse::openRemoteTrack(browse::remoteTrackOpenFor(ebsCold, QStringLiteral("audio"), ebsCold),
+                                    QStringLiteral("Cold Song"), g.doors());
+            CHECK(g.fetched.isEmpty() && g.played.isEmpty());
+            CHECK(g.said.size() == 1 && g.said.value(0).contains(QLatin1String("Cold Song")));
+            clean(g);
+        }
+        {   // A Jellyfin track whose server went away between the shelf and the press: says so, fetches nothing.
+            Rig g; g.sig = kSig;
+            browse::openRemoteTrack(rto(routes.value(jfId)), QStringLiteral("Once"), g.doors());
+            CHECK(g.fetched.isEmpty() && g.played.isEmpty());
+            CHECK(g.said.size() == 1 && g.said.value(0).contains(QLatin1String("Once")));
+            clean(g);
+        }
+        {   // Not one of these: nothing is minted, fetched, played or said.
+            Rig g; g.sig = kSig;
+            browse::openRemoteTrack(browse::RemoteTrackOpen{}, QStringLiteral("Nothing"), g.doors());
+            CHECK(g.minted.isEmpty() && g.fetched.isEmpty() && g.played.isEmpty() && g.said.isEmpty());
+        }
+
+        // 12h. OPENING CHANGES NOTHING: no love, no un-love, and the store holds exactly what it held.
+        CHECK(loves.isEmpty());
+        const QVector<FavoriteItem> after = FavoritesStore::list();
+        CHECK(after.size() == before.size());
+        for (int i = 0; i < qMin(after.size(), before.size()); ++i)
+            CHECK(after.at(i).itemId == before.at(i).itemId && after.at(i).ts == before.at(i).ts
+                  && after.at(i).albumKey == before.at(i).albumKey && after.at(i).path == before.at(i).path);
+
+        FavoritesStore::setLoveHook({});
+        for (const FavoriteItem& f : all) FavoritesStore::remove(f.itemId);
+        CHECK(FavoritesStore::list().isEmpty());
     }
 
     if (g_fails) { std::printf("LEAFROUTE: %d failure(s)\n", g_fails); return 1; }
