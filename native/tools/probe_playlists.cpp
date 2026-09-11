@@ -59,6 +59,52 @@ int main(int argc, char** argv)
     CHECK(core::mediaCategory(QStringLiteral("quux"))  == QStringLiteral("video"));  // unknown -> fallback (NOT photos)
     CHECK(core::mediaCategory(QString())               == QStringLiteral("video"));  // empty  -> fallback
 
+    // ---- 0b. playlistCategory: the bucket "Add to playlist" files into (issue #373) --------------------------
+    // The synthetic Music root is pushed with no addon, no catalogId and no catalogType, so the catalogue key
+    // HomeView hands over there is "native||" — and mediaCategory("") is "video". A track added from the local
+    // music library, or from a Subsonic server merged into it, was filed among the Video playlists.
+    {
+        using core::playlistCategory;
+        const QString synthetic = QStringLiteral("native||");   // every synthetic root: Music, Audiobooks, ...
+        const QString audio = QStringLiteral("audio");
+        // A local-library track (Music -> artist -> album -> track). Its row type is "track".
+        CHECK(playlistCategory(synthetic, audio, QStringLiteral("track")) == audio);
+        // A Subsonic track merged into the Music artists: same root, same category.
+        CHECK(playlistCategory(synthetic, audio, QStringLiteral("track")) == audio);
+        // ...and a row whose type says nothing at all still files where the user is standing.
+        CHECK(playlistCategory(synthetic, audio, QString()) == audio);
+        // The other synthetic categories answer their own buckets.
+        CHECK(playlistCategory(synthetic, audio, QStringLiteral("audiobook")) == audio);
+        CHECK(playlistCategory(synthetic, QStringLiteral("reading"), QStringLiteral("book")) == QStringLiteral("reading"));
+        CHECK(playlistCategory(synthetic, QStringLiteral("photos"), QStringLiteral("photo")) == QStringLiteral("photos"));
+        // No category to go on either (a search root, Home): the item's own type decides — never a silent video.
+        CHECK(playlistCategory(synthetic, QString(), QStringLiteral("track")) == audio);
+        CHECK(playlistCategory(synthetic, QString(), QStringLiteral("song")) == audio);
+        CHECK(playlistCategory(QString(), QString(), QStringLiteral("album")) == audio);   // an empty stack
+        CHECK(playlistCategory(synthetic, QString(), QStringLiteral("game")) == QStringLiteral("game"));
+        CHECK(playlistCategory(synthetic, QString(), QStringLiteral("movie")) == QStringLiteral("video"));
+        // An active "category" that is not a bucket is not an answer; the item's type is.
+        CHECK(playlistCategory(synthetic, QStringLiteral("music"), QStringLiteral("track")) == audio);
+        CHECK(playlistCategory(synthetic, QStringLiteral("bogus"), QStringLiteral("game")) == QStringLiteral("game"));
+
+        // ORDINARY ADD-ON CATALOGUES KEEP TODAY'S ANSWER EXACTLY: mediaCategory(catalogType), whatever the item
+        // or the active category says. Every row below is the pre-#373 expression's own answer.
+        const QString movies = QStringLiteral("com.x.catalog|movies|movie");
+        for (const QString& key : { movies, QStringLiteral("com.x.catalog|top|series"),
+                                    QStringLiteral("com.x.catalog|music|album"), QStringLiteral("com.x.catalog|songs|track"),
+                                    QStringLiteral("native|consoles|game"), QStringLiteral("com.x.catalog|books|book"),
+                                    QStringLiteral("someaddon|weird|quux"), QStringLiteral("someaddon|untyped|") })
+            for (const QString& active : { QString(), audio, QStringLiteral("game") })
+                for (const QString& type : { QString(), QStringLiteral("track"), QStringLiteral("movie"), QStringLiteral("game") })
+                    CHECK(playlistCategory(key, active, type) == core::mediaCategory(key.section(QLatin1Char('|'), 2, 2)));
+        CHECK(playlistCategory(movies, audio, QStringLiteral("track")) == QStringLiteral("video"));            // a video catalogue
+        CHECK(playlistCategory(QStringLiteral("native|consoles|game"), QString(), QStringLiteral("game"))
+              == QStringLiteral("game"));                                                                      // a games catalogue
+        CHECK(playlistCategory(QStringLiteral("com.x.catalog|songs|track"), QString(), QStringLiteral("track")) == audio);
+        // A named catalogue with no type is still a catalogue: today's catch-all, not the item's type.
+        CHECK(playlistCategory(QStringLiteral("someaddon|untyped|"), audio, QStringLiteral("track")) == QStringLiteral("video"));
+    }
+
     // ---- Seed a v1 (catalogKey-shaped) blob straight into the ini, and clear the migration stamp -------------
     // Three playlists: a Weekend-Picks-shaped movie list (video), a games list (game), and one with an
     // unrecognised catalogType (must fall to video). QSettings shares one in-process QConfFile per path, so a
