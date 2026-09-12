@@ -123,7 +123,9 @@ public:
     // Jump to a 0-based page — the whole of a comic bookmark's anchor. showPage() is the one page-change
     // path (decode, rescale, label, stats, pageInfoChanged) and ignores an out-of-range index, so a
     // bookmark that outlived its file cannot land the reader on a page that isn't there.
-    void gotoPage(int page0) override { showPage(page0); }
+    // #285: a jump is a move, so it spends the resume's half — a bookmark that lands on a spread opens on the
+    // half the reading direction gives it, not on the one some earlier close happened to leave in the store.
+    void gotoPage(int page0) override { resumeHalf_ = ComicRead::kNoStoredHalf; showPage(page0); }
 
 signals:
     void homeRequested();
@@ -221,6 +223,10 @@ private:
     bool railOn_ = false;
     QString seriesKey_;
     int  half_ = -1;              // paged split: -1 whole page, 0 first half on screen, 1 second half
+    // #285: the half this comic's stored resume recorded, held from open until the reader navigates away from
+    // it — the same shape resumeFraction_ has for the webtoon strip. kNoStoredHalf means the resume names no
+    // half, which is every resume written before #285 and every one closed on a page that was not split.
+    int  resumeHalf_ = ComicRead::kNoStoredHalf;
     QVector<QSize> pageSizes_;    // every page's own size, read from its HEADER at open (no decode)
     ComicRead::Strip strip_;      // webtoon: where each page starts in the strip, for the current width
     QHash<int, QPixmap> stripCache_;  // webtoon: prepared pages at strip width, held to the prefetch window

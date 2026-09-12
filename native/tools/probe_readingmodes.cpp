@@ -21,7 +21,9 @@
 //      containing the characters ('/', '=', ']') that would have broken a key-per-series scheme.
 //   3. THE SPLIT DECISION either side of aspect ratio 1.0, the viewport half of the rule, all three override
 //      values, and WHICH HALF IS SHOWN FIRST in each direction — including that the two halves tile an
-//      odd-width page exactly, with no lost middle column.
+//      odd-width page exactly, with no lost middle column — and (#285) WHICH HALF A RESUME REOPENS ON: the
+//      stored one while the page still splits, today's entry half in every case where it does not, and
+//      today's entry half exactly for a resume written before the half was stored at all.
 //   4. THE CROP HEURISTIC on synthetic pages: a uniform margin goes, art at a corner disables it, the
 //      tolerance boundary is exactly where it is claimed to be, and a blank page is refused rather than
 //      cropped to a postage stamp.
@@ -207,6 +209,44 @@ int main()
         CHECK(ComicRead::entryHalf(true, -1) == 1);  // arriving backwards: the half you would have left
         CHECK(ComicRead::entryHalf(false, +1) == -1);
         CHECK(ComicRead::entryHalf(false, -1) == -1);
+
+        // WHICH HALF A RESUME REOPENS ON (#285). entryHalf above is the answer for a page walked into;
+        // resumeHalf is the answer for one come BACK to, and the stored half wins wherever it still names a
+        // screen that exists. Every expected value below is written out by hand, as a literal.
+        //
+        // THE BUG: closed on the SECOND half of a spread that still splits, reopened -> the second half.
+        // Before #285 no half was stored and the answer was entryHalf(true, +1) = 0, the first half — the
+        // right page and the wrong half, which is the issue in one line.
+        CHECK(ComicRead::resumeHalf(1, /*splits=*/true, +1) == 1);
+        CHECK(ComicRead::resumeHalf(1, true, +1) != 0);        // ... and 0 is exactly what it used to be
+        CHECK(ComicRead::resumeHalf(1, true, -1) == 1);
+        // A stored FIRST half is just as much a recorded position: it beats the direction in both of them.
+        CHECK(ComicRead::resumeHalf(0, true, +1) == 0);
+        CHECK(ComicRead::resumeHalf(0, true, -1) == 0);
+        CHECK(ComicRead::resumeHalf(0, true, -1) != 1);        // not "arriving backwards" — arriving back
+        // THE PAGE NO LONGER SPLITS — a wider or rotated viewport, split set to Never, or WEBTOON, where a
+        // page has no halves at all and ComicView::pageSplits answers false for the mode (section 1 pins
+        // isPaged(Webtoon) == false). The stored half names a screen that does not exist, so the whole page
+        // comes up: -1, which is today's behaviour untouched.
+        CHECK(ComicRead::resumeHalf(1, /*splits=*/false, +1) == -1);
+        CHECK(ComicRead::resumeHalf(1, false, -1) == -1);
+        CHECK(ComicRead::resumeHalf(0, false, +1) == -1);
+        CHECK(ComicRead::resumeHalf(0, false, -1) == -1);
+        // NO STORED HALF — every resume written before #285 — is today's entry half EXACTLY, in both
+        // directions: forwards the first half, backwards the second, and no half on a page that does not
+        // split. This is the case that guarantees an old save opens precisely where it opens now.
+        CHECK(ComicRead::kNoStoredHalf == -1);
+        CHECK(ComicRead::resumeHalf(ComicRead::kNoStoredHalf, true, +1) == 0);
+        CHECK(ComicRead::resumeHalf(ComicRead::kNoStoredHalf, true, -1) == 1);
+        CHECK(ComicRead::resumeHalf(ComicRead::kNoStoredHalf, false, +1) == -1);
+        CHECK(ComicRead::resumeHalf(ComicRead::kNoStoredHalf, false, -1) == -1);
+        // A stored value that is not a half is "none": a hand-edited ini cannot invent a third screen, the
+        // same forgiving read section 1 makes of a mode that does not exist.
+        CHECK(ComicRead::resumeHalf(2, true, +1) == 0);
+        CHECK(ComicRead::resumeHalf(7, true, -1) == 1);
+        CHECK(ComicRead::resumeHalf(-5, true, +1) == 0);
+        CHECK(ComicRead::resumeHalf(99, true, -1) == 1);
+        CHECK(ComicRead::resumeHalf(99, false, -1) == -1);
     }
 
     // ---- 4. The border-crop heuristic --------------------------------------------------------------------

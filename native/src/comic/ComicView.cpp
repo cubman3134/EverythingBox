@@ -367,6 +367,15 @@ bool ComicView::openComic(const QString& path, QString* error)
     // rather than a thing you turn. A comic saved before this existed has no fraction and resumes at 0.0,
     // which is where it always resumed.
     resumeFraction_ = qBound(0.0, store().value(comicKey(path) + QStringLiteral("frac"), 0.0).toDouble(), 1.0);
+    // #285: and a page that SPLITS is two screens, so which of the two was on screen is part of the place as
+    // well. Read here, applied by showPage() below through ComicRead::resumeHalf, which honours it only while
+    // this page still splits at this viewport in this mode. A comic saved before #285 has no half: the key is
+    // absent, the value is kNoStoredHalf, and the page opens on the half it opens on today — the same promise
+    // the fraction one comment up makes about a comic saved before IT existed.
+    bool halfOk = false;
+    const int savedHalf = store().value(comicKey(path) + QStringLiteral("half"),
+                                        ComicRead::kNoStoredHalf).toInt(&halfOk);
+    resumeHalf_ = halfOk ? savedHalf : ComicRead::kNoStoredHalf;
     fit_ = true;
     zoom_ = 1.0;
     current_ = page;
@@ -408,6 +417,7 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     railOn_ = false;
     seriesKey_.clear();
     half_ = -1;
+    resumeHalf_ = ComicRead::kNoStoredHalf;   // #285: a photo folder carries no resume, so it names no half
     pageSizes_.clear();
     stripCache_.clear();
     railCache_.clear();
@@ -457,6 +467,12 @@ void ComicView::persist()
     currentPosition(&page, &fraction);
     store().setValue(k + QStringLiteral("page"), page);
     store().setValue(k + QStringLiteral("frac"), fraction);
+    // #285: ... and WHICH HALF of that page, when what is in front of the reader is a split spread. The key is
+    // written only while a half is actually on screen and REMOVED otherwise, because it describes the position
+    // being saved right now: a stale half left behind by an earlier close would later be read back against a
+    // page the reader was never on a half of. Absent is the pre-#285 state and reads as ComicRead's "none".
+    if (half_ >= 0) store().setValue(k + QStringLiteral("half"), half_);
+    else            store().remove(k + QStringLiteral("half"));
     store().setValue(k + QStringLiteral("title"), QFileInfo(path_).fileName());
     store().sync();
 }
@@ -476,7 +492,11 @@ void ComicView::showPage(int index, int dir)
     {
         // #154: a page that splits arrives as one of its halves — the second one when the reader is walking
         // backwards, so a spread read in reverse shows the half it showed last.
-        half_ = ComicRead::entryHalf(pageSplits(index), dir);
+        // #285: ... unless this is the comic being REOPENED, in which case the half the resume recorded is the
+        // half to come back to. resumeHalf_ holds the stored value until the reader navigates (nextPage,
+        // prevPage and gotoPage each spend it), and resumeHalf honours it only on a page that still splits —
+        // so a wider window, a Never override or webtoon all fall straight back to entryHalf's answer.
+        half_ = ComicRead::resumeHalf(resumeHalf_, pageSplits(index), dir);
         image_ = preparedPage(index, half_);
         rescale();
         scroll_->verticalScrollBar()->setValue(0); // start each page at the top
@@ -617,6 +637,8 @@ void ComicView::nextPage()
     // report is unconditional; a comic with no run there is answered with the same silence as before.
     // #154: a page that SPLIT is two screens, and the first press over it moves between them. It changes no
     // page, reports no boundary and writes no resume — the reader has not left this page yet.
+    // #285: the reader is moving, so the resume's half is spent — from here on the direction decides again.
+    resumeHalf_ = ComicRead::kNoStoredHalf;
     if (ComicRead::stepStaysInPage(half_, +1))
     {
         half_ = 1;
@@ -635,6 +657,7 @@ void ComicView::nextPage()
 }
 void ComicView::prevPage()
 {
+    resumeHalf_ = ComicRead::kNoStoredHalf;   // #285: as in nextPage() — a move spends the resume's half
     if (ComicRead::stepStaysInPage(half_, -1))
     {
         half_ = 0;
@@ -720,7 +743,11 @@ void ComicView::resizeEvent(QResizeEvent* e)
     // same (page, fraction), which is the whole reason the reading position is kept in those terms.
     if (mode_ == ComicRead::Mode::Webtoon && !photoMode_) { relayoutStrip(); updateLabel(); return; }
     // ... and a rotation can change whether the page in front of you is a double spread at all.
-    const int wantHalf = ComicRead::entryHalf(pageSplits(current_), +1);
+    // #285: through resumeHalf, because a comic REOPENED inside the themed host is laid out after it is shown
+    // — the viewport the split is decided on only settles here — so the resume's half has to survive into this
+    // recomputation or the restored spread would snap back to its first half. Once the reader has moved,
+    // resumeHalf_ is "none" and this is entryHalf's answer exactly, as it was.
+    const int wantHalf = ComicRead::resumeHalf(resumeHalf_, pageSplits(current_), +1);
     if ((wantHalf < 0) != (half_ < 0))
     {
         half_ = wantHalf;

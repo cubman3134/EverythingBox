@@ -105,6 +105,30 @@ namespace ComicRead
     // second half last should show you its second half first.
     inline int entryHalf(bool splits, int dir) { return !splits ? -1 : (dir < 0 ? 1 : 0); }
 
+    // WHICH HALF A RESUME REOPENS ON (issue #285). entryHalf above answers for a page you WALKED into, and it
+    // is the whole answer while you are reading: the direction you arrived from decides. A resume is not a
+    // walk — it is a position that was recorded — so the half that was on screen when the comic was closed is
+    // part of that position, and reading it back is what stops a spread left on its second half from reopening
+    // on its first.
+    //
+    // IT IS HONOURED ONLY WHERE IT STILL MEANS SOMETHING. Whether a page splits depends on the viewport and on
+    // the mode, and both can differ from the moment the position was written: the window was widened or
+    // rotated, the override was set to Never, the series was switched to webtoon (where a page never splits at
+    // all — see the webtoon note below; ComicView::pageSplits answers false for every non-paged mode). In each
+    // of those the stored half names a screen that no longer exists, so the answer falls back to entryHalf's,
+    // unchanged.
+    //
+    // A STORED VALUE THAT IS NOT 0 OR 1 IS "NONE" — the same forgiving read resolveMode makes of a hand-edited
+    // ini — and that is also the OLD-SAVE case: a resume written before #285 carries no half, reads as
+    // kNoStoredHalf, and therefore opens exactly where it opens today, in both directions. It is the promise
+    // the stored fraction made when it was added, in the same words (ComicView::openComic).
+    inline constexpr int kNoStoredHalf = -1;
+    inline int resumeHalf(int storedHalf, bool splits, int dir)
+    {
+        if (splits && (storedHalf == 0 || storedHalf == 1)) return storedHalf;
+        return entryHalf(splits, dir);
+    }
+
     // ---- BORDER CROP ---------------------------------------------------------------------------------------
     // Trim the uniform margin a scanner leaves around the art. The heuristic, in full:
     //
