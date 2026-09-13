@@ -4298,7 +4298,7 @@ echo
 #  2. THE SHELVES ARE CURRENT WHEN IT IS READ. refresh() calls refreshMusicShelves() BEFORE the tab gate: the
 #     shelf list is pushed in, and its own sourcesChanged connection runs after refresh()'s.
 #  3. THE MERGE READS THE SAME COUNT. musicMergePossible() is MusicSuppliers::mergePossible, not a second sum.
-#  4. THE SHELF RULE IS THE PROBED ONE. refreshMusicShelves() applies sourceMayServeShelf and catalogIsShelf.
+#  4. THE SHELF RULE IS THE PROBED ONE. refreshMusicShelves() applies sourceMayServeShelf and catalogIsShelf (since #392 through shelfCatalogId, which applies both).
 #  5. THE ROOT AND ITS EMPTY NOTE ASK THE SAME QUESTION. populateMusicArtists takes rootListsRemote, and
 #     musicEmptyNote asks MusicSuppliers::emptyNote rather than naming Subsonic alone.
 #
@@ -4347,8 +4347,8 @@ else
   [ "$mt_net" -eq 0 ] || mt_note "musicSuppliers() makes a request — the tab gate runs on every home refresh and must never touch the network."
 
   mt_body 'void HomeView::refreshMusicShelves()'
-  mt_s1="$(grep -c 'MusicSuppliers::sourceMayServeShelf(' "$mt_fn")"
-  mt_s2="$(grep -c 'MusicSuppliers::catalogIsShelf(' "$mt_fn")"
+  mt_s1="$(grep -cE 'MusicSuppliers::(sourceMayServeShelf|shelfCatalogId)\(' "$mt_fn")"
+  mt_s2="$(grep -cE 'MusicSuppliers::(catalogIsShelf|shelfCatalogId)\(' "$mt_fn")"
   [ "$mt_s1" -ge 1 ] && [ "$mt_s2" -ge 1 ] \
     || mt_note "refreshMusicShelves() does not apply MusicSuppliers::sourceMayServeShelf and catalogIsShelf — the shelf rule probe_musicsources pins is not the one in use, and a metadata add-on's music catalogue could open the tab."
 
@@ -4367,6 +4367,92 @@ else
     echo "PASS: music tab supplier count (tab, merge, root and empty note read one count; shelves current before the tab gate)"
   else
     echo "FAIL: music tab supplier count — the Music tab and the merge no longer share one definition of a supplier."; fail=1
+  fi
+fi
+echo
+# Catalogue tab keys and the absorbed music shelf (issue #392). probe_homerows holds navkeys: a catalogue whose id
+# is a built-in tab's key gets a key of its own, and a home-row list stored before the change still resolves.
+# probe_musicsources holds which catalogue tab the merged Music library absorbs. This is the half in HomeView,
+# which links nothing headlessly - without it both probes are checking functions nothing calls:
+#
+#  1. A CATALOGUE IS KEYED THROUGH navkeys::forCatalogue. refresh()'s addCat gives the tab and its navTargets_
+#     entry navkeys::forCatalogue(cid), never the raw id; selectType() lights the same key; and no other
+#     styleTypeButtons() call passes anything but a literal or that key.
+#  2. EVERY BUILT-IN KEY IS RESERVED. Each literal passed to makeTab(), to a built-in navTargets_ entry or to
+#     styleTypeButtons() is listed in navkeys::builtInKeys() - a new built-in tab keyed "games" that is not
+#     listed would let a catalogue called "games" collide with it again.
+#  3. NO PRODUCER SPELLS "source:" + A KEY BY HAND. homeRowCatalogue(), categoryCatalogs() and systemItems()
+#     ask sourceRowIdResolver(), so the editor and both themed producers agree on a row's id, old spelling included.
+#  4. THE ABSORB RULE IS THE MERGE'S. refresh() drops a catalogue with MusicSuppliers::catalogTabAbsorbed,
+#     reading ServerMusicClient's shelf list, after refreshMusicShelves() and before the election; and
+#     refreshMusicShelves() builds that list from MusicSuppliers::shelfCatalogId.
+#
+# Comments are stripped first, as in the gates above. Counts, never `grep -q` (pipefail).
+echo "=== catalogue tab keys + absorbed music shelf (#392) ==="
+NK_V="$HERE/../src/ui/HomeView.cpp"
+NK_H="$HERE/../src/core/NavKeys.h"
+nk_fail=0
+nk_note() { echo "  $1"; nk_fail=1; }
+if [ ! -f "$NK_V" ] || [ ! -f "$NK_H" ]; then
+  echo "FAIL: catalogue tab keys (HomeView.cpp or NavKeys.h not found under $HERE/../src)"; fail=1
+else
+  nk_v="$(mktemp)"; nk_fn="$(mktemp)"; nk_keys="$(mktemp)"
+  sed -E 's://.*$::' "$NK_V" | tr -d '\r' > "$nk_v"
+  nk_body() { awk -v sig="$1" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$nk_v" </dev/null > "$nk_fn"; }
+
+  nk_body 'void HomeView::refresh()'
+  nk_n="$(wc -l < "$nk_fn" | tr -d '[:space:]')"
+  [ "$nk_n" -ge 100 ] || nk_note "HomeView::refresh came out as $nk_n line(s) - its signature changed or it moved. The catalogue keys are not being checked."
+  nk_esc="$(grep -c 'navkeys::forCatalogue(cid)' "$nk_fn")"
+  nk_use="$(grep -cE 'makeTab\(btn, key, ctype\)|navTargets_\.push_back\(\{ key, false, addon, cid,' "$nk_fn")"
+  nk_raw="$(grep -cE 'makeTab\(btn, cid,|navTargets_\.push_back\(\{ cid,' "$nk_fn")"
+  [ "$nk_esc" -ge 1 ] && [ "$nk_use" -ge 2 ] && [ "$nk_raw" -eq 0 ] \
+    || nk_note "refresh() does not key a catalogue's tab AND its navTargets_ entry with navkeys::forCatalogue(cid) - a catalogue called \"music\" shares the Music tab's key again."
+  nk_shelf="$(grep -n 'refreshMusicShelves();' "$nk_fn" | head -1 | cut -d: -f1)"
+  nk_abs="$(grep -n 'MusicSuppliers::catalogTabAbsorbed(' "$nk_fn" | head -1 | cut -d: -f1)"
+  nk_elect="$(grep -n 'all\.push_back(' "$nk_fn" | head -1 | cut -d: -f1)"
+  nk_list="$(grep -c 'ServerMusicClient::instance().shelves()' "$nk_fn")"
+  if [ -z "$nk_shelf" ] || [ -z "$nk_abs" ] || [ -z "$nk_elect" ] || [ "$nk_list" -lt 1 ]; then
+    nk_note "refresh() does not drop a shelf's catalogue tab with MusicSuppliers::catalogTabAbsorbed over ServerMusicClient's shelf list - a server music shelf gets its own tab as well as Music."
+  elif [ "$nk_shelf" -ge "$nk_abs" ] || [ "$nk_abs" -ge "$nk_elect" ]; then
+    nk_note "refresh() reads the shelf list before refreshMusicShelves() brings it up to date, or applies the absorb rule after the catalogue election."
+  fi
+
+  nk_body 'void HomeView::selectType('
+  nk_sel="$(grep -c 'styleTypeButtons(navkeys::forCatalogue(catalogId))' "$nk_fn")"
+  [ "$nk_sel" -ge 1 ] || nk_note "selectType() does not light navkeys::forCatalogue(catalogId) - pressing a catalogue lights nothing, or lights a built-in tab of the same name."
+  nk_other="$(grep -E 'styleTypeButtons\(' "$nk_v" | grep -vcE 'styleTypeButtons\(QStringLiteral\("[^"]*"\)\)|styleTypeButtons\(navkeys::forCatalogue\(catalogId\)\)|void HomeView::styleTypeButtons\(const QString& activeKey\)')"
+  [ "$nk_other" -eq 0 ] || nk_note "$nk_other styleTypeButtons() call(s) pass something other than a built-in literal or navkeys::forCatalogue(catalogId) - a raw catalogue id can light a built-in tab."
+
+  nk_body 'void HomeView::refreshMusicShelves()'
+  nk_sc="$(grep -c 'MusicSuppliers::shelfCatalogId(' "$nk_fn")"
+  [ "$nk_sc" -ge 1 ] || nk_note "refreshMusicShelves() does not build the shelf list from MusicSuppliers::shelfCatalogId - the tab refresh() absorbs is not the shelf the merge took."
+
+  awk 'index($0, "inline const QStringList& builtInKeys()") { p = 1 } p { print } p && /return keys;/ { exit }' "$NK_H" | tr -d '\r' > "$nk_keys"
+  nk_lits="$(grep -oE 'makeTab\([A-Za-z_]+, QStringLiteral\("[^"]*"\)|styleTypeButtons\(QStringLiteral\("[^"]*"\)\)|navTargets_\.push_back\(\{ QStringLiteral\("[^"]*"\)' "$nk_v" \
+             | grep -oE 'QStringLiteral\("[^"]*"\)' | sed -E 's/QStringLiteral\("([^"]*)"\)/\1/' | sort -u)"
+  nk_litn=0
+  for nk_k in $nk_lits; do
+    nk_litn=$((nk_litn + 1))
+    nk_c="$(grep -cF "QStringLiteral(\"$nk_k\")" "$nk_keys")"
+    [ "$nk_c" -ge 1 ] || nk_note "the built-in tab key \"$nk_k\" is not in navkeys::builtInKeys() - a catalogue with that id would share its key."
+  done
+  [ "$nk_litn" -ge 5 ] || nk_note "found $nk_litn built-in tab key literal(s), expected at least 5 - the extraction no longer matches HomeView.cpp, so nothing was checked."
+
+  for nk_sig in 'QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()' 'QVariantList HomeView::categoryCatalogs(const QString& categoryKey)' 'QVariantList HomeView::systemItems()'; do
+    nk_body "$nk_sig"
+    nk_bn="$(wc -l < "$nk_fn" | tr -d '[:space:]')"
+    nk_hand="$(grep -c 'QStringLiteral("source:")' "$nk_fn")"
+    nk_res="$(grep -c 'sourceRowIdResolver()' "$nk_fn")"
+    [ "$nk_bn" -ge 5 ] && [ "$nk_hand" -eq 0 ] && [ "$nk_res" -ge 1 ] \
+      || nk_note "$nk_sig does not take its source: row ids from sourceRowIdResolver() - a stored row and the row on screen can disagree about a catalogue's id."
+  done
+
+  rm -f "$nk_v" "$nk_fn" "$nk_keys"
+  if [ "$nk_fail" -eq 0 ]; then
+    echo "PASS: catalogue tab keys + absorbed music shelf (catalogues keyed apart from built-ins; row ids resolved in one place; the merge's shelf gets no second tab)"
+  else
+    echo "FAIL: catalogue tab keys + absorbed music shelf - a catalogue can share a built-in tab's key, or a merged shelf keeps a second tab."; fail=1
   fi
 fi
 echo

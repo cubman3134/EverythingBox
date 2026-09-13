@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QHash>
 #include <QPointer>
+#include <functional>
 #include "../addons/AddonModels.h"
 #include "../core/Tracker.h"   // tracker::Kind - TrackerLeaf names it by value (issue #156)
 #include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
@@ -1212,6 +1213,8 @@ private:
                        bool audiobooks = false;                               // the synthetic Audiobooks one (#139)
                        bool books = false; };                                 // the synthetic My Books one (#134)
     QVector<NavTarget> navTargets_;
+    // navKey -> the `source:` home-row id it answers to (#392: a catalogue's escaped key keeps a stored old id).
+    std::function<QString(const QString&)> sourceRowIdResolver() const;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;
     bool atCarouselLanding_ = false; // showing the media-type carousel (the root)

@@ -795,6 +795,69 @@ int main(int argc, char** argv)
         CHECK(emptyNote(jfShelf, 0, false)    == EmptyNote::Nothing);
     }
 
+    // ---- A SHELF THE MERGE TOOK GETS NO SECOND TAB (issue #392) --------------------------------------------------
+    // A server's music shelf is browsable under Music; its own catalogue tab was the same music twice. Decided by
+    // what the MERGE took — shelfCatalogId, the same function HomeView::refreshMusicShelves builds the shelf list
+    // from — never by a name. Each source below is modelled whole: its flags and ALL of its catalogues, and every
+    // catalogue says whether it keeps its tab.
+    {
+        using namespace MusicSuppliers;
+        auto cat = [](const char* id, const char* type, bool searchOnly = false, bool skip = false) {
+            return CatalogFacts{ QString::fromLatin1(id), QString::fromLatin1(type), searchOnly, skip };
+        };
+        struct Expect { const char* catalogueId; bool keepsTab; };
+        struct Src { const char* name; bool remoteHttp, stremio, enabled; QList<CatalogFacts> cats;
+                     QList<Expect> expect; };
+        const QList<Src> srcs = {
+            // THE ISSUE'S CASE: a server whose music catalogue is literally called `music`. The Music tab has it.
+            { "our server, music catalogue called music", true, false, true,
+              { cat("movies392", "movie"), cat("music", "music") },
+              { { "movies392", true }, { "music", false } } },
+            // ...and under any other name: the rule never read the name.
+            { "our server, music catalogue called musiclib", true, false, true,
+              { cat("musiclib", "music") }, { { "musiclib", false } } },
+            // One shelf per server: the merge takes the FIRST, so a second music catalogue is not absorbed.
+            { "our server, two music catalogues", true, false, true,
+              { cat("musiclib", "music"), cat("music", "music") },
+              { { "musiclib", false }, { "music", true } } },
+            // A search-only or self-explaining music catalogue is not a shelf; the browsable one after it is.
+            { "our server, searchOnly then browsable", true, false, true,
+              { cat("musicsearch", "music", true), cat("explained", "music", false, true), cat("musiclib", "music") },
+              { { "musicsearch", true }, { "explained", true }, { "musiclib", false } } },
+            // A bundled metadata add-on's `music` catalogue is never a shelf (#384), so it keeps its tab.
+            { "bundled metadata add-on", false, false, true,
+              { cat("music", "music"), cat("aio.games", "game") }, { { "music", true }, { "aio.games", true } } },
+            { "Stremio add-on", true, true, true, { cat("music", "music") }, { { "music", true } } },
+            // A switched-off server supplies nothing (and HomeView skips a disabled add-on's catalogues anyway).
+            { "our server, switched off", true, false, false, { cat("music", "music") }, { { "music", true } } },
+            // Catalogues of any other type are untouched — even one whose id is `music`.
+            { "our server, a movie catalogue called music", true, false, true,
+              { cat("music", "movie") }, { { "music", true } } },
+        };
+        for (const Src& s : srcs)
+        {
+            const QString shelfId = shelfCatalogId(s.remoteHttp, s.stremio, s.enabled, s.cats);
+            Suppliers sup;
+            sup.serverShelves = shelfId.isEmpty() ? 0 : 1;   // what musicSuppliers() reads back from that list
+            for (const Expect& e : s.expect)
+            {
+                const bool keeps = !catalogTabAbsorbed(sup, shelfId, QString::fromLatin1(e.catalogueId));
+                if (keeps != e.keepsTab)
+                    std::fprintf(stderr, "MUSICSOURCES-FAIL #392 \"%s\" catalogue \"%s\": keepsTab=%d\n",
+                                 s.name, e.catalogueId, int(keeps));
+                CHECK(keeps == e.keepsTab);
+            }
+            // Wherever a tab is absorbed, the Music tab that absorbs it exists.
+            if (!shelfId.isEmpty()) CHECK(tabOffered(sup));
+        }
+        // Never on the strength of a door that is not there.
+        CHECK(!catalogTabAbsorbed(Suppliers{}, QStringLiteral("music"), QStringLiteral("music")));
+        // Nothing changes for a local-folder or Subsonic user: with no shelf there is nothing to absorb.
+        Suppliers localSub; localSub.localLibrary = true; localSub.subsonicServers = 1;
+        CHECK(!catalogTabAbsorbed(localSub, QString(), QStringLiteral("music")));
+        CHECK(!catalogTabAbsorbed(localSub, QString(), QString()));
+    }
+
     // Leave nothing behind (issue #42).
     QFile::remove(ini);
 
