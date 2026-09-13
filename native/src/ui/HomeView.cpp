@@ -120,6 +120,7 @@
 #include "../core/JellyfinMusicClient.h"  // #194 inc 3: a Jellyfin server's music as a supplier
 #include "../core/ServerMusic.h"          // #194 inc 3: the EverythingBox server's music shelf (ids, readers)
 #include "../core/ServerMusicClient.h"    // ...and its fetches
+#include "../core/MusicSuppliers.h"       // #384: the ONE supplier count the Music tab and the merge share
 #include "../browse/QueuedRowVerb.h"      // #365: a classic menu's playlist verb, on a copy, a turn later
 #include "../ebook/OpdsFeed.h"         // parseOpds + opdsBasicAuth (#146)
 #include "../core/NetHeaderApply.h"    // OPDS feed fetch: auth header + cross-origin drop on redirect (#146)
@@ -1374,7 +1375,21 @@ void HomeView::refresh()
     // hasServers() is one settings read and a small JSON parse - see SubsonicServerStore.h. It must stay
     // that cheap: this runs on every home refresh, and a gate that reached a server to decide whether to
     // draw a tab would make the home screen wait on a box that may be switched off.
-    if (MusicLibrary::hasLibrary() || SubsonicServerStore::hasServers())
+    //
+    // ...OR an enabled Jellyfin server, OR a music shelf on a connected EverythingBox server (#384). Naming
+    // two suppliers here while musicMergePossible() counted four left a Jellyfin-only or shelf-only user with
+    // music the merge knew about and no door to it. So both now read ONE count (MusicSuppliers.h): a tab
+    // needs one supplier, a merge needs two, and the two cannot disagree about which sources exist. Every
+    // term is still a settings read or an in-memory list.
+    //
+    // THE SHELF LIST IS PUSHED IN, not read from settings, so it is brought up to date HERE, before the count
+    // is taken. It used to be refreshed only by its own sourcesChanged connection, which is made AFTER the
+    // refresh() connection - so a server connected (or a manifest that gained a music catalogue) rebuilt the
+    // tabs against the PREVIOUS shelf list and the tab appeared one refresh late, and an add-on switched on or
+    // off (an imperative refresh() with no sourcesChanged at all) never moved it. refreshMusicShelves() walks
+    // the already-loaded sources and nothing else, so the refresh still waits on nothing.
+    refreshMusicShelves();
+    if (MusicSuppliers::tabOffered(musicSuppliers()))
     {
         auto* musicBtn = new QPushButton(tr("Music"), this);
         connect(musicBtn, &QPushButton::clicked, this, &HomeView::selectMusic);
@@ -3380,7 +3395,21 @@ browse::MusicEmptyNote HomeView::musicEmptyNote() const
     // sentence. Telling somebody to go and choose a folder when the thing they actually set up is sitting
     // right there would be actively wrong, so say nothing - which is already this struct's contract for an
     // empty `text` (see MusicEmptyNote).
-    if (SubsonicServerStore::hasServers()) return {};
+    //
+    // (#384) The same wrongness for a Jellyfin-only or shelf-only user, who has no door row to point at: the
+    // root is waiting on, or was refused by, or was answered empty by, the server they set up. Which of those
+    // is decided with the tab's own supplier count, so a local-folder or Subsonic user reads exactly what
+    // they read before.
+    switch (MusicSuppliers::emptyNote(musicSuppliers(), musicRootInFlight_.size(), !musicRootRefusal_.isEmpty()))
+    {
+    case MusicSuppliers::EmptyNote::None:    return {};
+    case MusicSuppliers::EmptyNote::Loading: return { tr("Loading your music…"), QString() };
+    case MusicSuppliers::EmptyNote::Refused:
+        return { musicRootRefusal_.isEmpty() ? tr("Your music server didn't answer.") : musicRootRefusal_,
+                 QString() };
+    case MusicSuppliers::EmptyNote::Nothing: return { tr("No music found on your music server."), QString() };
+    case MusicSuppliers::EmptyNote::Local:   break;
+    }
     const QString root = MusicLibrary::root();
     const QString shown = QDir::toNativeSeparators(root);
     if (root.isEmpty() || !QFileInfo::exists(root))
@@ -3498,7 +3527,11 @@ void HomeView::populateMusicArtists()
     // ONE SUPPLIER: exactly the call this function has always made. Not "the merge happens to be a no-op" -
     // the merged path is not entered at all, so there is no way for it to change a row, a count or an order
     // in a library it has no business touching. See MusicMerge.h.
-    if (!musicMergeActive())
+    //
+    // ...unless that one supplier is Jellyfin or a shelf (#384). This call renders the LOCAL index and the
+    // Subsonic door and nothing else, so for them it is an empty page behind a tab that now exists. They take
+    // the supplier-list path below instead, where one live source comes back from merge() verbatim.
+    if (!musicMergeActive() && !MusicSuppliers::rootListsRemote(musicSuppliers()))
     {
         showSyntheticCatalog(browse::musicArtistsCatalog(MusicLibrary::index(), musicEmptyNote(), musicCover(),
                                                          serverCount));
@@ -3515,6 +3548,18 @@ void HomeView::populateMusicArtists()
 
 // ---- ONE LIBRARY ACROSS SOURCES (issue #194, increment 1) ----------------------------------------------
 
+// The four suppliers, read for MusicSuppliers (#384). Settings reads and in-memory lists ONLY - the Music tab
+// asks this on every home refresh.
+MusicSuppliers::Suppliers HomeView::musicSuppliers() const
+{
+    MusicSuppliers::Suppliers s;
+    s.localLibrary    = MusicLibrary::hasLibrary();
+    s.subsonicServers = int(SubsonicServerStore::list().size());
+    s.jellyfin        = JellyfinServerStore::list();   // all of them; MusicSuppliers counts the ENABLED ones
+    s.serverShelves   = int(ServerMusicClient::instance().shelves().size());
+    return s;
+}
+
 bool HomeView::musicMergePossible() const
 {
     // A COUNT OF SUPPLIERS, not of content: the local library gates on hasLibrary() (a configured root that
@@ -3525,10 +3570,10 @@ bool HomeView::musicMergePossible() const
     // the switch that means "get this library out of the way for the evening" — a server switched off is a
     // supplier that is not supplying, and counting it would put a two-supplier install into the merged path
     // with nothing to merge. Subsonic has no such switch, so its list is counted whole, unchanged.
-    return (MusicLibrary::hasLibrary() ? 1 : 0)
-           + int(SubsonicServerStore::list().size())
-           + int(JellyfinServerStore::enabled().size())
-           + int(ServerMusicClient::instance().shelves().size()) >= 2;
+    //
+    // (#384) The count itself lives in MusicSuppliers::count, which the Music TAB reads too: this is the same
+    // number with a threshold of two, the tab's is one.
+    return MusicSuppliers::mergePossible(musicSuppliers());
 }
 
 // The connected servers that serve a music shelf. See the header for why the answer is pushed down.
@@ -3545,13 +3590,17 @@ void HomeView::refreshMusicShelves()
     {
         for (LoadedAddon* src : mgr_->sources())
         {
-            if (!src || src->transport != LoadedAddon::RemoteHttp) continue;
-            if (src->stremio) continue;                        // a third-party Stremio addon is not our server
-            if (!mgr_->isEnabled(src->manifest.id)) continue;
+            // Remote, ours (a third-party Stremio addon is not our server), switched on. The rule is
+            // MusicSuppliers::sourceMayServeShelf so probe_musicsources can hold it (#384): since a shelf now
+            // opens the Music TAB, a bundled add-on's `music` catalogue slipping through here would give every
+            // install a Music tab backed by a database rather than a library.
+            if (!src || !MusicSuppliers::sourceMayServeShelf(src->transport == LoadedAddon::RemoteHttp,
+                                                             src->stremio, mgr_->isEnabled(src->manifest.id)))
+                continue;
             for (const AddonCatalog& c : mgr_->catalogs(src))
             {
-                if (c.type != QStringLiteral("music")) continue;
-                if (c.searchOnly || !c.skipReason.isEmpty()) continue;   // it can never be browsed
+                // Of type `music`, and browsable at all (not searchOnly, no skip reason).
+                if (!MusicSuppliers::catalogIsShelf(c.type, c.searchOnly, !c.skipReason.isEmpty())) continue;
                 ServerMusicClient::Shelf s;
                 s.id           = src->manifest.id;
                 s.name         = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
@@ -3692,13 +3741,22 @@ void HomeView::fetchMergeSources()
 
     // (#194 increment 3) The two new suppliers, asked exactly as the Subsonic one is — and MARKED BEFORE
     // THE REQUEST for the same reason spelled out below.
+    //
+    // (#384) Each one is also held IN FLIGHT until it answers, and a refusal's sentence is kept: when these
+    // are the only suppliers, the root has nothing else on it, and musicEmptyNote needs to tell "still
+    // asking" from "it said no" from "it has no music".
     JellyfinMusicClient& jf = JellyfinMusicClient::instance();
     for (const JellyfinServer& srv : JellyfinServerStore::enabled())
     {
         const QString tag = QStringLiteral("jf:") + srv.id;
         if (jf.artistsLoaded(srv.id) || musicMergeFetched_.contains(tag)) continue;
         musicMergeFetched_.insert(tag);
-        jf.fetchArtists(srv.id, [landed](const JellyfinMusicClient::Result&) { landed(); });
+        musicRootInFlight_.insert(tag);
+        jf.fetchArtists(srv.id, [this, tag, landed](const JellyfinMusicClient::Result& r) {
+            musicRootInFlight_.remove(tag);
+            if (!r.ok && musicRootRefusal_.isEmpty()) musicRootRefusal_ = r.message;
+            landed();
+        });
     }
     ServerMusicClient& sh = ServerMusicClient::instance();
     for (const ServerMusicClient::Shelf& s : sh.shelves())
@@ -3706,7 +3764,12 @@ void HomeView::fetchMergeSources()
         const QString tag = QStringLiteral("ebs:") + s.id;
         if (sh.artistsLoaded(s.id) || musicMergeFetched_.contains(tag)) continue;
         musicMergeFetched_.insert(tag);
-        sh.fetchArtists(s.id, [landed](const ServerMusicClient::Result&) { landed(); });
+        musicRootInFlight_.insert(tag);
+        sh.fetchArtists(s.id, [this, tag, landed](const ServerMusicClient::Result& r) {
+            musicRootInFlight_.remove(tag);
+            if (!r.ok && musicRootRefusal_.isEmpty()) musicRootRefusal_ = r.message;
+            landed();
+        });
     }
 
     SubsonicClient& c = SubsonicClient::instance();

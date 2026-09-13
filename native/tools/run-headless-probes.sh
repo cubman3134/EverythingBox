@@ -4288,6 +4288,88 @@ if [ "$rm_fail" -eq 0 ]; then echo "PASS: a re-minted Recents row asks the addon
 echo
 
 
+# Music tab supplier count (issue #384). probe_musicsources holds the pure half: MusicSuppliers' ONE count, the
+# tab's threshold of one and the merge's of two for every combination the issue names, and the shelf rule that
+# keeps a bundled metadata add-on's `music` catalogue from counting. This is the half in HomeView, which links
+# nothing headlessly - without it the probe is checking a function nothing calls:
+#
+#  1. THE TAB READS THE COUNT. HomeView::refresh() gates the "music" tab on MusicSuppliers::tabOffered, and the
+#     two-supplier gate it replaced (a SubsonicServerStore::hasServers() read) is gone from it.
+#  2. THE SHELVES ARE CURRENT WHEN IT IS READ. refresh() calls refreshMusicShelves() BEFORE the tab gate: the
+#     shelf list is pushed in, and its own sourcesChanged connection runs after refresh()'s.
+#  3. THE MERGE READS THE SAME COUNT. musicMergePossible() is MusicSuppliers::mergePossible, not a second sum.
+#  4. THE SHELF RULE IS THE PROBED ONE. refreshMusicShelves() applies sourceMayServeShelf and catalogIsShelf.
+#  5. THE ROOT AND ITS EMPTY NOTE ASK THE SAME QUESTION. populateMusicArtists takes rootListsRemote, and
+#     musicEmptyNote asks MusicSuppliers::emptyNote rather than naming Subsonic alone.
+#
+# Comments are stripped first, as in the gates above. Counts, never `grep -q` (pipefail).
+echo "=== music tab supplier count (#384) ==="
+MT_V="$HERE/../src/ui/HomeView.cpp"
+mt_fail=0
+mt_note() { echo "  $1"; mt_fail=1; }
+if [ ! -f "$MT_V" ]; then
+  echo "FAIL: music tab supplier count (HomeView.cpp not found under $HERE/../src)"; fail=1
+else
+  mt_v="$(mktemp)"; mt_fn="$(mktemp)"
+  sed -E 's://.*$::' "$MT_V" > "$mt_v"
+  mt_body() { awk -v sig="$1" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$mt_v" </dev/null > "$mt_fn"; }
+
+  mt_body 'void HomeView::refresh()'
+  mt_n="$(wc -l < "$mt_fn" | tr -d '[:space:]')"
+  [ "$mt_n" -ge 100 ] || mt_note "HomeView::refresh came out as $mt_n line(s) — its signature changed or it moved. The tab gate is not being checked."
+  mt_gate="$(grep -n 'MusicSuppliers::tabOffered(musicSuppliers())' "$mt_fn" | head -1 | cut -d: -f1)"
+  mt_shelf="$(grep -n 'refreshMusicShelves();' "$mt_fn" | head -1 | cut -d: -f1)"
+  if [ -z "$mt_gate" ]; then
+    mt_note "refresh() does not gate anything on MusicSuppliers::tabOffered(musicSuppliers()) — the Music tab is back on its own list of suppliers."
+  else
+    mt_tab="$(sed -n "${mt_gate},$((mt_gate + 8))p" "$mt_fn" | grep -c 'makeTab(musicBtn, QStringLiteral("music")')"
+    [ "$mt_tab" -ge 1 ] || mt_note "the tabOffered gate in refresh() is not the one that builds the \"music\" tab."
+    if [ -z "$mt_shelf" ] || [ "$mt_shelf" -ge "$mt_gate" ]; then
+      mt_note "refresh() does not call refreshMusicShelves() before the tab gate — a server-shelf-only user's tab appears one refresh late, or never after an add-on is switched on."
+    fi
+  fi
+  mt_old="$(grep -c 'SubsonicServerStore::hasServers()' "$mt_fn")"
+  [ "$mt_old" -eq 0 ] || mt_note "refresh() still reads SubsonicServerStore::hasServers() — the two-supplier tab gate #384 replaced."
+
+  mt_body 'bool HomeView::musicMergePossible() const'
+  mt_m="$(grep -c 'MusicSuppliers::mergePossible(musicSuppliers())' "$mt_fn")"
+  mt_sum="$(grep -c 'JellyfinServerStore::enabled()' "$mt_fn")"
+  [ "$mt_m" -ge 1 ] && [ "$mt_sum" -eq 0 ] \
+    || mt_note "musicMergePossible() is not MusicSuppliers::mergePossible(musicSuppliers()) — the merge and the tab are counting two different lists again."
+
+  mt_body 'MusicSuppliers::Suppliers HomeView::musicSuppliers() const'
+  mt_reads=0
+  for mt_r in 'MusicLibrary::hasLibrary()' 'SubsonicServerStore::list()' 'JellyfinServerStore::list()' 'ServerMusicClient::instance().shelves()'; do
+    mt_c="$(grep -cF "$mt_r" "$mt_fn")"
+    [ "$mt_c" -ge 1 ] && mt_reads=$((mt_reads + 1)) || mt_note "musicSuppliers() does not read $mt_r — a supplier is missing from the one count."
+  done
+  mt_net="$(grep -cE 'fetch[A-Z]|QNetwork|->get\(' "$mt_fn")"
+  [ "$mt_net" -eq 0 ] || mt_note "musicSuppliers() makes a request — the tab gate runs on every home refresh and must never touch the network."
+
+  mt_body 'void HomeView::refreshMusicShelves()'
+  mt_s1="$(grep -c 'MusicSuppliers::sourceMayServeShelf(' "$mt_fn")"
+  mt_s2="$(grep -c 'MusicSuppliers::catalogIsShelf(' "$mt_fn")"
+  [ "$mt_s1" -ge 1 ] && [ "$mt_s2" -ge 1 ] \
+    || mt_note "refreshMusicShelves() does not apply MusicSuppliers::sourceMayServeShelf and catalogIsShelf — the shelf rule probe_musicsources pins is not the one in use, and a metadata add-on's music catalogue could open the tab."
+
+  mt_body 'void HomeView::populateMusicArtists()'
+  mt_rr="$(grep -c 'MusicSuppliers::rootListsRemote(' "$mt_fn")"
+  [ "$mt_rr" -ge 1 ] || mt_note "populateMusicArtists() does not ask MusicSuppliers::rootListsRemote — a Jellyfin-only or shelf-only user's Music tab opens onto an empty page."
+
+  mt_body 'browse::MusicEmptyNote HomeView::musicEmptyNote() const'
+  mt_en="$(grep -c 'MusicSuppliers::emptyNote(' "$mt_fn")"
+  mt_es="$(grep -c 'SubsonicServerStore::hasServers()' "$mt_fn")"
+  [ "$mt_en" -ge 1 ] && [ "$mt_es" -eq 0 ] \
+    || mt_note "musicEmptyNote() does not ask MusicSuppliers::emptyNote — a Jellyfin-only user is told to choose a music folder."
+
+  rm -f "$mt_v" "$mt_fn"
+  if [ "$mt_fail" -eq 0 ]; then
+    echo "PASS: music tab supplier count (tab, merge, root and empty note read one count; shelves current before the tab gate)"
+  else
+    echo "FAIL: music tab supplier count — the Music tab and the merge no longer share one definition of a supplier."; fail=1
+  fi
+fi
+echo
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
