@@ -265,12 +265,14 @@ namespace Subsonic
     constexpr int kNotFoundCode = 70;
 
     // WHAT A getCoverArt REPLY ANSWERED (#370): CoverFetch::classify, plus the one thing only this protocol
-    // does. Its failures arrive as a 200 with an envelope inside — a perfectly good NON-EMPTY body, which
-    // MetaCache would store as cover.jpg: a broken picture that PERSISTS, and that imagePath() then calls
-    // "already on disk" in every later session, so art the server gains later could never arrive. So an
+    // does. Its failures arrive as a 200 with an envelope inside — a NON-EMPTY body that is not a picture.
+    // Before #370 MetaCache stored exactly that as cover.jpg: a broken picture that PERSISTS, and that
+    // imagePath() then calls "already on disk" in every later session. CoverFetch's byte check (#377) now
+    // refuses it on its own, but only as a failure; this layer is what tells an ANSWER from one. So an
     // envelope is never an Image. A "not found" one is Absent; any other failure (a refused credential, a
     // server fault) is Retry; an "ok" one is Absent, since a subsonic-response is never a picture. A body
-    // that merely STARTS like markup and is not a subsonic-response — an SVG — is left to CoverFetch.
+    // that merely STARTS like markup and is not a subsonic-response — an SVG, or a proxy's HTML page — is
+    // left to CoverFetch.
     CoverFetch::Answer coverAnswer(bool transportOk, int httpStatus, const QByteArray& body);
 
     // ---- The payloads this increment reads -------------------------------------------------------------
