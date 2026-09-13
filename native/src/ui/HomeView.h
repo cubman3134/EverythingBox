@@ -28,6 +28,7 @@
 #include "../browse/BookCatalogs.h"      // browse::BookEmptyNote - and the same again, for #134
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
+#include "../core/MusicSuppliers.h"   // MusicSuppliers::Suppliers — the one count the tab and merge share (#384)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
 #include "../comic/ChapterRun.h"   // ChapterRun — the chapters either side of an opened manga chapter
 
@@ -813,6 +814,9 @@ private:
     //                         with a merged view would be answering a different question.
     bool musicMergePossible() const;
     bool musicMergeActive() const;
+    // #384: the four suppliers as MusicSuppliers counts them — read by the Music TAB (>= 1) and by
+    // musicMergePossible (>= 2), so the two can never disagree about which sources exist. Offline and cheap.
+    MusicSuppliers::Suppliers musicSuppliers() const;
     bool insideMusicServerLevel() const;
     void rebuildMergedMusic();                          // recompute mergedMusic_ from the live suppliers
     void applyMusicRemap();                             // ...and move what was banked onto the new pick
@@ -1406,6 +1410,10 @@ private:
     bool               mergedMusicValid_ = false;
     QSet<QString>      musicMergeFetched_;        // server ids whose artist list we have asked for
     QSet<QString>      musicMergeArtistFetched_;  // qualified artist keys whose albums we have asked for
+    // #384: the Jellyfin/shelf artist lists still being asked for, and the first refusal's sentence (one of the
+    // clients' own sentences, never a url) — what the Music root says when those are its only suppliers.
+    QSet<QString>      musicRootInFlight_;
+    QString            musicRootRefusal_;
     // #194 increment 2: the supersede counter for the track-list fetches a "Play all"/"Shuffle all" press
     // fires. Its OWN counter, not musicFetchGen_ — see playMusicArtistQueue for why the two must not share.
     int                musicQueueFetchGen_ = 0;

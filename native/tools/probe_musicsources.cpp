@@ -24,6 +24,7 @@
 #include "MusicId.h"
 #include "MusicMerge.h"
 #include "MusicRemap.h"
+#include "MusicSuppliers.h"
 #include "ServerMusic.h"
 #include "Subsonic.h"
 
@@ -689,6 +690,109 @@ int main(int argc, char** argv)
         const MusicLibrary::Album* mxB = albumIn(mixed, mixedKey);
         CHECK(mxB != nullptr && mxB->format.isEmpty() && mxB->bitrateKbps == 0);
         CHECK(MusicMerge::qualityBits(*mxB).isEmpty());
+    }
+
+    // ---- ONE SUPPLIER COUNT, TWO THRESHOLDS (issue #384) ----------------------------------------------------
+    // The Music TAB used to name the local folder and Subsonic; the merge counted all four suppliers. So a
+    // Jellyfin-only or shelf-only user had music the merge knew about and no tab to reach it. Every combination
+    // the issue names, with the count and BOTH thresholds, so a tab and a merge can never be answered from two
+    // different lists again.
+    {
+        using namespace MusicSuppliers;
+        auto jfServer = [](const char* id, bool on) {
+            JellyfinServer s; s.id = QString::fromLatin1(id); s.enabled = on; return s;
+        };
+        struct Case { const char* name; Suppliers s; int count; bool tab; bool merge; bool rootRemote; };
+        Suppliers none;
+        Suppliers local;       local.localLibrary = true;
+        Suppliers subsonic;    subsonic.subsonicServers = 1;
+        Suppliers jfOn;        jfOn.jellyfin = { jfServer("jf1", true) };
+        Suppliers jfOff;       jfOff.jellyfin = { jfServer("jf1", false) };
+        Suppliers shelf;       shelf.serverShelves = 1;
+        Suppliers localSub;    localSub.localLibrary = true; localSub.subsonicServers = 1;
+        Suppliers localJf;     localJf.localLibrary = true; localJf.jellyfin = { jfServer("jf1", true) };
+        Suppliers localJfOff;  localJfOff.localLibrary = true; localJfOff.jellyfin = { jfServer("jf1", false) };
+        Suppliers jfShelf;     jfShelf.jellyfin = { jfServer("jf1", true) }; jfShelf.serverShelves = 1;
+        Suppliers twoJf;       twoJf.jellyfin = { jfServer("jf1", true), jfServer("jf2", true) };
+        Suppliers subShelf;    subShelf.subsonicServers = 1; subShelf.serverShelves = 1;
+        Suppliers twoSub;      twoSub.subsonicServers = 2;
+        const Case cases[] = {
+            //  name                         suppliers    count  tab    merge  rootListsRemote
+            { "none",                        none,        0,     false, false, false },
+            { "local folder only",           local,       1,     true,  false, false },
+            { "Subsonic only",               subsonic,    1,     true,  false, false },
+            { "one enabled Jellyfin",        jfOn,        1,     true,  false, true  },
+            { "one DISABLED Jellyfin",       jfOff,       0,     false, false, false },
+            { "one server shelf",            shelf,       1,     true,  false, true  },
+            { "local + Subsonic",            localSub,    2,     true,  true,  true  },
+            { "local + Jellyfin",            localJf,     2,     true,  true,  true  },
+            { "local + disabled Jellyfin",   localJfOff,  1,     true,  false, false },
+            { "Jellyfin + shelf",            jfShelf,     2,     true,  true,  true  },
+            { "two enabled Jellyfin",        twoJf,       2,     true,  true,  true  },
+            { "Subsonic + shelf",            subShelf,    2,     true,  true,  true  },
+            { "two Subsonic",                twoSub,      2,     true,  true,  true  },
+        };
+        for (const Case& c : cases)
+        {
+            const bool ok = count(c.s) == c.count && tabOffered(c.s) == c.tab && mergePossible(c.s) == c.merge
+                            && rootListsRemote(c.s) == c.rootRemote;
+            if (!ok)
+                std::fprintf(stderr, "MUSICSOURCES-FAIL #384 case \"%s\": count=%d tab=%d merge=%d rootRemote=%d\n",
+                             c.name, count(c.s), int(tabOffered(c.s)), int(mergePossible(c.s)),
+                             int(rootListsRemote(c.s)));
+            CHECK(ok);
+            // The two thresholds are one count: a merge is never possible where no tab is.
+            CHECK(!mergePossible(c.s) || tabOffered(c.s));
+        }
+
+        // A BUNDLED METADATA ADD-ON'S `music` CATALOGUE COUNTS FOR NOTHING. Driven through the same two predicates
+        // HomeView::refreshMusicShelves applies, over the sources an install really has: the AIO catalog (a local
+        // add-on with a MusicBrainz `music` shelf), a third-party Stremio add-on with a `music` catalogue, a
+        // switched-off server, and a server whose music catalogue is search-only or explains why it cannot run.
+        struct Src { const char* name; bool remoteHttp, stremio, enabled; const char* type; bool searchOnly, skip;
+                     bool isShelf; };
+        const Src srcs[] = {
+            { "bundled metadata add-on, music catalogue", false, false, true,  "music", false, false, false },
+            { "Stremio add-on, music catalogue",          true,  true,  true,  "music", false, false, false },
+            { "our server, switched off",                 true,  false, false, "music", false, false, false },
+            { "our server, searchOnly music",             true,  false, true,  "music", true,  false, false },
+            { "our server, music with skipReason",        true,  false, true,  "music", false, true,  false },
+            { "our server, movie catalogue",              true,  false, true,  "movie", false, false, false },
+            { "our server, music catalogue",              true,  false, true,  "music", false, false, true  },
+        };
+        for (const Src& s : srcs)
+        {
+            const bool shelfOk = sourceMayServeShelf(s.remoteHttp, s.stremio, s.enabled)
+                                 && catalogIsShelf(QString::fromLatin1(s.type), s.searchOnly, s.skip);
+            if (shelfOk != s.isShelf)
+                std::fprintf(stderr, "MUSICSOURCES-FAIL #384 shelf rule \"%s\": isShelf=%d\n", s.name, int(shelfOk));
+            CHECK(shelfOk == s.isShelf);
+        }
+        // ...and so an install whose only `music` catalogue is the metadata add-on's has ZERO suppliers: no tab.
+        Suppliers metadataOnly;
+        metadataOnly.serverShelves = sourceMayServeShelf(false, false, true)
+                                     && catalogIsShelf(QStringLiteral("music"), false, false) ? 1 : 0;
+        CHECK(count(metadataOnly) == 0);
+        CHECK(!tabOffered(metadataOnly));
+
+        // WHAT THE ROOT SAYS WHEN IT HAS NO ARTISTS. Today's users read what they read before: a local folder keeps
+        // its own sentences, a Subsonic server says nothing (its door is on the page). A Jellyfin-only or
+        // shelf-only user is never told to choose a music folder.
+        CHECK(emptyNote(none, 0, false)       == EmptyNote::Local);
+        CHECK(emptyNote(local, 0, false)      == EmptyNote::Local);
+        CHECK(emptyNote(local, 1, true)       == EmptyNote::Local);
+        CHECK(emptyNote(subsonic, 0, false)   == EmptyNote::None);
+        CHECK(emptyNote(subShelf, 1, false)   == EmptyNote::None);
+        CHECK(emptyNote(localJf, 1, false)    == EmptyNote::Local);
+        CHECK(emptyNote(jfOff, 0, false)      == EmptyNote::Local);   // no supplier at all: the no-folder sentence
+        CHECK(emptyNote(jfOn, 1, false)       == EmptyNote::Loading);
+        CHECK(emptyNote(jfOn, 1, true)        == EmptyNote::Loading); // one still asking outranks one that refused
+        CHECK(emptyNote(jfOn, 0, true)        == EmptyNote::Refused);
+        CHECK(emptyNote(jfOn, 0, false)       == EmptyNote::Nothing);
+        CHECK(emptyNote(shelf, 1, false)      == EmptyNote::Loading);
+        CHECK(emptyNote(shelf, 0, true)       == EmptyNote::Refused);
+        CHECK(emptyNote(shelf, 0, false)      == EmptyNote::Nothing);
+        CHECK(emptyNote(jfShelf, 0, false)    == EmptyNote::Nothing);
     }
 
     // Leave nothing behind (issue #42).
