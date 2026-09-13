@@ -26,6 +26,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -107,6 +110,30 @@ const QVector<Picture>& pictures()
               "0103000300000001000100000106000300000001000200000111000400000001000000800115000300000001000300"
               "000116000300000001000200000117000400000001000000"
               "0c00000000000800080008c82828c82828c82828c82828"), QStringLiteral("tif") },
+    };
+    return all;
+}
+
+// #389: formats Qt DECODES that the cache does not hold - text (PBM/PGM/PPM, XBM, XPM) or signature-less (TGA). Each a
+// real 2x2 image: the binary ones written and read back by Pillow 12.3, the text ones Pillow reads back too. Hex or
+// plain ASCII, so no escape reaches a CHECK. The extension and content type are the ones a host would serve them with.
+struct Decodable { QString fmt; QString ext; QByteArray ctype; QByteArray bytes; };
+const QVector<Decodable>& decodableNotPictures()
+{
+    static const QVector<Decodable> all = {
+        { QStringLiteral("ppm"), QStringLiteral("ppm"), "image/x-portable-pixmap",
+          QByteArray::fromHex("50360a3220320a3235350ac828282828c82828c8c82828") },
+        { QStringLiteral("pgm"), QStringLiteral("pgm"), "image/x-portable-graymap",
+          QByteArray::fromHex("50350a3220320a3235350a583a3a58") },
+        { QStringLiteral("pbm"), QStringLiteral("pbm"), "image/x-portable-bitmap", QByteArrayLiteral("P1\n2 2\n0 1\n1 0\n") },
+        { QStringLiteral("xbm"), QStringLiteral("xbm"), "image/x-xbitmap",
+          QByteArrayLiteral("#define im_width 2\n#define im_height 2\nstatic char im_bits[] = {\n0x00,0x02\n};\n") },
+        { QStringLiteral("xpm"), QStringLiteral("xpm"), "image/x-xpixmap",
+          QByteArrayLiteral("/* XPM */\nstatic char * probe_xpm[] = {\n\"2 2 2 1\",\n\"  c #C82828\",\n\". c #2828C8\",\n"
+                            "\" .\",\n\". \"};\n") },
+        // Uncompressed true-colour TGA: it opens 00 00 02 00, which is CUR's signature - and a CUR count of zero.
+        { QStringLiteral("tga"), QStringLiteral("tga"), "image/x-tga", QByteArray::fromHex(
+              "000002000000000000000000020002001800c828282828c82828c8c82828000000000000000054525545564953494f4e2d5846494c452e00") },
     };
     return all;
 }
@@ -1130,6 +1157,156 @@ int main(int argc, char** argv)
             MetaCache::remove(key);
         }
         std::printf("IMAGEGATE-OK\n");
+
+        // ============================================================ #389: the classic grid caches a thumb only if the
+        // cache will keep it. HomeView::pumpThumbnails decodes each remote thumb and used to store whatever decoded, so a
+        // PPM/XPM/TGA was stored, judged broken by the next read-back, removed - and written again on every visit.
+        // gridVisit walks that path as far as a probe without QtGui can: populate() resolves the tile through
+        // displayImage (HomeView / SyntheticCatalogs set thumbnailUrl so); loadThumbnails paints a LOCAL tile straight
+        // from disk; pumpThumbnails GETs a REMOTE one with the same redirect policy and, when it decoded, stores it under
+        // "thumb" through the grid's gate (CoverFetch::gridThumbCacheable) and paints it. `decoded` stands for
+        // QPixmap::loadFromData's answer. Request counts and stored files are the evidence, never timings.
+        {
+            QNetworkAccessManager gridNam;
+            struct Visit { QString tile; QByteArray painted; };
+            auto gridVisit = [&](const QString& key, const QString& url, bool decoded) {
+                Visit v;
+                v.tile = MetaCache::displayImage(key, url);
+                if (!v.tile.startsWith(QStringLiteral("http"))) { v.painted = readAllOf(v.tile); return v; }
+                QNetworkRequest req{ QUrl(v.tile) };
+                req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+                QNetworkReply* reply = gridNam.get(req);
+                const bool finished = pumpUntil([&] { return reply->isFinished(); });
+                if (finished && reply->error() == QNetworkReply::NoError)
+                {
+                    const QByteArray data = reply->readAll();
+                    if (decoded)
+                    {
+                        if (CoverFetch::gridThumbCacheable(decoded, data))
+                            MetaCache::storeImage(key, QStringLiteral("thumb"), reply->url().toString(),
+                                                  reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
+                        v.painted = data;
+                    }
+                }
+                reply->deleteLater();
+                return v;
+            };
+            const QString thumb = QStringLiteral("thumb");
+            const int kVisits = 5;
+
+            // -- the pure rule: decoded AND a picture to the cache ----------------------------------------------------
+            for (const Decodable& dn : decodableNotPictures())
+            {
+                const QByteArray what = QStringLiteral("389 rule: a %1 is not a picture to the cache").arg(dn.fmt).toLatin1();
+                CHECK(!CoverFetch::isPicture(dn.bytes), what.constData());
+                const QByteArray grid = QStringLiteral("389 rule: a decoded %1 is not cacheable").arg(dn.fmt).toLatin1();
+                CHECK(!CoverFetch::gridThumbCacheable(true, dn.bytes), grid.constData());
+            }
+            for (const Picture& pic : pictures())
+            {
+                const QByteArray yes = QStringLiteral("389 rule: a decoded %1 is cacheable").arg(pic.fmt).toLatin1();
+                CHECK(CoverFetch::gridThumbCacheable(true, pic.bytes), yes.constData());
+                const QByteArray no = QStringLiteral("389 rule: an undecoded %1 is not").arg(pic.fmt).toLatin1();
+                CHECK(!CoverFetch::gridThumbCacheable(false, pic.bytes), no.constData());
+            }
+            CHECK(!CoverFetch::gridThumbCacheable(true, kHtmlPage), "389 rule: a page is never cacheable, decoded or not");
+            CHECK(!CoverFetch::gridThumbCacheable(true, QByteArray()), "389 rule: an empty body is never cacheable");
+
+            // -- 1. a decodable non-picture thumb is SHOWN but never stored, visit after visit -------------------------
+            for (const Decodable& dn : decodableNotPictures())
+            {
+                const QString key = QStringLiteral("389:grid:") + dn.fmt;
+                MetaCache::remove(key);
+                const QByteArray path = "/grid/" + dn.fmt.toLatin1() + "/cover." + dn.ext.toLatin1();
+                const QString url = http.route(path, dn.ctype, dn.bytes);
+                for (int i = 1; i <= kVisits; ++i)
+                {
+                    const Visit v = gridVisit(key, url, true);
+                    const QByteArray src = QStringLiteral("389 grid: a %1 tile is its source url - nothing cached to serve").arg(dn.fmt).toLatin1();
+                    CHECK(v.tile == url, src.constData());
+                    const QByteArray shown = QStringLiteral("389 grid: a %1 thumb is still painted, from the bytes fetched").arg(dn.fmt).toLatin1();
+                    CHECK(v.painted == dn.bytes, shown.constData());
+                    const QByteArray once = QStringLiteral("389 grid: a %1 thumb takes one request per visit, never more").arg(dn.fmt).toLatin1();
+                    CHECK(http.count(path) == i, once.constData());
+                    const QByteArray none = QStringLiteral("389 grid: a %1 thumb is not stored").arg(dn.fmt).toLatin1();
+                    CHECK(roleFiles(key, thumb) == 0, none.constData());
+                    CHECK(recordedFile(key, thumb).isEmpty(), "389 grid: ...and no images entry is recorded");
+                }
+                CHECK(settle(), "389 grid: settle");
+                const QByteArray total = QStringLiteral("389 grid: %1 visits to a %2 thumb made %1 requests").arg(kVisits).arg(dn.fmt).toLatin1();
+                CHECK(http.count(path) == kVisits, total.constData());
+                CHECK(roleFiles(key, thumb) == 0 && recordedFile(key, thumb).isEmpty(), "389 grid: still nothing stored");
+                MetaCache::remove(key);
+            }
+
+            // -- 2. one an earlier build STORED is removed once, and never written again ---------------------------------
+            for (const Decodable& dn : decodableNotPictures())
+            {
+                const QString key = QStringLiteral("389:gridheal:") + dn.fmt;
+                MetaCache::remove(key);
+                const QByteArray path = "/gridheal/" + dn.fmt.toLatin1() + "/cover." + dn.ext.toLatin1();
+                const QString url = http.route(path, dn.ctype, dn.bytes);
+                MetaCache::storeImage(key, thumb, url, QString::fromLatin1(dn.ctype), dn.bytes);   // the old grid's write
+                const QString planted = recordedFile(key, thumb);
+                CHECK(readAllOf(planted) == dn.bytes, "389 grid heal: fixture - the old build's thumb is stored");
+                for (int i = 1; i <= kVisits; ++i)
+                {
+                    const Visit v = gridVisit(key, url, true);
+                    CHECK(v.tile == url && v.painted == dn.bytes, "389 grid heal: the thumb is painted from its source");
+                    const QByteArray gone = QStringLiteral("389 grid heal: the stored %1 is gone and not written again").arg(dn.fmt).toLatin1();
+                    CHECK(!QFileInfo::exists(planted) && roleFiles(key, thumb) == 0 && recordedFile(key, thumb).isEmpty(),
+                          gone.constData());
+                    CHECK(http.count(path) == i, "389 grid heal: one request per visit");
+                }
+                MetaCache::remove(key);
+            }
+
+            // -- 3. every format the cache keeps is stored by the grid ONCE and served from disk after ------------------
+            for (const Picture& pic : pictures())
+            {
+                const QString key = QStringLiteral("389:gridkeep:") + pic.fmt;
+                MetaCache::remove(key);
+                const QByteArray path = "/gridkeep/" + pic.fmt.toLatin1() + "/cover." + pic.ext.toLatin1();
+                const QString url = http.route(path, pic.ctype, pic.bytes);
+                const Visit first = gridVisit(key, url, true);
+                CHECK(first.tile == url && first.painted == pic.bytes, "389 grid keep: the first visit paints the fetched thumb");
+                const QString stored = recordedFile(key, thumb);
+                const QByteArray landed = QStringLiteral("389 grid keep: a %1 thumb is stored by the grid").arg(pic.fmt).toLatin1();
+                CHECK(readAllOf(stored) == pic.bytes, landed.constData());
+                const QByteArray named = QStringLiteral("389 grid keep: ...as thumb.%1").arg(pic.ext).toLatin1();
+                CHECK(QFileInfo(stored).fileName() == thumb + QLatin1Char('.') + pic.ext, named.constData());
+                for (int i = 2; i <= kVisits; ++i)
+                {
+                    const Visit v = gridVisit(key, url, true);
+                    const QByteArray local = QStringLiteral("389 grid keep: a stored %1 tile is the file on disk").arg(pic.fmt).toLatin1();
+                    CHECK(v.tile == stored && v.painted == pic.bytes, local.constData());
+                    CHECK(MetaCache::scrapedImage(key, url) == stored, "389 grid keep: scrapedImage serves it");
+                    CHECK(MetaCache::verifiedImagePath(key, thumb) == stored, "389 grid keep: the bytes check keeps it");
+                }
+                CHECK(settle(), "389 grid keep: settle");
+                const QByteArray never = QStringLiteral("389 grid keep: a %1 thumb is fetched once in %2 visits").arg(pic.fmt).arg(kVisits).toLatin1();
+                CHECK(http.count(path) == 1, never.constData());
+                CHECK(readAllOf(stored) == pic.bytes && roleFiles(key, thumb) == 1, "389 grid keep: bytes unchanged, one file");
+                MetaCache::remove(key);
+            }
+
+            // -- 4. the decode check still stands: bytes the grid could not decode are neither painted nor stored -------
+            {
+                const QString key = QStringLiteral("389:gridundecoded");
+                MetaCache::remove(key);
+                const QByteArray path = "/gridundecoded/cover.png";
+                const QString url = http.route(path, "image/png", pictures()[1].bytes);
+                for (int i = 1; i <= 2; ++i)
+                {
+                    const Visit v = gridVisit(key, url, false);
+                    CHECK(v.tile == url && v.painted.isEmpty(), "389 grid undecoded: nothing painted");
+                    CHECK(roleFiles(key, thumb) == 0 && recordedFile(key, thumb).isEmpty(), "389 grid undecoded: nothing stored");
+                    CHECK(http.count(path) == i, "389 grid undecoded: one request per visit");
+                }
+                MetaCache::remove(key);
+            }
+            std::printf("GRIDTHUMB-OK\n");
+        }
     }
 
     // ---------------------------------------------------------------- items without a stable identity

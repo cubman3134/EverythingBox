@@ -151,6 +151,18 @@ namespace CoverFetch
             || detail::svgDocument(b);
     }
 
+    // WHAT THE CLASSIC GRID MAY CACHE (#389). The grid's thumbnail loader (HomeView::pumpThumbnails) decodes every
+    // remote thumb it fetches, and used to store whatever decoded. Qt decodes more than the cache holds: PBM/PGM/PPM,
+    // XBM and XPM are TEXT, and TGA has no signature at all, so isPicture refuses them - rightly, or an error page
+    // could pass for art again (#377). Stored anyway, such a thumb was judged broken by the next read-back
+    // (verifiedImagePath), removed, and fetched and stored again on every visit. So the grid stores a thumb only
+    // when it decoded AND the cache's own rule says it will keep it: one rule for what the cache holds. A decoded
+    // thumb that fails this is still painted - from the bytes the grid already has - just never written. Pure.
+    inline bool gridThumbCacheable(bool decoded, const QByteArray& body)
+    {
+        return decoded && isPicture(body);
+    }
+
     // `transportOk` is QNetworkReply::NoError. `httpStatus` is the status line's code, and 0 when there was
     // none — a refused connection, and a timeout, both look like that. The body is only read when the transfer
     // succeeded: a failed reply's body is an error page, not a picture. Neither is the header consulted.
