@@ -668,7 +668,9 @@ private:
     // (The bingeGroup already chosen for a stream id's series is BingeStore::preferredGroup — one definition
     // shared with MainWindow's next-episode hand-off, which had a verbatim copy of it.)
 
-    void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
+    // `navKey` is the key refresh() gave the catalogue's tab (#394: two add-ons' same-id catalogues differ only there).
+    void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name,
+                    const QString& navKey);
     void showCarousel();             // show the media-type carousel landing (carousel layout)
     void showXmb();                  // show the PS3 XMB layout (categories + item column)
     void activateItem(int row);      // open/drill a catalog item by row (shared by grid + carousel)
@@ -1211,9 +1213,10 @@ private:
                        QString catalogId, type, name; bool photos = false;    // the synthetic Photos category (#102)
                        bool music = false;                                    // the synthetic Music category (#74)
                        bool audiobooks = false;                               // the synthetic Audiobooks one (#139)
-                       bool books = false; };                                 // the synthetic My Books one (#134)
+                       bool books = false;                                    // the synthetic My Books one (#134)
+                       QString addonId; };   // a catalogue's add-on manifest id, copied at refresh (#394: its row id needs it)
     QVector<NavTarget> navTargets_;
-    // navKey -> the `source:` home-row id it answers to (#392: a catalogue's escaped key keeps a stored old id).
+    // navKey -> the `source:` home-row id it answers to (#392/#394: a catalogue keeps any spelling stored for it).
     std::function<QString(const QString&)> sourceRowIdResolver() const;
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;
