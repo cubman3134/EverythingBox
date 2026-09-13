@@ -295,8 +295,9 @@ void JellyfinMusicClient::prefetchAlbumCover(const QString& albumKey, std::funct
     // NOTHING LANDED, SO `then` DOES NOT FIRE (#370) — not for a cover already on disk, not for a server that
     // is gone, not for a failure. `then` re-renders the level and the re-render re-runs this prefetch, so
     // firing it on any of those paths made a level with one cached cover reload itself every 400 ms for as
-    // long as it was on screen. CoverFetch.h has the whole rule.
-    if (!MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
+    // long as it was on screen. CoverFetch.h has the whole rule. The cover on disk is VERIFIED, not merely present:
+    // one stored as an error page before #377 is not a cover, and is healed here (#382).
+    if (!MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
     if (coverMissing_.contains(albumKey)) return;   // the server already said "no picture" this session
     JellyfinServer srv;
     QString itemId;
@@ -334,12 +335,12 @@ void JellyfinMusicClient::prefetchAlbumCover(const QString& albumKey, std::funct
             case CoverFetch::Answer::Retry:
                 break;
         }
-        if (MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;   // nothing landed
+        if (MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;   // nothing landed
         if (then) then();
     });
 }
 
 QString JellyfinMusicClient::albumCoverPath(const QString& albumKey) const
 {
-    return MetaCache::imagePath(albumKey, QStringLiteral("cover"));
+    return MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover"));
 }

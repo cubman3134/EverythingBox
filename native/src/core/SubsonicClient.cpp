@@ -587,8 +587,9 @@ void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<v
     if (!ref.ok || (ref.kind != Subsonic::Kind::Album && ref.kind != Subsonic::Kind::Playlist)) return;
     // ALREADY ON DISK: return WITHOUT firing `then`. The callback means "new artwork landed, re-render",
     // and a re-render re-runs this prefetch over the same albums — so firing it for a cached cover would
-    // schedule a refresh that schedules a refresh, for ever.
-    if (!MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
+    // schedule a refresh that schedules a refresh, for ever. VERIFIED, not merely present: a cover stored as an
+    // error page before #377 is not a cover, and is healed here (#382).
+    if (!MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
     const auto it = caches_.constFind(ref.serverId);
     if (it == caches_.constEnd()) return;
     const QString coverId = it->albumCoverId.value(albumKey);
@@ -647,14 +648,14 @@ void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<v
         // DID ANYTHING LAND? Only the disk says so. `then` re-renders the level, and the re-render re-runs this
         // prefetch — so firing it when nothing was stored is the loop the early return above guards against for
         // a cached cover, re-created by an empty answer (#370).
-        if (MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
+        if (MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
         if (then) then();
     });
 }
 
 QString SubsonicClient::albumCoverPath(const QString& albumKey) const
 {
-    return MetaCache::imagePath(albumKey, QStringLiteral("cover"));
+    return MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover"));
 }
 
 // ==================================================================================================

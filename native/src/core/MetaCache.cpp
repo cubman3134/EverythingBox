@@ -1,6 +1,7 @@
 #include "MetaCache.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "CoverFetch.h"     // the bytes rule a stored cover is read back against (#382)
 #include "MetaOverrides.h"  // the user's corrections composite over everything this cache holds (issue #24)
 
 #include <QCoreApplication>
@@ -10,6 +11,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
@@ -381,6 +383,62 @@ QString MetaCache::imagePath(const QString& key, const QString& role)
     return abs;
 }
 
+namespace
+{
+// #382: the verdict on each stored file this SESSION, keyed on its absolute path - true = a picture. In memory
+// only: a later session reads the file again. storeImage/recordLocalImage/remove drop the entries they make stale,
+// so bytes written after a verdict (the real art replacing a removed page, under the same name) are judged afresh.
+QHash<QString, bool>& storedVerdicts() { static QHash<QString, bool> v; return v; }
+}
+
+QString MetaCache::verifiedImagePath(const QString& key, const QString& role)
+{
+    const QString abs = imagePath(key, role);
+    if (abs.isEmpty()) return {};
+    const auto known = storedVerdicts().constFind(abs);
+    if (known != storedVerdicts().constEnd()) return known.value() ? abs : QString();
+
+    QFile f(abs);
+    // Unopenable (another process holding it for a moment) is not evidence of anything: served as it always was,
+    // and asked again next time rather than remembered.
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) return abs;
+    const qint64 size = f.size();
+    QByteArray prefix = f.read(CoverFetch::kSignatureBytes);
+    if (!CoverFetch::isPicture(prefix) && size > prefix.size())   // not a raster signature: SVG, or broken
+        prefix += f.read(CoverFetch::kStoredPrefixBytes - prefix.size());
+    f.close();
+
+    if (CoverFetch::storedCoverIntact(prefix, size))
+    {
+        storedVerdicts().insert(abs, true);
+        return abs;
+    }
+    // BROKEN: not cached at all. The file goes, and so does its "images" entry - written directly, as the cap
+    // sweep does, so nothing else in the bundle changes (merge() would stamp a fresh savedAt onto it).
+    if (QFile::remove(abs))
+        ini().setValue(kImageBytesKey, std::max<qint64>(0, ini().value(kImageBytesKey).toLongLong() - size));
+    QFile mf(metaFile(key));
+    if (mf.open(QIODevice::ReadOnly))
+    {
+        const QJsonDocument doc = QJsonDocument::fromJson(mf.readAll());
+        mf.close();
+        QJsonObject obj = doc.object();
+        QJsonObject images = obj.value(QStringLiteral("images")).toObject();
+        images.remove(role);
+        obj.insert(QStringLiteral("images"), images);
+        QSaveFile out(metaFile(key));
+        if (doc.isObject() && out.open(QIODevice::WriteOnly))   // never a rewrite from a bundle that did not parse
+        {
+            out.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+            out.commit();
+        }
+    }
+    // Remembered only if something is still there to be asked about (a file that would not delete): once both are
+    // gone, imagePath answers "" before this is reached, and the next bytes stored here must be judged on their own.
+    if (!imagePath(key, role).isEmpty()) storedVerdicts().insert(abs, false);
+    return {};
+}
+
 QString MetaCache::scrapedImage(const QString& key, const QString& url)
 {
     // #183: the composited miximage card (issue #90) is the preferred tile art wherever it exists — this is
@@ -456,6 +514,7 @@ void MetaCache::storeImage(const QString& key, const QString& role, const QStrin
     if (!f.open(QIODevice::WriteOnly)) return;
     f.write(data);
     if (!f.commit()) return;
+    storedVerdicts().remove(dirFor(key) + QLatin1Char('/') + file);   // new bytes: judged on their own (#382)
     // Record it under "images" (merge keeps any other roles already saved).
     QJsonObject images = load(key).value(QStringLiteral("images")).toObject();
     images.insert(role, file);
@@ -468,6 +527,7 @@ void MetaCache::recordLocalImage(const QString& key, const QString& role, const 
     if (key.isEmpty() || role.isEmpty() || fileName.isEmpty()) return;
     // Same record shape storeImage writes, minus the byte total: this file was composited from art already
     // on disk (the miximage card), so it is not new bytes to count against the download cache cap.
+    storedVerdicts().remove(dirFor(key) + QLatin1Char('/') + fileName);   // freshly written bytes (#382)
     QJsonObject images = load(key).value(QStringLiteral("images")).toObject();
     images.insert(role, fileName);
     merge(key, { { QStringLiteral("images"), images } });
@@ -612,6 +672,12 @@ void MetaCache::remove(const QString& key)
 {
     if (key.isEmpty()) return;
     QDir(dirFor(key)).removeRecursively();
+    const QString prefix = dirFor(key) + QLatin1Char('/');
+    for (auto it = storedVerdicts().begin(); it != storedVerdicts().end();)
+    {
+        if (it.key().startsWith(prefix)) it = storedVerdicts().erase(it);
+        else ++it;
+    }
 }
 
 void MetaCache::setPinnedKeysProvider(std::function<QSet<QString>()> provider)

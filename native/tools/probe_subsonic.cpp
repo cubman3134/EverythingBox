@@ -41,7 +41,10 @@
 #include <QCryptographicHash>
 #include <QDeadlineTimer>
 #include <QDir>
+#include <QDirIterator>
+#include <QFile>
 #include <QHostAddress>
+#include <QJsonObject>
 #include <QImage>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -1435,6 +1438,11 @@ private:
                 body += "<album id=\"al-" + QByteArray::number(i) + "\" name=\"Record " + QByteArray::number(i)
                       + "\" artist=\"Probe\" artistId=\"ar-1\" songCount=\"1\" coverArt=\"c-"
                       + QByteArray::number(i) + "\"/>";
+            // #382: records whose cover is ALREADY ON DISK before any pass asks for it - a stored error page
+            // healed by a prefetch (p), one healed by the display accessor (d), and a real picture kept (k).
+            for (const char* tag : { "p", "d", "k" })
+                body += QByteArray("<album id=\"al-382") + tag + "\" name=\"Stored " + tag
+                      + "\" artist=\"Probe\" artistId=\"ar-1\" songCount=\"1\" coverArt=\"c-382" + tag + "\"/>";
             body += "</starred2></subsonic-response>";
             send(sock, 200, "text/xml", body);
             return;
@@ -1484,7 +1492,11 @@ private:
                  "{\"id\":\"sm-4\",\"title\":\"Busy sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-4\"},"
 
                  "{\"id\":\"sm-5\",\"title\":\"Proxied sleeve\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-5\"},"
-                 "{\"id\":\"sm-6\",\"title\":\"Starred tracks' album\",\"type\":\"album\"}"   // #368: no sleeve, so no cover ask
+                 "{\"id\":\"sm-6\",\"title\":\"Starred tracks' album\",\"type\":\"album\"},"   // #368: no sleeve, so no cover ask
+                 // #382: sleeves already on disk before any pass asks - see testBrokenStoredCovers382.
+                 "{\"id\":\"sm-382p\",\"title\":\"Stored page, prefetched\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-382p\"},"
+                 "{\"id\":\"sm-382d\",\"title\":\"Stored page, displayed\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-382d\"},"
+                 "{\"id\":\"sm-382k\",\"title\":\"Stored sleeve, kept\",\"type\":\"album\",\"thumbnailUrl\":\"" + r + "/cover/sm-382k\"}"
                  "]}");
             return;
         }
@@ -1953,6 +1965,251 @@ static void testServerMusicCoverAnswers(CoverStub& stub)
     }
 }
 
+// ==================================================================================================
+// #382 — A COVER ALREADY ON DISK AS AN ERROR PAGE is not a cover
+// ==================================================================================================
+// #377 stopped NEW error pages being stored. One stored BEFORE it stayed for good: every prefetch opens with "is
+// it already on disk?", and a page saved as cover.jpg is. So a stored cover is read back (a bounded prefix, once a
+// session) through MetaCache::verifiedImagePath, which every client's prefetch guard, its "did anything land?"
+// check and its display accessor use. Every assertion is a request count the stub saw, or bytes on disk.
+static const QByteArray& errorPage382()
+{
+    static const QByteArray page = "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>"
+                                   "<body><h1>Bad Gateway</h1><p>The upstream server is restarting.</p></body></html>\n";
+    return page;
+}
+
+// What a pre-#377 build left behind: the page recorded under the cover role as cover.jpg - storeImage itself
+// never looked at the bytes, so this is the very write that build made - beside metadata that must survive.
+static void plantStoredCover(const QString& key, const QByteArray& bytes)
+{
+    MetaCache::merge(key, { { QStringLiteral("item"),
+                              QJsonObject{ { QStringLiteral("title"), QStringLiteral("Planted 382") } } } });
+    MetaCache::storeImage(key, QStringLiteral("cover"), QStringLiteral("cover.jpg"), QStringLiteral("image/jpeg"), bytes);
+}
+static QByteArray diskCoverBytes(const QString& key)   // cover.jpg read straight off the folder, whatever the record says
+{
+    QFile f(MetaCache::dirFor(key) + QStringLiteral("/cover.jpg"));
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+using CoverAccessor = std::function<QString(const QString&)>;
+
+// A STORED PAGE, AND THEN A PASS OF THE LEVEL: the prefetch finds it is not a cover, and ONE fetch stores the art.
+static void storedPageHealsByPrefetch(const char* who, CoverStub& stub, const ArtView::Prefetch& prefetch,
+                                      const CoverAccessor& accessor, const QString& key, const QString& coverId)
+{
+    plantStoredCover(key, errorPage382());
+    CHECK(!coverOf(key).isEmpty());                           // not vacuous: the page IS recorded, and on disk
+    CHECK(diskCoverBytes(key) == errorPage382());
+    stub.answers[coverId] = CoverStub::Answer::Image;
+    ArtView& v = newView(prefetch, key);
+    v.render();
+    waitFor([&] { return v.landed >= 1; });
+    settleView(v);
+    std::printf("382 %s: stored error page, one pass of the level -> %d request(s), %d landing(s)\n",
+                who, stub.covers(coverId), v.landed);
+    CHECK(stub.covers(coverId) == 1);
+    CHECK(v.landed == 1);
+    CHECK(storedCoverBytes(key) == stub.imageBytes);          // the REAL art, byte for byte, never the page
+    CHECK(coverFilesOf(key) == 1);
+    CHECK(!accessor(key).isEmpty() && accessor(key) == coverOf(key));
+    for (int i = 0; i < 3; ++i) anotherPass(v, stub, coverId);
+    CHECK(stub.covers(coverId) == 1);                         // healed once; the healed cover is kept
+    CHECK(v.landed == 1);
+}
+
+// A STORED PAGE, AND THE SCREEN ASKS FOR IT FIRST: the accessor never hands out the page's path. The file and
+// its "images" entry go, and nothing else in the bundle moves; then the normal fetch runs, once.
+static void storedPageNeverShown(const char* who, CoverStub& stub, const ArtView::Prefetch& prefetch,
+                                 const CoverAccessor& accessor, const QString& key, const QString& coverId)
+{
+    plantStoredCover(key, errorPage382());
+    const QJsonObject before = MetaCache::load(key);
+    CHECK(before.value(QStringLiteral("images")).toObject().value(QStringLiteral("cover")).toString()
+          == QStringLiteral("cover.jpg"));
+    const QString shown = accessor(key);
+    std::printf("382 %s: stored error page, display accessor -> %s, %d cover file(s) left\n",
+                who, shown.isEmpty() ? "empty" : "ITS PATH", coverFilesOf(key));
+    CHECK(shown.isEmpty());
+    CHECK(coverFilesOf(key) == 0);
+    CHECK(coverOf(key).isEmpty());
+    QJsonObject after = MetaCache::load(key);
+    CHECK(!after.value(QStringLiteral("images")).toObject().contains(QStringLiteral("cover")));
+    QJsonObject beforeRest = before;
+    beforeRest.remove(QStringLiteral("images"));
+    after.remove(QStringLiteral("images"));
+    CHECK(after == beforeRest);                               // item, key, v, savedAt: all exactly as they were
+    CHECK(accessor(key).isEmpty());
+    CHECK(stub.covers(coverId) == 0);                         // the screen asking is not a fetch
+
+    stub.answers[coverId] = CoverStub::Answer::Image;
+    ArtView& v = newView(prefetch, key);
+    v.render();
+    waitFor([&] { return v.landed >= 1; });
+    settleView(v);
+    CHECK(stub.covers(coverId) == 1);
+    CHECK(v.landed == 1);
+    CHECK(storedCoverBytes(key) == stub.imageBytes);
+    CHECK(!accessor(key).isEmpty());
+}
+
+// A REAL PICTURE ALREADY ON DISK: never removed, never asked for, and `then` never fires for it.
+static void storedPictureKept(const char* who, CoverStub& stub, const ArtView::Prefetch& prefetch,
+                              const CoverAccessor& accessor, const QString& key, const QString& coverId,
+                              const QByteArray& bytes)
+{
+    plantStoredCover(key, bytes);
+    CHECK(diskCoverBytes(key) == bytes);
+    stub.answers[coverId] = CoverStub::Answer::Image;          // were it asked for, it would be answered
+    CHECK(!accessor(key).isEmpty() && accessor(key) == coverOf(key));
+    ArtView& v = newView(prefetch, key);
+    v.render();
+    settleView(v);
+    for (int i = 0; i < 3; ++i) anotherPass(v, stub, coverId);
+    std::printf("382 %s: a stored %s, 4 passes -> %d request(s), %d landing(s), bytes %s\n", who, coverId.toUtf8().constData(),
+                stub.covers(coverId), v.landed, diskCoverBytes(key) == bytes ? "unchanged" : "CHANGED");
+    CHECK(stub.covers(coverId) == 0);
+    CHECK(v.landed == 0);
+    CHECK(v.renders == 4);
+    CHECK(diskCoverBytes(key) == bytes);
+    CHECK(coverFilesOf(key) == 1);
+    CHECK(!accessor(key).isEmpty());
+}
+
+// THE VERDICT IS IN MEMORY, FOR THIS SESSION: a second process over the same data directory reads the file again.
+static int verdictSessionChild(const QString& key)
+{
+    if (MetaCache::imagePath(key, QStringLiteral("cover")).isEmpty()) return 2;   // the planted page is there
+    if (!MetaCache::verifiedImagePath(key, QStringLiteral("cover")).isEmpty()) return 3;
+    if (!MetaCache::imagePath(key, QStringLiteral("cover")).isEmpty()) return 4;   // ...and is gone now
+    return QFile::exists(MetaCache::dirFor(key) + QStringLiteral("/cover.jpg")) ? 5 : 0;
+}
+
+static void testBrokenStoredCovers382(CoverStub& stub, const QString& serverId)
+{
+    // ---- Subsonic --------------------------------------------------------------------------------------------
+    {
+        SubsonicClient& cl = SubsonicClient::instance();
+        const ArtView::Prefetch prefetch = [&cl](const QString& k, std::function<void()> t) { cl.prefetchAlbumCover(k, std::move(t)); };
+        const CoverAccessor accessor = [&cl](const QString& k) { return cl.albumCoverPath(k); };
+        auto key = [&](const char* tag) {
+            return Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-382") + QLatin1String(tag));
+        };
+        storedPageHealsByPrefetch("subsonic", stub, prefetch, accessor, key("p"), QStringLiteral("c-382p"));
+        storedPageNeverShown("subsonic", stub, prefetch, accessor, key("d"), QStringLiteral("c-382d"));
+        storedPictureKept("subsonic", stub, prefetch, accessor, key("k"), QStringLiteral("c-382k"), stub.imageBytes);
+    }
+    // ---- EverythingBox server shelf ---------------------------------------------------------------------------
+    {
+        ServerMusicClient& cl = ServerMusicClient::instance();
+        const ArtView::Prefetch prefetch = [&cl](const QString& k, std::function<void()> t) { cl.prefetchAlbumCover(k, std::move(t)); };
+        const CoverAccessor accessor = [&cl](const QString& k) { return cl.albumCoverPath(k); };
+        auto key = [](const char* id) {
+            return ServerMusic::qualify(QLatin1String(kShelfId), ServerMusic::Kind::Album, QLatin1String(id));
+        };
+        storedPageHealsByPrefetch("server shelf", stub, prefetch, accessor, key("sm-382p"), QStringLiteral("sm-382p"));
+        storedPageNeverShown("server shelf", stub, prefetch, accessor, key("sm-382d"), QStringLiteral("sm-382d"));
+        storedPictureKept("server shelf", stub, prefetch, accessor, key("sm-382k"), QStringLiteral("sm-382k"), stub.imageBytes);
+    }
+    // ---- Jellyfin, and every format the cache can hold ---------------------------------------------------------
+    JellyfinMusicClient& jcl = JellyfinMusicClient::instance();
+    const ArtView::Prefetch jPrefetch = [&jcl](const QString& k, std::function<void()> t) { jcl.prefetchAlbumCover(k, std::move(t)); };
+    const CoverAccessor jAccessor = [&jcl](const QString& k) { return jcl.albumCoverPath(k); };
+    auto jkey = [](const char* item) { return Jellyfin::qualify(QLatin1String(kJfServerId), QLatin1String(item)); };
+    storedPageHealsByPrefetch("jellyfin", stub, jPrefetch, jAccessor, jkey("jf-382p"), QStringLiteral("jf-382p"));
+    storedPageNeverShown("jellyfin", stub, jPrefetch, jAccessor, jkey("jf-382d"), QStringLiteral("jf-382d"));
+    {
+        // Complete, tiny, real files (the same ones #377 fetched), plus two SVGs: one bare, one behind an XML
+        // declaration, a comment and a DOCTYPE with an internal subset - the Illustrator shape.
+        const QByteArray svgPlain = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+        const QByteArray svgProlog = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Generator: a drawing tool -->\n"
+                                     "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" "
+                                     "[<!ENTITY ns_flows \"http://ns.example/Flows/\">]>\n"
+                                     "<svg version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+        // A prolog LONGER than the prefix that is read: undecided, and therefore kept.
+        const QByteArray svgLong = "<?xml version=\"1.0\"?>\n<!--" + QByteArray(int(CoverFetch::kStoredPrefixBytes) + 4096, 'x')
+                                 + "-->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+        const struct { const char* id; QByteArray bytes; } kept[] = {
+            { "jf-382-jpeg", QByteArray::fromBase64("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=") },
+            { "jf-382-png",  stub.imageBytes },
+            { "jf-382-webp", QByteArray::fromBase64("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==") },
+            { "jf-382-gif",  QByteArray::fromBase64("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7") },
+            { "jf-382-svg",  svgPlain },
+            { "jf-382-svgprolog", svgProlog },
+            { "jf-382-svglong", svgLong },
+        };
+        for (const auto& f : kept)
+        {
+            CHECK(!f.bytes.isEmpty());
+            storedPictureKept("jellyfin", stub, jPrefetch, jAccessor, jkey(f.id), QLatin1String(f.id), f.bytes);
+        }
+    }
+    // A PAGE BIGGER THAN THE PREFIX is still decided - its root is <html> within the first bytes - and healed.
+    {
+        const QString key = jkey("jf-382-bigpage");
+        const QByteArray big = errorPage382() + QByteArray(int(CoverFetch::kStoredPrefixBytes) * 2, ' ');
+        plantStoredCover(key, big);
+        CHECK(diskCoverBytes(key) == big);
+        const QString shown = jAccessor(key);
+        std::printf("382 jellyfin: stored error page of %d bytes -> accessor %s\n", int(big.size()), shown.isEmpty() ? "empty" : "ITS PATH");
+        CHECK(shown.isEmpty());
+        CHECK(coverFilesOf(key) == 0);
+    }
+    // ONCE A SESSION: a stored picture judged once is not read again on the next call. Proven by changing the file
+    // underneath - which nothing in the app does - and seeing this session still serve it and not ask for it...
+    {
+        const QString key = jkey("jf-382-once");
+        stub.answers[QStringLiteral("jf-382-once")] = CoverStub::Answer::Image;
+        plantStoredCover(key, stub.imageBytes);
+        CHECK(!jAccessor(key).isEmpty());                     // judged: a picture
+        {
+            QFile f(MetaCache::dirFor(key) + QStringLiteral("/cover.jpg"));
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write(errorPage382());
+        }
+        CHECK(diskCoverBytes(key) == errorPage382());
+        for (int i = 0; i < 5; ++i) CHECK(!jAccessor(key).isEmpty());
+        ArtView& v = newView(jPrefetch, key);
+        v.render();
+        settleView(v);
+        anotherPass(v, stub, QStringLiteral("jf-382-once"));
+        std::printf("382 jellyfin: file changed under a judged cover -> this session: %d request(s), file %s\n",
+                    stub.covers(QStringLiteral("jf-382-once")), coverFilesOf(key) == 1 ? "kept" : "REMOVED");
+        CHECK(stub.covers(QStringLiteral("jf-382-once")) == 0);
+        CHECK(coverFilesOf(key) == 1);
+        // ...while the NEXT session, knowing nothing, reads it and finds the page: the verdict was never written down.
+        QProcess child;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("EB_PROBE_DATA_DIR"), AppPaths::dataDir());
+        child.setProcessEnvironment(env);
+        child.start(QCoreApplication::applicationFilePath(), { QStringLiteral("verdict-session"), key });
+        CHECK(waitFor([&] { return child.state() == QProcess::NotRunning; }, 30000));
+        std::printf("382 jellyfin: next session over the same data dir -> exit %d\n", child.exitCode());
+        CHECK(child.exitStatus() == QProcess::NormalExit);
+        CHECK(child.exitCode() == 0);
+        CHECK(coverFilesOf(key) == 0);
+        CHECK(!MetaCache::load(key).value(QStringLiteral("images")).toObject().contains(QStringLiteral("cover")));
+    }
+    // THE PREFIX RULE, AS A TABLE. Bodies built outside CHECK (GCC reads some escapes in a stringified condition).
+    {
+        const QByteArray jpegHead = QByteArray::fromHex("ffd8ffe000104a4649460001");
+        const QByteArray page     = errorPage382();
+        const QByteArray openComment = "<?xml version=\"1.0\"?>\n<!-- a comment still going when the prefix ends";
+        const QByteArray rootAtEnd   = "<?xml version=\"1.0\"?>\n<sv";
+        const QByteArray empty;
+        CHECK(CoverFetch::kSignatureBytes >= 12);
+        CHECK(CoverFetch::kStoredPrefixBytes >= 4096);
+        CHECK(CoverFetch::storedCoverIntact(jpegHead, 250000));           // a raster signature decides alone
+        CHECK(!CoverFetch::storedCoverIntact(page, page.size()));         // the whole file read: a page
+        CHECK(!CoverFetch::storedCoverIntact(page, 10 * 1024 * 1024));    // a big page: decided by its root
+        CHECK(CoverFetch::storedCoverIntact(openComment, 200000));        // ran out inside the prolog: kept
+        CHECK(!CoverFetch::storedCoverIntact(openComment, openComment.size()));   // ...unless that was the file
+        CHECK(CoverFetch::storedCoverIntact(rootAtEnd, 200000));          // a root cut at the prefix's end: kept
+        CHECK(!CoverFetch::storedCoverIntact(empty, 0));                  // an empty file is not a cover
+    }
+}
+
 // THE RULE, AS A TABLE — including the case no live stub produces cheaply: a TIMEOUT, which reaches the
 // client as a failed transfer with no status line at all, and must be Retry, never "no art".
 static void testCoverAnswerRules()
@@ -2089,6 +2346,18 @@ static void testCoverStateHoldsNoCredential(const CoverStub& stub, const QString
     }
     CHECK(harvested > 0);                        // the scan is over real tokens, not over an empty list
     for (const QByteArray& s : secrets) CHECK(!scanned.contains(s));
+    // #382: every bundle the cover cases wrote or rewrote (a healed page drops its "images" entry in place) - bytes.
+    int bundles = 0;
+    for (QDirIterator it(AppPaths::dataDir() + QStringLiteral("/metadata"), QDir::Files, QDirIterator::Subdirectories); it.hasNext();)
+    {
+        QFile f(it.next());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray bytes = f.readAll();
+        ++bundles;
+        for (const QByteArray& s : secrets) CHECK(!bytes.contains(s));
+        CHECK(!bytes.contains(QByteArray("/rest/")));
+    }
+    CHECK(bundles > 0);
     CHECK(!scanned.contains(QByteArray("&t=")));
     CHECK(!scanned.contains(QByteArray("/rest/")));
     CHECK(!scanned.contains(QByteArray("http")));
@@ -2176,6 +2445,7 @@ static void testCoverAnswers370()
     testNextSessionAsksAgain(stub, serverId);
     testJellyfinCoverAnswers(stub);
     testServerMusicCoverAnswers(stub);
+    testBrokenStoredCovers382(stub, serverId);   // before the credential scan, so it covers what these remember
     testCoverStateHoldsNoCredential(stub, serverId);
     testCoverAnswerRules();
     testServerMusicColdAlbum368(stub);   // last: it re-lists the shelf, which the cover cases above read as cold
@@ -2187,6 +2457,11 @@ int main(int argc, char** argv)
     {
         QCoreApplication child(argc, argv);
         return coverSessionChild(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "verdict-session") == 0)
+    {
+        QCoreApplication child(argc, argv);
+        return verdictSessionChild(QString::fromLocal8Bit(argv[2]));
     }
     QCoreApplication app(argc, argv);
 

@@ -59,6 +59,14 @@ namespace MetaCache
     // file for a role ("" when absent); displayImage picks the cached grid image if present, else `url`.
     void cacheImage(const QString& key, const QString& role, const QString& url);
     QString imagePath(const QString& key, const QString& role);
+    // imagePath, but only if the stored file's BYTES are a picture (#382): the one check the four remote music/
+    // audiobook clients' cover prefetch guards, their "did anything land?" checks and their cover-path accessors all
+    // go through. A cover saved as an error page before #377 is otherwise "already on disk" for ever. Reads a bounded
+    // prefix (CoverFetch::storedCoverIntact has the size and why), once per file per session, and remembers the
+    // verdict in memory only. A file judged broken counts as NOT CACHED: it is deleted and its "images" entry
+    // dropped (nothing else in the bundle is touched), and "" is returned, so the normal fetch runs and stores the
+    // real art. A file that is a picture - or that the prefix cannot decide - is never removed.
+    QString verifiedImagePath(const QString& key, const QString& role);
     QString displayImage(const QString& key, const QString& url);
     // displayImage WITHOUT the user's correction on top — the offline-first cached file, else `url`. The
     // metadata editor's baseline needs this half for the same reason cachedDetailScraped exists: it shows
