@@ -630,6 +630,15 @@ static int litCount(const QVector<Tab>& strip, const QString& activeKey)    // s
     return n;
 }
 
+// The row id of a device's ONLY catalogue tab (the #392 cases): the strip is that one catalogue, keyed the way
+// HomeView keys it; `rowKeys` is every key with a row on the device, as HomeView::sourceRowIdResolver builds it.
+static QString soloRowId(const QString& catalogueId, const QSet<QString>& rowKeys, const QSet<QString>& stored)
+{
+    QVector<navkeys::CatalogueTab> strip{ { QStringLiteral("org.example.solo"), catalogueId, QString() } };
+    navkeys::keyCatalogueTabs(strip);
+    return navkeys::catalogueRowId(strip[0], strip, rowKeys, stored);
+}
+
 static void testCatalogueKeysNeverCollide()
 {
     using namespace navkeys;
@@ -677,41 +686,201 @@ static void testCatalogueKeysNeverCollide()
     // ---- a STORED row still resolves --------------------------------------------------------------------------
     const QSet<QString> none;
     // An ordinary catalogue: unchanged whatever is stored.
-    CHECK(catalogueRowId(QStringLiteral("aio.games"), { QStringLiteral("aio.games") }, none)
+    CHECK(soloRowId(QStringLiteral("aio.games"), { QStringLiteral("aio.games") }, none)
           == QStringLiteral("source:aio.games"));
     // A catalogue called `home`: the built-in Home tab is on the strip but never has a row, so it is not among the
     // row keys and the pre-#392 spelling is always the catalogue's.
     const QSet<QString> homePresent = { forCatalogue(QStringLiteral("home")) };
-    CHECK(catalogueRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") })
+    CHECK(soloRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") })
           == QStringLiteral("source:home"));
     // A catalogue called `photos`, on a device with no Photos tab: the old spelling is still the catalogue's.
-    CHECK(catalogueRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
-                         { QStringLiteral("source:photos") })
+    CHECK(soloRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
+                    { QStringLiteral("source:photos") })
           == QStringLiteral("source:photos"));
     // ...and on a device WITH the Photos tab the old spelling stays with the built-in (whose key never changed),
     // while the catalogue answers to its new id.
     const QSet<QString> photosPresent = { QStringLiteral("photos"), forCatalogue(QStringLiteral("photos")) };
     CHECK(rowIdForKey(QStringLiteral("photos")) == QStringLiteral("source:photos"));
-    CHECK(catalogueRowId(QStringLiteral("photos"), photosPresent, { QStringLiteral("source:photos") })
+    CHECK(soloRowId(QStringLiteral("photos"), photosPresent, { QStringLiteral("source:photos") })
           == QStringLiteral("source:catalog:photos"));
     // Once the new id is stored it wins over the old spelling; with nothing stored it is the new id.
-    CHECK(catalogueRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) },
-                         { QStringLiteral("source:books"), QStringLiteral("source:catalog:books") })
+    CHECK(soloRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) },
+                    { QStringLiteral("source:books"), QStringLiteral("source:catalog:books") })
           == QStringLiteral("source:catalog:books"));
-    CHECK(catalogueRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) }, none)
+    CHECK(soloRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) }, none)
           == QStringLiteral("source:catalog:books"));
 
     // Through the planner: a profile that HID its `home` catalogue before #392 still has it hidden, and one that
     // moved its `photos` catalogue first (no Photos tab here) still has it first.
-    const QString homeRow = catalogueRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") });
+    const QString homeRow = soloRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") });
     CHECK(spell(plan(avail({ QStringLiteral("category:video"), homeRow }),
                      { row(QStringLiteral("source:home"), false), row(QStringLiteral("category:video")) }))
           == QStringLiteral("category:video"));
-    const QString photosRow = catalogueRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
-                                             { QStringLiteral("source:photos") });
+    const QString photosRow = soloRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
+                                        { QStringLiteral("source:photos") });
     CHECK(spell(plan(avail({ QStringLiteral("category:video"), photosRow }),
                      { row(QStringLiteral("source:photos")), row(QStringLiteral("category:video")) }))
           == QStringLiteral("source:photos category:video"));
+}
+
+// ---- TWO ADD-ONS WITH ONE CATALOGUE ID GET TWO TABS (issue #394) -----------------------------------------------
+// The device model HomeView runs: refresh() keys every elected catalogue tab together with keyCatalogueTabs(), and
+// sourceRowIdResolver() gives each its row with catalogueRowId() over that same strip. The themed producers then
+// hand the ids to applyHomeRowList, which keeps the FIRST row of an id and drops any later one — modelled here, so
+// "both tiles present" is checked against the drop that hid a tile, not against plan() alone.
+using CatSpec = QPair<QString, QString>;   // (manifest id, catalogue id)
+static QVector<navkeys::CatalogueTab> keyedStrip(const QVector<CatSpec>& specs)
+{
+    QVector<navkeys::CatalogueTab> strip;
+    for (const CatSpec& s : specs) strip.push_back({ s.first, s.second, QString() });
+    navkeys::keyCatalogueTabs(strip);
+    return strip;
+}
+static QHash<QString, QString> keyOf(const QVector<navkeys::CatalogueTab>& strip)   // "addon|id" -> key
+{
+    QHash<QString, QString> out;
+    for (const navkeys::CatalogueTab& t : strip) out.insert(t.addonId + QLatin1Char('|') + t.catalogueId, t.key);
+    return out;
+}
+static QStringList rowIdsOf(const QVector<navkeys::CatalogueTab>& strip, const QSet<QString>& builtInRowKeys,
+                            const QSet<QString>& stored)
+{
+    QSet<QString> rowKeys = builtInRowKeys;
+    for (const navkeys::CatalogueTab& t : strip) rowKeys.insert(t.key);
+    QStringList out;
+    for (const navkeys::CatalogueTab& t : strip) out << navkeys::catalogueRowId(t, strip, rowKeys, stored);
+    return out;
+}
+static QString arrangedHome(const QStringList& rowIds, const QVector<Row>& list)          // applyHomeRowList
+{
+    QVector<Available> available;
+    QSet<QString> seen;
+    for (const QString& id : rowIds)
+        if (!seen.contains(id)) { seen.insert(id); available.push_back({ id, 1 }); }
+    return spell(plan(available, list));
+}
+
+static void testSameCatalogueIdAcrossAddons()
+{
+    using namespace navkeys;
+    const QString A = QStringLiteral("org.example.alpha"), B = QStringLiteral("org.example.beta");
+    const QString top = QStringLiteral("top");
+    const QString qA = qualifiedForCatalogue(A, top), qB = qualifiedForCatalogue(B, top);
+
+    // Two fixture add-ons that each declare `top`, on a strip beside the built-in tabs: two DISTINCT keys, both
+    // the qualified form (not "the first keeps `top`"), each opening its own add-on's catalogue, one lit per press.
+    const QVector<navkeys::CatalogueTab> both = keyedStrip({ { A, top }, { B, top }, { A, QStringLiteral("movies") } });
+    CHECK(both[0].key == qA);
+    CHECK(both[1].key == qB);
+    CHECK(both[0].key != both[1].key);
+    CHECK(both[0].key != top && both[1].key != top);
+    CHECK(both[2].key == QStringLiteral("movies"));             // an id nobody else uses keeps its key
+    QVector<Tab> strip = { { QStringLiteral("home"), QStringLiteral("built-in home") } };
+    for (const navkeys::CatalogueTab& t : both) strip.push_back({ t.key, t.addonId + QStringLiteral(" ") + t.catalogueId });
+    for (const QString& k : builtInKeys()) if (k != QStringLiteral("home")) strip.push_back({ k, QStringLiteral("built-in ") + k });
+    for (int i = 0; i < strip.size(); ++i)
+    {
+        CHECK(firstMatch(strip, strip[i].key) == i);             // activateNav opens THIS tab's screen
+        CHECK(litCount(strip, strip[i].key) == 1);               // styleTypeButtons lights only it
+    }
+    CHECK(strip[firstMatch(strip, qB)].opens == B + QStringLiteral(" top"));
+
+    // A SINGLE add-on with `top` keeps the plain key — on its own, beside other add-ons' other ids, and when the
+    // same add-on is simply listed once.
+    CHECK(keyedStrip({ { A, top } })[0].key == top);
+    CHECK(keyedStrip({ { B, top } })[0].key == top);
+    const QVector<navkeys::CatalogueTab> unique = keyedStrip({ { A, top }, { B, QStringLiteral("popular") } });
+    CHECK(unique[0].key == top && unique[1].key == QStringLiteral("popular"));
+
+    // The SAME keys whatever order the add-ons loaded in (which is what differs between two devices).
+    const QVector<CatSpec> three = { { A, top }, { B, top }, { A, QStringLiteral("music") },
+                                     { B, QStringLiteral("music") }, { B, QStringLiteral("popular") } };
+    const QHash<QString, QString> forward = keyOf(keyedStrip(three));
+    QVector<CatSpec> reversed(three.rbegin(), three.rend());
+    CHECK(keyOf(keyedStrip(reversed)) == forward);
+    QVector<CatSpec> rotated = three.mid(2) + three.mid(0, 2);
+    CHECK(keyOf(keyedStrip(rotated)) == forward);
+    CHECK(forward.value(A + QStringLiteral("|top")) == qA);
+    // #392's escape composes: two add-ons that both declare `music` are qualified apart from each other, from the
+    // escaped `catalog:music` and from the built-in Music tab.
+    CHECK(forward.value(A + QStringLiteral("|music")) == qualifiedForCatalogue(A, QStringLiteral("music")));
+    CHECK(forward.value(A + QStringLiteral("|music")) != forward.value(B + QStringLiteral("|music")));
+    CHECK(forward.value(B + QStringLiteral("|popular")) == QStringLiteral("popular"));
+
+    // ---- both tiles on an ARRANGED home ----------------------------------------------------------------------
+    // A list arranged on this two-add-on device names both qualified rows; neither is dropped as a duplicate.
+    const QStringList bothRows = rowIdsOf(both, {}, { rowIdForKey(qB), rowIdForKey(qA) });
+    CHECK(bothRows[0] != bothRows[1]);
+    CHECK(arrangedHome(bothRows, { row(rowIdForKey(qB)), row(rowIdForKey(qA)), row(QStringLiteral("source:movies")) })
+          == QStringLiteral("source:") + qB + QStringLiteral(" source:") + qA + QStringLiteral(" source:movies"));
+
+    // ---- a stored PLAIN `source:top` --------------------------------------------------------------------------
+    const QSet<QString> plainTop = { QStringLiteral("source:top"), QStringLiteral("category:video") };
+    // ...on a one-add-on device it is that catalogue's row, whichever add-on it is: hidden stays hidden, placed
+    // stays placed.
+    CHECK(rowIdsOf(keyedStrip({ { A, top } }), {}, plainTop) == QStringList{ QStringLiteral("source:top") });
+    CHECK(rowIdsOf(keyedStrip({ { B, top } }), {}, plainTop) == QStringList{ QStringLiteral("source:top") });
+    CHECK(arrangedHome(rowIdsOf(keyedStrip({ { A, top } }), {}, plainTop),
+                       { row(QStringLiteral("source:top"), false), row(QStringLiteral("category:video")) })
+          == QString());
+    // ...on a two-add-on device it is AMBIGUOUS: neither catalogue takes it (handing it to one would be a guess
+    // that differs between devices), both qualified tiles appear as rows the list never heard of, and the plain
+    // row stays in the list — skipped, not pruned — for the day this device is back to one `top`.
+    CHECK(rowIdsOf(both, {}, plainTop)
+          == (QStringList{ rowIdForKey(qA), rowIdForKey(qB), QStringLiteral("source:movies") }));
+    const QVector<Row> plainList = { row(QStringLiteral("source:top")), row(QStringLiteral("category:video")) };
+    CHECK(arrangedHome(QStringList{ QStringLiteral("category:video") } + rowIdsOf(both, {}, plainTop), plainList)
+          == QStringLiteral("category:video source:") + qA + QStringLiteral(" source:") + qB
+                 + QStringLiteral(" source:movies"));
+    ProfileStore::setCurrent(QStringLiteral("ambiguous394"));
+    HomeRowStore::save(plainList);
+    CHECK(HomeRowStore::list().size() == 2 && HomeRowStore::list()[0].rowId == QStringLiteral("source:top"));
+    HomeRowStore::reset();
+
+    // ---- a stored QUALIFIED row, arranged where the ids collided, read where they don't -----------------------
+    // The one catalogue it names takes it back (hidden stays hidden)...
+    const QSet<QString> qualifiedA = { rowIdForKey(qA), QStringLiteral("category:video") };
+    CHECK(rowIdsOf(keyedStrip({ { A, top } }), {}, qualifiedA) == QStringList{ rowIdForKey(qA) });
+    CHECK(arrangedHome(rowIdsOf(keyedStrip({ { A, top } }), {}, qualifiedA),
+                       { row(rowIdForKey(qA), false), row(QStringLiteral("category:video")) })
+          == QString());
+    // ...the OTHER add-on never does...
+    CHECK(rowIdsOf(keyedStrip({ { B, top } }), {}, qualifiedA) == QStringList{ QStringLiteral("source:top") });
+    // ...and where the device stored both spellings, its own key's row wins.
+    CHECK(rowIdsOf(keyedStrip({ { A, top } }), {}, { rowIdForKey(qA), QStringLiteral("source:top") })
+          == QStringList{ QStringLiteral("source:top") });
+    // A catalogue with a unique id and no qualified row stored is exactly #392's answer (the existing-install rule).
+    CHECK(rowIdsOf(keyedStrip({ { A, QStringLiteral("movies") } }), {}, { QStringLiteral("source:movies") })
+          == QStringList{ QStringLiteral("source:movies") });
+
+    // #392's legacy spelling is still guarded by the built-in: two add-ons with `photos` beside the Photos tab.
+    const QVector<navkeys::CatalogueTab> photos = keyedStrip({ { A, QStringLiteral("photos") }, { B, QStringLiteral("photos") } });
+    CHECK(rowIdsOf(photos, { QStringLiteral("photos") }, { QStringLiteral("source:photos") })
+          == (QStringList{ rowIdForKey(qualifiedForCatalogue(A, QStringLiteral("photos"))),
+                           rowIdForKey(qualifiedForCatalogue(B, QStringLiteral("photos"))) }));
+
+    // ---- a qualified key never spells a built-in key, an escaped key or another pair's key ---------------------
+    const QStringList addons = { A, B, QString(), QStringLiteral("a"), QStringLiteral("a/b"), QStringLiteral("@"),
+                                 QStringLiteral("item:x"), QStringLiteral("catalog:y"), QStringLiteral("home"),
+                                 QStringLiteral("a%2Fb") };
+    const QStringList ids = { top, QStringLiteral("b/c"), QStringLiteral("c"), QStringLiteral("home"),
+                              QStringLiteral("music"), QStringLiteral("item:1"), QStringLiteral("catalog:music"),
+                              QStringLiteral("@x/y"), QStringLiteral("catalog:@org.example.alpha/top"), QString() };
+    QSet<QString> unqualified;
+    for (const QString& id : ids) unqualified.insert(forCatalogue(id));
+    QSet<QString> qualified;
+    for (const QString& addon : addons)
+        for (const QString& id : ids)
+        {
+            const QString key = qualifiedForCatalogue(addon, id);
+            CHECK(!builtInKeys().contains(key));
+            CHECK(!key.startsWith(QLatin1String("item:")));
+            CHECK(!unqualified.contains(key));   // never a plain key, never an escaped catalog:<id> key
+            qualified.insert(key);
+        }
+    CHECK(qualified.size() == addons.size() * ids.size());
+    CHECK(qualifiedForCatalogue(QStringLiteral("a"), QStringLiteral("b/c"))
+          != qualifiedForCatalogue(QStringLiteral("a/b"), QStringLiteral("c")));
 }
 
 int main(int argc, char** argv)
@@ -729,6 +898,7 @@ int main(int argc, char** argv)
     testJson();
     testMerge();
     testEditSurvivesSettingsDiscard();
+    testSameCatalogueIdAcrossAddons(); // issue #394 (last: it writes a profile's row list)
 
     if (failures) { std::fprintf(stderr, "HOMEROWS-FAIL %d assertion(s)\n", failures); return 1; }
     std::printf("HOMEROWS-OK\n");

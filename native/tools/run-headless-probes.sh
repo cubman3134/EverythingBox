@@ -4375,20 +4375,23 @@ echo
 # probe_musicsources holds which catalogue tab the merged Music library absorbs. This is the half in HomeView,
 # which links nothing headlessly - without it both probes are checking functions nothing calls:
 #
-#  1. A CATALOGUE IS KEYED THROUGH navkeys::forCatalogue. refresh()'s addCat gives the tab and its navTargets_
-#     entry navkeys::forCatalogue(cid), never the raw id; selectType() lights the same key; and no other
+#  1. A CATALOGUE IS KEYED THROUGH navkeys::keyCatalogueTabs, OVER THE WHOLE STRIP (#394). refresh() keys every
+#     elected catalogue together, from the add-on's manifest id and the catalogue id, and gives the tab and its navTargets_
+#     entry that key - never the raw id, never forCatalogue(cid) alone (two add-ons' `top` would share it); every
+#     selectType() call hands over the tab's key and selectType() lights exactly that; and no other
 #     styleTypeButtons() call passes anything but a literal or that key.
 #  2. EVERY BUILT-IN KEY IS RESERVED. Each literal passed to makeTab(), to a built-in navTargets_ entry or to
 #     styleTypeButtons() is listed in navkeys::builtInKeys() - a new built-in tab keyed "games" that is not
 #     listed would let a catalogue called "games" collide with it again.
 #  3. NO PRODUCER SPELLS "source:" + A KEY BY HAND. homeRowCatalogue(), categoryCatalogs() and systemItems()
-#     ask sourceRowIdResolver(), so the editor and both themed producers agree on a row's id, old spelling included.
+#     ask sourceRowIdResolver(), so the editor and both themed producers agree on a row's id, old spelling included,
+#     and the resolver hands navkeys::catalogueRowId the same add-on-keyed strip refresh() keyed.
 #  4. THE ABSORB RULE IS THE MERGE'S. refresh() drops a catalogue with MusicSuppliers::catalogTabAbsorbed,
 #     reading ServerMusicClient's shelf list, after refreshMusicShelves() and before the election; and
 #     refreshMusicShelves() builds that list from MusicSuppliers::shelfCatalogId.
 #
 # Comments are stripped first, as in the gates above. Counts, never `grep -q` (pipefail).
-echo "=== catalogue tab keys + absorbed music shelf (#392) ==="
+echo "=== catalogue tab keys + absorbed music shelf (#392, #394) ==="
 NK_V="$HERE/../src/ui/HomeView.cpp"
 NK_H="$HERE/../src/core/NavKeys.h"
 nk_fail=0
@@ -4403,11 +4406,12 @@ else
   nk_body 'void HomeView::refresh()'
   nk_n="$(wc -l < "$nk_fn" | tr -d '[:space:]')"
   [ "$nk_n" -ge 100 ] || nk_note "HomeView::refresh came out as $nk_n line(s) - its signature changed or it moved. The catalogue keys are not being checked."
-  nk_esc="$(grep -c 'navkeys::forCatalogue(cid)' "$nk_fn")"
+  nk_esc="$(grep -cE 'navkeys::keyCatalogueTabs\(catalogueStrip\);|catalogueStrip\.push_back\(\{ e\.addon->manifest\.id, e\.cat\.id,|const QString key = catalogueStrip\[i\]\.key;|navTargets_\.back\(\)\.addonId = catalogueStrip\[i\]\.addonId;' "$nk_fn")"
+  nk_one="$(grep -c 'forCatalogue(' "$nk_fn")"
   nk_use="$(grep -cE 'makeTab\(btn, key, ctype\)|navTargets_\.push_back\(\{ key, false, addon, cid,' "$nk_fn")"
   nk_raw="$(grep -cE 'makeTab\(btn, cid,|navTargets_\.push_back\(\{ cid,' "$nk_fn")"
-  [ "$nk_esc" -ge 1 ] && [ "$nk_use" -ge 2 ] && [ "$nk_raw" -eq 0 ] \
-    || nk_note "refresh() does not key a catalogue's tab AND its navTargets_ entry with navkeys::forCatalogue(cid) - a catalogue called \"music\" shares the Music tab's key again."
+  [ "$nk_esc" -ge 4 ] && [ "$nk_one" -eq 0 ] && [ "$nk_use" -ge 2 ] && [ "$nk_raw" -eq 0 ] \
+    || nk_note "refresh() does not key a catalogue's tab AND its navTargets_ entry from navkeys::keyCatalogueTabs over the add-on-keyed strip - a catalogue called \"music\" shares the Music tab's key again, or two add-ons' \"top\" share one key."
   nk_shelf="$(grep -n 'refreshMusicShelves();' "$nk_fn" | head -1 | cut -d: -f1)"
   nk_abs="$(grep -n 'MusicSuppliers::catalogTabAbsorbed(' "$nk_fn" | head -1 | cut -d: -f1)"
   nk_elect="$(grep -n 'all\.push_back(' "$nk_fn" | head -1 | cut -d: -f1)"
@@ -4419,10 +4423,18 @@ else
   fi
 
   nk_body 'void HomeView::selectType('
-  nk_sel="$(grep -c 'styleTypeButtons(navkeys::forCatalogue(catalogId))' "$nk_fn")"
-  [ "$nk_sel" -ge 1 ] || nk_note "selectType() does not light navkeys::forCatalogue(catalogId) - pressing a catalogue lights nothing, or lights a built-in tab of the same name."
-  nk_other="$(grep -E 'styleTypeButtons\(' "$nk_v" | grep -vcE 'styleTypeButtons\(QStringLiteral\("[^"]*"\)\)|styleTypeButtons\(navkeys::forCatalogue\(catalogId\)\)|void HomeView::styleTypeButtons\(const QString& activeKey\)')"
-  [ "$nk_other" -eq 0 ] || nk_note "$nk_other styleTypeButtons() call(s) pass something other than a built-in literal or navkeys::forCatalogue(catalogId) - a raw catalogue id can light a built-in tab."
+  nk_sel="$(grep -c 'styleTypeButtons(navKey);' "$nk_fn")"
+  nk_selall="$(grep -c 'styleTypeButtons(navKey)' "$nk_v")"
+  nk_calls="$(grep -E 'selectType\(' "$nk_v" | grep -v 'void HomeView::selectType(' | grep -c '')"
+  nk_keyed="$(grep -E 'selectType\(' "$nk_v" | grep -v 'void HomeView::selectType(' | grep -cE 'selectType\([^;]*, (key|firstKey|t\.navKey)\)')"
+  [ "$nk_sel" -ge 1 ] && [ "$nk_selall" -eq 1 ] || nk_note "selectType() does not light the navKey it is handed - pressing a catalogue lights nothing, or lights another tab of the same catalogue id."
+  [ "$nk_calls" -ge 3 ] && [ "$nk_calls" -eq "$nk_keyed" ] || nk_note "$nk_keyed of $nk_calls selectType() call(s) hand over the tab's key (key / firstKey / t.navKey) - a catalogue could light a tab it was not opened from."
+  nk_other="$(grep -E 'styleTypeButtons\(' "$nk_v" | grep -vcE 'styleTypeButtons\(QStringLiteral\("[^"]*"\)\)|styleTypeButtons\(navKey\)|void HomeView::styleTypeButtons\(const QString& activeKey\)')"
+  [ "$nk_other" -eq 0 ] || nk_note "$nk_other styleTypeButtons() call(s) pass something other than a built-in literal or selectType()'s navKey - a raw catalogue id can light a built-in tab."
+
+  nk_body 'std::function<QString(const QString&)> HomeView::sourceRowIdResolver() const'
+  nk_rs="$(grep -cE 'strip\.push_back\(\{ t\.addonId, t\.catalogId, t\.navKey \}\)|navkeys::catalogueRowId\(strip\[it\.value\(\)\], strip, rowKeys, stored\)' "$nk_fn")"
+  [ "$nk_rs" -ge 2 ] || nk_note "sourceRowIdResolver() does not resolve a catalogue's row over the add-on-keyed strip - a row stored on a device where two add-ons share a catalogue id is lost, or taken by the wrong one."
 
   nk_body 'void HomeView::refreshMusicShelves()'
   nk_sc="$(grep -c 'MusicSuppliers::shelfCatalogId(' "$nk_fn")"
@@ -4450,7 +4462,7 @@ else
 
   rm -f "$nk_v" "$nk_fn" "$nk_keys"
   if [ "$nk_fail" -eq 0 ]; then
-    echo "PASS: catalogue tab keys + absorbed music shelf (catalogues keyed apart from built-ins; row ids resolved in one place; the merge's shelf gets no second tab)"
+    echo "PASS: catalogue tab keys + absorbed music shelf (catalogues keyed apart from built-ins and from each other across add-ons; row ids resolved in one place; the merge's shelf gets no second tab)"
   else
     echo "FAIL: catalogue tab keys + absorbed music shelf - a catalogue can share a built-in tab's key, or a merged shelf keeps a second tab."; fail=1
   fi

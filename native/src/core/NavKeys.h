@@ -29,11 +29,50 @@
 // was always ambiguous — both rows produced it — and it stays with the built-in, whose key never changed; the
 // catalogue then appears under its new id, at the end, like any row the list has not heard of.
 //
+// TWO ADD-ONS WITH ONE CATALOGUE ID (issue #394). The rule above keys a catalogue by its id alone, so two add-ons
+// that both declare `top` produced one key between them, with every effect listed at the top: the second tab
+// opened the first add-on's catalogue, both lit up, and an arranged home dropped one tile. When two catalogue
+// tabs on the strip share an id, BOTH are written in the add-on-qualified form
+//
+//     catalog:@<the add-on's manifest id, percent-encoded>/<the catalogue id>
+//
+// and every catalogue whose id is unique on the strip keeps exactly the key above (keyCatalogueTabs()).
+//   * THE SAME ON EVERY DEVICE. The home-row list syncs, so the qualified form is built ONLY from what is the
+//     same wherever the add-on is installed: the manifest id the add-on declares and the catalogue id it
+//     declares. Never the load order, an index or which add-on "came first" — that differs between devices.
+//     That is also why BOTH colliding catalogues are qualified: escaping only the second would give the row
+//     `source:top` to add-on A on one device and to add-on B on another.
+//   * STILL ONE-TO-ONE. An unescaped key never starts with `catalog:`. An escaped key continues with a built-in
+//     key, `item:` or `catalog:` — never `@`. A qualified key always continues with `@`. So the three never meet,
+//     none is a built-in key or starts with `item:`, and the manifest id is percent-encoded (no `/` survives) so
+//     the first `/` after the `@` is always the separator: two different (add-on, catalogue) pairs never share a
+//     qualified key.
+//   * WHETHER a catalogue is qualified does depend on this device (a second add-on declaring `top` has to be
+//     installed for anything to collide); WHAT it is qualified to does not. The row resolution below is what
+//     makes the list survive that: a catalogue answers to every spelling any device could have stored for it.
+//
+// THE SPELLINGS A CATALOGUE'S ROW ANSWERS TO (catalogueRowId), in order: its own key's row; its qualified
+// spelling (stored by a device where its id collided); its unqualified key (stored by a device where it did
+// not); its raw id (stored before #392). Its own row wins whenever it is stored. Otherwise it takes the first
+// OTHER spelling that is stored, is not the own row of another tab on this device, and that no other catalogue
+// on this device also answers to. So:
+//   * a plain `source:top` stored by a one-add-on device is the catalogue's own row on any one-add-on device;
+//   * on a device where two add-ons declare `top`, that row is AMBIGUOUS — both catalogues answer to it — and
+//     neither takes it. The row is KEPT in the list (never pruned: HomeRows.h, a device must never drop a row it
+//     cannot place), both qualified tiles appear as rows the list has not heard of, and the plain row is placed
+//     again the moment this device is back to one add-on declaring `top`. Handing it to either one would be a
+//     guess that differs between devices, which is exactly what the synced list cannot survive;
+//   * a qualified row stored by that two-add-on device is taken back by the one catalogue it names on a device
+//     where the id is unique — so an arrangement made where the ids collided keeps its place everywhere.
+//
 // Header-only and QtCore-only: probe_homerows drives it with no HomeView.
 #pragma once
+#include <QHash>
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
+#include <QVector>
 
 namespace navkeys
 {
@@ -64,20 +103,75 @@ namespace navkeys
         return mustEscape(catalogueId) ? QString(cataloguePrefix()) + catalogueId : catalogueId;
     }
 
+    // The add-on-qualified key of a catalogue whose id another add-on's tab also uses (#394). Built only from the
+    // manifest id and the catalogue id, so it is the same on every device (see the header).
+    inline QString qualifiedForCatalogue(const QString& addonId, const QString& catalogueId)
+    {
+        return QString(cataloguePrefix()) + QLatin1Char('@') + QString::fromLatin1(QUrl::toPercentEncoding(addonId))
+               + QLatin1Char('/') + catalogueId;
+    }
+
+    // One catalogue tab on the strip: the add-on's manifest id, the catalogue id, and the key keyCatalogueTabs()
+    // gives it.
+    struct CatalogueTab
+    {
+        QString addonId;
+        QString catalogueId;
+        QString key;
+    };
+
+    // Keys EVERY catalogue tab on the strip at once, because a key depends on the other tabs: a catalogue whose id
+    // a tab of a DIFFERENT add-on also uses gets qualifiedForCatalogue(), and every other one forCatalogue().
+    // Nothing here reads the order of `tabs`, so the same add-ons give the same keys however they loaded.
+    inline void keyCatalogueTabs(QVector<CatalogueTab>& tabs)
+    {
+        QHash<QString, QSet<QString>> addonsOfId;   // catalogue id -> the add-ons with a tab for it
+        for (const CatalogueTab& t : tabs) addonsOfId[t.catalogueId].insert(t.addonId);
+        for (CatalogueTab& t : tabs)
+            t.key = addonsOfId.value(t.catalogueId).size() > 1 ? qualifiedForCatalogue(t.addonId, t.catalogueId)
+                                                                : forCatalogue(t.catalogueId);
+    }
+
     // The home-row id (`source:<key>`) of any tab.
     inline QString rowIdForKey(const QString& navKey) { return QStringLiteral("source:") + navKey; }
 
-    // The home-row id a CATALOGUE's tile answers to. `rowKeys` is every nav key that has a `source:` row on this
-    // device right now, built-in and catalogue alike — every tab but Home, which has no row; `storedRowIds` is
-    // every id in the profile's stored row list.
-    inline QString catalogueRowId(const QString& catalogueId, const QSet<QString>& rowKeys,
-                                  const QSet<QString>& storedRowIds)
+    // Every row id a catalogue's tile answers to, its own first (the order catalogueRowId prefers them in).
+    inline QStringList catalogueRowSpellings(const CatalogueTab& tab)
     {
-        const QString key = forCatalogue(catalogueId);
-        const QString id  = rowIdForKey(key);
-        if (key == catalogueId || storedRowIds.contains(id)) return id;   // never renamed, or already re-stored
-        const QString legacy = rowIdForKey(catalogueId);
-        if (storedRowIds.contains(legacy) && !rowKeys.contains(catalogueId)) return legacy;
-        return id;
+        QStringList ids{ rowIdForKey(tab.key) };
+        for (const QString& key : { qualifiedForCatalogue(tab.addonId, tab.catalogueId),   // a colliding device (#394)
+                                    forCatalogue(tab.catalogueId),                         // a device where it didn't
+                                    tab.catalogueId })                                     // before #392
+        {
+            const QString id = rowIdForKey(key);
+            if (!ids.contains(id)) ids << id;
+        }
+        return ids;
+    }
+
+    // The home-row id a CATALOGUE's tile answers to. `strip` is every catalogue tab on this device, keyed by
+    // keyCatalogueTabs() (it includes `tab`); `rowKeys` is every nav key that has a `source:` row on this device
+    // right now, built-in and catalogue alike — every tab but Home, which has no row; `storedRowIds` is every id in
+    // the profile's stored row list. The rule is in the header: own row if stored, else the first other spelling
+    // that is stored and that nothing else on this device owns or also answers to, else the own row.
+    inline QString catalogueRowId(const CatalogueTab& tab, const QVector<CatalogueTab>& strip,
+                                  const QSet<QString>& rowKeys, const QSet<QString>& storedRowIds)
+    {
+        const QStringList spellings = catalogueRowSpellings(tab);
+        const QString& own = spellings.first();
+        if (storedRowIds.contains(own)) return own;
+        for (int i = 1; i < spellings.size(); ++i)
+        {
+            const QString& id = spellings[i];
+            if (!storedRowIds.contains(id)) continue;
+            if (rowKeys.contains(id.mid(int(qstrlen("source:"))))) continue;   // another tab's own row
+            bool shared = false;                                                // ...or another catalogue's too
+            for (const CatalogueTab& other : strip)
+                if ((other.addonId != tab.addonId || other.catalogueId != tab.catalogueId)
+                    && catalogueRowSpellings(other).contains(id))
+                { shared = true; break; }
+            if (!shared) return id;
+        }
+        return own;
     }
 }

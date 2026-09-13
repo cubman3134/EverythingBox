@@ -1313,16 +1313,13 @@ void HomeView::refresh()
             bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
     auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
+    // The election only COLLECTS; the tabs are made once it is over (below). #394: a catalogue's key depends on
+    // every other catalogue that gets a tab — two add-ons that both declare `top` are each keyed by add-on — so
+    // no tab can be keyed until the whole strip is known.
+    struct ElectedCat { LoadedAddon* addon; AddonCatalog cat; QString display; };
+    QVector<ElectedCat> elected;
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
-        auto* btn = new QPushButton(display, this);
-        const QString cid = c.id, ctype = c.type;
-        connect(btn, &QPushButton::clicked, this, [this, addon, cid, ctype, display] { selectType(addon, cid, ctype, display); });
-        // #392: the KEY is navkeys::forCatalogue(cid), never the raw id — a catalogue called `music` (or any other
-        // built-in tab's key) would otherwise share the built-in tab's key. catalogId stays the real id.
-        const QString key = navkeys::forCatalogue(cid);
-        makeTab(btn, key, ctype);
-        navTargets_.push_back({ key, false, addon, cid, ctype, display });
-        if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; first = false; }
+        elected.push_back({ addon, c, display });
     };
 
     // Lead with a single Movies tab, then a single TV tab, then every other winning catalog (one per type).
@@ -1359,6 +1356,27 @@ void HomeView::refresh()
             explainedTypes.insert(c.cat.type);
         }
         addCat(c.addon, c.cat, c.cat.name);
+    }
+
+    // The catalogue tabs, in election order. #392/#394: the KEY comes from navkeys::keyCatalogueTabs over the whole
+    // strip, never the raw id — a catalogue called `music` would otherwise share the built-in Music tab's key, and
+    // two add-ons' `top` catalogues would share one key between them. catalogId stays the real id.
+    QVector<navkeys::CatalogueTab> catalogueStrip;
+    for (const ElectedCat& e : elected) catalogueStrip.push_back({ e.addon->manifest.id, e.cat.id, QString() });
+    navkeys::keyCatalogueTabs(catalogueStrip);
+    QString firstKey;
+    for (int i = 0; i < elected.size(); ++i)
+    {
+        LoadedAddon* const addon = elected[i].addon;
+        const QString cid = elected[i].cat.id, ctype = elected[i].cat.type, display = elected[i].display;
+        const QString key = catalogueStrip[i].key;
+        auto* btn = new QPushButton(display, this);
+        connect(btn, &QPushButton::clicked, this,
+                [this, addon, cid, ctype, display, key] { selectType(addon, cid, ctype, display, key); });
+        makeTab(btn, key, ctype);
+        navTargets_.push_back({ key, false, addon, cid, ctype, display });
+        navTargets_.back().addonId = catalogueStrip[i].addonId;
+        if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; firstKey = key; first = false; }
     }
 
     // The Photos category (#102) — the browse half of the photo feature. Offered ONLY when the configured
@@ -1483,7 +1501,7 @@ void HomeView::refresh()
     if (!RecentStore::list().isEmpty())
         selectRecent();
     else if (firstAddon)
-        selectType(firstAddon, firstCat, firstType, firstName);
+        selectType(firstAddon, firstCat, firstType, firstName, firstKey);
     else
     {
         grid_->clear(); items_.clear(); stack_.clear();
@@ -1566,7 +1584,7 @@ void HomeView::activateNav(const QString& navKey)
             else if (t.music)   selectMusic();   // Music  (#74)  -> the synthetic Artists/Albums browser
             else if (t.audiobooks) selectAudiobooks();   // Audiobooks (#139) -> the synthetic book browser
             else if (t.books)   selectBooks();   // My Books (#134) -> the synthetic reading browser
-            else                selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
+            else                selectType(t.addon, t.catalogId, t.type, t.name, t.navKey); // catalog -> item view
             return;
         }
 }
@@ -2016,11 +2034,14 @@ void HomeView::focusUpFromColumn()
         focusChromeRow();
 }
 
-void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name)
+void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name,
+                          const QString& navKey)
 {
     recentView_ = false;
     applyGridMode(/*recentList*/ false);
-    styleTypeButtons(navkeys::forCatalogue(catalogId)); // #392: the tab's key, not the raw id (see refresh)
+    // #392/#394: light the key the tab was MADE with (refresh), handed in by every caller. It cannot be rebuilt
+    // from catalogId: two add-ons' `top` catalogues are keyed apart only by the whole strip.
+    styleTypeButtons(navKey);
     search_->clear();
     stack_.clear();
     if (agg_) agg_->cancel(); // J17: switching to a catalog abandons any in-flight cross-addon search
@@ -2116,25 +2137,32 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
     return out;
 }
 
-// The `source:` row id each nav key answers to in the stored home-row list (#392). A built-in tab's is its key;
-// a catalogue's is navkeys::catalogueRowId, which hands a pre-#392 stored spelling back to a catalogue whose key
-// was escaped, so an existing arrangement keeps its place. Computed once per producer call — it reads the store.
+// The `source:` row id each nav key answers to in the stored home-row list (#392, #394). A built-in tab's is its
+// key; a catalogue's is navkeys::catalogueRowId over the whole catalogue strip, which hands back any spelling
+// another device (or an older build) stored for that catalogue — the pre-#392 raw id, the unqualified key, the
+// add-on-qualified key — unless something else on this device owns or shares it, so an arrangement keeps its
+// place. Computed once per producer call — it reads the store.
 std::function<QString(const QString&)> HomeView::sourceRowIdResolver() const
 {
     QSet<QString> rowKeys;   // the keys that have a `source:` row: every tab but Home (the producers skip it)
-    QHash<QString, QString> catalogueOfKey;
+    QVector<navkeys::CatalogueTab> strip;   // every catalogue tab, keyed exactly as refresh() keyed it
+    QHash<QString, int> catalogueOfKey;     // its key -> its place in `strip`
     for (const NavTarget& t : navTargets_)
     {
         if (!t.isHome) rowKeys.insert(t.navKey);
-        if (t.addon) catalogueOfKey.insert(t.navKey, t.catalogId);
+        if (t.addon)
+        {
+            catalogueOfKey.insert(t.navKey, int(strip.size()));
+            strip.push_back({ t.addonId, t.catalogId, t.navKey });
+        }
     }
     QSet<QString> stored;
     for (const homerows::Row& r : HomeRowStore::list()) stored.insert(r.rowId);
-    return [rowKeys, catalogueOfKey, stored](const QString& navKey) {
+    return [rowKeys, strip, catalogueOfKey, stored](const QString& navKey) {
         if (navKey.isEmpty()) return QString();
         const auto it = catalogueOfKey.constFind(navKey);
         return it == catalogueOfKey.constEnd() ? navkeys::rowIdForKey(navKey)
-                                               : navkeys::catalogueRowId(it.value(), rowKeys, stored);
+                                               : navkeys::catalogueRowId(strip[it.value()], strip, rowKeys, stored);
     };
 }
 
