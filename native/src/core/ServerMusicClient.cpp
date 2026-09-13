@@ -273,8 +273,9 @@ void ServerMusicClient::prefetchAlbumCover(const QString& albumKey, std::functio
     // NOTHING LANDED, SO `then` DOES NOT FIRE (#370) — not for a cover already on disk, not for an album the
     // shelf sent no image for, not for a failure. `then` re-renders the level and the re-render re-runs this
     // prefetch, so firing it on any of those paths made the level reload itself every 400 ms for as long as
-    // it was on screen. CoverFetch.h has the whole rule.
-    if (!MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
+    // it was on screen. CoverFetch.h has the whole rule. The cover on disk is VERIFIED, not merely present: one
+    // stored as an error page before #377 is not a cover, and is healed here (#382).
+    if (!MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;
     if (coverMissing_.contains(albumKey)) return;   // the shelf already said "no picture" this session
     const ServerMusic::Ref ref = ServerMusic::parse(albumKey);
     Shelf shelf;
@@ -311,12 +312,12 @@ void ServerMusicClient::prefetchAlbumCover(const QString& albumKey, std::functio
             case CoverFetch::Answer::Retry:
                 break;
         }
-        if (MetaCache::imagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;   // nothing landed
+        if (MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover")).isEmpty()) return;   // nothing landed
         if (then) then();
     });
 }
 
 QString ServerMusicClient::albumCoverPath(const QString& albumKey) const
 {
-    return MetaCache::imagePath(albumKey, QStringLiteral("cover"));
+    return MetaCache::verifiedImagePath(albumKey, QStringLiteral("cover"));
 }

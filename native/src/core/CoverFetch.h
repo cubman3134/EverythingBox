@@ -43,10 +43,10 @@ namespace CoverFetch
         }
         inline bool xmlSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
-        // An SVG is text, so it has no magic number; what it has is a ROOT ELEMENT named svg. Skipped on the
-        // way to it: a UTF-8 BOM, whitespace, the XML declaration, comments and a DOCTYPE (internal subset and
-        // all). The root and not "contains <svg": an HTML page with an icon drawn in it is a page.
-        inline bool svgDocument(const QByteArray& b)
+        // Where the ROOT ELEMENT of a markup document can start: past an optional UTF-8 BOM, whitespace, the XML
+        // declaration, comments and a DOCTYPE (internal subset and all). -1 when one of those does not close
+        // inside `b` - which, for bytes read back from a file's PREFIX (#382), means "ran out", not "not SVG".
+        inline qsizetype prologEnd(const QByteArray& b)
         {
             const qsizetype n = b.size();
             qsizetype i = bytesAt(b, 0, "\xEF\xBB\xBF", 3) ? 3 : 0;
@@ -56,30 +56,38 @@ namespace CoverFetch
                 qsizetype end = -1;
                 if (bytesAt(b, i, "<?", 2))
                 {
-                    if ((end = b.indexOf("?>", i + 2)) < 0) return false;
+                    if ((end = b.indexOf("?>", i + 2)) < 0) return -1;
                     i = end + 2;
                 }
                 else if (bytesAt(b, i, "<!--", 4))
                 {
-                    if ((end = b.indexOf("-->", i + 4)) < 0) return false;
+                    if ((end = b.indexOf("-->", i + 4)) < 0) return -1;
                     i = end + 3;
                 }
                 else if (bytesAt(b, i, "<!DOCTYPE", 9))
                 {
                     const qsizetype subset = b.indexOf('[', i);
                     const qsizetype close  = b.indexOf('>', i);
-                    if (close < 0) return false;
+                    if (close < 0) return -1;
                     if (subset >= 0 && subset < close)
                     {
                         const qsizetype subsetEnd = b.indexOf(']', subset);
-                        if (subsetEnd < 0 || (end = b.indexOf('>', subsetEnd)) < 0) return false;
+                        if (subsetEnd < 0 || (end = b.indexOf('>', subsetEnd)) < 0) return -1;
                         i = end + 1;
                     }
                     else i = close + 1;
                 }
-                else break;
+                else return i;
             }
-            if (!bytesAt(b, i, "<svg", 4) || i + 4 >= n) return false;
+        }
+
+        // An SVG is text, so it has no magic number; what it has is a ROOT ELEMENT named svg, found past the
+        // prolog (prologEnd). The root and not "contains <svg": an HTML page with an icon drawn in it is a page.
+        inline bool svgDocument(const QByteArray& b)
+        {
+            const qsizetype n = b.size();
+            const qsizetype i = prologEnd(b);
+            if (i < 0 || !bytesAt(b, i, "<svg", 4) || i + 4 >= n) return false;
             const char after = b[i + 4];
             return xmlSpace(after) || after == '>' || after == '/';
         }
@@ -111,6 +119,32 @@ namespace CoverFetch
             return (httpStatus == 404 || httpStatus == 410) ? Answer::Absent : Answer::Retry;
         if (body.isEmpty()) return Answer::Absent;
         return isPicture(body) ? Answer::Image : Answer::Retry;
+    }
+
+    // A COVER ALREADY ON DISK, READ BACK (#382). Covers stored before #377 may be an error page saved as cover.jpg,
+    // and "is it already on disk?" says yes to that for ever. So a stored cover is judged by the same bytes rule as
+    // a reply - but from a bounded PREFIX of the file, since the whole file must never be read on the GUI thread.
+    //
+    //   kSignatureBytes     every raster signature above ends by byte 12 (WebP's "WEBP" is bytes 8-11), so a
+    //                       JPEG/PNG/GIF/WebP cover is decided from its first 12 bytes and nothing more is read.
+    //   kStoredPrefixBytes  64 KiB, read only when those 12 bytes are not a raster picture - which is SVG, or
+    //                       something broken. An SVG's root element follows its prolog, and the prologs real
+    //                       exporters write (an XML declaration, a generator comment, Illustrator's DOCTYPE with
+    //                       its entity subset) run to a few KB; 64 KiB is many times that. A broken page decides
+    //                       far sooner: "<!DOCTYPE html>" closes at byte 15 and the root after it is <html>.
+    //
+    // THE RULE ERRS TOWARD KEEPING. A valid cover wrongly judged broken is deleted and fetched again, which is the
+    // regression that would matter; a broken one wrongly kept is today's behaviour. So when the prefix is SHORTER
+    // than the file and it ran out before a root element could be seen (a prolog longer than 64 KiB, or a root that
+    // starts at the very end of it), the answer is "intact". Only a decided "not a picture" is broken. Pure.
+    constexpr qsizetype kSignatureBytes    = 12;
+    constexpr qsizetype kStoredPrefixBytes = 64 * 1024;
+    inline bool storedCoverIntact(const QByteArray& prefix, qint64 fileSize)
+    {
+        if (isPicture(prefix)) return true;
+        if (fileSize <= prefix.size()) return false;           // the whole file was read: decided
+        const qsizetype root = detail::prologEnd(prefix);
+        return root < 0 || root + 4 >= prefix.size();          // ran out before the root: undecided, so kept
     }
 
     // THE TIMEOUT RULE. A cover request that goes this long without a byte moving is given up (it is

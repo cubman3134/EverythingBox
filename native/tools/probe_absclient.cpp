@@ -1384,6 +1384,91 @@ static void testCoverAnswers376(AbsStub& stub)
     }
 }
 
+// ==================================================================================================
+// #382 — A COVER ALREADY ON DISK AS AN ERROR PAGE
+// ==================================================================================================
+// Covers stored before #377 may be a proxy's page saved as cover.jpg, and "already on disk?" said yes to that for
+// ever. AbsClient's prefetch guard, its landing check and coverPath() now read a stored cover back through
+// MetaCache::verifiedImagePath. Every assertion is a request count the stub saw, or bytes on disk.
+static const char* kStoredPage382 =
+    "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head><body>The server is restarting.</body></html>\n";
+
+// The write a pre-#377 build made (storeImage never looked at the bytes), beside metadata that must survive.
+static void plantStoredCover382(const QString& qualifiedId, const QByteArray& bytes)
+{
+    const QString itemKey = Abs::itemIdOf(qualifiedId);
+    MetaCache::merge(itemKey, { { QStringLiteral("item"), QJsonObject{ { QStringLiteral("title"), QStringLiteral("Planted 382") } } } });
+    MetaCache::storeImage(itemKey, QStringLiteral("cover"), QStringLiteral("cover.jpg"), QStringLiteral("image/jpeg"), bytes);
+}
+
+static void testBrokenStoredCovers382(AbsStub& stub)
+{
+    AbsClient& c = AbsClient::instance();
+    const QByteArray page(kStoredPage382);
+    const QString healed = QStringLiteral("li_cov382_prefetch"), shown = QStringLiteral("li_cov382_display"),
+                  kept = QStringLiteral("li_cov382_kept");
+    auto key = [](const QString& item) { return Abs::qualify(g_serverId, item); };
+    for (const QString& item : { healed, shown, kept }) stub.covers[item] = AbsStub::Cover::Image;
+
+    // ---- A STORED PAGE, THEN A PASS OF THE LEVEL: one fetch, and the real art replaces it.
+    {
+        plantStoredCover382(key(healed), page);
+        CHECK(!MetaCache::imagePath(Abs::itemIdOf(key(healed)), QStringLiteral("cover")).isEmpty());   // not vacuous
+        CHECK(coverFileBytes(key(healed)) == page);
+        coverPass(key(healed));
+        waitFor([&] { return landingsOf(key(healed)) >= 1; });
+        passesThatMustNotAsk(key(healed), 3);
+        std::printf("382 abs: stored error page, then passes of the level -> %d request(s), %d landing(s)\n",
+                    stub.coverAsks(healed), landingsOf(key(healed)));
+        CHECK(stub.coverAsks(healed) == 1);
+        CHECK(landingsOf(key(healed)) == 1);
+        CHECK(coverFileBytes(key(healed)) == stub.coverBytes);   // the picture, never the page
+        CHECK(coverFiles(key(healed)) == 1);
+        CHECK(!c.coverPath(key(healed)).isEmpty());
+    }
+
+    // ---- A STORED PAGE, AND THE SCREEN ASKS FIRST: coverPath never hands out the page. The file and its "images"
+    // entry go and nothing else in the bundle moves; then the normal fetch runs, once.
+    {
+        plantStoredCover382(key(shown), page);
+        const QString itemKey = Abs::itemIdOf(key(shown));
+        const QJsonObject before = MetaCache::load(itemKey);
+        CHECK(before.value(QStringLiteral("images")).toObject().contains(QStringLiteral("cover")));
+        const QString path = c.coverPath(key(shown));
+        std::printf("382 abs: stored error page, coverPath -> %s, %d cover file(s) left\n",
+                    path.isEmpty() ? "empty" : "ITS PATH", coverFiles(key(shown)));
+        CHECK(path.isEmpty());
+        CHECK(coverFiles(key(shown)) == 0);
+        QJsonObject after = MetaCache::load(itemKey), beforeRest = before;
+        CHECK(!after.value(QStringLiteral("images")).toObject().contains(QStringLiteral("cover")));
+        after.remove(QStringLiteral("images"));
+        beforeRest.remove(QStringLiteral("images"));
+        CHECK(after == beforeRest);
+        CHECK(stub.coverAsks(shown) == 0);
+        coverPass(key(shown));
+        waitFor([&] { return landingsOf(key(shown)) >= 1; });
+        passesThatMustNotAsk(key(shown), 2);
+        CHECK(stub.coverAsks(shown) == 1);
+        CHECK(landingsOf(key(shown)) == 1);
+        CHECK(coverFileBytes(key(shown)) == stub.coverBytes);
+        CHECK(!c.coverPath(key(shown)).isEmpty());
+    }
+
+    // ---- A REAL PICTURE ALREADY ON DISK: never removed, never asked for, never a landing.
+    {
+        const QByteArray jpeg = QByteArray::fromBase64(kCoverJpegBase64);
+        plantStoredCover382(key(kept), jpeg);
+        CHECK(!c.coverPath(key(kept)).isEmpty());
+        passesThatMustNotAsk(key(kept), 4);
+        std::printf("382 abs: stored real JPEG, 4 passes -> %d request(s), %d landing(s)\n",
+                    stub.coverAsks(kept), landingsOf(key(kept)));
+        CHECK(stub.coverAsks(kept) == 0);
+        CHECK(landingsOf(key(kept)) == 0);
+        CHECK(coverFileBytes(key(kept)) == jpeg);
+        CHECK(!c.coverPath(key(kept)).isEmpty());
+    }
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
@@ -1412,6 +1497,7 @@ int main(int argc, char** argv)
     testLive(stub, port);
     testSessionHooks(scratchIni);
     testCoverAnswers376(stub);   // before the token sweep, so the sweep covers what the covers wrote
+    testBrokenStoredCovers382(stub);
     testTokenNeverLands(stub, scratchIni);
 
     // The saved server goes at the end rather than in a destructor: the scan above has to run while the row

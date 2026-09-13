@@ -493,8 +493,9 @@ void AbsClient::prefetchCover(const QString& qualifiedId, std::function<void()> 
     if (itemKey.isEmpty()) return;
     // ALREADY ON DISK: return WITHOUT firing `then`. The callback means "new artwork landed, re-render",
     // and a re-render re-runs this prefetch over the same rows — so firing it for a cached cover would
-    // schedule a refresh that schedules a refresh, for ever. (SubsonicClient makes the same note.)
-    if (!MetaCache::imagePath(itemKey, QStringLiteral("cover")).isEmpty()) return;
+    // schedule a refresh that schedules a refresh, for ever. (SubsonicClient makes the same note.) VERIFIED, not
+    // merely present: a cover stored as an error page before #377 is not a cover, and is healed here (#382).
+    if (!MetaCache::verifiedImagePath(itemKey, QStringLiteral("cover")).isEmpty()) return;
 
     const Abs::Ref ref = Abs::parse(itemKey);
     AbsServer srv;
@@ -543,7 +544,7 @@ void AbsClient::prefetchCover(const QString& qualifiedId, std::function<void()> 
         }
         // DID ANYTHING LAND? `then` means "new artwork is on disk, re-render", and firing it when nothing
         // was stored is what makes the loop above possible. Only the disk says so.
-        if (MetaCache::imagePath(itemKey, QStringLiteral("cover")).isEmpty()) return;
+        if (MetaCache::verifiedImagePath(itemKey, QStringLiteral("cover")).isEmpty()) return;
         if (then) then();
     });
 }
@@ -551,7 +552,7 @@ void AbsClient::prefetchCover(const QString& qualifiedId, std::function<void()> 
 QString AbsClient::coverPath(const QString& qualifiedId) const
 {
     const QString itemKey = Abs::itemIdOf(qualifiedId);
-    return itemKey.isEmpty() ? QString() : MetaCache::imagePath(itemKey, QStringLiteral("cover"));
+    return itemKey.isEmpty() ? QString() : MetaCache::verifiedImagePath(itemKey, QStringLiteral("cover"));
 }
 
 // ==================================================================================================
