@@ -43,10 +43,14 @@ QNetworkAccessManager* nam()
 // In-flight artwork downloads (key + role), so a shelf rebuild doesn't refetch the same poster.
 QSet<QString>& inflight() { static QSet<QString> s; return s; }
 
+// Every format CoverFetch::isPicture admits has its extensions here (bmp/ico/cur/tif/tiff joined with #387), so a
+// picture lands under its own name and the cap sweep below counts it with the rest.
 const QStringList& imageExts()
 {
     static const QStringList known = { QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("png"),
-                                       QStringLiteral("webp"), QStringLiteral("gif"), QStringLiteral("svg") };
+                                       QStringLiteral("webp"), QStringLiteral("gif"), QStringLiteral("svg"),
+                                       QStringLiteral("bmp"), QStringLiteral("ico"), QStringLiteral("cur"),
+                                       QStringLiteral("tif"), QStringLiteral("tiff") };
     return known;
 }
 
@@ -59,6 +63,9 @@ QString imageExt(const QUrl& url, const QString& contentType)
     if (contentType.contains(QStringLiteral("webp"))) return QStringLiteral("webp");
     if (contentType.contains(QStringLiteral("svg")))  return QStringLiteral("svg");
     if (contentType.contains(QStringLiteral("gif")))  return QStringLiteral("gif");
+    if (contentType.contains(QStringLiteral("bmp")))  return QStringLiteral("bmp");    // image/bmp, image/x-ms-bmp
+    if (contentType.contains(QStringLiteral("icon"))) return QStringLiteral("ico");    // image/x-icon, image/vnd.microsoft.icon
+    if (contentType.contains(QStringLiteral("tiff"))) return QStringLiteral("tif");
     return QStringLiteral("jpg");
 }
 

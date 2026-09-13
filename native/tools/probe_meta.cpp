@@ -9,6 +9,7 @@
 // of that store lives in probe_cloudmerge §20 — it needs CloudMerge, which this probe does not link.
 #include "AddonModels.h"
 #include "AppPaths.h"
+#include "CoverFetch.h"
 #include "MetaCache.h"
 #include "MetaOverrides.h"
 #include "ScrapedSnapshot.h"
@@ -53,27 +54,59 @@ const QByteArray kHtmlPage = QByteArrayLiteral(
     "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>\n"
     "<body><h1>502 Bad Gateway</h1><p>The upstream server did not answer in time.</p></body></html>\n");
 
-struct Picture { QString fmt; QString ext; QByteArray ctype; QByteArray bytes; };
+// fmt, the extension its url carries, the content type it is served with, its bytes, and the extension that
+// content type alone picks for a url with none (MetaCache.cpp, imageExt).
+// Bodies that must never be stored as art. The page is what a proxy says; the other two start with a new raster
+// signature and are still not pictures: an ICO header that declares ZERO images, and text that starts with "BM".
+QByteArray zeroCountIco()
+{
+    QByteArray b = QByteArray::fromHex("000001000000") + QByteArray(64, char(0x5a));
+    return b;
+}
+const QByteArray kBmText = QByteArrayLiteral("BMW 3 Series review: the sports sedan, measured and driven\n");
+
+struct Picture { QString fmt; QString ext; QByteArray ctype; QByteArray bytes; QString ctypeExt; };
 const QVector<Picture>& pictures()
 {
     static const QVector<Picture> all = {
         { QStringLiteral("jpeg"), QStringLiteral("jpg"), "image/jpeg",
           bytesOf({ 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10 }) + "JFIF" + bytesOf({ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
-                                                                                0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9 }) },
+                                                                                0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9 }), QStringLiteral("jpg") },
         { QStringLiteral("png"), QStringLiteral("png"), "image/png",
           bytesOf({ 0x89 }) + "PNG" + bytesOf({ 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D }) + "IHDR"
-              + bytesOf({ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00 }) },
+              + bytesOf({ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00 }), QStringLiteral("png") },
         { QStringLiteral("webp"), QStringLiteral("webp"), "image/webp",
           QByteArray("RIFF") + bytesOf({ 0x1A, 0x00, 0x00, 0x00 }) + "WEBPVP8L"
-              + bytesOf({ 0x0D, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x00, 0x10, 0x07, 0x10, 0x11, 0x11 }) },
+              + bytesOf({ 0x0D, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x00, 0x10, 0x07, 0x10, 0x11, 0x11 }), QStringLiteral("webp") },
         { QStringLiteral("gif"), QStringLiteral("gif"), "image/gif",
           QByteArray("GIF89a") + bytesOf({ 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
                                            0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02,
-                                           0x02, 0x44, 0x01, 0x00, 0x3B }) },
+                                           0x02, 0x44, 0x01, 0x00, 0x3B }), QStringLiteral("gif") },
         { QStringLiteral("svg"), QStringLiteral("svg"), "image/svg+xml",
           QByteArrayLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Generator: probe fixture -->\n"
                             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"3\">"
-                            "<rect width=\"2\" height=\"3\" fill=\"#c33\"/></svg>\n") },
+                            "<rect width=\"2\" height=\"3\" fill=\"#c33\"/></svg>\n"), QStringLiteral("svg") },
+        // The formats Qt decodes that the classic grid could store as a thumb (#387 follow-up): each a 2x2 image
+        // written and read back by an independent encoder (Pillow), hex so no escape reaches a CHECK.
+        { QStringLiteral("bmp"), QStringLiteral("bmp"), "image/bmp", QByteArray::fromHex(
+              "424d460000000000000036000000280000000200000002000000010018000000000010000000c40e0000c40e0000"
+              "00000000000000002828c82828c800002828c82828c80000"), QStringLiteral("bmp") },
+        { QStringLiteral("ico"), QStringLiteral("ico"), "image/x-icon", QByteArray::fromHex(
+              "00000100010002020000000018003a00000016000000280000000200000004000000010018000000000010000000"
+              "c40e0000c40e000000000000000000002828c82828c800002828c82828c800000000"), QStringLiteral("ico") },
+        { QStringLiteral("cur"), QStringLiteral("cur"), "image/vnd.microsoft.icon", QByteArray::fromHex(
+              "00000200010002020000010001003a00000016000000280000000200000004000000010018000000000010000000"
+              "c40e0000c40e000000000000000000002828c82828c800002828c82828c800000000"), QStringLiteral("ico") },
+        { QStringLiteral("tiff-le"), QStringLiteral("tiff"), "image/tiff", QByteArray::fromHex(
+              "49492a00080000000a0000010400010000000200000001010400010000000200000002010300030000008600000003"
+              "010300010000000100000006010300010000000200000011010400010000008c0000001501030001000000030000"
+              "0016010400010000000200000017010400010000000c0000001c0103000100000001000000000000000800080008"
+              "00c82828c82828c82828c82828"), QStringLiteral("tif") },
+        { QStringLiteral("tiff-be"), QStringLiteral("tif"), "image/tiff", QByteArray::fromHex(
+              "4d4d002a00000008000901000003000000010002000001010003000000010002000001020003000000030000007a"
+              "0103000300000001000100000106000300000001000200000111000400000001000000800115000300000001000300"
+              "000116000300000001000200000117000400000001000000"
+              "0c00000000000800080008c82828c82828c82828c82828"), QStringLiteral("tif") },
     };
     return all;
 }
@@ -769,6 +802,75 @@ int main(int argc, char** argv)
     // under poster.jpg - and its "already cached" guard then kept it for good (the cap sweep evicts only thumb.*).
     // Everything here is served by a loopback host this probe starts; request counts and stored bytes are the
     // evidence, never how long anything took.
+    // -- the pure bytes rule the gate and the read-back share (CoverFetch::isPicture / storedCoverIntact) ---------
+    {
+        for (const Picture& pic : pictures())
+        {
+            const QByteArray is = QStringLiteral("387 rule: a %1 is a picture").arg(pic.fmt).toLatin1();
+            CHECK(CoverFetch::isPicture(pic.bytes), is.constData());
+            CHECK(CoverFetch::storedCoverIntact(pic.bytes, pic.bytes.size()), "387 rule: the whole file is intact");
+            if (pic.fmt == QStringLiteral("svg")) continue;   // text: decided from the longer prefix (#382)
+            // A raster signature decides from the SIGNATURE prefix alone - the read verifiedImagePath makes first.
+            const QByteArray head = pic.bytes.left(CoverFetch::kSignatureBytes);
+            const QByteArray alone = QStringLiteral("387 rule: a %1 is decided by its signature prefix").arg(pic.fmt).toLatin1();
+            CHECK(CoverFetch::isPicture(head), alone.constData());
+            CHECK(CoverFetch::storedCoverIntact(head, 10 * 1024 * 1024), alone.constData());
+        }
+        CHECK(CoverFetch::kSignatureBytes <= 64, "387 rule: the signature prefix stays a few bytes");
+
+        // Starts like a new signature, is not a picture.
+        auto fixture = [](const char* fmt) {
+            for (const Picture& pic : pictures()) if (pic.fmt == QLatin1String(fmt)) return pic.bytes;
+            return QByteArray();
+        };
+        const QByteArray bmp = fixture("bmp"), ico = fixture("ico"), cur = fixture("cur");
+        const QByteArray tiffLe = fixture("tiff-le"), tiffBe = fixture("tiff-be");
+        CHECK(bmp.startsWith("BM") && ico.size() > 6 && cur.size() > 6 && tiffLe.startsWith("II") && tiffBe.startsWith("MM"),
+              "387 rule: fixture - the variants start from the right files");
+        QByteArray icoZero = ico;  icoZero[4] = 0; icoZero[5] = 0;      // declares no images
+        QByteArray curZero = cur;  curZero[4] = 0; curZero[5] = 0;
+        QByteArray bmpDib = bmp;   bmpDib[14] = char(0x99);             // no DIB header has that size
+        QByteArray tiffOff = tiffLe; tiffOff[4] = 4;                    // the first IFD inside the 8-byte header
+        const QVector<QPair<const char*, QByteArray>> refused = {
+            { "ico with zero images", icoZero }, { "cur with zero images", curZero },
+            { "the zero-count ico blob", zeroCountIco() },
+            { "a bare ico signature", QByteArray::fromHex("00000100") },
+            { "an ico header cut before its count", QByteArray::fromHex("0000010001") },
+            { "bmp with an unknown DIB header size", bmpDib },
+            { "a bmp file header with no DIB header", bmp.left(14) },
+            { "bare BM", QByteArrayLiteral("BM") },
+            { "text starting BM", kBmText },
+            { "a tiff whose first IFD is inside its header", tiffOff },
+            { "a bare little-endian tiff signature", tiffLe.left(4) },
+            { "a bare big-endian tiff signature", tiffBe.left(4) },
+            { "an html page", kHtmlPage },
+            { "an xml error", QByteArrayLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>AccessDenied</Code>"
+                                                "<Message>Access Denied</Message></Error>") },
+            { "json", QByteArrayLiteral("{\"error\":\"Unauthorized\",\"statusCode\":401}") },
+            { "plain text", QByteArrayLiteral("Bad Gateway") },
+            { "empty", QByteArray() },
+        };
+        for (const auto& r : refused)
+        {
+            const QByteArray what = QByteArray("387 rule: not a picture - ") + r.first;
+            CHECK(!CoverFetch::isPicture(r.second), what.constData());
+            CHECK(!CoverFetch::storedCoverIntact(r.second, r.second.size()), what.constData());
+        }
+        // NO TEXT BODY PASSES. Every new signature holds a NUL byte (ICO, CUR, TIFF) or needs a DIB size with NULs in it
+        // (BMP), and text has none - pinned over EVERY two-character printable start, with a tail that also reads like
+        // the rest of a header ("*", digits): "BM", "II*", "MM", all of them.
+        int textPassed = 0;
+        for (int c1 = 0x20; c1 < 0x7f; ++c1)
+            for (int c2 = 0x20; c2 < 0x7f; ++c2)
+            {
+                QByteArray t;
+                t.append(char(c1)).append(char(c2));
+                t += "*\t0*00 1 (plain text, a header's worth of it) 0123456789 abcdefghijklmnopqrstuvwxyz\r\n";
+                if (CoverFetch::isPicture(t)) ++textPassed;
+            }
+        CHECK(textPassed == 0, "387 rule: no text body is ever a picture, whatever its first two characters");
+    }
+
     {
         ArtHost http;
         CHECK(http.start(), "387: the loopback art host listens");
@@ -793,13 +895,17 @@ int main(int argc, char** argv)
             return landed;
         };
 
+        struct NotPicture { QByteArray tag; QByteArray body; };
+        const QVector<NotPicture> notPictures = { { "page", kHtmlPage }, { "ico0", zeroCountIco() }, { "bmtext", kBmText } };
+
         // -- 1. a 200 page is NOT stored, whatever it is labelled --------------------------------------------------
+        for (const NotPicture& np : notPictures)
         for (const QString& role : roles)
         {
-            const QString key = QStringLiteral("387:gate:") + role;
+            const QString key = QStringLiteral("387:gate:") + QString::fromLatin1(np.tag) + QLatin1Char(':') + role;
             MetaCache::remove(key);
-            const QByteArray path = "/gate/" + role.toLatin1() + ".jpg";
-            const QString url = http.route(path, "image/jpeg", kHtmlPage);
+            const QByteArray path = "/gate/" + np.tag + "/" + role.toLatin1() + ".jpg";
+            const QString url = http.route(path, "image/jpeg", np.body);
             MetaCache::saveArt(key, art(role, url));              // the real prefetch path: saveArt -> cacheImage
             CHECK(pumpUntil([&] { return http.count(path) == 1; }), "387 gate: the page is requested once");
             // The only proof its reply FINISHED without storing: the same art may be asked for again. Stored, the
@@ -815,17 +921,18 @@ int main(int argc, char** argv)
         }
 
         // -- 2. a page ALREADY stored is removed and replaced by the next fetch -------------------------------------
+        for (const NotPicture& np : notPictures)
         for (const QString& role : roles)
         {
-            const QString key = QStringLiteral("387:heal:") + role;
+            const QString key = QStringLiteral("387:heal:") + QString::fromLatin1(np.tag) + QLatin1Char(':') + role;
             MetaCache::remove(key);
-            const QByteArray path = "/heal/" + role.toLatin1() + ".png";
+            const QByteArray path = "/heal/" + np.tag + "/" + role.toLatin1() + ".png";
             const QString url = http.route(path, "image/png", pictures()[1].bytes);
             // What a build before this fix wrote (storeImage never looked at bytes, and still does not).
             MetaCache::storeImage(key, role, QStringLiteral("https://x.invalid/") + role + QStringLiteral(".jpg"),
-                                  QStringLiteral("image/jpeg"), kHtmlPage);
+                                  QStringLiteral("image/jpeg"), np.body);
             const QString planted = recordedFile(key, role);
-            CHECK(!planted.isEmpty() && readAllOf(planted) == kHtmlPage, "387 heal: fixture - the page is stored");
+            CHECK(!planted.isEmpty() && readAllOf(planted) == np.body, "387 heal: fixture - the page is stored");
             MetaCache::saveArt(key, art(role, url));
             CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pictures()[1].bytes; }),
                   "387 heal: the next fetch replaces a stored page with the real picture");
@@ -928,6 +1035,10 @@ int main(int argc, char** argv)
                     MetaCache::saveArt(key, art(role, url));
                     const QByteArray landed = QStringLiteral("387 keep: a fetched %1 %2 is stored").arg(pic.fmt, role).toLatin1();
                     CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pic.bytes; }), landed.constData());
+                    const QByteArray named = QStringLiteral("387 keep: a fetched %1 %2 lands as %2.%3").arg(pic.fmt, role, pic.ext).toLatin1();
+                    CHECK(QFileInfo(recordedFile(key, role)).fileName() == role + QLatin1Char('.') + pic.ext, named.constData());
+                    CHECK(MetaCache::verifiedImagePath(key, role) == recordedFile(key, role),
+                          "387 keep: the fetched picture reads back through the bytes check");
                     for (int i = 0; i < 4; ++i)
                     {
                         MetaCache::cacheImage(key, role, url);
@@ -974,6 +1085,27 @@ int main(int argc, char** argv)
                     MetaCache::remove(key);
                 }
             }
+        // A url with NO extension: the content type alone names the file, and it reads back. One role is enough -
+        // imageExt does not look at the role.
+        for (const Picture& pic : pictures())
+        {
+            const QString key = QStringLiteral("387:ctype:") + pic.fmt;
+            MetaCache::remove(key);
+            const QByteArray path = "/ctype/" + pic.fmt.toLatin1();
+            const QString url = http.route(path, pic.ctype, pic.bytes);
+            MetaCache::cacheImage(key, QStringLiteral("thumb"), url);
+            const QByteArray landed = QStringLiteral("387 ctype: a %1 served as %2 is stored").arg(pic.fmt, QString::fromLatin1(pic.ctype)).toLatin1();
+            CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, QStringLiteral("thumb"))) == pic.bytes; }), landed.constData());
+            const QByteArray named = QStringLiteral("387 ctype: ...as thumb.%1").arg(pic.ctypeExt).toLatin1();
+            CHECK(QFileInfo(recordedFile(key, QStringLiteral("thumb"))).fileName() == QStringLiteral("thumb.") + pic.ctypeExt,
+                  named.constData());
+            CHECK(MetaCache::scrapedImage(key, url) == recordedFile(key, QStringLiteral("thumb")),
+                  "387 ctype: and it is what the tile is served");
+            CHECK(settle(), "387 ctype: settle");
+            CHECK(http.count(path) == 1, "387 ctype: in one request");
+            MetaCache::remove(key);
+        }
+
         // ...and the corrected poster's role, in every format.
         for (const Picture& pic : pictures())
         {
