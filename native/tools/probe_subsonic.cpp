@@ -2253,7 +2253,7 @@ static void testCoverAnswerRules()
     CHECK(Subsonic::coverAnswer(false, 500, none) == A::Retry);
 
     // #377: A 200 BODY IS A PICTURE ONLY IF ITS OWN FIRST BYTES SAY SO - for each format MetaCache can hold
-    // (jpg/jpeg, png, webp, gif, svg: MetaCache.cpp's imageExts). Anything else is a failure, not a cover:
+    // (MetaCache.cpp's imageExts; bmp/ico/cur/tiff joined with #387 and are pinned in probe_meta). Anything else is a failure, not a cover:
     // Retry - never stored, never "no art".
     const QByteArray jpeg   = QByteArray::fromHex("ffd8ffe000104a46494600010100");
     const QByteArray webp   = QByteArray("RIFF") + QByteArray::fromHex("1a000000") + QByteArray("WEBPVP8L");

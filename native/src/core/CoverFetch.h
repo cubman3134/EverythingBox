@@ -42,6 +42,42 @@ namespace CoverFetch
             return b.size() >= at + n && std::memcmp(b.constData() + at, sig, size_t(n)) == 0;
         }
         inline bool xmlSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+        inline quint32 le16(const QByteArray& b, qsizetype at) { return quint8(b[at]) | quint32(quint8(b[at + 1])) << 8; }
+        inline quint32 le32(const QByteArray& b, qsizetype at) { return le16(b, at) | le16(b, at + 2) << 16; }
+        inline quint32 be32(const QByteArray& b, qsizetype at)
+        {
+            return quint32(quint8(b[at])) << 24 | quint32(quint8(b[at + 1])) << 16 | quint32(quint8(b[at + 2])) << 8
+                 | quint8(b[at + 3]);
+        }
+
+        // BMP: "BM", and a DIB header size Qt's own reader accepts at bytes 14-17 (OS/2 1.x 12, OS/2 2.x 16 or 64,
+        // BITMAPINFOHEADER 40, its v2/v3 extensions 52/56, v4 108, v5 124). "BM" alone would wave through any text
+        // that starts with those two letters; the size field holds NUL bytes, which no text does.
+        inline bool bmp(const QByteArray& b)
+        {
+            if (!bytesAt(b, 0, "BM", 2) || b.size() < 18) return false;
+            switch (le32(b, 14))
+            {
+            case 12: case 16: case 40: case 52: case 56: case 64: case 108: case 124: return true;
+            default: return false;
+            }
+        }
+        // ICO 00 00 01 00 / CUR 00 00 02 00, then the image count: a header that declares NO images is not a
+        // picture, and neither is a four-byte prefix with nothing after it.
+        inline bool icon(const QByteArray& b)
+        {
+            return (bytesAt(b, 0, "\x00\x00\x01\x00", 4) || bytesAt(b, 0, "\x00\x00\x02\x00", 4))
+                && b.size() >= 6 && le16(b, 4) != 0;
+        }
+        // TIFF "II*\0" (little-endian) / "MM\0*" (big-endian), then the first IFD's offset, which cannot point back
+        // inside the 8-byte header.
+        inline bool tiff(const QByteArray& b)
+        {
+            if (b.size() < 8) return false;
+            if (bytesAt(b, 0, "II*\x00", 4)) return le32(b, 4) >= 8;
+            if (bytesAt(b, 0, "MM\x00*", 4)) return be32(b, 4) >= 8;
+            return false;
+        }
 
         // Where the ROOT ELEMENT of a markup document can start: past an optional UTF-8 BOM, whitespace, the XML
         // declaration, comments and a DOCTYPE (internal subset and all). -1 when one of those does not close
@@ -95,11 +131,15 @@ namespace CoverFetch
 
     // IS THIS BODY A PICTURE? (#377) Asked of the BYTES, never of the Content-Type header: the header is exactly
     // the part a misbehaving proxy gets wrong — a 200 labelled image/jpeg wrapped round an HTML page. The set is
-    // the formats MetaCache can hold (MetaCache.cpp, imageExts(): jpg/jpeg, png, webp, gif, svg), each by its
-    // own signature:
+    // the formats MetaCache can hold (MetaCache.cpp, imageExts()), each by its own signature:
     //   JPEG  FF D8 FF                          PNG   89 50 4E 47 0D 0A 1A 0A
     //   GIF   "GIF87a" or "GIF89a"              WebP  "RIFF", a four-byte size, "WEBP"
     //   SVG   text whose root element is <svg>  (see detail::svgDocument)
+    //   BMP   "BM" + a known DIB header size    ICO / CUR  00 00 01 00 / 00 00 02 00 + a non-zero image count
+    //   TIFF  "II*\0" or "MM\0*" + a first-IFD offset past the header
+    // BMP, ICO/CUR and TIFF joined with #387: the classic grid stores any thumb Qt decodes, and a picture this rule
+    // did not know was removed by the read-back and fetched again on every visit. No TEXT body can pass any of them -
+    // each needs a NUL byte where text has none - so an error page, an XML error or a login page never does.
     // Anything else is not a cover. Pure: no I/O, no state.
     inline bool isPicture(const QByteArray& b)
     {
@@ -107,6 +147,7 @@ namespace CoverFetch
             || detail::bytesAt(b, 0, "\x89PNG\r\n\x1A\n", 8)
             || detail::bytesAt(b, 0, "GIF87a", 6) || detail::bytesAt(b, 0, "GIF89a", 6)
             || (detail::bytesAt(b, 0, "RIFF", 4) && detail::bytesAt(b, 8, "WEBP", 4))
+            || detail::bmp(b) || detail::icon(b) || detail::tiff(b)
             || detail::svgDocument(b);
     }
 
@@ -125,8 +166,9 @@ namespace CoverFetch
     // and "is it already on disk?" says yes to that for ever. So a stored cover is judged by the same bytes rule as
     // a reply - but from a bounded PREFIX of the file, since the whole file must never be read on the GUI thread.
     //
-    //   kSignatureBytes     every raster signature above ends by byte 12 (WebP's "WEBP" is bytes 8-11), so a
-    //                       JPEG/PNG/GIF/WebP cover is decided from its first 12 bytes and nothing more is read.
+    //   kSignatureBytes     every raster signature above ends by byte 18 (BMP's DIB header size is bytes 14-17; WebP's
+    //                       "WEBP" is 8-11; ICO/CUR's count 4-5; TIFF's IFD offset 4-7), so a JPEG/PNG/GIF/WebP/BMP/
+    //                       ICO/CUR/TIFF picture is decided from its first 18 bytes and nothing more is read.
     //   kStoredPrefixBytes  64 KiB, read only when those 12 bytes are not a raster picture - which is SVG, or
     //                       something broken. An SVG's root element follows its prolog, and the prologs real
     //                       exporters write (an XML declaration, a generator comment, Illustrator's DOCTYPE with
@@ -137,7 +179,7 @@ namespace CoverFetch
     // regression that would matter; a broken one wrongly kept is today's behaviour. So when the prefix is SHORTER
     // than the file and it ran out before a root element could be seen (a prolog longer than 64 KiB, or a root that
     // starts at the very end of it), the answer is "intact". Only a decided "not a picture" is broken. Pure.
-    constexpr qsizetype kSignatureBytes    = 12;
+    constexpr qsizetype kSignatureBytes    = 18;
     constexpr qsizetype kStoredPrefixBytes = 64 * 1024;
     inline bool storedCoverIntact(const QByteArray& prefix, qint64 fileSize)
     {

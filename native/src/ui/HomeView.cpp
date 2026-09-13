@@ -3178,7 +3178,7 @@ static browse::BookCoverFn bookCover()
         // setting AND on the book having no cover of its own, so an install that never opted in — and every
         // tile in one that did but whose file carries a cover — pays not one file read for this.
         if (b.hasCover || !Settings::booksEnrichOnline()) return QString();
-        return MetaCache::imagePath(b.key, QStringLiteral("poster"));
+        return MetaCache::verifiedImagePath(b.key, QStringLiteral("poster"));   // never a stored error page (#387)
     };
 }
 
@@ -5726,7 +5726,7 @@ void HomeView::populateChannelGuide()
         // …under the channel's own row-producer key, the identity everything else in this feature uses. A
         // user who has dropped a logo in through the metadata editor gets it here; nobody else has one, and
         // that is unremarkable.
-        const QString art = MetaCache::imagePath(channels::rowProducerKey(c.id), QStringLiteral("poster"));
+        const QString art = MetaCache::verifiedImagePath(channels::rowProducerKey(c.id), QStringLiteral("poster")); // #387
         if (!art.isEmpty()) logos.insert(c.id, art);
     }
     const QDateTime dayStart = QDateTime::fromSecsSinceEpoch(dayUtc, Qt::UTC);

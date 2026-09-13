@@ -55,8 +55,11 @@ namespace MetaCache
     MediaDetail cachedDetailScraped(const QString& key);
 
     // Artwork. cacheImage downloads url into the item's folder as <role>.<ext> (async; no-op for empty /
-    // non-http urls or when already cached) and records it under "images". imagePath returns the local
+    // non-http urls or when already cached) and records it under "images" - only if the reply's BYTES are a picture
+    // (CoverFetch::isPicture, #387); any other successful body is not stored. imagePath returns the local
     // file for a role ("" when absent); displayImage picks the cached grid image if present, else `url`.
+    // imagePath does not look at bytes. What a download put there is read back through verifiedImagePath (below) by
+    // cacheImage's own guard, loadArt, cachedDetail(Scraped), scrapedImage/displayImage and the miximage inputs.
     void cacheImage(const QString& key, const QString& role, const QString& url);
     QString imagePath(const QString& key, const QString& role);
     // imagePath, but only if the stored file's BYTES are a picture (#382): the one check the four remote music/
