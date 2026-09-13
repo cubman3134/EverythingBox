@@ -12,6 +12,26 @@
 namespace browse
 {
 
+namespace
+{
+// A server-shelf TRACK id, and nothing else a shelf mints: an album or an artist names nothing a player opens.
+bool isShelfTrack(const QString& s)
+{
+    const ServerMusic::Ref r = ServerMusic::parse(s);
+    return r.ok && r.kind == ServerMusic::Kind::Track;
+}
+
+// `albumKey` when it is an album OF THE SAME SHELF as `trackId`, else empty. A key that names another server's
+// album, or something that is not an album, would send the fetch to the wrong place or to nothing — worse than
+// having no album, which at least says so.
+QString sameShelfAlbum(const QString& trackId, const QString& albumKey)
+{
+    const ServerMusic::Ref t = ServerMusic::parse(trackId);
+    const ServerMusic::Ref a = ServerMusic::parse(albumKey);
+    return (t.ok && a.ok && a.kind == ServerMusic::Kind::Album && a.sourceId == t.sourceId) ? albumKey : QString();
+}
+} // namespace
+
 MediaItem favoriteShelfRow(const FavoriteItem& f)
 {
     MediaItem it;
@@ -61,9 +81,50 @@ FavoriteRoute favoriteRouteFor(const MediaItem& favItem, const QVector<FavoriteI
             }
             r.how = FavoriteOpen::ServerTrack;
         }
-        else if (Jellyfin::isQualified(id) || ServerMusic::isQualified(id))
+        else if (Jellyfin::isQualified(id))
         {
-            r.how = FavoriteOpen::TrackNoDoor;
+            // #368. JellyfinMusicClient::streamUrl mints from the id and the server's STORED sign-in, with nothing
+            // fetched first — so it opens straight after a restart, exactly as a Subsonic track does. It mints
+            // nothing for a server that is gone or switched off, and each of those says which it is.
+            const QString srv = Jellyfin::serverOf(id);
+            if (!(world.jellyfinKnown && world.jellyfinKnown(srv)))
+            {
+                r.how = FavoriteOpen::TrackServerGone;
+                return r;
+            }
+            if (!(world.jellyfinOn && world.jellyfinOn(srv)))
+            {
+                r.how = FavoriteOpen::TrackServerOff;
+                return r;
+            }
+            r.how = FavoriteOpen::ServerTrack;
+        }
+        else if (ServerMusic::isQualified(id))
+        {
+            // #368. An EverythingBox server's track url may be signed, so it lives for one session — filled when
+            // the track's ALBUM is fetched — and the id cannot name that album. The record can: every track
+            // favourite carries the album its row was on (FavoriteItem::albumKey). openRecent is handed that
+            // album as the path and the track as the key, and fetches the album first when it holds no url.
+            if (!(world.shelfKnown && world.shelfKnown(ServerMusic::sourceOf(id))))
+            {
+                r.how = FavoriteOpen::TrackServerGone;
+                return r;
+            }
+            QString album;
+            for (const FavoriteItem& f : stored)
+                if (f.itemId == id) { album = sameShelfAlbum(id, f.albumKey); break; }
+            // A star from before #368 has no album. It still opens when this session already holds its url
+            // (its album was browsed); otherwise it says what to do, rather than open a player on nothing.
+            if (album.isEmpty() && !(world.shelfUrlReady && world.shelfUrlReady(id)))
+            {
+                r.how = FavoriteOpen::TrackAlbumUnknown;
+                return r;
+            }
+            r.how = FavoriteOpen::ServerTrack;
+            r.path = album.isEmpty() ? id : album;   // where it plays from: its album, when one is known
+            r.albumKey = album;
+            r.kind = QStringLiteral("audio"); r.resumeKey = id;
+            r.title = favItem.title; r.thumb = favItem.thumbnailUrl;
             return r;
         }
         else
@@ -96,7 +157,7 @@ FavoriteRoute favoriteRouteFor(const MediaItem& favItem, const QVector<FavoriteI
             r.how = FavoriteOpen::LocalTrack;
         }
         // The id in BOTH path and resume key: openRecent consults the key first for a music identity (so a
-        // Subsonic id reaches its qualified-track arm), and reads the path for a local file.
+        // Subsonic or Jellyfin id reaches its qualified-track arm), and reads the path for a local file.
         r.path = id; r.kind = QStringLiteral("audio"); r.resumeKey = id;
         r.title = favItem.title; r.thumb = favItem.thumbnailUrl;
         return r;
@@ -105,6 +166,75 @@ FavoriteRoute favoriteRouteFor(const MediaItem& favItem, const QVector<FavoriteI
     r.addonId = addonId;
     r.how = (world.sourceKnown && world.sourceKnown(addonId)) ? FavoriteOpen::Addon : FavoriteOpen::AddonMissing;
     return r;
+}
+
+RemoteTrackOpen remoteTrackOpenFor(const QString& path, const QString& kind, const QString& resumeKey)
+{
+    RemoteTrackOpen o;
+    // THE KEY FIRST, then the path — openRecent's rule for every identity: the key is what the row IS, the path
+    // only where it played from. For a shelf track the path may be that album, and it is kept only when it is.
+    if (isShelfTrack(resumeKey))
+    {
+        o.trackId = resumeKey;
+        o.albumKey = sameShelfAlbum(resumeKey, path);
+        return o;
+    }
+    if (isShelfTrack(path))
+    {
+        o.trackId = path;
+        return o;
+    }
+    // A Jellyfin id carries no kind, and openJellyfinItem opens it as a VIDEO. Only the caller's "audio" says
+    // this one is a music track (the favourite's route and openAudioStream's Recents row both file that kind).
+    if (kind == QLatin1String("audio"))
+    {
+        if (Jellyfin::isQualified(resumeKey))  o.trackId = resumeKey;
+        else if (Jellyfin::isQualified(path)) o.trackId = path;
+    }
+    return o;
+}
+
+void openRemoteTrack(const RemoteTrackOpen& o, const QString& title, const RemoteTrackDoors& doors)
+{
+    if (o.trackId.isEmpty() || !doors.mint || !doors.play || !doors.say) return;
+    // Minted now, handed straight to the player, kept nowhere.
+    const QString url = doors.mint(o.trackId);
+    if (!url.isEmpty())
+    {
+        doors.play(url, o.trackId);
+        return;
+    }
+    if (o.albumKey.isEmpty() || !doors.fetchAlbum)
+    {
+        doors.say(Jellyfin::isQualified(o.trackId)
+                      ? QCoreApplication::translate("MainWindow", "“%1” can't be played — its music server is not "
+                                                                  "set up, or is switched off.").arg(title)
+                      : QCoreApplication::translate("MainWindow", "“%1” can't be played until its album has been "
+                                                                  "opened in Music.").arg(title));
+        return;
+    }
+    // COLD: this session holds no url for it. Fetch the album it is on — its urls come with it — then play. The
+    // doors are copied into the callback: the album lands later, after this call and its caller have returned.
+    const RemoteTrackDoors d = doors;
+    const QString trackId = o.trackId;
+    doors.fetchAlbum(o.albumKey, [d, trackId, title](bool ok, const QString& sentence) {
+        if (!ok)
+        {
+            // The client's own sentence ("That server is not connected any more."), which has never seen a url.
+            d.say(!sentence.isEmpty() ? sentence
+                                      : QCoreApplication::translate("MainWindow", "“%1” could not be fetched from its "
+                                                                                  "music server.").arg(title));
+            return;
+        }
+        const QString u = d.mint(trackId);
+        if (u.isEmpty())
+        {
+            d.say(QCoreApplication::translate("MainWindow", "“%1” is no longer on its album on the music server.")
+                      .arg(title));
+            return;
+        }
+        d.play(u, trackId);
+    });
 }
 
 QString favoriteOpenSentence(FavoriteOpen how, const QString& title)
@@ -118,9 +248,13 @@ QString favoriteOpenSentence(FavoriteOpen how, const QString& title)
         case FavoriteOpen::TrackServerGone:
             return QCoreApplication::translate("HomeView", "“%1” can't be played — its music server is no "
                                                            "longer set up.").arg(title);
-        case FavoriteOpen::TrackNoDoor:
-            return QCoreApplication::translate("HomeView", "“%1” is on a music source Favorites can't open "
-                                                           "yet — play it from Music.").arg(title);
+        case FavoriteOpen::TrackServerOff:
+            return QCoreApplication::translate("HomeView", "“%1” can't be played — its music server is switched "
+                                                           "off.").arg(title);
+        case FavoriteOpen::TrackAlbumUnknown:
+            return QCoreApplication::translate("HomeView", "“%1” was starred before Favorites kept its album — play "
+                                                           "it from Music, and star it again there to open it from "
+                                                           "here.").arg(title);
         case FavoriteOpen::ReopenByPath: case FavoriteOpen::NativeStore: case FavoriteOpen::LocalTrack:
         case FavoriteOpen::LocalAlbum:
         case FavoriteOpen::ServerTrack:  case FavoriteOpen::Addon:       case FavoriteOpen::AddonMissing:

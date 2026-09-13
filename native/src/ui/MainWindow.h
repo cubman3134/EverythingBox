@@ -1466,6 +1466,10 @@ private:
     // #365 (same TU): the same menus' Add to playlist / Download labels on a track row, said once for both.
     QString trackPlaylistVerbLabel() const;
     QString trackDownloadVerbLabel() const;
+    // #368 (same TU): openRecent's remote-track arm — a Jellyfin music track or an EverythingBox-server track,
+    // by qualified id (browse::remoteTrackOpenFor decides, browse::openRemoteTrack sequences). True = claimed.
+    bool openRemoteMusicTrack(const QString& path, const QString& kind, const QString& resumeKey,
+                              const QString& title, const QString& thumb);
     int  themedBrowseIndex() const;  // the themed column's highlighted row, or -1 (not a themed browse surface)
     bool browseQueueTarget(browse::QueueTarget* out) const;  // …resolved to a music row, on whichever layout
     void showBrowseQueueMenu(int itemsRow);   // the right-click route: the verbs over one classic grid row

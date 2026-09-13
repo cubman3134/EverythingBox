@@ -88,6 +88,9 @@ public:
     // Empty when the album's tracks have not been fetched, or the shelf is gone — which the caller renders
     // as "unavailable" rather than erroring at play.
     QString streamUrl(const QString& qualifiedTrackId) const;
+    // Whether streamUrl would answer (#368) — asked by the Favorites shelf, which needs a yes or no and has no
+    // business holding a url that may be signed.
+    bool hasStreamUrl(const QString& qualifiedTrackId) const;
 
     // The album's cover, fetched into MetaCache under the qualified album key. The shelf sends an ordinary
     // image url on the album row; it is fetched rather than rendered from, because a MediaItem's thumbnail

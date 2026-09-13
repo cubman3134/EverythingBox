@@ -9820,6 +9820,15 @@ void HomeView::openFavorite(const MediaItem& favItem)
     // #369: the local music index — the one openMusicAlbum plays a local album out of — so a starred local
     // track can be found on its album. Not yet scanned, it is empty and every local track falls back below.
     world.localMusic  = &MusicLibrary::index();
+    // #368: the other two music servers. A Jellyfin track's url is minted from its id and the server's stored
+    // sign-in, so the questions are only "is that server still here" and "is it switched on". An EverythingBox
+    // server's shelf list is pushed down from the add-on side — read fresh, so a server connected since the last
+    // look counts — and its urls live for one session, so the router asks whether this session holds this one.
+    world.jellyfinKnown = [](const QString& id) { JellyfinServer s; return JellyfinServerStore::get(id, s); };
+    world.jellyfinOn    = [](const QString& id) { JellyfinServer s; return JellyfinServerStore::get(id, s) && s.enabled; };
+    refreshMusicShelves();
+    world.shelfKnown    = [](const QString& src) { return ServerMusicClient::instance().has(src); };
+    world.shelfUrlReady = [](const QString& id) { return ServerMusicClient::instance().hasStreamUrl(id); };
     const browse::FavoriteRoute route = browse::favoriteRouteFor(favItem, FavoritesStore::list(), world);
     switch (route.how)
     {
@@ -9838,6 +9847,8 @@ void HomeView::openFavorite(const MediaItem& favItem)
         case browse::FavoriteOpen::LocalTrack:
         // #364: a SUBSONIC TRACK re-opens by its qualified id, which openRecent's qualified-track arm mints a
         // fresh stream url from — with no index fetched first, so a star from last session opens cold.
+        // #368: a JELLYFIN track the same way, by its id; an EVERYTHINGBOX-SERVER track with its ALBUM as the path,
+        // which openRecent's remote-track arm fetches first when this session holds no url for the track.
         case browse::FavoriteOpen::ServerTrack:
             emit openRecent(route.path, route.kind, route.resumeKey, route.title, route.thumb);
             return;
@@ -9845,7 +9856,8 @@ void HomeView::openFavorite(const MediaItem& favItem)
         // which would send somebody looking for an add-on the track never had.
         case browse::FavoriteOpen::TrackFileGone:
         case browse::FavoriteOpen::TrackServerGone:
-        case browse::FavoriteOpen::TrackNoDoor:
+        case browse::FavoriteOpen::TrackServerOff:
+        case browse::FavoriteOpen::TrackAlbumUnknown:
             showToast(browse::favoriteOpenSentence(route.how, favItem.title), kFeedbackLong);
             return;
         // A favourited native-store game with no local file (Steam/Epic) has no source addon - reopen its
@@ -11131,6 +11143,10 @@ void HomeView::favoriteThemedLeaf(int idx)
         f.addonId = stack_.last().addon ? stack_.last().addon->manifest.id : QString();
         f.itemId = it.id; f.title = it.title; f.subtitle = it.subtitle;
         f.type = it.type; f.thumbnailUrl = it.thumbnailUrl; f.expandable = it.expandable;
+        // #368: a music track records the album its row is on, from the one builder the classic menus use — an
+        // EverythingBox server's track id cannot name its album, and ★ Favorites needs it to open one after a
+        // restart. Empty for every row that is not a track.
+        f.albumKey = browse::trackFavoriteFor(it).albumKey;
         FavoritesStore::add(f);
     }
     // Nudge the live panel so its heart reflects the new state.

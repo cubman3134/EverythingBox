@@ -68,6 +68,7 @@ QVector<FavoriteItem> FavoritesStore::list()
         it.path         = o.value(QStringLiteral("path")).toString();
         it.kind         = o.value(QStringLiteral("kind")).toString();
         it.system       = o.value(QStringLiteral("system")).toString();
+        it.albumKey     = o.value(QStringLiteral("albumKey")).toString();
         it.ts           = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
         if (!it.itemId.isEmpty()) out.push_back(it);
     }
@@ -110,6 +111,7 @@ static void save(const QVector<FavoriteItem>& items)
         if (!it.path.isEmpty()) o.insert(QStringLiteral("path"), it.path);
         if (!it.kind.isEmpty()) o.insert(QStringLiteral("kind"), it.kind);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (!it.albumKey.isEmpty()) o.insert(QStringLiteral("albumKey"), it.albumKey);
         o.insert(QStringLiteral("ts"), static_cast<double>(it.ts));
         arr.append(o);
     }

@@ -16,7 +16,13 @@
 #include "MainWindow.h"
 
 #include "FeedbackPolicy.h"
+#include "../browse/FavoriteRoute.h"     // #368: remoteTrackOpenFor / openRemoteTrack
 #include "../core/FavoritesStore.h"
+#include "../core/ServerMusicClient.h"   // #368: a cold shelf track's album fetch
+#include "../core/SubsonicClient.h"      // MusicSupply::playUrl — the one place a credential enters a queue
+
+#include <QPointer>
+#include <QTimer>
 
 // The label said once for both classic menus, so the two cannot come to disagree about what the row does.
 // Decided by browse::trackFavoriteVerb: Favorite on a track that is not one, Remove on a track that is.
@@ -41,3 +47,35 @@ void MainWindow::pressTrackFavorite(const FavoriteItem& fav)
 // downloadBrowseItem (the themed Download's crawl). Only the words live here, said once for both menus.
 QString MainWindow::trackPlaylistVerbLabel() const { return tr("Add to playlist…"); }
 QString MainWindow::trackDownloadVerbLabel() const { return tr("Download"); }
+
+// ---- #368: a starred Jellyfin or EverythingBox-server track, opened from ★ Favorites ------------------------
+// openRecent's remote-track arm. WHAT it opens is browse::remoteTrackOpenFor and the ORDER it does things in is
+// browse::openRemoteTrack — both pure, both walked by probe_leafroute §12. Only the doors are here:
+//   * mint  — MusicSupply::playUrl, the one place a credential enters a queue. The url goes straight to the
+//             player and is kept nowhere (openAudioStream's Recents row is location()-scrubbed by the store).
+//   * fetch — ServerMusicClient::fetchAlbumTracks, for a shelf track this session holds no url for. Its reply
+//             is handled a turn LATER: `done` runs the whole play path, and running that inside the reply's own
+//             finished delivery is the #211 shape (a nested loop frees the reply under Qt's frames).
+//   * say   — notify, which the user sees. openRecent's other lines go to a status bar the app keeps hidden.
+// Nothing here touches FavoritesStore: opening is not starring, and the love hook must not fire.
+bool MainWindow::openRemoteMusicTrack(const QString& path, const QString& kind, const QString& resumeKey,
+                                      const QString& title, const QString& thumb)
+{
+    const browse::RemoteTrackOpen o = browse::remoteTrackOpenFor(path, kind, resumeKey);
+    if (o.trackId.isEmpty()) return false;
+    QPointer<MainWindow> self(this);
+    browse::RemoteTrackDoors doors;
+    doors.mint = [](const QString& trackId) { return MusicSupply::playUrl(trackId); };
+    doors.fetchAlbum = [self](const QString& albumKey, std::function<void(bool, const QString&)> done) {
+        ServerMusicClient::instance().fetchAlbumTracks(albumKey, [self, done](const ServerMusicClient::Result& r) {
+            if (!self) return;
+            QTimer::singleShot(0, self.data(), [self, done, r] { if (self) done(r.ok, r.message); });
+        });
+    };
+    doors.play = [self, title, thumb](const QString& url, const QString& trackId) {
+        if (self) self->openAudioStream(url, trackId, title, thumb);   // re-keyed to the stable id
+    };
+    doors.say = [self](const QString& sentence) { if (self) self->notify(sentence, kFeedbackLong); };
+    browse::openRemoteTrack(o, title, doors);
+    return true;
+}

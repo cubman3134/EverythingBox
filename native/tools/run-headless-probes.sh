@@ -2932,6 +2932,50 @@ else
   [ "$(sed -E 's://.*$::' "$fo_mw" 2>/dev/null | grep -cE 'connect\(home_,[[:space:]]*&HomeView::playMusicAlbumRequested,[[:space:]]*this,[[:space:]]*&MainWindow::openMusicAlbum\)' || true)" -ge 1 ] \
     || fo_note "MainWindow no longer connects HomeView::playMusicAlbumRequested to MainWindow::openMusicAlbum. A starred track's album would be asked for and never played."
 
+  # --- 7. #368: a Jellyfin or EverythingBox-server track opens, through openRecent's remote-track arm. ---
+  # openRecent asks MainWindow::openRemoteMusicTrack AHEAD of its Jellyfin arm, which would open a Jellyfin id as a
+  # video. The member runs the two functions probe_leafroute s12 walks, through its four doors, hands the album
+  # reply to the next turn (#211), and writes no favourite. openFavorite answers every question the router asks
+  # of the two servers, reading the shelves fresh first. The themed chooser records the album as the classic menus do.
+  fo_or="$(mktemp)"; fo_tf="$(mktemp)"; fo_tl="$(mktemp)"
+  sed -E 's://.*$::' "$fo_mw" 2>/dev/null | awk '/^void MainWindow::openRecent\(/ { p = 1 } p { print } p && /^\}/ { exit }' > "$fo_or"
+  sed -E 's://.*$::' "$HERE/../src/ui/MainWindowTrackFavorite.cpp" 2>/dev/null \
+    | awk '/^bool MainWindow::openRemoteMusicTrack\(/ { p = 1 } p { print } p && /^\}/ { exit }' > "$fo_tf"
+  awk '/^void HomeView::favoriteThemedLeaf\(/ { p = 1 } p { print } p && /^\}/ { exit }' "$fo_v" </dev/null > "$fo_tl"
+  fo_nor="$(wc -l < "$fo_or" | tr -d '[:space:]')"
+  fo_ntf="$(wc -l < "$fo_tf" | tr -d '[:space:]')"
+  fo_ntl="$(wc -l < "$fo_tl" | tr -d '[:space:]')"
+  [ "$fo_nor" -ge 50 ] || fo_note "MainWindow::openRecent came out as $fo_nor line(s): it moved or its signature changed, and clause 7 is checking nothing."
+  [ "$fo_ntf" -ge 10 ] || fo_note "MainWindow::openRemoteMusicTrack came out of MainWindowTrackFavorite.cpp as $fo_ntf line(s). A starred Jellyfin or EverythingBox-server track has no door without it."
+  [ "$fo_ntl" -ge 10 ] || fo_note "HomeView::favoriteThemedLeaf came out as $fo_ntl line(s): it moved or its signature changed, and clause 7 is checking nothing."
+  fo_rm="$(awk '/openRemoteMusicTrack\(/ { print NR; exit }' "$fo_or" </dev/null)"
+  fo_jf="$(awk '/Jellyfin::isQualified\(resumeKey\)/ { print NR; exit }' "$fo_or" </dev/null)"
+  [ -n "$fo_jf" ] || fo_note "openRecent's Jellyfin arm (Jellyfin::isQualified(resumeKey)) was not found, so the order check below compares nothing."
+  if [ -z "$fo_rm" ]; then
+    fo_note "MainWindow::openRecent never asks openRemoteMusicTrack. A starred Jellyfin or EverythingBox-server track reaches no door that plays it."
+  elif [ -n "$fo_jf" ] && [ "$fo_rm" -gt "$fo_jf" ]; then
+    fo_note "MainWindow::openRecent asks openRemoteMusicTrack AFTER its Jellyfin arm, which opens every Jellyfin id as a video - a starred Jellyfin track would go to the video door."
+  fi
+  for fo_need in 'browse::remoteTrackOpenFor(' 'browse::openRemoteTrack(' 'MusicSupply::playUrl(' \
+                 'ServerMusicClient::instance().fetchAlbumTracks(' 'QTimer::singleShot(0' 'openAudioStream(' 'notify('; do
+    [ "$(grep -cF "$fo_need" "$fo_tf" || true)" -ge 1 ] \
+      || fo_note "MainWindow::openRemoteMusicTrack does not call $fo_need - it has drifted from the sequence probe_leafroute s12 walks (mint with the one minter, fetch a cold album, play the next turn, say what failed)."
+  done
+  [ "$(grep -cE 'FavoritesStore::|statusBar\(\)|errorString\(' "$fo_tf" || true)" -eq 0 ] \
+    || fo_note "MainWindow::openRemoteMusicTrack touches FavoritesStore, the hidden status bar, or a request's errorString. Opening is not starring; a failure must be seen; and a sentence built from a request can carry its token."
+  for fo_q in jellyfinKnown jellyfinOn shelfKnown shelfUrlReady; do
+    [ "$(grep -cE "world\.${fo_q}[[:space:]]*=" "$fo_fn" || true)" -ge 1 ] \
+      || fo_note "HomeView::openFavorite does not answer world.$fo_q. An unanswered question answers false, so every such favourite would say its server is gone."
+  done
+  fo_rs="$(awk '/refreshMusicShelves\(\)/ { print NR; exit }' "$fo_fn" </dev/null)"
+  if [ -z "$fo_rs" ] || { [ -n "$fo_rt" ] && [ "$fo_rs" -gt "$fo_rt" ]; }; then
+    fo_note "HomeView::openFavorite does not read the music shelves fresh (refreshMusicShelves()) before it routes. A server connected since the last look would read as gone."
+  fi
+  [ "$(grep -cE 'albumKey[[:space:]]*=[[:space:]]*browse::trackFavoriteFor\(it\)\.albumKey' "$fo_tl" || true)" -ge 1 ] \
+    || fo_note "HomeView::favoriteThemedLeaf does not record a track's album (f.albumKey = browse::trackFavoriteFor(it).albumKey). An EverythingBox-server track starred on the themed layout could not open from Favorites after a restart."
+  rm -f "$fo_or" "$fo_tf" "$fo_tl"
+
+
   rm -f "$fo_h" "$fo_v" "$fo_fn" "$fo_bf"
   if [ "$fo_fail" -eq 0 ]; then
     echo "PASS: favourites shelf open routing (#364) ($fo_nenum route(s) handled in openFavorite, router after the PC-game arm, no store writes)"
