@@ -113,4 +113,35 @@ namespace MusicSuppliers
     {
         return type == QLatin1String("music") && !searchOnly && !hasSkipReason;
     }
+
+    // ...applied to ONE SOURCE: the id of the catalogue the merge takes as that server's shelf, or "" when it
+    // takes none. The FIRST qualifying catalogue only — one music shelf per server, because a second would be
+    // the same library twice. HomeView::refreshMusicShelves builds the merge's shelf list from this.
+    struct CatalogFacts
+    {
+        QString id;
+        QString type;
+        bool    searchOnly    = false;
+        bool    hasSkipReason = false;
+    };
+    inline QString shelfCatalogId(bool remoteHttp, bool stremio, bool enabled, const QList<CatalogFacts>& catalogs)
+    {
+        if (!sourceMayServeShelf(remoteHttp, stremio, enabled)) return QString();
+        for (const CatalogFacts& c : catalogs)
+            if (catalogIsShelf(c.type, c.searchOnly, c.hasSkipReason)) return c.id;
+        return QString();
+    }
+
+    // ---- WHICH CATALOGUE TABS THE MUSIC TAB ABSORBS (issue #392) ------------------------------------------
+    // A shelf the merge took is browsable under Music, artists and albums and all; its own catalogue tab is the
+    // same music a second time. So that catalogue gets no tab — decided by whether the MERGE took it (the id
+    // shelfCatalogId returned for its source), never by its name or its type. Everything else keeps its tab: a
+    // bundled metadata add-on's `music` catalogue (never a shelf), a Stremio add-on's, a server's second music
+    // catalogue, a search-only or self-explaining one, and every catalogue of any other type. And only where the
+    // Music tab really exists: a shelf is itself a supplier, so it always does, but a catalogue is never hidden
+    // on the strength of a door that is not there.
+    inline bool catalogTabAbsorbed(const Suppliers& s, const QString& shelfCatalogIdOfSource, const QString& catalogId)
+    {
+        return tabOffered(s) && !shelfCatalogIdOfSource.isEmpty() && catalogId == shelfCatalogIdOfSource;
+    }
 }

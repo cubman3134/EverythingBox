@@ -34,6 +34,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "HomeRows.h"
+#include "NavKeys.h"       // issue #392: a catalogue tab's key and the stored row it answers to
 #include "ProfileStore.h"
 #include "SettingsTxn.h"   // issue #322: the settings transaction this store's keys must sit outside of
 
@@ -611,12 +612,115 @@ static void testEditSurvivesSettingsDiscard()
     HomeRowStore::reset();
 }
 
+// ---- A CATALOGUE CAN NOT SPELL A BUILT-IN TAB'S KEY (issue #392) ----------------------------------------------
+// HomeView addresses every tab by one string. activateNav() opens the FIRST target with it and styleTypeButtons()
+// lights EVERY button with it, so the two are modelled here exactly that way, over a strip holding each built-in
+// tab AND a catalogue whose id is that tab's key. HomeView builds a catalogue's key with navkeys::forCatalogue
+// (the headless runner holds the call sites to it); this holds what that key does.
+struct Tab { QString key; QString opens; };
+static int firstMatch(const QVector<Tab>& strip, const QString& key)        // activateNav
+{
+    for (int i = 0; i < strip.size(); ++i) if (strip[i].key == key) return i;
+    return -1;
+}
+static int litCount(const QVector<Tab>& strip, const QString& activeKey)    // styleTypeButtons
+{
+    int n = 0;
+    for (const Tab& t : strip) if (t.key == activeKey) ++n;
+    return n;
+}
+
+static void testCatalogueKeysNeverCollide()
+{
+    using namespace navkeys;
+    CHECK(builtInKeys() == (QStringList{ QStringLiteral("home"), QStringLiteral("photos"), QStringLiteral("music"),
+                                         QStringLiteral("audiobooks"), QStringLiteral("books") }));
+
+    // Every built-in key, as a catalogue id: its tab and the built-in tab both exist, pressing each opens its own
+    // screen, and only the pressed one is lit.
+    for (const QString& k : builtInKeys())
+    {
+        const QVector<Tab> strip = { { k, QStringLiteral("built-in ") + k },
+                                     { forCatalogue(k), QStringLiteral("catalogue ") + k } };
+        const bool distinct = strip[0].key != strip[1].key && !builtInKeys().contains(strip[1].key);
+        if (!distinct)
+            std::fprintf(stderr, "HOMEROWS-FAIL #392 catalogue \"%s\" is keyed \"%s\"\n", qPrintable(k),
+                         qPrintable(strip[1].key));
+        CHECK(distinct);
+        CHECK(firstMatch(strip, strip[0].key) == 0);   // the built-in tab opens the built-in screen
+        CHECK(firstMatch(strip, strip[1].key) == 1);   // ...and the catalogue's tab opens the catalogue
+        CHECK(litCount(strip, strip[0].key) == 1);     // pressing one lights one
+        CHECK(litCount(strip, strip[1].key) == 1);
+    }
+
+    // The carousel reads `item:<n>` as a grid item, so a catalogue may not be keyed like one either.
+    CHECK(!forCatalogue(QStringLiteral("item:3")).startsWith(QLatin1String("item:")));
+
+    // An ordinary id keeps its spelling: its key, and so its stored `source:` row, are what they always were.
+    for (const char* id : { "cinemeta.movie", "aio.games", "musiclib", "Music", "musics", "bios", "tv" })
+        CHECK(forCatalogue(QString::fromLatin1(id)) == QString::fromLatin1(id));
+
+    // One-to-one: escaping the escape prefix means two different ids never share a key, and none is a built-in's.
+    const QStringList ids = { QStringLiteral("music"), QStringLiteral("catalog:music"),
+                              QStringLiteral("catalog:catalog:music"), QStringLiteral("item:1"),
+                              QStringLiteral("catalog:item:1"), QStringLiteral("home"), QStringLiteral("musiclib") };
+    QSet<QString> keys;
+    for (const QString& id : ids)
+    {
+        const QString key = forCatalogue(id);
+        CHECK(!builtInKeys().contains(key));
+        CHECK(!key.startsWith(QLatin1String("item:")));
+        keys.insert(key);
+    }
+    CHECK(keys.size() == ids.size());
+
+    // ---- a STORED row still resolves --------------------------------------------------------------------------
+    const QSet<QString> none;
+    // An ordinary catalogue: unchanged whatever is stored.
+    CHECK(catalogueRowId(QStringLiteral("aio.games"), { QStringLiteral("aio.games") }, none)
+          == QStringLiteral("source:aio.games"));
+    // A catalogue called `home`: the built-in Home tab is on the strip but never has a row, so it is not among the
+    // row keys and the pre-#392 spelling is always the catalogue's.
+    const QSet<QString> homePresent = { forCatalogue(QStringLiteral("home")) };
+    CHECK(catalogueRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") })
+          == QStringLiteral("source:home"));
+    // A catalogue called `photos`, on a device with no Photos tab: the old spelling is still the catalogue's.
+    CHECK(catalogueRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
+                         { QStringLiteral("source:photos") })
+          == QStringLiteral("source:photos"));
+    // ...and on a device WITH the Photos tab the old spelling stays with the built-in (whose key never changed),
+    // while the catalogue answers to its new id.
+    const QSet<QString> photosPresent = { QStringLiteral("photos"), forCatalogue(QStringLiteral("photos")) };
+    CHECK(rowIdForKey(QStringLiteral("photos")) == QStringLiteral("source:photos"));
+    CHECK(catalogueRowId(QStringLiteral("photos"), photosPresent, { QStringLiteral("source:photos") })
+          == QStringLiteral("source:catalog:photos"));
+    // Once the new id is stored it wins over the old spelling; with nothing stored it is the new id.
+    CHECK(catalogueRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) },
+                         { QStringLiteral("source:books"), QStringLiteral("source:catalog:books") })
+          == QStringLiteral("source:catalog:books"));
+    CHECK(catalogueRowId(QStringLiteral("books"), { forCatalogue(QStringLiteral("books")) }, none)
+          == QStringLiteral("source:catalog:books"));
+
+    // Through the planner: a profile that HID its `home` catalogue before #392 still has it hidden, and one that
+    // moved its `photos` catalogue first (no Photos tab here) still has it first.
+    const QString homeRow = catalogueRowId(QStringLiteral("home"), homePresent, { QStringLiteral("source:home") });
+    CHECK(spell(plan(avail({ QStringLiteral("category:video"), homeRow }),
+                     { row(QStringLiteral("source:home"), false), row(QStringLiteral("category:video")) }))
+          == QStringLiteral("category:video"));
+    const QString photosRow = catalogueRowId(QStringLiteral("photos"), { forCatalogue(QStringLiteral("photos")) },
+                                             { QStringLiteral("source:photos") });
+    CHECK(spell(plan(avail({ QStringLiteral("category:video"), photosRow }),
+                     { row(QStringLiteral("source:photos")), row(QStringLiteral("category:video")) }))
+          == QStringLiteral("source:photos category:video"));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("EverythingBoxProbe"));
     QCoreApplication::setApplicationName(QStringLiteral("probe_homerows"));
 
+    testCatalogueKeysNeverCollide();   // issue #392
     testDefaultIsToday();
     testReorderHideCap();
     testWhichHomeDrawsWhat();

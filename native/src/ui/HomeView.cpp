@@ -56,6 +56,7 @@
 #include "../core/FilterPresetStore.h" // per-profile saved filter presets (#63)
 #include "../core/TraktClient.h"   // calendarAvailable()/cachedCalendar() — the Trakt shelf's only gate (#23)
 #include "../core/HomeRows.h"   // issue #161: the per-profile home row list + the pure planner
+#include "../core/NavKeys.h"    // issue #392: a catalogue tab's key can never be a built-in tab's
 #include "../core/Requests.h"        // #109: the id path, the vocabulary, the anti-duplicate rule
 #include "../core/RequestBackend.h"  // #109: the seam — and the chooser that says whether ANY backend is set up
 #include "../core/RequestStore.h"    // #109: this profile's own request rows (the Requests shelf)
@@ -1278,6 +1279,16 @@ void HomeView::refresh()
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; bool selfExplaining; };
     QVector<CatRef> all;
+    // The shelf list is brought up to date FIRST: the Music tab gate below reads it, and so does the #392
+    // absorb rule here (see the note at the tab gate for why it cannot wait for its own connection).
+    refreshMusicShelves();
+    // #392: a server music shelf the merged Music library took is browsable under Music; its own catalogue tab
+    // would be the same music twice. The rule is the MERGE's list (MusicSuppliers::catalogTabAbsorbed), not a
+    // name: a metadata add-on's `music` catalogue, a server's second one and every other type keep their tabs.
+    const MusicSuppliers::Suppliers musicSupply = musicSuppliers();
+    QHash<QString, QString> shelfOfSource;   // source id -> the catalogue the merge took as its shelf
+    for (const ServerMusicClient::Shelf& sh : ServerMusicClient::instance().shelves())
+        shelfOfSource.insert(sh.id, sh.catalogId);
     for (LoadedAddon* s : mgr_->sources())
     {
         if (!mgr_->isEnabled(s->manifest.id)) continue;
@@ -1286,7 +1297,8 @@ void HomeView::refresh()
         // A `bios:` catalog (the file provider's BIOS index — Kind "game") is machinery for the BIOS fetcher,
         // never a browsable shelf: keep it off the home screen.
         for (const AddonCatalog& c : mgr_->catalogs(s))
-            if (!c.searchOnly && !c.id.startsWith(QStringLiteral("bios:")))
+            if (!c.searchOnly && !c.id.startsWith(QStringLiteral("bios:"))
+                && !MusicSuppliers::catalogTabAbsorbed(musicSupply, shelfOfSource.value(s->manifest.id), c.id))
                 all.push_back({ s, c, isSelfExplaining(s, c) });
     }
     // Best source score available per media type. A self-explaining catalog is EXCLUDED from this (exactly as
@@ -1305,8 +1317,11 @@ void HomeView::refresh()
         auto* btn = new QPushButton(display, this);
         const QString cid = c.id, ctype = c.type;
         connect(btn, &QPushButton::clicked, this, [this, addon, cid, ctype, display] { selectType(addon, cid, ctype, display); });
-        makeTab(btn, cid, ctype);
-        navTargets_.push_back({ cid, false, addon, cid, ctype, display });
+        // #392: the KEY is navkeys::forCatalogue(cid), never the raw id — a catalogue called `music` (or any other
+        // built-in tab's key) would otherwise share the built-in tab's key. catalogId stays the real id.
+        const QString key = navkeys::forCatalogue(cid);
+        makeTab(btn, key, ctype);
+        navTargets_.push_back({ key, false, addon, cid, ctype, display });
         if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; first = false; }
     };
 
@@ -1387,8 +1402,8 @@ void HomeView::refresh()
     // refresh() connection - so a server connected (or a manifest that gained a music catalogue) rebuilt the
     // tabs against the PREVIOUS shelf list and the tab appeared one refresh late, and an add-on switched on or
     // off (an imperative refresh() with no sourcesChanged at all) never moved it. refreshMusicShelves() walks
-    // the already-loaded sources and nothing else, so the refresh still waits on nothing.
-    refreshMusicShelves();
+    // the already-loaded sources and nothing else, so the refresh still waits on nothing. (#392: the call now
+    // sits above the catalogue election, which reads the same list to drop the shelf's own tab.)
     if (MusicSuppliers::tabOffered(musicSuppliers()))
     {
         auto* musicBtn = new QPushButton(tr("Music"), this);
@@ -2005,7 +2020,7 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
 {
     recentView_ = false;
     applyGridMode(/*recentList*/ false);
-    styleTypeButtons(catalogId);
+    styleTypeButtons(navkeys::forCatalogue(catalogId)); // #392: the tab's key, not the raw id (see refresh)
     search_->clear();
     stack_.clear();
     if (agg_) agg_->cancel(); // J17: switching to a catalog abandons any in-flight cross-addon search
@@ -2094,10 +2109,33 @@ QVector<HomeView::HomeRowChoice> HomeView::homeRowCatalogue()
             out.push_back({ QStringLiteral("category:") + key,
                             tr("Category: %1").arg(categoryMeta(key).value(QStringLiteral("title")).toString()),
                             false });
+    const auto rowIdOf = sourceRowIdResolver(); // #392: the same id the themed producers plan by
     for (const NavTarget& t : navTargets_)
         if (!t.isHome && !t.navKey.isEmpty())
-            out.push_back({ QStringLiteral("source:") + t.navKey, tr("Catalogue: %1").arg(t.name), false });
+            out.push_back({ rowIdOf(t.navKey), tr("Catalogue: %1").arg(t.name), false });
     return out;
+}
+
+// The `source:` row id each nav key answers to in the stored home-row list (#392). A built-in tab's is its key;
+// a catalogue's is navkeys::catalogueRowId, which hands a pre-#392 stored spelling back to a catalogue whose key
+// was escaped, so an existing arrangement keeps its place. Computed once per producer call — it reads the store.
+std::function<QString(const QString&)> HomeView::sourceRowIdResolver() const
+{
+    QSet<QString> rowKeys;   // the keys that have a `source:` row: every tab but Home (the producers skip it)
+    QHash<QString, QString> catalogueOfKey;
+    for (const NavTarget& t : navTargets_)
+    {
+        if (!t.isHome) rowKeys.insert(t.navKey);
+        if (t.addon) catalogueOfKey.insert(t.navKey, t.catalogId);
+    }
+    QSet<QString> stored;
+    for (const homerows::Row& r : HomeRowStore::list()) stored.insert(r.rowId);
+    return [rowKeys, catalogueOfKey, stored](const QString& navKey) {
+        if (navKey.isEmpty()) return QString();
+        const auto it = catalogueOfKey.constFind(navKey);
+        return it == catalogueOfKey.constEnd() ? navkeys::rowIdForKey(navKey)
+                                               : navkeys::catalogueRowId(it.value(), rowKeys, stored);
+    };
 }
 
 // ---- Custom home rows on the THEMED home (issue #161) ------------------------------------------------------
@@ -2175,9 +2213,9 @@ QVariantList HomeView::categoryCatalogs(const QString& categoryKey)
                             { QStringLiteral("playlistsCategory"), categoryKey }, { QStringLiteral("accent"), QStringLiteral("#6A6E78") } };
     // #161: the profile's row list orders/hides the catalogues ("source:<navKey>"). The Playlists folder
     // carries no navKey, so it is unaddressable and stays where it is — see applyHomeRowList.
-    return applyHomeRowList(out, [](const QVariantMap& m) {
-        const QString nk = m.value(QStringLiteral("navKey")).toString();
-        return nk.isEmpty() ? QString() : QStringLiteral("source:") + nk;
+    const auto rowIdOf = sourceRowIdResolver();   // #392: never "source:" + the key by hand
+    return applyHomeRowList(out, [rowIdOf](const QVariantMap& m) {
+        return rowIdOf(m.value(QStringLiteral("navKey")).toString());
     });
 }
 
@@ -2195,9 +2233,9 @@ QVariantList HomeView::systemItems()
                             { QStringLiteral("accent"), typeColor(t.type).name() } };
     }
     // #161: the profile's row list orders/hides the catalogue tiles ("source:<navKey>").
-    return applyHomeRowList(out, [](const QVariantMap& m) {
-        const QString nk = m.value(QStringLiteral("navKey")).toString();
-        return nk.isEmpty() ? QString() : QStringLiteral("source:") + nk;
+    const auto rowIdOf = sourceRowIdResolver();   // #392: never "source:" + the key by hand
+    return applyHomeRowList(out, [rowIdOf](const QVariantMap& m) {
+        return rowIdOf(m.value(QStringLiteral("navKey")).toString());
     });
 }
 
@@ -3583,6 +3621,13 @@ bool HomeView::musicMergePossible() const
 // bundled metadata add-on has a catalogue of type `music` too (the AIO catalog's MusicBrainz shelf), and
 // merging THAT into somebody's library would fold a database of every record ever pressed into the twelve
 // albums they own. A metadata shelf answers "what exists"; a server shelf answers "what you have".
+static QList<MusicSuppliers::CatalogFacts> shelfFacts(const QVector<AddonCatalog>& cats)
+{
+    QList<MusicSuppliers::CatalogFacts> out;
+    for (const AddonCatalog& c : cats) out.push_back({ c.id, c.type, c.searchOnly, !c.skipReason.isEmpty() });
+    return out;
+}
+
 void HomeView::refreshMusicShelves()
 {
     QVector<ServerMusicClient::Shelf> shelves;
@@ -3594,13 +3639,18 @@ void HomeView::refreshMusicShelves()
             // MusicSuppliers::sourceMayServeShelf so probe_musicsources can hold it (#384): since a shelf now
             // opens the Music TAB, a bundled add-on's `music` catalogue slipping through here would give every
             // install a Music tab backed by a database rather than a library.
-            if (!src || !MusicSuppliers::sourceMayServeShelf(src->transport == LoadedAddon::RemoteHttp,
-                                                             src->stremio, mgr_->isEnabled(src->manifest.id)))
-                continue;
-            for (const AddonCatalog& c : mgr_->catalogs(src))
+            // ...and of its catalogues, the first of type `music` that can be browsed at all (not searchOnly, no
+            // skip reason). Both halves are MusicSuppliers::shelfCatalogId, so the catalogue tab the Music tab
+            // absorbs (#392, refresh()) is exactly the one this list takes.
+            if (!src) continue;
+            const QVector<AddonCatalog> cats = mgr_->catalogs(src);
+            const QString shelfId = MusicSuppliers::shelfCatalogId(src->transport == LoadedAddon::RemoteHttp,
+                                                                   src->stremio, mgr_->isEnabled(src->manifest.id),
+                                                                   shelfFacts(cats));
+            if (shelfId.isEmpty()) continue;
+            for (const AddonCatalog& c : cats)
             {
-                // Of type `music`, and browsable at all (not searchOnly, no skip reason).
-                if (!MusicSuppliers::catalogIsShelf(c.type, c.searchOnly, !c.skipReason.isEmpty())) continue;
+                if (c.id != shelfId) continue;
                 ServerMusicClient::Shelf s;
                 s.id           = src->manifest.id;
                 s.name         = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
@@ -5395,8 +5445,8 @@ QString HomeView::currentCategoryKey(const QString& itemType) const
 // catalogue, so currentCatalogKey() says nothing about them ("native||"). Each root carries, as its mime, the
 // navKey its tab was opened by ("so loadTop() repopulates on Back"), and that tab declares the type the themed
 // bucket column already groups it under (Music -> "album" -> audio) — so this answers the category the user can
-// SEE they are in. Only the synthetic tabs are matched: an add-on catalogue's navKey is its catalogue id, which
-// could spell the same word. "" for anything else — a real catalogue answers for itself, and Search and Home
+// SEE they are in. Only the synthetic tabs are matched: an add-on catalogue's navKey used to be its raw catalogue
+// id, which could spell the same word (navkeys::forCatalogue escapes that since #392; the guard stays). "" for anything else — a real catalogue answers for itself, and Search and Home
 // have no single category.
 QString HomeView::activeCategoryKey() const
 {

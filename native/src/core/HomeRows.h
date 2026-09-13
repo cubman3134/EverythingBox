@@ -33,7 +33,8 @@
 //   playlist:<id>       one saved playlist's items (#playlists)
 //   preset:<id>         one #63 saved filter, evaluated over the rows the home already holds
 //   category:<key>      one media-type bucket on the themed home ("video" | "game" | "audio" | …)
-//   source:<navKey>     one catalogue's row on the themed home (the nav key = the catalogue id)
+//   source:<navKey>     one catalogue's row on the themed home (the nav key = the catalogue id, except an id
+//                       a built-in tab's key could be confused with, written catalog:<id> — NavKeys.h, #392)
 //   recents, trakt:missed
 //                       accepted vocabulary with no producer in this build — kept and skipped (see above).
 //                       "trakt:missed" HAD one until #155: the New shelf absorbed those rows, so a stored
