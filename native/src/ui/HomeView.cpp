@@ -99,6 +99,7 @@
 #include "../core/AbsServerStore.h"      // ...and the saved servers behind it
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
 #include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
+#include "../core/CoverFetch.h"          // #389: the grid's thumbnail store keeps only what the cache keeps
 #include "../browse/BookCatalogs.h"     // issue #134: the Authors/Series browse over the reading library
 #include "../core/BookLibrary.h"        // ...and the index those builders render
 #include "../core/IptvSourceStore.h"   // Live TV sources (#75 inc 2)
@@ -13448,14 +13449,19 @@ void HomeView::pumpThumbnails()
             {
                 const QByteArray data = reply->readAll();
                 QPixmap pm;
-                if (pm.loadFromData(data))
+                const bool decoded = pm.loadFromData(data);
+                if (decoded)
                 {
                     // Persist this poster so displayImage() serves it locally next visit (no re-fetch on
                     // Back / relaunch). Cheap + idempotent; a no-op once the role is cached. Cached even if
                     // we've navigated away — the bytes are valid for this key regardless of the live view.
                     // Post-redirect url so the extension guess sees the real file name (same as cacheImage).
-                    MetaCache::storeImage(cacheKey, QStringLiteral("thumb"), reply->url().toString(),
-                                          reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
+                    // Only a thumb the cache will KEEP (#389): a PPM/XPM/TGA decodes but is not a picture to
+                    // the read-back, which would remove it and send the next visit here again. Not stored,
+                    // it is still painted below from `pm`, and the next visit fetches it as it did before.
+                    if (CoverFetch::gridThumbCacheable(decoded, data))
+                        MetaCache::storeImage(cacheKey, QStringLiteral("thumb"), reply->url().toString(),
+                                              reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
                     if (gen == generation_) // still the same view: paint it (else just kept for the cache)
                         w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
                                                     itemFrac));
