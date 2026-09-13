@@ -17,18 +17,153 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <cstdio>
+#include <initializer_list>
+#include <memory>
 
 static int failures = 0;
 #define CHECK(cond, what) do { \
     if (!(cond)) { std::fprintf(stderr, "META-FAIL %s (line %d)\n", what, __LINE__); ++failures; } \
 } while (0)
+
+// ---- #387 fixtures: a loopback art host this probe starts itself, and the bytes it serves ----------------------
+namespace
+{
+QByteArray bytesOf(std::initializer_list<int> v)
+{
+    QByteArray b;
+    for (int c : v) b.append(char(c));
+    return b;
+}
+
+// What a reverse proxy, captive portal or login page answers with 200 - served below as "image/jpeg", because the
+// header is exactly the part a misbehaving proxy gets wrong.
+const QByteArray kHtmlPage = QByteArrayLiteral(
+    "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>\n"
+    "<body><h1>502 Bad Gateway</h1><p>The upstream server did not answer in time.</p></body></html>\n");
+
+struct Picture { QString fmt; QString ext; QByteArray ctype; QByteArray bytes; };
+const QVector<Picture>& pictures()
+{
+    static const QVector<Picture> all = {
+        { QStringLiteral("jpeg"), QStringLiteral("jpg"), "image/jpeg",
+          bytesOf({ 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10 }) + "JFIF" + bytesOf({ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+                                                                                0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9 }) },
+        { QStringLiteral("png"), QStringLiteral("png"), "image/png",
+          bytesOf({ 0x89 }) + "PNG" + bytesOf({ 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D }) + "IHDR"
+              + bytesOf({ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00 }) },
+        { QStringLiteral("webp"), QStringLiteral("webp"), "image/webp",
+          QByteArray("RIFF") + bytesOf({ 0x1A, 0x00, 0x00, 0x00 }) + "WEBPVP8L"
+              + bytesOf({ 0x0D, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x00, 0x10, 0x07, 0x10, 0x11, 0x11 }) },
+        { QStringLiteral("gif"), QStringLiteral("gif"), "image/gif",
+          QByteArray("GIF89a") + bytesOf({ 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+                                           0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02,
+                                           0x02, 0x44, 0x01, 0x00, 0x3B }) },
+        { QStringLiteral("svg"), QStringLiteral("svg"), "image/svg+xml",
+          QByteArrayLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Generator: probe fixture -->\n"
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"3\">"
+                            "<rect width=\"2\" height=\"3\" fill=\"#c33\"/></svg>\n") },
+    };
+    return all;
+}
+
+// Serves exactly the routes it is given and counts every request by path. Anything unrouted is a 404.
+struct ArtHost
+{
+    QTcpServer srv;
+    QHash<QByteArray, QPair<QByteArray, QByteArray>> routes;   // path -> (content type, body)
+    QHash<QByteArray, int> served;
+
+    bool start()
+    {
+        if (!srv.listen(QHostAddress::LocalHost, 0)) return false;
+        QObject::connect(&srv, &QTcpServer::newConnection, &srv, [this] {
+            while (QTcpSocket* c = srv.nextPendingConnection())
+            {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf] {
+                    buf->append(c->readAll());
+                    const int end = buf->indexOf("\r\n\r\n");
+                    if (end < 0) return;
+                    const QByteArray path = buf->left(end).split('\n').value(0).trimmed().split(' ').value(1);
+                    buf->clear();
+                    served[path] += 1;
+                    const auto hit = routes.constFind(path);
+                    QByteArray resp;
+                    if (hit == routes.constEnd())
+                        resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    else
+                        resp = "HTTP/1.1 200 OK\r\nContent-Type: " + hit->first + "\r\nContent-Length: "
+                               + QByteArray::number(hit->second.size()) + "\r\nConnection: close\r\n\r\n"
+                               + hit->second;
+                    c->write(resp);
+                    c->flush();
+                    c->disconnectFromHost();
+                });
+                QObject::connect(c, &QTcpSocket::disconnected, c, &QObject::deleteLater);
+            }
+        });
+        return true;
+    }
+    QString route(const QByteArray& path, const QByteArray& ctype, const QByteArray& body)
+    {
+        routes.insert(path, { ctype, body });
+        return QStringLiteral("http://127.0.0.1:%1%2").arg(srv.serverPort()).arg(QString::fromLatin1(path));
+    }
+    int count(const QByteArray& path) const { return served.value(path); }
+};
+
+// Pump the event loop until `done` holds, bounded. Callers assert on what is on disk and what was served
+// afterwards - never on how long it took.
+template <typename F> bool pumpUntil(F done, int boundMs = 8000)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!done())
+    {
+        if (t.elapsed() > boundMs) return false;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    return true;
+}
+
+QByteArray readAllOf(const QString& path)
+{
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+// The file an item's "images" record names for a role, whether or not it exists - "" when there is no record.
+QString recordedFile(const QString& key, const QString& role)
+{
+    const QString file = MetaCache::load(key).value(QStringLiteral("images")).toObject().value(role).toString();
+    return file.isEmpty() ? QString() : MetaCache::dirFor(key) + QLatin1Char('/') + file;
+}
+
+// How many files of this role are in the item's folder (<role>.<anything>).
+int roleFiles(const QString& key, const QString& role)
+{
+    return int(QDir(MetaCache::dirFor(key)).entryList({ role + QStringLiteral(".*") }, QDir::Files).size());
+}
+
+QJsonObject bundleWithoutImages(const QString& key)
+{
+    QJsonObject o = MetaCache::load(key);
+    o.remove(QStringLiteral("images"));
+    return o;
+}
+} // namespace
 
 int main(int argc, char** argv)
 {
@@ -94,7 +229,7 @@ int main(int argc, char** argv)
     {
         QFile f(MetaCache::dirFor(key) + QStringLiteral("/thumb.jpg"));
         CHECK(f.open(QIODevice::WriteOnly), "can write into the bundle dir");
-        f.write("jpegbytes");
+        f.write(pictures()[0].bytes);   // a JPEG by its bytes: the readers judge a stored file by them (#387)
     }
     MetaCache::merge(key, { { QStringLiteral("images"),
                               QJsonObject{ { QStringLiteral("thumb"), QStringLiteral("thumb.jpg") } } } });
@@ -172,7 +307,7 @@ int main(int argc, char** argv)
         MetaCache::remove(akey);
         MetaCache::saveArt(akey, pd.art);
         QDir().mkpath(MetaCache::dirFor(akey));
-        { QFile f(MetaCache::dirFor(akey) + QStringLiteral("/logo.png")); f.open(QIODevice::WriteOnly); f.write("png"); }
+        { QFile f(MetaCache::dirFor(akey) + QStringLiteral("/logo.png")); f.open(QIODevice::WriteOnly); f.write(pictures()[1].bytes); }
         MetaCache::merge(akey, { { QStringLiteral("images"),
             QJsonObject{ { QStringLiteral("logo"), QStringLiteral("logo.png") } } } }); // simulate finished download
         const MediaArt reloaded = MetaCache::loadArt(akey);
@@ -390,7 +525,7 @@ int main(int argc, char** argv)
             // A finished poster download: the WRONG art, cached locally. displayImage would normally serve
             // this in preference to any url, which is exactly why the correction has to outrank it.
             MetaCache::storeImage(ok1, QStringLiteral("thumb"), QStringLiteral("https://x.invalid/wrong.png"),
-                                  QStringLiteral("image/png"), QByteArray(64, 'x'));
+                                  QStringLiteral("image/png"), pictures()[1].bytes);
             CHECK(!MetaCache::imagePath(ok1, QStringLiteral("thumb")).isEmpty(),
                   "fixture: the wrong poster really is cached on disk");
             CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
@@ -426,7 +561,7 @@ int main(int argc, char** argv)
             // A finished download of the CORRECTED poster (storeImage is the same persist path cacheImage
             // ends in, without the network).
             MetaCache::storeImage(ok1, fixRole, QStringLiteral("https://x.invalid/right.jpg"),
-                                  QStringLiteral("image/jpeg"), QByteArray(48, 'r'));
+                                  QStringLiteral("image/jpeg"), pictures()[0].bytes);
             CHECK(!MetaCache::imagePath(ok1, fixRole).isEmpty(),
                   "fixture: the corrected poster really is cached on disk");
             CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
@@ -506,7 +641,7 @@ int main(int argc, char** argv)
             {
                 QFile f(MetaCache::dirFor(mk) + QStringLiteral("/thumb.jpg"));
                 CHECK(f.open(QIODevice::WriteOnly), "fixture: can write the tile thumb");
-                f.write("thumbbytes");
+                f.write(pictures()[0].bytes);
             }
             MetaCache::merge(mk, { { QStringLiteral("images"),
                                      QJsonObject{ { QStringLiteral("thumb"), QStringLiteral("thumb.jpg") } } } });
@@ -627,6 +762,242 @@ int main(int argc, char** argv)
         }
 
         std::printf("OVERRIDE-OK\n");
+    }
+
+    // ================================================================ #387: the general image cache holds only
+    // pictures, and heals what it held badly. cacheImage used to store ANY successful body - a proxy's 200 error page
+    // under poster.jpg - and its "already cached" guard then kept it for good (the cap sweep evicts only thumb.*).
+    // Everything here is served by a loopback host this probe starts; request counts and stored bytes are the
+    // evidence, never how long anything took.
+    {
+        ArtHost http;
+        CHECK(http.start(), "387: the loopback art host listens");
+        const QStringList roles = { QStringLiteral("poster"), QStringLiteral("logo"), QStringLiteral("box"),
+                                    QStringLiteral("fanart"), QStringLiteral("screenshot"), QStringLiteral("thumb") };
+        auto art = [](const QString& role, const QString& url) { MediaArt a; a.addImage(role, url); return a; };
+        // Records the art bundle WITHOUT saveArt's prefetch, so a reader can be asked before anything is fetched.
+        auto recordArt = [&](const QString& key, const QString& role, const QString& url) {
+            MetaCache::merge(key, { { QStringLiteral("art"), QJsonObject::fromVariantMap(art(role, url).toVariant()) } });
+        };
+        // A bounded settle: one more genuine picture, requested after everything above, lands. Anything the calls
+        // above asked the host for has reached it by then.
+        int settles = 0;
+        auto settle = [&] {
+            const QString key = QStringLiteral("387:settle:%1").arg(++settles);
+            MetaCache::remove(key);
+            const QByteArray path = "/settle/" + QByteArray::number(settles) + ".png";
+            MetaCache::cacheImage(key, QStringLiteral("poster"), http.route(path, "image/png", pictures()[1].bytes));
+            const bool landed = pumpUntil([&] { return readAllOf(recordedFile(key, QStringLiteral("poster")))
+                                                           == pictures()[1].bytes; });
+            MetaCache::remove(key);
+            return landed;
+        };
+
+        // -- 1. a 200 page is NOT stored, whatever it is labelled --------------------------------------------------
+        for (const QString& role : roles)
+        {
+            const QString key = QStringLiteral("387:gate:") + role;
+            MetaCache::remove(key);
+            const QByteArray path = "/gate/" + role.toLatin1() + ".jpg";
+            const QString url = http.route(path, "image/jpeg", kHtmlPage);
+            MetaCache::saveArt(key, art(role, url));              // the real prefetch path: saveArt -> cacheImage
+            CHECK(pumpUntil([&] { return http.count(path) == 1; }), "387 gate: the page is requested once");
+            // The only proof its reply FINISHED without storing: the same art may be asked for again. Stored, the
+            // "already cached" guard would refuse every later ask and the count would stay at 1.
+            CHECK(pumpUntil([&] { MetaCache::cacheImage(key, role, url); return http.count(path) >= 2; }),
+                  "387 gate: a 200 page is not stored - the same art is asked for again");
+            CHECK(roleFiles(key, role) == 0, "387 gate: no file of that role is written");
+            CHECK(recordedFile(key, role).isEmpty(), "387 gate: no images entry is recorded");
+            CHECK(MetaCache::loadArt(key).image(role) == url, "387 gate: loadArt still offers the url");
+            CHECK(settle(), "387 gate: settle");
+            CHECK(roleFiles(key, role) == 0, "387 gate: ...and the second answer was not stored either");
+            MetaCache::remove(key);
+        }
+
+        // -- 2. a page ALREADY stored is removed and replaced by the next fetch -------------------------------------
+        for (const QString& role : roles)
+        {
+            const QString key = QStringLiteral("387:heal:") + role;
+            MetaCache::remove(key);
+            const QByteArray path = "/heal/" + role.toLatin1() + ".png";
+            const QString url = http.route(path, "image/png", pictures()[1].bytes);
+            // What a build before this fix wrote (storeImage never looked at bytes, and still does not).
+            MetaCache::storeImage(key, role, QStringLiteral("https://x.invalid/") + role + QStringLiteral(".jpg"),
+                                  QStringLiteral("image/jpeg"), kHtmlPage);
+            const QString planted = recordedFile(key, role);
+            CHECK(!planted.isEmpty() && readAllOf(planted) == kHtmlPage, "387 heal: fixture - the page is stored");
+            MetaCache::saveArt(key, art(role, url));
+            CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pictures()[1].bytes; }),
+                  "387 heal: the next fetch replaces a stored page with the real picture");
+            CHECK(http.count(path) == 1, "387 heal: ...in exactly one request");
+            CHECK(!QFileInfo::exists(planted), "387 heal: the page file is gone");
+            CHECK(roleFiles(key, role) == 1, "387 heal: one file of that role is left");
+            for (int i = 0; i < 3; ++i) MetaCache::cacheImage(key, role, url);
+            CHECK(settle(), "387 heal: settle");
+            CHECK(http.count(path) == 1, "387 heal: the healed picture is not fetched again");
+            MetaCache::remove(key);
+        }
+
+        // -- 3. a stored page is never SHOWN: every reader counts it as not cached, and asks the host for nothing ---
+        struct Reader { QString name; QStringList roles; };
+        const QVector<Reader> readers = {
+            { QStringLiteral("loadArt"), roles },
+            { QStringLiteral("cachedDetailScraped"), { QStringLiteral("poster"), QStringLiteral("thumb") } },
+            { QStringLiteral("cachedDetail"), { QStringLiteral("poster"), QStringLiteral("thumb") } },
+            { QStringLiteral("scrapedImage"), { QStringLiteral("poster"), QStringLiteral("thumb") } },
+            { QStringLiteral("displayImage"), { QStringLiteral("poster"), QStringLiteral("thumb") } },
+        };
+        for (const Reader& reader : readers)
+            for (const QString& role : reader.roles)
+            {
+                const QString key = QStringLiteral("387:shown:%1:%2").arg(reader.name, role);
+                MetaCache::remove(key);
+                const QByteArray path = "/shown/" + reader.name.toLatin1() + "/" + role.toLatin1() + ".gif";
+                const QString url = http.route(path, "image/gif", pictures()[3].bytes);
+                MetaCache::merge(key, { { QStringLiteral("item"),
+                                          QJsonObject{ { QStringLiteral("title"), QStringLiteral("Shown") },
+                                                       { QStringLiteral("thumbnailUrl"), url } } } });
+                recordArt(key, role, url);
+                MetaCache::storeImage(key, role, QStringLiteral("https://x.invalid/p.jpg"), QStringLiteral("image/jpeg"),
+                                      kHtmlPage);
+                const QString planted = recordedFile(key, role);
+                CHECK(QFileInfo::exists(planted), "387 shown: fixture - the page is stored");
+                const QJsonObject restBefore = bundleWithoutImages(key);
+
+                QString got;
+                if (reader.name == QStringLiteral("loadArt")) got = MetaCache::loadArt(key).image(role);
+                else if (reader.name == QStringLiteral("cachedDetailScraped")) got = MetaCache::cachedDetailScraped(key).imageUrl;
+                else if (reader.name == QStringLiteral("cachedDetail")) got = MetaCache::cachedDetail(key).imageUrl;
+                else if (reader.name == QStringLiteral("scrapedImage")) got = MetaCache::scrapedImage(key, url);
+                else got = MetaCache::displayImage(key, url);
+                const QByteArray what = QStringLiteral("387 shown: %1(%2) hands out the url, never the stored page")
+                                            .arg(reader.name, role).toLatin1();
+                CHECK(got == url, what.constData());
+                CHECK(!QFileInfo::exists(planted), "387 shown: the page file is removed");
+                CHECK(recordedFile(key, role).isEmpty(), "387 shown: its images entry is dropped");
+                CHECK(bundleWithoutImages(key) == restBefore, "387 shown: nothing else in the bundle changes");
+                CHECK(settle(), "387 shown: settle");
+                CHECK(http.count(path) == 0, "387 shown: a reader asks the host for nothing");
+                MetaCache::cacheImage(key, role, url);
+                CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pictures()[3].bytes; }),
+                      "387 shown: then the normal fetch stores the real picture");
+                CHECK(http.count(path) == 1, "387 shown: ...in one request");
+                MetaCache::remove(key);
+            }
+
+        // -- 4. the corrected poster's own role (fix-*), through displayImage ---------------------------------------
+        {
+            const QString key = QStringLiteral("387:fix");
+            MetaCache::remove(key);
+            const QByteArray path = "/fix/right.webp";
+            const QString fixUrl = http.route(path, "image/webp", pictures()[2].bytes);
+            MetaOverrides::Override ov;
+            ov.image = fixUrl;
+            MetaOverrides::set(key, ov);
+            const QString role = MetaCache::fixedImageRole(fixUrl);
+            MetaCache::storeImage(key, role, fixUrl, QStringLiteral("image/jpeg"), kHtmlPage);
+            const QString planted = recordedFile(key, role);
+            CHECK(QFileInfo::exists(planted), "387 fix: fixture - a page is stored under the correction's role");
+            CHECK(MetaCache::displayImage(key, QStringLiteral("https://x.invalid/tile.jpg")) == fixUrl,
+                  "387 fix: displayImage never serves the stored page for a correction");
+            CHECK(!QFileInfo::exists(planted), "387 fix: the page file is removed");
+            CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pictures()[2].bytes; }),
+                  "387 fix: ...and the corrected poster is fetched in its place");
+            CHECK(http.count(path) == 1, "387 fix: in one request");
+            CHECK(MetaCache::displayImage(key, QStringLiteral("https://x.invalid/tile.jpg")) == recordedFile(key, role),
+                  "387 fix: then the cached corrected poster is what is served");
+            CHECK(settle(), "387 fix: settle");
+            CHECK(http.count(path) == 1, "387 fix: and it is not fetched again");
+            MetaOverrides::reset(key);
+            MetaCache::remove(key);
+        }
+
+        // -- 5. a GENUINE picture in every role and format is never removed and never fetched again -----------------
+        // Both ways a picture gets there: fetched by cacheImage (so the gate lets every format through), and already
+        // on disk from an earlier session (so the read-back never removes one).
+        for (const Picture& pic : pictures())
+            for (const QString& role : roles)
+            {
+                const QString tag = pic.fmt + QLatin1Char(':') + role;
+                // (a) fetched
+                {
+                    const QString key = QStringLiteral("387:fetch:") + tag;
+                    MetaCache::remove(key);
+                    const QByteArray path = "/fetch/" + pic.fmt.toLatin1() + "/" + role.toLatin1() + "." + pic.ext.toLatin1();
+                    const QString url = http.route(path, pic.ctype, pic.bytes);
+                    MetaCache::saveArt(key, art(role, url));
+                    const QByteArray landed = QStringLiteral("387 keep: a fetched %1 %2 is stored").arg(pic.fmt, role).toLatin1();
+                    CHECK(pumpUntil([&] { return readAllOf(recordedFile(key, role)) == pic.bytes; }), landed.constData());
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        MetaCache::cacheImage(key, role, url);
+                        MetaCache::saveArt(key, art(role, url));
+                        CHECK(MetaCache::loadArt(key).image(role) == recordedFile(key, role),
+                              "387 keep: loadArt serves the fetched picture");
+                    }
+                    CHECK(settle(), "387 keep: settle");
+                    const QByteArray once = QStringLiteral("387 keep: a fetched %1 %2 is requested exactly once").arg(pic.fmt, role).toLatin1();
+                    CHECK(http.count(path) == 1, once.constData());
+                    CHECK(readAllOf(recordedFile(key, role)) == pic.bytes && roleFiles(key, role) == 1,
+                          "387 keep: the fetched picture's bytes are unchanged");
+                    MetaCache::remove(key);
+                }
+                // (b) already on disk
+                {
+                    const QString key = QStringLiteral("387:kept:") + tag;
+                    MetaCache::remove(key);
+                    const QByteArray path = "/kept/" + pic.fmt.toLatin1() + "/" + role.toLatin1() + "." + pic.ext.toLatin1();
+                    const QString url = http.route(path, pic.ctype, pic.bytes);
+                    MetaCache::merge(key, { { QStringLiteral("item"),
+                                              QJsonObject{ { QStringLiteral("title"), QStringLiteral("Kept") },
+                                                           { QStringLiteral("thumbnailUrl"), url } } } });
+                    MetaCache::storeImage(key, role, url, QString::fromLatin1(pic.ctype), pic.bytes);
+                    const QString stored = recordedFile(key, role);
+                    CHECK(readAllOf(stored) == pic.bytes, "387 kept: fixture - the picture is on disk");
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        MetaCache::saveArt(key, art(role, url));
+                        MetaCache::cacheImage(key, role, url);
+                        const QByteArray served = QStringLiteral("387 kept: loadArt serves the stored %1 %2").arg(pic.fmt, role).toLatin1();
+                        CHECK(MetaCache::loadArt(key).image(role) == stored, served.constData());
+                        if (role == QStringLiteral("poster") || role == QStringLiteral("thumb"))
+                        {
+                            CHECK(MetaCache::cachedDetailScraped(key).imageUrl == stored, "387 kept: cachedDetailScraped serves it");
+                            CHECK(MetaCache::scrapedImage(key, url) == stored, "387 kept: scrapedImage serves it");
+                            CHECK(MetaCache::displayImage(key, url) == stored, "387 kept: displayImage serves it");
+                        }
+                    }
+                    CHECK(settle(), "387 kept: settle");
+                    const QByteArray never = QStringLiteral("387 kept: a stored %1 %2 is never fetched again").arg(pic.fmt, role).toLatin1();
+                    CHECK(http.count(path) == 0, never.constData());
+                    CHECK(readAllOf(stored) == pic.bytes && roleFiles(key, role) == 1, "387 kept: bytes unchanged, one file");
+                    MetaCache::remove(key);
+                }
+            }
+        // ...and the corrected poster's role, in every format.
+        for (const Picture& pic : pictures())
+        {
+            const QString key = QStringLiteral("387:keptfix:") + pic.fmt;
+            MetaCache::remove(key);
+            const QByteArray path = "/keptfix/right." + pic.ext.toLatin1();
+            const QString fixUrl = http.route(path, pic.ctype, pic.bytes);
+            MetaOverrides::Override ov;
+            ov.image = fixUrl;
+            MetaOverrides::set(key, ov);
+            const QString role = MetaCache::fixedImageRole(fixUrl);
+            MetaCache::storeImage(key, role, fixUrl, QString::fromLatin1(pic.ctype), pic.bytes);
+            const QString stored = recordedFile(key, role);
+            for (int i = 0; i < 4; ++i)
+                CHECK(MetaCache::displayImage(key, QStringLiteral("https://x.invalid/tile.jpg")) == stored,
+                      "387 kept fix: displayImage serves the stored corrected poster");
+            CHECK(settle(), "387 kept fix: settle");
+            const QByteArray never = QStringLiteral("387 kept fix: a stored %1 correction is never fetched again").arg(pic.fmt).toLatin1();
+            CHECK(http.count(path) == 0, never.constData());
+            CHECK(readAllOf(stored) == pic.bytes, "387 kept fix: bytes unchanged");
+            MetaOverrides::reset(key);
+            MetaCache::remove(key);
+        }
+        std::printf("IMAGEGATE-OK\n");
     }
 
     // ---------------------------------------------------------------- items without a stable identity

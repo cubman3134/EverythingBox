@@ -132,14 +132,18 @@ Miximage::ComposePlan Miximage::planForKey(const QString& key)
     if (key.isEmpty()) return plan;
 
     // The cached input roles. logo falls back to clearlogo, disc to cart — the conventional aliases a
-    // provider may have used (THEME_FORMAT.md lists them). These are all LOCAL files (imagePath returns ""
-    // for an uncached role). MetaCache has unguarded statics, so this half MUST stay on the GUI thread.
-    plan.in.screenshot = MetaCache::imagePath(key, QStringLiteral("screenshot"));
-    plan.in.box        = MetaCache::imagePath(key, QStringLiteral("box"));
-    plan.in.logo       = MetaCache::imagePath(key, QStringLiteral("logo"));
-    if (plan.in.logo.isEmpty()) plan.in.logo = MetaCache::imagePath(key, QStringLiteral("clearlogo"));
-    plan.in.disc       = MetaCache::imagePath(key, QStringLiteral("disc"));
-    if (plan.in.disc.isEmpty()) plan.in.disc = MetaCache::imagePath(key, QStringLiteral("cart"));
+    // provider may have used (THEME_FORMAT.md lists them). These are all LOCAL files ("" for an uncached role).
+    // MetaCache has unguarded statics, so this half MUST stay on the GUI thread.
+    // Read back through the bytes check (#387): an input stored as an error page by an earlier build is removed
+    // here and counts as absent. That changes the identity stamp below, so a card built while the page was there is
+    // rebuilt from the good inputs, and rebuilt again once the real art lands - rather than kept, stamp and all,
+    // with the real art never fetched because the page was "already cached".
+    plan.in.screenshot = MetaCache::verifiedImagePath(key, QStringLiteral("screenshot"));
+    plan.in.box        = MetaCache::verifiedImagePath(key, QStringLiteral("box"));
+    plan.in.logo       = MetaCache::verifiedImagePath(key, QStringLiteral("logo"));
+    if (plan.in.logo.isEmpty()) plan.in.logo = MetaCache::verifiedImagePath(key, QStringLiteral("clearlogo"));
+    plan.in.disc       = MetaCache::verifiedImagePath(key, QStringLiteral("disc"));
+    if (plan.in.disc.isEmpty()) plan.in.disc = MetaCache::verifiedImagePath(key, QStringLiteral("cart"));
     if (!hasAnyInput(plan.in)) return plan; // !viable: no card is made — and, by design, no blank one either
     plan.viable = true;
 

@@ -203,6 +203,124 @@ int main(int argc, char** argv)
         MetaCache::remove(key);
     }
 
+    // ---------------------------------------------------------------- #387: a broken input never reaches a card
+    // An input role can be a 200 error page stored as box.jpg by a build before #387. compose() skips a layer that
+    // will not decode, so no broken PIXELS land - but the card's identity stamp then names the page, the page is
+    // "already cached" for good, and the real box is never fetched: the card is built from a broken input for ever.
+    // The inputs are read back through MetaCache's bytes check, so the page is removed, the card is rebuilt from
+    // the good inputs, and the real box - once it lands - joins it.
+    {
+        const QByteArray page = QByteArrayLiteral("<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head>"
+                                                  "<body><h1>502 Bad Gateway</h1></body></html>\n");
+        auto readAll = [](const QString& p) { QFile f(p); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+        auto boxRecord = [](const QString& key) {
+            return MetaCache::load(key).value(QStringLiteral("images")).toObject().value(QStringLiteral("box")).toString();
+        };
+        auto boxFiles = [](const QString& key) {
+            return int(QDir(MetaCache::dirFor(key)).entryList({ QStringLiteral("box.*") }, QDir::Files).size());
+        };
+
+        // (a) a fresh item: good screenshot, box stored as a page.
+        {
+            const QString key = QStringLiteral("miximage-387-fresh");
+            MetaCache::remove(key);
+            MetaCache::storeImage(key, QStringLiteral("screenshot"), QStringLiteral("s.png"), QStringLiteral("image/png"),
+                                  pngBytes(solid(kRed)));
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.jpg"), QStringLiteral("image/jpeg"), page);
+            const QString pagePath = MetaCache::dirFor(key) + QLatin1Char('/') + boxRecord(key);
+            CHECK(boxRecord(key) == QStringLiteral("box.jpg") && readAll(pagePath) == page, "387 fresh: fixture - the page is stored as box");
+
+            const QString card = Miximage::ensureForKey(key, kCanvas);
+            CHECK(!card.isEmpty(), "387 fresh: a card is still made from the good screenshot");
+            CHECK(boxFiles(key) == 0 && boxRecord(key).isEmpty(), "387 fresh: the page box is removed, file and entry");
+            CHECK(!readAll(MetaCache::dirFor(key) + QStringLiteral("/miximage.stamp")).contains("/box."),
+                  "387 fresh: the card's stamp does not name the page");
+            QImage c1; c1.load(card);
+            CHECK(nearRgb(c1.pixel(154, 720), kRed), "387 fresh: no box layer in the card (the screenshot shows there)");
+
+            // The real box arrives (storeImage is the persist path cacheImage ends in): the card picks it up.
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.png"), QStringLiteral("image/png"),
+                                  pngBytes(solid(kGreen)));
+            CHECK(boxRecord(key) == QStringLiteral("box.png"), "387 fresh: the real box is stored once the page is gone");
+            const QString again = Miximage::ensureForKey(key, kCanvas);
+            QImage c2; c2.load(again);
+            CHECK(nearRgb(c2.pixel(154, 720), kGreen), "387 fresh: the card is rebuilt with the real box");
+            CHECK(nearRgb(c2.pixel(640, 432), kRed), "387 fresh: ...over the same screenshot");
+            MetaCache::remove(key);
+        }
+
+        // (b) a card an EARLIER build made while the page was there - its stamp names the page, so as far as the
+        // staleness check goes it is "fresh". It must not be kept.
+        {
+            const QString key = QStringLiteral("miximage-387-old-card");
+            MetaCache::remove(key);
+            MetaCache::storeImage(key, QStringLiteral("screenshot"), QStringLiteral("s.png"), QStringLiteral("image/png"),
+                                  pngBytes(solid(kRed)));
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.jpg"), QStringLiteral("image/jpeg"), page);
+            Miximage::ComposePlan old;
+            old.viable = true;
+            old.in.screenshot = MetaCache::imagePath(key, QStringLiteral("screenshot"));
+            old.in.box = MetaCache::imagePath(key, QStringLiteral("box"));
+            old.outPath = MetaCache::dirFor(key) + QStringLiteral("/miximage.png");
+            old.stampPath = MetaCache::dirFor(key) + QStringLiteral("/miximage.stamp");
+            // The identity planForKey writes (Miximage.h: each input's path + byte size), as that build computed it.
+            for (const QString& p : { old.in.screenshot, old.in.box, old.in.logo, old.in.disc })
+                old.identity += (p.isEmpty() ? QByteArray("-")
+                                             : p.toUtf8() + ':' + QByteArray::number(QFileInfo(p).size())) + '\n';
+            CHECK(!old.in.box.isEmpty() && Miximage::composeAndSave(old, kCanvas), "387 old card: fixture - the old card is made");
+            MetaCache::recordLocalImage(key, QStringLiteral("miximage"), QStringLiteral("miximage.png"));
+            CHECK(readAll(old.stampPath) == old.identity && old.identity.contains("box.jpg"),
+                  "387 old card: fixture - its stamp names the page");
+
+            const QString card = Miximage::ensureForKey(key, kCanvas);
+            CHECK(card == old.outPath, "387 old card: the card keeps its path");
+            CHECK(!readAll(old.stampPath).contains("/box."), "387 old card: it is rebuilt - the new stamp no longer names the page");
+            CHECK(boxFiles(key) == 0 && boxRecord(key).isEmpty(), "387 old card: the page box is removed");
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.png"), QStringLiteral("image/png"),
+                                  pngBytes(solid(kGreen)));
+            QImage c; c.load(Miximage::ensureForKey(key, kCanvas));
+            CHECK(nearRgb(c.pixel(154, 720), kGreen), "387 old card: the real box joins the rebuilt card");
+            MetaCache::remove(key);
+        }
+
+        // (c) the page is the ONLY input: no card, no role, and the page is gone.
+        {
+            const QString key = QStringLiteral("miximage-387-only-page");
+            MetaCache::remove(key);
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.jpg"), QStringLiteral("image/jpeg"), page);
+            CHECK(!boxRecord(key).isEmpty(), "387 only page: fixture - the page is stored");
+            CHECK(Miximage::ensureForKey(key, kCanvas).isEmpty(), "387 only page: no card is made");
+            CHECK(!QFileInfo::exists(MetaCache::dirFor(key) + QStringLiteral("/miximage.png")), "387 only page: no card file");
+            CHECK(!MetaCache::loadArt(key).images.contains(QStringLiteral("miximage")), "387 only page: no miximage role");
+            CHECK(boxFiles(key) == 0 && boxRecord(key).isEmpty(), "387 only page: the page box is removed");
+            MetaCache::remove(key);
+        }
+
+        // (d) genuine inputs are never removed by the read-back, and the card is not rebuilt for reading them (its
+        // bytes stay put across repeated asks). PNG only: the one format Qt both writes and reads with no plugin on
+        // every runner; probe_meta pins every stored format against the same check.
+        {
+            const QString key = QStringLiteral("miximage-387-genuine");
+            MetaCache::remove(key);
+            const QByteArray shot = pngBytes(solid(kRed)), box = pngBytes(solid(kGreen)), logo = pngBytes(solid(kBlue));
+            MetaCache::storeImage(key, QStringLiteral("screenshot"), QStringLiteral("s.png"), QStringLiteral("image/png"), shot);
+            MetaCache::storeImage(key, QStringLiteral("box"), QStringLiteral("b.png"), QStringLiteral("image/png"), box);
+            MetaCache::storeImage(key, QStringLiteral("logo"), QStringLiteral("l.png"), QStringLiteral("image/png"), logo);
+            const QString card = Miximage::ensureForKey(key, kCanvas);
+            const QByteArray first = readAll(card);
+            for (int i = 0; i < 3; ++i) CHECK(Miximage::ensureForKey(key, kCanvas) == card, "387 genuine: same card");
+            CHECK(readAll(card) == first, "387 genuine: the card is not rebuilt for being read");
+            CHECK(readAll(MetaCache::imagePath(key, QStringLiteral("box"))) == box
+                      && readAll(MetaCache::imagePath(key, QStringLiteral("logo"))) == logo
+                      && readAll(MetaCache::imagePath(key, QStringLiteral("screenshot"))) == shot,
+                  "387 genuine: every input is still stored, bytes unchanged");
+            QImage c; c.load(card);
+            CHECK(nearRgb(c.pixel(154, 720), kGreen) && nearRgb(c.pixel(640, 96), kBlue),
+                  "387 genuine: box and logo are in the card");
+            MetaCache::remove(key);
+        }
+    }
+
     // ---------------------------------------------------------------- no inputs -> no card, and no blank one
     {
         const QString key = QStringLiteral("miximage-empty-item");

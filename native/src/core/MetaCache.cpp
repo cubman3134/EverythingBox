@@ -309,12 +309,13 @@ MediaArt MetaCache::loadArt(const QString& key)
 {
     const QJsonObject art = load(key).value(QStringLiteral("art")).toObject();
     MediaArt a = MediaArt::fromJson(art); // same parser: images{role:[urls]} + videos + audio + meta
-    // Offline-first: put the locally cached file (if any) at the front of each role's candidate list.
+    // Offline-first: put the locally cached file (if any) at the front of each role's candidate list - only if its
+    // bytes are a picture (#387): a page stored before cacheImage checked bodies is removed here, not handed out.
     QMap<QString, QStringList> resolved;
     for (auto it = a.images.constBegin(); it != a.images.constEnd(); ++it)
     {
         QStringList list;
-        const QString local = imagePath(key, it.key());
+        const QString local = verifiedImagePath(key, it.key());
         if (!local.isEmpty()) list << local;
         for (const QString& u : it.value()) if (!list.contains(u)) list << u;
         resolved.insert(it.key(), list);
@@ -362,9 +363,10 @@ MediaDetail MetaCache::cachedDetailScraped(const QString& key)
         const QJsonObject f = v.toObject();
         d.facts.push_back({ f.value(QStringLiteral("label")).toString(), f.value(QStringLiteral("value")).toString() });
     }
-    // Offline-first artwork: the locally cached poster (detail cover, else the grid thumb), else the urls.
-    QString img = imagePath(key, QStringLiteral("poster"));
-    if (img.isEmpty()) img = imagePath(key, QStringLiteral("thumb"));
+    // Offline-first artwork: the locally cached poster (detail cover, else the grid thumb), else the urls. Read back
+    // through the bytes check (#387), so a stored error page is never the card's image.
+    QString img = verifiedImagePath(key, QStringLiteral("poster"));
+    if (img.isEmpty()) img = verifiedImagePath(key, QStringLiteral("thumb"));
     if (img.isEmpty()) img = det.value(QStringLiteral("imageUrl")).toString(it.value(QStringLiteral("thumbnailUrl")).toString());
     d.imageUrl = img;
     d.art = loadArt(key); // rich artwork/videos/audio/meta, resolved to local files where cached
@@ -448,9 +450,11 @@ QString MetaCache::scrapedImage(const QString& key, const QString& url)
     // an unscraped item (or one whose card has not been generated yet) has no "miximage" role and falls
     // straight through to exactly today's tile — its own thumb, then poster, then the remote url. Absent a
     // card, nothing changes; there is no blank slot and no forced look change.
+    // The card itself is composited here from decoded images, so it is read as it is; the downloaded roles under it
+    // go through the bytes check (#387).
     QString img = imagePath(key, QStringLiteral("miximage"));
-    if (img.isEmpty()) img = imagePath(key, QStringLiteral("thumb"));
-    if (img.isEmpty()) img = imagePath(key, QStringLiteral("poster"));
+    if (img.isEmpty()) img = verifiedImagePath(key, QStringLiteral("thumb"));
+    if (img.isEmpty()) img = verifiedImagePath(key, QStringLiteral("poster"));
     return img.isEmpty() ? url : img;
 }
 
@@ -474,7 +478,7 @@ QString MetaCache::displayImage(const QString& key, const QString& url)
     // art, so under those roles the corrected poster was never downloaded and the fixed item rendered as
     // NOTHING offline — where the wrong-but-cached art at least used to render.
     const QString role = fixedImageRole(fixed);
-    const QString local = imagePath(key, role);
+    const QString local = verifiedImagePath(key, role);   // a stored page is removed and fetched again (#387)
     if (!local.isEmpty()) return local;
     cacheImage(key, role, fixed);
     return fixed;
@@ -483,7 +487,9 @@ QString MetaCache::displayImage(const QString& key, const QString& url)
 void MetaCache::cacheImage(const QString& key, const QString& role, const QString& url)
 {
     if (key.isEmpty() || url.isEmpty() || !url.startsWith(QStringLiteral("http"))) return;
-    if (!imagePath(key, role).isEmpty()) return; // already cached
+    // Already cached - and a PICTURE (#387). A page stored before the check below existed is removed by the read-back
+    // and fetched again here; a real picture answers at once and is never fetched twice.
+    if (!verifiedImagePath(key, role).isEmpty()) return;
     const QString tag = key + QLatin1Char('|') + role;
     if (inflight().contains(tag)) return;
     inflight().insert(tag);
@@ -495,10 +501,16 @@ void MetaCache::cacheImage(const QString& key, const QString& role, const QStrin
         inflight().remove(tag);
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) return; // offline/404: keep the url fallback
+        // THE STORE GATE (#387): a successful body is stored only if its own BYTES are a picture (CoverFetch::isPicture,
+        // the rule the cover clients use since #377). A reverse proxy's, captive portal's or login page's 200 is not
+        // art: stored, it would be a broken picture that is also "already cached", so the real art would never be
+        // asked for again. Not stored, the url fallback stands and the next ask fetches again. The Content-Type is
+        // not consulted - it is exactly what such a page gets wrong.
+        const QByteArray body = reply->readAll();
+        if (!CoverFetch::isPicture(body)) return;
         // Same persist path as a poster the UI fetched itself; the post-redirect url guesses the extension.
         MetaCache::storeImage(key, role, reply->url().toString(),
-                              reply->header(QNetworkRequest::ContentTypeHeader).toString(),
-                              reply->readAll());
+                              reply->header(QNetworkRequest::ContentTypeHeader).toString(), body);
     });
 }
 
