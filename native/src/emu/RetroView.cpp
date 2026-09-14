@@ -1365,6 +1365,15 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
                          const QString& gameKey)
 {
     stop();   // writes the OUTGOING game's battery RAM — which is why the new identity is assigned below, not here
+    // #288: take the pending conf plan NOW, so a launch that fails before the core loads can never leave it
+    // behind for the next game, and a previous launch's checked plan can never be reported for this one.
+    const bool hasConfPlan = hasPendingConfPlan_;
+    const DosConf::Plan confPlan = pendingConfPlan_;
+    const QString confName = pendingConfName_;
+    hasPendingConfPlan_ = false;
+    pendingConfPlan_ = DosConf::Plan();
+    pendingConfName_.clear();
+    hasCheckedConfPlan_ = false;
     // This game's per-game-override identity (issue #95). PlayStats::identity's rule — the stable item key
     // when present, else the ROM path — hashed to the ini-safe token that keys optgame/* and padgame/*.
     overrideToken_ = Settings::gameToken(gameKey.isEmpty() ? romPath : gameKey);
@@ -1380,6 +1389,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     if (!core_.loadCore(corePath.toStdString(), &err))
     {
         if (error) *error = QString::fromStdString(err);
+        confOptions_.clear();
         return false;
     }
     // Apply the user's saved per-core options before the game loads, so the core picks them up the
@@ -1412,11 +1422,26 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // it; but it is still a FILE the user dropped next to a game, not a choice they made in the app, so any
     // setting they picked by hand outranks it. Consumed here (cleared after use) so a conf can never survive
     // into the next launch on the same view.
-    if (!confOptions_.isEmpty())
+    //
+    // #288: the conf plan is held against the options THIS core just registered in loadCore() before a single
+    // key of it is seeded. setOptionValue does not validate, so a key the core never declared, or a value off
+    // its list, would otherwise be stored, reported "applied" and never read. What the check drops is not
+    // seeded; the checked plan is what the launcher reports. The MIDI seed (confOptions_) goes on top, as before.
+    QMap<QString, QString> confSeed;
+    if (hasConfPlan)
+    {
+        checkedConfPlan_ = DosConf::checkAgainstCore(confPlan, DosConf::declaredFrom(core_.options()));
+        checkedConfName_ = confName;
+        hasCheckedConfPlan_ = true;
+        if (checkedConfPlan_.ok) confSeed = checkedConfPlan_.options;
+    }
+    for (auto it = confOptions_.constBegin(); it != confOptions_.constEnd(); ++it)
+        confSeed.insert(it.key(), it.value());
+    if (!confSeed.isEmpty())
     {
         const QMap<QString, QString> gameDelta = (coreName.isEmpty() || overrideToken_.isEmpty())
             ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName);
-        for (auto it = confOptions_.constBegin(); it != confOptions_.constEnd(); ++it)
+        for (auto it = confSeed.constBegin(); it != confSeed.constEnd(); ++it)
         {
             if (!coreName.isEmpty() && !Settings::optionValue(coreName, it.key()).isEmpty()) continue; // user chose
             if (gameDelta.contains(it.key())) continue;                                                // game overrides

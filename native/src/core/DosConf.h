@@ -249,6 +249,12 @@ namespace DosConf
         QString reason;
     };
 
+    // Whether a plan's `applied` list has been held against the options the LOADED core declares (#288).
+    //   NotChecked — translate() alone: what the recipe says, before any core is loaded;
+    //   Unknown    — checked, but the core declared no options at all, so nothing could be confirmed;
+    //   Checked    — every applied entry names a key the core declares, with a value it accepts.
+    enum class CoreCheck { NotChecked, Unknown, Checked };
+
     struct Plan
     {
         QMap<QString, QString> options;   // what to seed on the core
@@ -256,22 +262,26 @@ namespace DosConf
         QList<Ignored> ignored;
         bool    ok = false;               // false => the conf could not be read; options is empty
         QString error;
+        CoreCheck coreCheck = CoreCheck::NotChecked;
     };
 
-    // `cycles=` in a conf takes four shapes and dosbox-pure's option takes two of them:
-    //   "auto"                -> "auto"
-    //   "max", "max 80%", "max limit 20000" -> "max"   (the percentage/limit qualifiers have no option form)
+    // `cycles=` in a conf takes four shapes, and the core option's spelling of each is a bare word or a bare
+    // decimal count:
+    //   "auto", "auto 7800 limit 50000", "auto 50%" -> "auto"  (the start/limit/percentage qualifiers have no
+    //   "max", "max 80%", "max limit 20000"         -> "max"    option form)
     //   "fixed 5000"          -> "5000"
     //   "5000"                -> "5000"
     // Anything else yields "" and the key is ignored with a reason, which is the whole point of returning a
-    // string rather than guessing a number.
+    // string rather than guessing a number. Whether the loaded core ACCEPTS a given count is not this
+    // function's question: dosbox-pure declares a fixed list of counts (issue #288), and checkAgainstCore()
+    // below is what refuses one it does not declare.
     inline QString transformCycles(const QString& raw)
     {
         const QString v = raw.trimmed().toLower();
         if (v.isEmpty()) return QString();
-        if (v == QLatin1String("auto")) return QStringLiteral("auto");
         const QStringList parts = v.split(QLatin1Char(' '), Qt::SkipEmptyParts);
         if (parts.isEmpty()) return QString();
+        if (parts.first() == QLatin1String("auto")) return QStringLiteral("auto");
         if (parts.first() == QLatin1String("max")) return QStringLiteral("max");
         QString number = parts.first();
         if (number == QLatin1String("fixed"))
@@ -352,6 +362,75 @@ namespace DosConf
             p.ignored.push_back(ig);
         }
         return p;
+    }
+
+    // ---- pure: the LOADED core's declared options (issue #288) -------------------------------------------
+    // The recipe says which option a conf key becomes and which values it takes, but the recipe is data that
+    // was written by a person, and LibretroCore::setOptionValue does not validate: a key the core never
+    // declared, or a value outside its list, is stored, "applied", and silently never read. So the plan is held
+    // against what the core ITSELF registered before it is reported or seeded.
+    //
+    // key -> the values the core accepts. A key with an EMPTY list declares an open value (any string); an
+    // EMPTY map means the core's options are unknown.
+    using Declared = QMap<QString, QStringList>;
+
+    // Built from anything shaped like LibretroCore::options() — a range of { std::string key; values of
+    // pair<std::string value, std::string label> } — so this header stays free of the libretro frontend and
+    // a probe can hand it a fake core's list.
+    template <typename OptionList>
+    inline Declared declaredFrom(const OptionList& opts)
+    {
+        Declared d;
+        for (const auto& o : opts)
+        {
+            QStringList vals;
+            for (const auto& v : o.values) vals.push_back(QString::fromStdString(v.first));
+            d.insert(QString::fromStdString(o.key), vals);
+        }
+        return d;
+    }
+
+    // The plan, re-classified against the loaded core. Pure. Every applied entry is kept only if the core
+    // declares its option AND (when the core lists values) the value; otherwise it moves to `ignored` with a
+    // reason that names the key, or the value. `options` is rebuilt from what survives, in conf order, so a
+    // dropped entry can never be seeded and a repeated key still resolves to its last ACCEPTED value.
+    //
+    // An EMPTY `declared` means the core's options are unknown (it registered none, or they could not be read):
+    // the plan is returned unchanged — today's behaviour — marked Unknown so logLines() says it went unchecked.
+    // An unreadable conf is returned as it is; it has nothing applied to check.
+    //
+    // This is the one rule, and it governs a user's override recipe exactly as it governs the shipped one:
+    // nothing here names a core or a key.
+    inline Plan checkAgainstCore(const Plan& p, const Declared& declared)
+    {
+        Plan out = p;
+        if (!p.ok) return out;
+        if (declared.isEmpty()) { out.coreCheck = CoreCheck::Unknown; return out; }
+        out.coreCheck = CoreCheck::Checked;
+        out.applied.clear();
+        out.options.clear();
+        QList<Ignored> demoted;
+        for (const Applied& a : p.applied)
+        {
+            QString reason;
+            const auto it = declared.constFind(a.option);
+            if (it == declared.constEnd())
+                reason = QStringLiteral("the loaded core does not offer %1").arg(a.option);
+            else if (!it.value().isEmpty() && !it.value().contains(a.optionValue))
+                reason = QStringLiteral("the loaded core does not accept %1 for %2").arg(a.optionValue, a.option);
+            if (!reason.isEmpty())
+            {
+                Ignored ig; ig.from = a.from; ig.confValue = a.confValue; ig.reason = reason;
+                demoted.push_back(ig);
+                continue;
+            }
+            out.applied.push_back(a);
+            out.options.insert(a.option, a.optionValue);
+        }
+        // Demoted entries go ahead of the plan's own ignored list: they were settings the recipe knew, and the
+        // [autoexec] line stays last where the report has always put it.
+        out.ignored = demoted + p.ignored;
+        return out;
     }
 
     // ---- pure: which file beside the game is the conf ----------------------------------------------------
@@ -438,6 +517,9 @@ namespace DosConf
     {
         QStringList out;
         if (!p.ok) { out.push_back(QStringLiteral("conf unreadable: ") + p.error); return out; }
+        if (p.coreCheck == CoreCheck::Unknown)
+            out.push_back(QStringLiteral("core options unknown: the loaded core declared none, so the settings "
+                                         "below were not checked against it"));
         for (const Applied& a : p.applied)
             out.push_back(QStringLiteral("applied %1=%2 -> %3=%4")
                               .arg(a.from, a.confValue, a.option, a.optionValue));

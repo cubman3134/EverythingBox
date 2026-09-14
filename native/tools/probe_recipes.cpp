@@ -29,8 +29,10 @@
 #include "LaunchRecipe.h"
 #include "SystemCatalog.h"
 #include "AmsdosCatalog.h"
+#include "dosbox_pure_declared.h"   // #288: dosbox-pure's declared options, verified against its source
 
 #include <QCoreApplication>
+#include <QSet>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -727,6 +729,72 @@ int main(int argc, char** argv)
             CHECK(cap32->options.value(QStringLiteral("cap32_autorun")) == QLatin1String("enabled"));
         }
         if (croc) CHECK(LaunchRecipes::bootCommandFor(*croc).isEmpty());
+    }
+
+    // ---- #288: the SHIPPED msdos.json agrees with what dosbox-pure really declares ---------------------------
+    // The conf mapping was first written from memory, and a key or value the core does not declare is stored
+    // by setOptionValue, reported "applied", and never read. dosbox_pure_declared.h is the core's own option
+    // table (verified against the upstream source at a pinned release), so this turns that verification into a
+    // regression fixture: a future edit to msdos.json that names a key or a value dosbox-pure does not offer
+    // fails here, not silently in a user's game.
+    {
+        const DosConf::Declared declared = DosConf::declaredFrom(dosboxPureDeclaredOptions());
+        const LaunchRecipe dos = LaunchRecipes::load(QStringLiteral("msdos"), QString());
+        const RecipeCore* pure = dos.isNull() ? nullptr : LaunchRecipes::coreFor(dos, QStringLiteral("dosbox_pure"));
+        CHECK(pure != nullptr);
+        if (pure)
+        {
+            // The recipe's own seeds name declared keys with accepted values.
+            for (auto it = pure->options.constBegin(); it != pure->options.constEnd(); ++it)
+            {
+                CHECK(declared.contains(it.key()));
+                CHECK(declared.value(it.key()).contains(it.value()));
+            }
+
+            QSet<QString> mappedTo;
+            for (const DosConf::Mapping& m : pure->conf.map)
+            {
+                if (m.transform == QLatin1String("none")) continue;   // never translated, so never seeded
+                mappedTo.insert(m.to);
+                const bool keyDeclared = declared.contains(m.to);
+                if (!keyDeclared) std::fprintf(stderr, "RECIPES-FAIL %s -> undeclared %s\n",
+                                               qPrintable(m.from), qPrintable(m.to));
+                CHECK(keyDeclared);
+                const QStringList accepted = declared.value(m.to);
+                for (auto v = m.values.constBegin(); v != m.values.constEnd(); ++v)
+                {
+                    if (!accepted.contains(v.value()))
+                        std::fprintf(stderr, "RECIPES-FAIL %s=%s -> %s=%s is not a declared value\n",
+                                     qPrintable(m.from), qPrintable(v.key()), qPrintable(m.to), qPrintable(v.value()));
+                    CHECK(accepted.contains(v.value()));
+                    // A conf value dosbox-pure accepts VERBATIM passes through verbatim — mapping it onto a
+                    // neighbour (386_slow onto 386) would run the game on different hardware than it asked for.
+                    if (accepted.contains(v.key()) && v.value() != v.key())
+                        std::fprintf(stderr, "RECIPES-FAIL %s=%s is declared as-is but maps to %s\n",
+                                     qPrintable(m.from), qPrintable(v.key()), qPrintable(v.value()));
+                    CHECK(!accepted.contains(v.key()) || v.value() == v.key());
+                }
+                if (m.transform == QLatin1String("cycles"))
+                {
+                    // Every value the cycles transform can produce for the shapes it recognises must be declared,
+                    // and every count dosbox-pure declares must be reachable from a `fixed N` conf line.
+                    CHECK(accepted.contains(DosConf::transformCycles(QStringLiteral("auto"))));
+                    CHECK(accepted.contains(DosConf::transformCycles(QStringLiteral("max 80%"))));
+                    for (const QString& n : accepted)
+                    {
+                        if (n == QLatin1String("auto") || n == QLatin1String("max")) continue;
+                        CHECK(DosConf::transformCycles(QStringLiteral("fixed ") + n) == n);
+                    }
+                }
+            }
+            // Exactly the seven options this recipe maps, all of them — a mapping dropped by accident fails too.
+            const QSet<QString> seven = {
+                QStringLiteral("dosbox_pure_machine"), QStringLiteral("dosbox_pure_memory_size"),
+                QStringLiteral("dosbox_pure_cycles"), QStringLiteral("dosbox_pure_cpu_type"),
+                QStringLiteral("dosbox_pure_cpu_core"), QStringLiteral("dosbox_pure_sblaster_type"),
+                QStringLiteral("dosbox_pure_sblaster_adlib_mode") };
+            CHECK(mappedTo == seven);
+        }
     }
 
     if (failures == 0) std::printf("RECIPES-OK\n");

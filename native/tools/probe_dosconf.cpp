@@ -34,6 +34,7 @@
 #include "LaunchRecipe.h"
 #include "EmulatorRegistry.h"
 #include "LaunchOptionsStore.h"
+#include "dosbox_pure_declared.h"   // #288: dosbox-pure's declared options, verified against its source
 
 #include <QCoreApplication>
 #include <QJsonObject>
@@ -450,6 +451,175 @@ int main(int argc, char** argv)
         const auto haveAll = [](const QString&) { return true; };
         CHECK(DosConf::midiOptions(midi, QString(), haveAll).isEmpty());
         CHECK(DosConf::midiOptions(midi, QStringLiteral("default"), haveAll).isEmpty());
+    }
+
+    // ---- 8. #288: nothing is reported applied unless the LOADED core declares it ----------------------------
+    // LibretroCore::setOptionValue does not validate, so a key the core never declared (or a value outside its
+    // list) would be stored, reported "applied" and never read. The plan is therefore held against the loaded
+    // core's own options before it is reported or seeded. The fake core here is dosbox-pure's REAL declaration
+    // (dosbox_pure_declared.h, verified against the upstream source), in the exact CoreOption shape
+    // LibretroCore::options() hands the launch path.
+    {
+        const std::vector<CoreOption> fakeCore = dosboxPureDeclaredOptions();
+        const DosConf::Declared declared = DosConf::declaredFrom(fakeCore);
+        CHECK(declared.size() == 8);
+        CHECK(declared.value(QStringLiteral("dosbox_pure_cycles")).contains(QStringLiteral("7800")));
+        CHECK(declared.value(QStringLiteral("dosbox_pure_cpu_type")).contains(QStringLiteral("386_slow")));
+
+        const LaunchRecipe dos = LaunchRecipes::load(QStringLiteral("msdos"), QString());
+        const RecipeCore* pure = dos.isNull() ? nullptr : LaunchRecipes::coreFor(dos, QStringLiteral("dosbox_pure"));
+        CHECK(pure != nullptr);
+        if (!pure) { std::fprintf(stderr, "DOSCONF had %d failure(s)\n", failures + 1); return 1; }
+
+        const auto planFor = [&](const QByteArray& confBytes, const DosConf::Declared& d, DosConf::Plan* before) {
+            DosConf::File f;
+            DosConf::parse(confBytes, &f);
+            const DosConf::Plan pre = DosConf::translate(f, pure->conf);
+            if (before) *before = pre;
+            return DosConf::checkAgainstCore(pre, d);
+        };
+        const auto ignoredReason = [](const DosConf::Plan& p, const QString& from) {
+            for (const DosConf::Ignored& i : p.ignored) if (i.from == from) return i.reason;
+            return QString();
+        };
+        const auto isApplied = [](const DosConf::Plan& p, const QString& from) {
+            for (const DosConf::Applied& a : p.applied) if (a.from == from) return true;
+            return false;
+        };
+
+        // (a) each of the seven mapped keys, with a representative conf value, lands APPLIED with the exact
+        //     value dosbox-pure declares. cputype=386_slow is dosbox-pure's own "386_slow", not "386".
+        const QByteArray seven("[dosbox]\nmachine=svga_et4000\nmemsize=32\n"
+                               "[cpu]\ncycles=fixed 7800\ncputype=386_slow\ncore=dynamic_x86\n"
+                               "[sblaster]\nsbtype=sbpro2\noplmode=dualopl2\n");
+        DosConf::Plan sevenPre;
+        const DosConf::Plan all = planFor(seven, declared, &sevenPre);
+        CHECK(all.ok);
+        CHECK(sevenPre.coreCheck == DosConf::CoreCheck::NotChecked);
+        CHECK(all.coreCheck == DosConf::CoreCheck::Checked);
+        CHECK(all.applied.size() == 7);
+        CHECK(all.ignored.isEmpty());
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_machine")) == QLatin1String("svga"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_memory_size")) == QLatin1String("32"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String("7800"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_cpu_type")) == QLatin1String("386_slow"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_cpu_core")) == QLatin1String("dynamic"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_sblaster_type")) == QLatin1String("sbpro2"));
+        CHECK(all.options.value(QStringLiteral("dosbox_pure_sblaster_adlib_mode")) == QLatin1String("dualopl2"));
+        for (const DosConf::Applied& a : all.applied)
+            CHECK(declared.value(a.option).contains(a.optionValue));
+
+        // (b) an UNDECLARED KEY: the same conf on a core that does not offer the adlib-mode option. The recipe
+        //     translated it (applied before load); the loaded core moves it to IGNORED, with the reason, and it
+        //     is neither seeded nor counted as applied.
+        DosConf::Declared noAdlib = declared;
+        noAdlib.remove(QStringLiteral("dosbox_pure_sblaster_adlib_mode"));
+        DosConf::Plan keyPre;
+        const DosConf::Plan keyPost = planFor(seven, noAdlib, &keyPre);
+        CHECK(isApplied(keyPre, QStringLiteral("sblaster.oplmode")));             // applied -> …
+        CHECK(!isApplied(keyPost, QStringLiteral("sblaster.oplmode")));           // … -> ignored after load
+        CHECK(ignoredReason(keyPost, QStringLiteral("sblaster.oplmode"))
+              == QLatin1String("the loaded core does not offer dosbox_pure_sblaster_adlib_mode"));
+        CHECK(!keyPost.options.contains(QStringLiteral("dosbox_pure_sblaster_adlib_mode")));
+        CHECK(keyPost.applied.size() == 6);
+        CHECK(keyPost.applied.size() + keyPost.ignored.size() == keyPre.applied.size() + keyPre.ignored.size());
+        const QString keyReport = DosConf::report(QStringLiteral("Doom"), QStringLiteral("DOSBOX.CONF"), keyPost);
+        CHECK(keyReport.contains(QStringLiteral("6 of 7 settings applied")));
+        CHECK(keyReport.contains(QStringLiteral("Ignored: sblaster.oplmode.")));
+        CHECK(!keyReport.contains(QStringLiteral("dosbox_pure_sblaster_adlib_mode=")));
+        CHECK(DosConf::logLines(keyPost).join(QLatin1Char('\n'))
+                  .contains(QStringLiteral("does not offer dosbox_pure_sblaster_adlib_mode")));
+
+        // (c) an UNDECLARED VALUE: a dosbox-pure build with no dynamic recompiler declares cpu_core as only
+        //     normal/simple (core_options.h:924-932). core=dynamic is ignored, and the reason NAMES the value.
+        DosConf::Declared interpOnly = declared;
+        interpOnly.insert(QStringLiteral("dosbox_pure_cpu_core"), { QStringLiteral("normal"), QStringLiteral("simple") });
+        const DosConf::Plan valPost = planFor(QByteArray("[cpu]\ncore=dynamic\n"), interpOnly, nullptr);
+        CHECK(valPost.applied.isEmpty());
+        CHECK(valPost.options.isEmpty());
+        const QString valReason = ignoredReason(valPost, QStringLiteral("cpu.core"));
+        CHECK(valReason.contains(QStringLiteral("dynamic")));
+        CHECK(valReason.contains(QStringLiteral("dosbox_pure_cpu_core")));
+        // A repeated key: the dropped value must not survive into the seed, and the accepted one must.
+        const DosConf::Plan rep = planFor(QByteArray("[cpu]\ncore=simple\ncore=dynamic\n"), interpOnly, nullptr);
+        CHECK(rep.options.value(QStringLiteral("dosbox_pure_cpu_core")) == QLatin1String("simple"));
+        CHECK(rep.applied.size() == 1);
+        CHECK(rep.ignored.size() == 1);
+
+        // (d) an EMPTY declared set means UNKNOWN: today's behaviour, unchanged, and the log says so.
+        DosConf::Plan unkPre;
+        const DosConf::Plan unk = planFor(seven, DosConf::Declared(), &unkPre);
+        CHECK(unk.coreCheck == DosConf::CoreCheck::Unknown);
+        CHECK(unk.options == unkPre.options);
+        CHECK(unk.applied.size() == unkPre.applied.size());
+        CHECK(unk.ignored.size() == unkPre.ignored.size());
+        const QStringList unkLines = DosConf::logLines(unk);
+        CHECK(unkLines.size() == unk.applied.size() + unk.ignored.size() + 1);
+        CHECK(unkLines.value(0).contains(QStringLiteral("unknown")));
+        CHECK(!DosConf::logLines(unkPre).join(QLatin1Char('\n')).contains(QStringLiteral("unknown")));
+        CHECK(!DosConf::logLines(all).join(QLatin1Char('\n')).contains(QStringLiteral("unknown")));
+
+        // (e) a declared key with an OPEN value list takes any value.
+        DosConf::Declared open = declared;
+        open.insert(QStringLiteral("dosbox_pure_cycles"), QStringList());
+        const DosConf::Plan openPlan = planFor(QByteArray("[cpu]\ncycles=fixed 3000\n"), open, nullptr);
+        CHECK(openPlan.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String("3000"));
+
+        // (f) cycles, per the REAL declaration: a fixed list of auto, max and eleven counts.
+        struct CyclesCase { const char* conf; const char* applied; const char* ignoredNaming; };
+        const CyclesCase cases[] = {
+            { "auto",                  "auto", nullptr },
+            { "AUTO",                  "auto", nullptr },
+            { "auto 7800 limit 50000", "auto", nullptr },   // DOSBox's auto with a start value and a limit
+            { "auto 50%",              "auto", nullptr },
+            { "max",                   "max",  nullptr },
+            { "max 80%",               "max",  nullptr },
+            { "max limit 20000",       "max",  nullptr },
+            { "fixed 7800",            "7800", nullptr },
+            { "7800",                  "7800", nullptr },
+            { "fixed 1000000",         "1000000", nullptr },
+            { "fixed 3000",            nullptr, "3000" },    // a real count, but not one dosbox-pure offers
+            { "20000",                 nullptr, "20000" },
+        };
+        for (const CyclesCase& c : cases)
+        {
+            const DosConf::Plan cp = planFor(QByteArray("[cpu]\ncycles=") + c.conf + "\n", declared, nullptr);
+            if (c.applied)
+            {
+                if (cp.options.value(QStringLiteral("dosbox_pure_cycles")) != QLatin1String(c.applied))
+                    std::fprintf(stderr, "DOSCONF-FAIL cycles=%s -> '%s', want '%s'\n", c.conf,
+                                 qPrintable(cp.options.value(QStringLiteral("dosbox_pure_cycles"))), c.applied);
+                CHECK(cp.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String(c.applied));
+                CHECK(cp.ignored.isEmpty());
+            }
+            else
+            {
+                if (!cp.options.isEmpty())
+                    std::fprintf(stderr, "DOSCONF-FAIL cycles=%s was applied\n", c.conf);
+                CHECK(cp.options.isEmpty());
+                CHECK(ignoredReason(cp, QStringLiteral("cpu.cycles")).contains(QLatin1String(c.ignoredNaming)));
+            }
+        }
+        // …and a shape with no option form at all is still ignored with the recipe's own note.
+        const DosConf::Plan bare = planFor(QByteArray("[cpu]\ncycles=fixed\n"), declared, nullptr);
+        CHECK(bare.options.isEmpty());
+        CHECK(!ignoredReason(bare, QStringLiteral("cpu.cycles")).isEmpty());
+
+        // (g) an unreadable conf stays unreadable — the check never invents an applied entry.
+        const DosConf::Plan broken = planFor(QByteArray("[cpu\ncycles=max\n"), declared, nullptr);
+        CHECK(!broken.ok);
+        CHECK(broken.options.isEmpty());
+        CHECK(broken.applied.isEmpty());
+
+        // (h) the GOG conf from section 4 on the real core: cycles=fixed 20000 was "applied" by the recipe
+        //     alone, and the loaded core's declaration turns it into an honest ignored line.
+        DosConf::Plan gogPre;
+        const DosConf::Plan gog = planFor(gogConf(), declared, &gogPre);
+        CHECK(isApplied(gogPre, QStringLiteral("cpu.cycles")));
+        CHECK(!isApplied(gog, QStringLiteral("cpu.cycles")));
+        CHECK(ignoredReason(gog, QStringLiteral("cpu.cycles")).contains(QStringLiteral("20000")));
+        CHECK(DosConf::report(QStringLiteral("Doom"), QStringLiteral("DOSBOX.CONF"), gog)
+                  .contains(QStringLiteral("6 of 11 settings applied")));
     }
 
     if (failures == 0) std::printf("DOSCONF-OK\n");

@@ -53,13 +53,13 @@
             "from": "cpu.cycles",
             "to": "dosbox_pure_cycles",
             "transform": "cycles",
-            "note": "only auto, max and a fixed cycle count can be expressed as a core option"
+            "note": "DOSBox-Pure's Emulated Performance option takes auto, max or a cycle count, and this value is none of those"
           },
           {
             "from": "cpu.cputype",
             "to": "dosbox_pure_cpu_type",
             "values": {
-              "auto": "auto", "386": "386", "386_slow": "386", "386_prefetch": "386_prefetch",
+              "auto": "auto", "386": "386", "386_slow": "386_slow", "386_prefetch": "386_prefetch",
               "486_slow": "486_slow", "486_prefetch": "486_slow",
               "pentium": "pentium_slow", "pentium_slow": "pentium_slow"
             },

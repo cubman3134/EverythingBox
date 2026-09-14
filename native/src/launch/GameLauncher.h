@@ -22,6 +22,7 @@ class Pad2KeyRuntime;
 class QTimer;
 struct GameSystem;
 struct ExternalEmulator;
+namespace DosConf { struct Plan; }   // #288: the dosbox.conf plan (DosConf.h)
 
 class GameLauncher : public QObject
 {
@@ -100,14 +101,14 @@ public:
     // user at a `CAT` listing with no explanation. Public so the split-pane branch reports it too.
     QString amsdosBootCommand(const CorePlan& plan, bool* readable = nullptr) const;
 
-    // #191: the dosbox.conf translation for a libretro plan. Reads the conf sitting beside the game, maps it
-    // onto this core's options through the recipe's `conf` block, fills *options with what to seed, and
-    // returns THE REPORT — the sentence naming which of the conf's settings were applied and which were
-    // ignored. "" when there is no conf beside the game (which is every launch on every other system), so
-    // nothing about a launch without one changes. A conf that cannot be PARSED returns its own message and
-    // leaves *options empty: half-applying a conf is worse than ignoring it. Public so the split-pane branch
-    // can run the same translation.
-    QString dosConfReport(const CorePlan& plan, const QString& title, QMap<QString, QString>* options) const;
+    // #191: the dosbox.conf translation for a libretro plan. Reads the conf sitting beside the game and maps it
+    // onto this core's options through the recipe's `conf` block, filling *plan and *confName. False when there
+    // is no conf beside the game (which is every launch on every other system), so nothing about a launch
+    // without one changes. A conf that cannot be PARSED yields a plan with ok=false and no options:
+    // half-applying a conf is worse than ignoring it.
+    // #288: the plan is the RECIPE's view only. RetroView re-classifies it against the loaded core's declared
+    // options before seeding, and reportDosConf() reports that checked plan.
+    bool dosConfPlan(const CorePlan& plan, DosConf::Plan* out, QString* confName) const;
 
     // #191: the MIDI assets. For the user's chosen MS-DOS MIDI device, fills *options with the core option
     // that selects it — but only when every file that device needs is in the system folder — and returns the
@@ -194,6 +195,9 @@ private:
     // progress in the status bar) with this tail running as the continuation once the files land.
     void finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
                               const QString& thumb, const QString& key);
+    // #288: log and report the dosbox.conf plan RetroView checked against the loaded core (if any). The
+    // user-facing sentence is shown only when the game launched.
+    void reportDosConf(const QString& title, bool launched);
     // The RetroPark launch tail (Slice 2a) — the third branch beside finishLibretroLaunch, taken when a libretro
     // system's resolved backend is RetroPark. For now a STUB that only signals the host to show the RetroPark page;
     // Task 4 wires the live RetroParkView (driven refcore surface) in here. Mirrors finishLibretroLaunch's shape so

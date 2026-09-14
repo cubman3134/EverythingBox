@@ -725,14 +725,20 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
                 // so both run here, past every blocker, and hand their options to the view before openGame.
                 // The MIDI seed is applied SECOND and so wins on a key both name: the user picked it in
                 // Settings, and a conf is a file that happened to be in the folder.
-                QMap<QString, QString> seed;
-                const QString confMsg = dosConfReport(ready, recentTitle, &seed);
+                //
+                // #288: the conf is only TRANSLATED here, from the recipe. Its report is not built until
+                // finishLibretroLaunch, after RetroView has loaded the core and held the plan against the
+                // options that core actually declares — before load, nothing can say which keys it will read.
+                DosConf::Plan confPlan;
+                QString confName;
+                const bool hasConf = dosConfPlan(ready, &confPlan, &confName);
                 QMap<QString, QString> midiSeed;
                 const QString midiMsg = dosMidiSeed(ready, recentTitle, &midiSeed);
-                for (auto it = midiSeed.constBegin(); it != midiSeed.constEnd(); ++it)
-                    seed.insert(it.key(), it.value());
-                if (retro_) retro_->setConfOptions(seed);
-                if (!confMsg.isEmpty()) emit notifyUser(confMsg, kFeedbackLong);
+                if (retro_)
+                {
+                    retro_->setConfOptions(midiSeed);
+                    if (hasConf) retro_->setConfPlan(confPlan, confName);
+                }
                 if (!midiMsg.isEmpty()) emit notifyUser(midiMsg, kFeedbackLong);
                 finishLibretroLaunch(ready, launchRom, recentTitle, thumb, key);
             });
@@ -810,32 +816,36 @@ QString GameLauncher::amsdosBootCommand(const CorePlan& plan, bool* readable) co
 //
 // The conf beside the game is read, mapped onto THIS plan's core through the recipe's `conf` block, and the
 // result comes back as two lists: what was applied and what was not. Every ignored key carries a reason. The
-// sentence returned here names both — because the alternative, applying six of a user's twenty settings and
+// report built from it (reportDosConf) names both — because the alternative, applying six of a user's twenty settings and
 // saying "conf applied", would leave them debugging a game that is not configured the way they think it is.
 //
-// Returns "" for every launch with no conf beside it, which is every launch on every system but MS-DOS and
+// Returns false for every launch with no conf beside it, which is every launch on every system but MS-DOS and
 // most MS-DOS launches too, so nothing about them changes.
-QString GameLauncher::dosConfReport(const CorePlan& plan, const QString& title,
-                                    QMap<QString, QString>* options) const
+//
+// #288: this is the recipe-only half. The plan it fills has NOT been checked against the core — the core is
+// not loaded yet — so it is handed to RetroView, which re-classifies it after loadCore(), and reportDosConf()
+// logs and reports the checked result.
+bool GameLauncher::dosConfPlan(const CorePlan& plan, DosConf::Plan* out, QString* confNameOut) const
 {
-    if (options) options->clear();
-    if (plan.systemId.isEmpty() || plan.core.isEmpty() || plan.launchRom.isEmpty()) return QString();
+    if (out) *out = DosConf::Plan();
+    if (confNameOut) confNameOut->clear();
+    if (plan.systemId.isEmpty() || plan.core.isEmpty() || plan.launchRom.isEmpty()) return false;
     const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
-    if (recipe.isNull()) return QString();
+    if (recipe.isNull()) return false;
     const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
-    if (!rc || rc->conf.isNull()) return QString();   // this core has no conf mapping — nothing to do
+    if (!rc || rc->conf.isNull()) return false;   // this core has no conf mapping — nothing to do
 
     // The game folder: launchRom is the folder itself, or the program inside it (#190 hands a folder game the
     // executable path). The whole top level is listed rather than a "*.conf" filter, which is case-SENSITIVE
     // on Linux and would miss the upper-case DOSBOX.CONF a DOS game folder actually ships.
     const QFileInfo fi(plan.launchRom);
     const QDir dir = fi.isDir() ? QDir(plan.launchRom) : QDir(fi.absolutePath());
-    if (!dir.exists()) return QString();
+    if (!dir.exists()) return false;
     const QString confName = DosConf::chooseConf(dir.entryList(QDir::Files));
-    if (confName.isEmpty()) return QString();
+    if (confName.isEmpty()) return false;
 
     QFile f(dir.absoluteFilePath(confName));
-    if (!f.open(QIODevice::ReadOnly)) return QString();
+    if (!f.open(QIODevice::ReadOnly)) return false;
     // Bounded: a dosbox.conf is a few kilobytes. Reading a capped prefix keeps a mislabelled huge file off the
     // GUI thread — the same guard amsdosBootCommand applies to a .dsk.
     const QByteArray bytes = f.read(1 * 1024 * 1024);
@@ -843,12 +853,22 @@ QString GameLauncher::dosConfReport(const CorePlan& plan, const QString& title,
 
     DosConf::File conf;
     DosConf::parse(bytes, &conf);                       // a false return leaves conf.ok false, which is the report
-    const DosConf::Plan p = DosConf::translate(conf, rc->conf);
-    if (options && p.ok) *options = p.options;
+    if (out) *out = DosConf::translate(conf, rc->conf);
+    if (confNameOut) *confNameOut = confName;
+    return true;
+}
 
+// #288. The conf report, built from the plan AS THE LOADED CORE CHECKED IT (RetroView::openGame). Logs one line
+// per entry with its reason either way; the user-facing sentence is only shown for a game that actually started,
+// because a launch that failed has its own message and applied nothing the user will see.
+void GameLauncher::reportDosConf(const QString& title, bool launched)
+{
+    DosConf::Plan p;
+    QString confName;
+    if (!retro_ || !retro_->takeCheckedConfPlan(&p, &confName)) return;
     for (const QString& line : DosConf::logLines(p))
         glLog(QStringLiteral("game: %1 %2").arg(confName, line));
-    return DosConf::report(title, confName, p);
+    if (launched) emit notifyUser(DosConf::report(title, confName, p), kFeedbackLong);
 }
 
 // #191. The MIDI assets. Whatever device the user chose for MS-DOS, the files it needs are THEIRS to supply —
@@ -900,7 +920,9 @@ void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& lau
     // filed under the console the item was actually opened from (a shared extension resolves ambiguously).
     // `key` (the catalog item's stable id, else empty) keys this game's per-game overrides (#95) — the same
     // identity RecentStore de-dups on and PlayStats accrues under, so overrides follow the game, not the path.
-    if (retro_->openGame(plan.corePath, launchRom, plan.core, &err, recentTitle, plan.systemId, key))
+    const bool opened = retro_->openGame(plan.corePath, launchRom, plan.core, &err, recentTitle, plan.systemId, key);
+    reportDosConf(recentTitle, opened);   // #288: the conf report, as the loaded core checked it
+    if (opened)
     {
         glLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         emit showRetroRequested();
