@@ -27,8 +27,10 @@
 #pragma once
 #include "ComicInfo.h"
 
+#include <QHash>
 #include <QImage>
 #include <QRect>
+#include <QSet>
 #include <QSize>
 #include <QString>
 #include <QVector>
@@ -234,6 +236,54 @@ namespace ComicRead
     // because a caller with a budget spends it from the front, and forward is where the reader is going.
     inline constexpr int kPrefetchRadius = 3;
     QVector<int> prefetchWindow(int current, int total, int radius = kPrefetchRadius);
+
+    // ---- WEBTOON: DECODING OFF THE PAINT PATH (issue #286) -------------------------------------------------
+    // A jump from the thumbnail rail lands on a page nobody has decoded, and a webtoon page can be 800x12000.
+    // The strip therefore never decodes while it paints: a page that is not ready is drawn as a placeholder of
+    // its laid-out height, a worker decodes + prepares + scales it, and the GUI thread only turns the finished
+    // QImage into a pixmap. These are the bookkeeping DECISIONS of that arrangement — which pages to ask a
+    // worker for, whether a worker should still bother once it starts, and whether a finished page may be
+    // drawn — as free functions over plain values, so probe_readingmodes asserts them and ComicView only
+    // applies the answers.
+    //
+    // THE GENERATION is a counter ComicView bumps every time its strip cache is emptied (a width change, a
+    // filter change, leaving the strip, opening something else). Every request carries the generation it was
+    // made under, and an answer from an older generation describes pages that no longer exist on screen.
+
+    // What a worker hands back, minus the image: which page, under which generation, at which strip width.
+    struct StripResult
+    {
+        int     page = -1;
+        quint64 generation = 0;
+        int     width = 0;
+    };
+
+    // WHICH PAGES TO REQUEST, IN ORDER. `window` is the prefetch window in its priority order (prefetchWindow's:
+    // the landed page first, then forward before back), and the answer keeps that order. A page is skipped when
+    // it is already `cached`, or when it is already in flight UNDER THIS GENERATION — `inFlight` maps a page to
+    // the generation its outstanding request was made under, so a request left over from before a cache clear
+    // does not stop the page being asked for again at the new one.
+    QVector<int> stripRequests(const QVector<int>& window, const QSet<int>& cached,
+                               const QHash<int, quint64>& inFlight, quint64 generation);
+
+    // MAY A FINISHED PAGE BE DRAWN. Only when its generation is the current one, its width is the strip's
+    // current width, and its page is still inside the current window. Anything else is dropped rather than
+    // cached — a page outside the window would be evicted again at the next scroll, so caching it would only
+    // turn the window back into a leak.
+    bool acceptStripResult(const StripResult& r, quint64 generation, int width, const QVector<int>& window);
+
+    // THE WORKER'S START CHECK. A flick across 200 pages queues far more jobs than will ever be looked at, so a
+    // job re-reads the live generation and window bounds when it actually starts, and does no work unless it
+    // is still wanted. `windowFirst..windowLast` is the window's index range (prefetchWindow is contiguous).
+    bool stripJobWanted(int page, quint64 jobGeneration, quint64 liveGeneration, int windowFirst, int windowLast);
+
+    // THE WINDOW NEVER EXCLUDES A PAGE ON SCREEN. prefetchWindow's +/-3 is counted from the page at the TOP of
+    // the viewport; a strip cut into pages shorter than a third of the viewport would put visible pages beyond
+    // it, and those would stay placeholders because their results fall outside the window. stripLastVisible is
+    // the last page intersecting [y, y + viewportH); stripWindow widens the radius just enough to reach it,
+    // and is exactly prefetchWindow(current, count) whenever the pages are taller than that.
+    int stripLastVisible(const Strip& s, int y, int viewportH);
+    QVector<int> stripWindow(const Strip& s, int current, int lastVisible);
 
     // How far Up/Down move in webtoon mode, as a fraction of the viewport height. Less than 1 on purpose:
     // a full-viewport jump loses the line you were on at the seam between two presses.
