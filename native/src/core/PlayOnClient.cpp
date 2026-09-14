@@ -47,8 +47,15 @@ void PlayOnClient::post(const PlayOn::Peer& peer, const QString& path, const QBy
                         const QString& token, int timeoutMs,
                         std::function<void(int, const QByteArray&, bool)> done)
 {
+    post(peer, path, body, token, timeoutMs, QStringLiteral("application/json"), done);
+}
+
+void PlayOnClient::post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body,
+                        const QString& token, int timeoutMs, const QString& contentType,
+                        std::function<void(int, const QByteArray&, bool)> done)
+{
     QNetworkRequest req{ QUrl(base(peer) + path) };
-    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, contentType);
     // The credential. One header, one request, and it appears nowhere else in this process's output.
     if (!token.isEmpty()) req.setRawHeader("X-EB-Token", token.toLatin1());
 
@@ -153,32 +160,47 @@ void PlayOnClient::fetchInventory(const PlayOn::Peer& peer, const QString& token
             if (ok && status == 200)
             {
                 QList<LibraryBundle::Entry> items;
+                QList<int> formats;
                 QString err;
-                if (LibraryBundle::parseInventory(body, items, err))
+                if (LibraryBundle::parseInventory(body, items, formats, err))
                 {
-                    emit inventoryArrived(id, items, true, QString());
+                    emit inventoryArrived(id, items, true, QString(), formats);
                     return;
                 }
-                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false, err);
+                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false, err, QList<int>{ 1 });
                 return;
             }
             if (status == 401)
             {
                 emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
-                                      tr("%1 needs pairing again.").arg(name));
+                                      tr("%1 needs pairing again.").arg(name), QList<int>{ 1 });
                 return;
             }
             emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
-                                  reasonOf(body, tr("%1 did not answer.").arg(name)));
+                                  reasonOf(body, tr("%1 did not answer.").arg(name)), QList<int>{ 1 });
         });
+}
+
+int PlayOnClient::bundleTimeoutMsFor(qint64 bodyBytes, int format)
+{
+    if (format != LibraryBundle::kPayloadFormatV2) return kBundleTimeoutMs;
+    return kBundleTimeoutMs + int(bodyBytes / (512LL * 1024)) * 1000;
 }
 
 void PlayOnClient::sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
                                   const QByteArray& payload)
 {
+    sendBundleItem(peer, token, itemId, payload, LibraryBundle::kFormatVersion);
+}
+
+void PlayOnClient::sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
+                                  const QByteArray& payload, int format)
+{
     const QString id = peer.id;
     const QString name = peer.name;
-    post(peer, QStringLiteral("/bundle"), payload, token, kBundleTimeoutMs,
+    const bool raw = format == LibraryBundle::kPayloadFormatV2;
+    post(peer, QStringLiteral("/bundle"), payload, token, bundleTimeoutMsFor(payload.size(), format),
+         raw ? QString::fromLatin1(LibraryBundle::kBundleV2ContentType) : QStringLiteral("application/json"),
          [this, id, itemId, name](int status, const QByteArray& body, bool ok) {
              LibraryBundle::Receipt r;
              if (ok && status == 200 && LibraryBundle::parseReceipt(body, r))

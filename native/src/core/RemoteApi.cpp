@@ -102,6 +102,18 @@ namespace RemoteApi
                 bool ok = false;
                 const int n = line.mid(colon + 1).trimmed().toInt(&ok);
                 if (ok && n >= 0) contentLength = n;
+                // #291: the same header as a 64-bit figure, for the streaming decision. The int above is left
+                // exactly as it was, so the buffered routes parse bodies as they always have.
+                bool ok64 = false;
+                const qint64 n64 = line.mid(colon + 1).trimmed().toLongLong(&ok64);
+                if (ok64 && n64 >= 0) req.declaredLength = n64;
+            }
+            else if (name == "content-type")
+            {
+                QByteArray type = line.mid(colon + 1);
+                const int semi = type.indexOf(';');
+                if (semi >= 0) type.truncate(semi);
+                req.contentType = type.trimmed().toLower();
             }
             // The token a paired peer presents. Two spellings because a hand-written client reaches for
             // Authorization and a fetch() from the phone page reaches for a custom header; both mean the same
@@ -386,6 +398,7 @@ namespace RemoteApi
             case 404: return "Not Found";
             case 405: return "Method Not Allowed";
             case 409: return "Conflict";          // #143: a reference this device cannot resolve
+            case 411: return "Length Required";   // #291: a streamed bundle must say where it ends
             case 413: return "Payload Too Large";
             default:  return "OK";
         }
@@ -418,5 +431,18 @@ namespace RemoteApi
         if (rawPrefix.startsWith("POST /bundle ") || rawPrefix.startsWith("POST /bundle?"))
             return kBundleRequestCap;
         return kDefaultRequestCap;
+    }
+
+    BodyPlan bodyPlanFor(const Request& headers)
+    {
+        // Only POST /bundle, and only when the body declares itself as the raw-body format. The JSON (v1)
+        // bundle, every other route, and a request that names the type anywhere but Content-Type are buffered
+        // exactly as they always were.
+        if (!headers.valid || headers.method != Method::Post) return BodyPlan::Buffer;
+        if (headers.path != QStringLiteral("/bundle")) return BodyPlan::Buffer;
+        if (headers.contentType != QByteArray(kBundleStreamContentType)) return BodyPlan::Buffer;
+        if (headers.declaredLength < 0) return BodyPlan::LengthRequired;
+        if (headers.declaredLength > kBundleStreamCap) return BodyPlan::TooLarge;
+        return BodyPlan::Stream;
     }
 }

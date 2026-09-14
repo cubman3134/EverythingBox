@@ -90,6 +90,17 @@ LibraryBundle::Receipt MainWindow::libraryReceiveBundle(const QByteArray& body)
     return LibraryBundle::receiptFor(r, error);
 }
 
+LibraryBundle::Receipt MainWindow::libraryReceiveBundleStream(QIODevice& body)
+{
+    // #291. `body` is the spool RemoteServer wrote under the cache root. landItemV2 judges the whole header --
+    // id, names, sizes, and that they account for exactly the bytes in the file -- before it copies a byte.
+    QString error;
+    const LibraryBundle::LandResult r = LibraryBundle::landItemV2(libraryCacheRoot(), body, error);
+    if (r == LibraryBundle::LandResult::Refused || r == LibraryBundle::LandResult::WriteFailed)
+        slLog(QStringLiteral("bundle: refused an item — %1").arg(error));
+    return LibraryBundle::receiptFor(r, error);
+}
+
 // ---------------------------------------------------------------------------- this device as a SOURCE -----
 
 void MainWindow::sendLibraryTo(const PlayOn::Peer& peer)
@@ -139,6 +150,7 @@ void MainWindow::sendLibraryWithToken(const PlayOn::Peer& peer, const QString& t
     sendLibCursor_ = 0;
     sendLibProgress_ = LibraryBundle::Progress();
     sendLibPeerId_ = peer.id;
+    sendLibFormat_ = LibraryBundle::kFormatVersion;
 
     notify(tr("Comparing libraries with %1…").arg(peer.name), 4000);
 
@@ -146,9 +158,11 @@ void MainWindow::sendLibraryWithToken(const PlayOn::Peer& peer, const QString& t
     PlayOnClient* c = playOnClient();
     connect(c, &PlayOnClient::inventoryArrived, this,
             [self, peer, token](const QString& id, const QList<LibraryBundle::Entry>& theirs,
-                                bool ok, const QString& message) {
+                                bool ok, const QString& message, const QList<int>& formats) {
         if (!self || id != peer.id) return;
         if (!ok) { self->notify(message, 6000); return; }
+        // #291: raw bodies to a target that says it takes them; v1, exactly as before, to one that does not.
+        self->sendLibFormat_ = LibraryBundle::chooseBundleFormat(formats);
 
         // THE DIFF, and it is the whole feature: only what is missing or newer leaves this machine.
         const QList<LibraryBundle::Entry> mine =
@@ -187,9 +201,14 @@ void MainWindow::sendLibraryNextItem(const PlayOn::Peer& peer, const QString& to
     }
 
     const QString itemId = sendLibQueue_.at(sendLibCursor_);
+    // The item is read whole into memory -- at most the format's ceiling (64 MiB for v2), one item at a time --
+    // and posted as one body, rather than streamed from the files while the request is in flight. Reading it
+    // first snapshots the item: a thumb evicted or re-fetched mid-send cannot put a body on the wire whose
+    // sizes no longer match its header (the target would refuse it as Malformed, every run).
+    const int format = sendLibFormat_;
     LibraryBundle::Payload p;
     QString error;
-    if (!LibraryBundle::readPayload(libraryCacheRoot(), itemId, p, error))
+    if (!LibraryBundle::readPayload(libraryCacheRoot(), itemId, p, error, LibraryBundle::maxItemBytesFor(format)))
     {
         // The item went away (an eviction, an uninstall) between the diff and the read. Not a failure of the
         // run: skip it, and let the next run's diff decide again.
@@ -198,7 +217,10 @@ void MainWindow::sendLibraryNextItem(const PlayOn::Peer& peer, const QString& to
         QTimer::singleShot(0, this, [this, peer, token] { sendLibraryNextItem(peer, token); });
         return;
     }
-    const QByteArray wire = LibraryBundle::encodePayload(p);
+    const QByteArray wire = format == LibraryBundle::kPayloadFormatV2 ? LibraryBundle::encodePayloadV2(p)
+                                                                      : LibraryBundle::encodePayload(p);
+    const qint64 fileBytes = LibraryBundle::fileBytesOf(p);
+    p = LibraryBundle::Payload();   // the wire holds the bytes now; do not keep a second copy for the request's life
 
     QPointer<MainWindow> self(this);
     PlayOnClient* c = playOnClient();
@@ -222,8 +244,10 @@ void MainWindow::sendLibraryNextItem(const PlayOn::Peer& peer, const QString& to
         });
     }, Qt::SingleShotConnection);
 
-    sendLibProgress_.bytesSent += qint64(wire.size());
-    c->sendBundleItem(peer, token, itemId, wire);
+    // Honest bytes (#291): what lands on the target's disk, for both formats -- not the wire, which for v1 is
+    // a third larger than the art it carries.
+    sendLibProgress_.bytesSent += fileBytes;
+    c->sendBundleItem(peer, token, itemId, wire, format);
 }
 
 // ---------------------------------------------------------------------------- the way in ------------------

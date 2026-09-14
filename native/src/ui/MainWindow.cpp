@@ -5363,6 +5363,9 @@ void MainWindow::updateRemoteServer()
     // cache: LibraryBundle refuses an id that is not a MetaCache hash and a file that is not art.
     h.inventory  = [this] { return libraryInventoryJson(); };
     h.bundle     = [this](const QByteArray& body) { return libraryReceiveBundle(body); };
+    // #291 — a raw-body bundle is spooled under the cache root by RemoteServer and landed from that file.
+    h.bundleRoot   = [] { return libraryCacheRoot(); };
+    h.bundleStream = [this](QIODevice& body) { return libraryReceiveBundleStream(body); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))

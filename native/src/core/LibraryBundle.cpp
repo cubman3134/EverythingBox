@@ -10,8 +10,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QIODevice>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QSet>
+#include <QUuid>
 #include <algorithm>
+#include <functional>
 
 namespace LibraryBundle
 {
@@ -122,6 +127,23 @@ namespace
         }
         return true;
     }
+
+    // One file of a landing: its name and time, and how its bytes get into the staging folder. v1 writes
+    // them from memory; v2 (#291) copies them straight off the spooled body.
+    struct StagedFile
+    {
+        QString name;
+        qint64  mtimeMs = 0;
+    };
+    using WriteOne = std::function<bool(int index, const QString& path, QString& error)>;
+
+    // Defined in section 9: whether a spool path belongs to a body this process is still receiving.
+    bool spoolIsLive(const QString& absPath);
+
+    // Defined in section 9, beside the v2 landing that shares it.
+    LandResult landCommon(const QString& root, const QString& id, const QString& stamp, qint64 updatedMs,
+                          const QList<StagedFile>& files, const WriteOne& writeOne, const LandOptions& opts,
+                          QString& error);
 }
 
 // ------------------------------------------------------------------ 1. safety ------------------------------
@@ -212,6 +234,9 @@ QByteArray inventoryJson(const QList<Entry>& entries)
     QJsonObject root;
     root.insert(QStringLiteral("v"), kFormatVersion);
     root.insert(QStringLiteral("items"), arr);
+    // #291: what this device accepts. NOT a bump of "v" -- an older source refuses an inventory whose "v" is
+    // higher than its own -- but a field an older parser simply does not read.
+    root.insert(QStringLiteral("bundle"), QJsonArray{ kFormatVersion, kPayloadFormatV2 });
     return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
@@ -501,6 +526,11 @@ QList<Entry> inventoryFor(const QString& root)
 
 bool readPayload(const QString& root, const QString& id, Payload& out, QString& error)
 {
+    return readPayload(root, id, out, error, kMaxItemBytes);
+}
+
+bool readPayload(const QString& root, const QString& id, Payload& out, QString& error, qint64 maxItemBytes)
+{
     out = Payload();
     error.clear();
     Entry e;
@@ -528,8 +558,9 @@ bool readPayload(const QString& root, const QString& id, Payload& out, QString& 
         error = QStringLiteral("that item's files could not be read");
         return false;
     }
-    if (total > kMaxItemBytes)
+    if (total > maxItemBytes)
     {
+        out = Payload();
         error = QStringLiteral("that item's art is larger than a bundle carries");
         return false;
     }
@@ -574,85 +605,18 @@ LandResult landItem(const QString& root, const Payload& p, QString& error, const
         return LandResult::Refused;
     }
 
-    recoverItem(root, p.id);
-
-    // Warm, never fight. An identical stamp is already the answer; a LOCAL copy that is newer is kept, and
-    // the source is told so rather than being let believe it overwrote something.
-    {
-        Entry cur;
-        QList<FileEntry> curFiles;
-        if (scanItem(root, p.id, cur, curFiles))
-        {
-            if (cur.stamp == p.stamp) return LandResult::AlreadyCurrent;
-            if (cur.updatedMs > p.updatedMs) return LandResult::KeptNewer;
-        }
-    }
-
-    const QString staging = incomingRoot(root) + QLatin1Char('/') + p.id;
-    QDir(staging).removeRecursively();
-    if (!QDir().mkpath(staging))
-    {
-        error = QStringLiteral("this device could not open its cache for writing");
-        return LandResult::WriteFailed;
-    }
-
-    int written = 0;
-    QSet<QString> staged;
+    QList<StagedFile> files;
     for (const PayloadFile& f : p.files)
     {
-        if (opts.failAfterFiles >= 0 && written >= opts.failAfterFiles)
-        {
-            // Interrupted mid-item. The live folder has not been touched yet, so the target still holds
-            // exactly what it held before; the staged remains are swept on the next run.
-            error = QStringLiteral("the transfer was interrupted");
-            return LandResult::Interrupted;
-        }
-        if (!writeFileWithTime(staging + QLatin1Char('/') + f.name, f.data, f.mtimeMs, error))
-        {
-            QDir(staging).removeRecursively();
-            return LandResult::WriteFailed;
-        }
-        staged.insert(f.name);
-        ++written;
+        StagedFile sf;
+        sf.name = f.name;
+        sf.mtimeMs = f.mtimeMs;
+        files << sf;
     }
-
-    const QString live    = itemDir(root, p.id);
-    const QString retired = retiredRoot(root) + QLatin1Char('/') + p.id;
-    QDir().mkpath(retiredRoot(root));
-    QDir(retired).removeRecursively();
-
-    const bool hadLive = QFileInfo::exists(live);
-    if (hadLive && !QDir().rename(live, retired))
-    {
-        QDir(staging).removeRecursively();
-        error = QStringLiteral("this device could not replace its copy of that item");
-        return LandResult::WriteFailed;
-    }
-    if (hadLive)
-    {
-        // Carry across whatever the bundle did NOT bring — the trailer, the theme song, the manual. Warming
-        // an art cache must not cost the target the megabyte roles it already fetched.
-        const QFileInfoList kept = QDir(retired).entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
-        for (const QFileInfo& fi : kept)
-        {
-            if (staged.contains(fi.fileName())) continue;
-            QFile::rename(fi.absoluteFilePath(), staging + QLatin1Char('/') + fi.fileName());
-        }
-    }
-    if (!QDir().rename(staging, live))
-    {
-        if (hadLive) QDir().rename(retired, live);         // put the old item back rather than leave a hole
-        QDir(staging).removeRecursively();
-        error = QStringLiteral("this device could not move that item into place");
-        return LandResult::WriteFailed;
-    }
-    QDir(retired).removeRecursively();
-    // Tidy the two bookkeeping folders while they are empty, so a finished transfer leaves a cache directory
-    // holding items and nothing else. Both refuse to remove a non-empty directory, so a landing that runs
-    // beside another one in flight cannot take its staging away.
-    QDir().rmdir(retiredRoot(root));
-    QDir().rmdir(incomingRoot(root));
-    return LandResult::Landed;
+    const WriteOne fromMemory = [&p](int index, const QString& path, QString& err) {
+        return writeFileWithTime(path, p.files.at(index).data, 0, err);
+    };
+    return landCommon(root, p.id, p.stamp, p.updatedMs, files, fromMemory, opts, error);
 }
 
 int sweepPartials(const QString& root)
@@ -677,6 +641,15 @@ int sweepPartials(const QString& root)
         {
             QDir(incoming.filePath(id)).removeRecursively();
             ++touched;
+        }
+        // #291: a spooled v2 body that no transfer in THIS process owns is a crash leftover. One that is still
+        // registered belongs to a body arriving right now -- an inventory request in the middle of it must
+        // not pull the file out from under the socket.
+        const QFileInfoList strays = incoming.entryInfoList(QDir::Files | QDir::Hidden | QDir::System);
+        for (const QFileInfo& fi : strays)
+        {
+            if (spoolIsLive(fi.absoluteFilePath())) continue;
+            if (QFile::remove(fi.absoluteFilePath())) ++touched;
         }
     }
     // Drop the two bookkeeping folders themselves once they are empty. rmdir refuses a non-empty directory,
@@ -767,5 +740,435 @@ QString describeProgress(const Progress& p, const QString& deviceName)
                             : QStringLiteral(" %1 could not be sent.").arg(p.failed));
     return s;
 }
+
+// ------------------------------------------------------------------ 9. the raw-body format (#291) ---------
+
+namespace
+{
+    const char kMagic[] = "EBBUNDLE";    // 8 bytes, no terminator on the wire
+    constexpr qint64 kCopyChunk = 256 * 1024;
+
+    void appendU32(QByteArray& b, quint32 v)
+    {
+        b.append(char((v >> 24) & 0xff));
+        b.append(char((v >> 16) & 0xff));
+        b.append(char((v >> 8) & 0xff));
+        b.append(char(v & 0xff));
+    }
+
+    quint32 u32At(const QByteArray& b, int at)
+    {
+        return (quint32(quint8(b.at(at))) << 24) | (quint32(quint8(b.at(at + 1))) << 16)
+             | (quint32(quint8(b.at(at + 2))) << 8) | quint32(quint8(b.at(at + 3)));
+    }
+
+    bool refuse(Refusal r, const QString& text, Refusal& why, QString& message)
+    {
+        why = r;
+        message = text;
+        return false;
+    }
+
+    void setMtime(const QString& path, qint64 mtimeMs)
+    {
+        if (mtimeMs <= 0) return;
+        QFile t(path);
+        if (t.open(QIODevice::ReadWrite))
+        {
+            t.setFileTime(QDateTime::fromMSecsSinceEpoch(mtimeMs), QFileDevice::FileModificationTime);
+            t.close();
+        }
+    }
+
+    // The landing both formats share: recover, keep-the-newer, stage, carry the untouched files across, swap.
+    // Callers have ALREADY validated the id, the names and the sizes; the per-file name check below is a second
+    // line, so a caller that forgot cannot write a file the allowlist refuses -- but it is not where a refusal
+    // is meant to happen, and for v2 it would come too late (after earlier files' bytes were staged).
+    LandResult landCommon(const QString& root, const QString& id, const QString& stamp, qint64 updatedMs,
+                          const QList<StagedFile>& files, const WriteOne& writeOne, const LandOptions& opts,
+                          QString& error)
+    {
+        recoverItem(root, id);
+
+        // Warm, never fight. An identical stamp is already the answer; a LOCAL copy that is newer is kept, and
+        // the source is told so rather than being let believe it overwrote something.
+        {
+            Entry cur;
+            QList<FileEntry> curFiles;
+            if (scanItem(root, id, cur, curFiles))
+            {
+                if (cur.stamp == stamp) return LandResult::AlreadyCurrent;
+                if (cur.updatedMs > updatedMs) return LandResult::KeptNewer;
+            }
+        }
+
+        const QString staging = incomingRoot(root) + QLatin1Char('/') + id;
+        QDir(staging).removeRecursively();
+        if (!QDir().mkpath(staging))
+        {
+            error = QStringLiteral("this device could not open its cache for writing");
+            return LandResult::WriteFailed;
+        }
+
+        int written = 0;
+        QSet<QString> staged;
+        for (int i = 0; i < files.size(); ++i)
+        {
+            const StagedFile& f = files.at(i);
+            if (opts.failAfterFiles >= 0 && written >= opts.failAfterFiles)
+            {
+                // Interrupted mid-item. The live folder has not been touched yet, so the target still holds
+                // exactly what it held before; the staged remains are swept on the next run.
+                error = QStringLiteral("the transfer was interrupted");
+                return LandResult::Interrupted;
+            }
+            if (!safeFileName(f.name))
+            {
+                QDir(staging).removeRecursively();
+                QDir().rmdir(incomingRoot(root));
+                error = QStringLiteral("that bundle carried a file this device will not write");
+                return LandResult::Refused;
+            }
+            if (!writeOne(i, staging + QLatin1Char('/') + f.name, error))
+            {
+                QDir(staging).removeRecursively();
+                QDir().rmdir(incomingRoot(root));
+                return LandResult::WriteFailed;
+            }
+            setMtime(staging + QLatin1Char('/') + f.name, f.mtimeMs);
+            staged.insert(f.name);
+            ++written;
+        }
+
+        const QString live    = itemDir(root, id);
+        const QString retired = retiredRoot(root) + QLatin1Char('/') + id;
+        QDir().mkpath(retiredRoot(root));
+        QDir(retired).removeRecursively();
+
+        const bool hadLive = QFileInfo::exists(live);
+        if (hadLive && !QDir().rename(live, retired))
+        {
+            QDir(staging).removeRecursively();
+            error = QStringLiteral("this device could not replace its copy of that item");
+            return LandResult::WriteFailed;
+        }
+        if (hadLive)
+        {
+            // Carry across whatever the bundle did NOT bring — the trailer, the theme song, the manual. Warming
+            // an art cache must not cost the target the megabyte roles it already fetched.
+            const QFileInfoList kept = QDir(retired).entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+            for (const QFileInfo& fi : kept)
+            {
+                if (staged.contains(fi.fileName())) continue;
+                QFile::rename(fi.absoluteFilePath(), staging + QLatin1Char('/') + fi.fileName());
+            }
+        }
+        if (!QDir().rename(staging, live))
+        {
+            if (hadLive) QDir().rename(retired, live);         // put the old item back rather than leave a hole
+            QDir(staging).removeRecursively();
+            error = QStringLiteral("this device could not move that item into place");
+            return LandResult::WriteFailed;
+        }
+        QDir(retired).removeRecursively();
+        // Tidy the two bookkeeping folders while they are empty, so a finished transfer leaves a cache directory
+        // holding items and nothing else. Both refuse to remove a non-empty directory, so a landing that runs
+        // beside another one in flight (or beside a spooling body) cannot take its staging away.
+        QDir().rmdir(retiredRoot(root));
+        QDir().rmdir(incomingRoot(root));
+        return LandResult::Landed;
+    }
+
+    // The spools this process has open. A spool NOT in here is a crash leftover, and sweepPartials removes it;
+    // one in here belongs to a body still arriving, and an inventory request in the meantime must not take it.
+    QMutex& spoolMutex()
+    {
+        static QMutex m;
+        return m;
+    }
+    QSet<QString>& liveSpools()
+    {
+        static QSet<QString> s;
+        return s;
+    }
+    bool spoolIsLive(const QString& absPath)
+    {
+        QMutexLocker lock(&spoolMutex());
+        return liveSpools().contains(absPath);
+    }
+}
+
+bool parseInventory(const QByteArray& json, QList<Entry>& out, QList<int>& formats, QString& error)
+{
+    formats = QList<int>{ kFormatVersion };
+    if (!parseInventory(json, out, error)) return false;
+    // The capability field. Absent (an older device), or anything but an array of numbers, means v1 only.
+    const QJsonValue adv = QJsonDocument::fromJson(json).object().value(QStringLiteral("bundle"));
+    if (adv.isArray())
+    {
+        for (const QJsonValue& v : adv.toArray())
+        {
+            if (!v.isDouble()) continue;
+            const int f = v.toInt(0);
+            if (f > 0 && !formats.contains(f)) formats << f;
+        }
+    }
+    return true;
+}
+
+int chooseBundleFormat(const QList<int>& advertised)
+{
+    return advertised.contains(kPayloadFormatV2) ? kPayloadFormatV2 : kFormatVersion;
+}
+
+qint64 maxItemBytesFor(int format)
+{
+    return format == kPayloadFormatV2 ? kMaxItemBytesV2 : kMaxItemBytes;
+}
+
+qint64 fileBytesOf(const Payload& p)
+{
+    qint64 total = 0;
+    for (const PayloadFile& f : p.files) total += qint64(f.data.size());
+    return total;
+}
+
+QByteArray encodePayloadV2(const Payload& p)
+{
+    QJsonArray files;
+    for (const PayloadFile& f : p.files)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("name"), f.name);
+        o.insert(QStringLiteral("mtime"), double(f.mtimeMs));
+        o.insert(QStringLiteral("size"), double(f.data.size()));
+        files.append(o);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("id"), p.id);
+    root.insert(QStringLiteral("stamp"), p.stamp);
+    root.insert(QStringLiteral("updated"), double(p.updatedMs));
+    root.insert(QStringLiteral("files"), files);
+    const QByteArray header = QJsonDocument(root).toJson(QJsonDocument::Compact);
+
+    QByteArray out;
+    out.reserve(int(kV2PreambleBytes + header.size() + fileBytesOf(p)));
+    out.append(kMagic, 8);
+    appendU32(out, quint32(kPayloadFormatV2));
+    appendU32(out, quint32(header.size()));
+    out.append(header);
+    for (const PayloadFile& f : p.files) out.append(f.data);
+    return out;
+}
+
+bool decodeHeaderV2(QIODevice& in, BundleHeader& out, Refusal& why, QString& message)
+{
+    out = BundleHeader();
+    why = Refusal::None;
+    message.clear();
+
+    // The length check at the end needs the body's size, so a stream that cannot say is refused outright
+    // rather than half-trusted. The target spools to a file for exactly this reason.
+    if (in.isSequential() || !in.isReadable())
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+
+    const QByteArray pre = in.read(kV2PreambleBytes);
+    if (pre.size() != kV2PreambleBytes || !pre.startsWith(QByteArray(kMagic, 8)))
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+
+    const quint32 version = u32At(pre, 8);
+    if (version > quint32(kPayloadFormatV2))
+        return refuse(Refusal::FutureFormat,
+                      QStringLiteral("that device sends a newer library format than this one understands"),
+                      why, message);
+    if (version != quint32(kPayloadFormatV2))
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle did not say what format it is"), why, message);
+    out.version = int(version);
+
+    const quint32 headerLen = u32At(pre, 12);
+    if (headerLen == 0 || qint64(headerLen) > kMaxV2HeaderBytes)
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+    const QByteArray header = in.read(qint64(headerLen));
+    if (header.size() != int(headerLen))
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(header);
+    if (!doc.isObject())
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+    const QJsonObject root = doc.object();
+    out.id        = root.value(QStringLiteral("id")).toString();
+    out.stamp     = root.value(QStringLiteral("stamp")).toString();
+    out.updatedMs = qint64(root.value(QStringLiteral("updated")).toDouble());
+    if (!safeItemId(out.id))
+        return refuse(Refusal::UnsafeId, QStringLiteral("that bundle named an item this device will not write"),
+                      why, message);
+
+    // EVERY file entry is judged here, before the first file byte is read. A decoder that checked each name
+    // as it reached that file's bytes would already have read -- and a landing would already have staged --
+    // the files ahead of the bad one.
+    QSet<QString> names;
+    qint64 total = 0;
+    const QJsonArray files = root.value(QStringLiteral("files")).toArray();
+    for (const QJsonValue& v : files)
+    {
+        const QJsonObject o = v.toObject();
+        FileEntry f;
+        f.name    = o.value(QStringLiteral("name")).toString();
+        f.mtimeMs = qint64(o.value(QStringLiteral("mtime")).toDouble());
+        if (!safeFileName(f.name))
+            return refuse(Refusal::UnsafeFileName,
+                          QStringLiteral("that bundle carried a file this device will not write"), why, message);
+        const QJsonValue sizeValue = o.value(QStringLiteral("size"));
+        if (!sizeValue.isDouble())
+            return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+        const double size = sizeValue.toDouble();
+        if (size > double(kMaxFileBytes))
+            return refuse(Refusal::TooLarge,
+                          QStringLiteral("that bundle carried a file too large for an art transfer"), why, message);
+        if (size < 0 || size != double(qint64(size)))
+            return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+        if (names.contains(f.name))
+            return refuse(Refusal::Malformed, QStringLiteral("that bundle was not readable"), why, message);
+        names.insert(f.name);
+        f.size = qint64(size);
+        total += f.size;
+        out.files << f;
+    }
+    if (out.files.isEmpty())
+        return refuse(Refusal::Empty, QStringLiteral("that bundle carried nothing"), why, message);
+    if (total > kMaxItemBytesV2)
+        return refuse(Refusal::TooLarge, QStringLiteral("that bundle was too large for an art transfer"),
+                      why, message);
+
+    // The declared sizes must account for EXACTLY the bytes that follow. Short means a truncated body; long
+    // means bytes nobody declared. Either way the header is not describing this body, and nothing of it lands.
+    if (in.size() - in.pos() != total)
+        return refuse(Refusal::Malformed, QStringLiteral("that bundle's length did not match what it declared"),
+                      why, message);
+
+    out.fileBytes = total;
+    return true;
+}
+
+bool decodePayloadV2(QIODevice& in, Payload& out, Refusal& why, QString& message)
+{
+    out = Payload();
+    BundleHeader h;
+    if (!decodeHeaderV2(in, h, why, message)) return false;
+    out.version   = h.version;
+    out.id        = h.id;
+    out.stamp     = h.stamp;
+    out.updatedMs = h.updatedMs;
+    for (const FileEntry& f : h.files)
+    {
+        PayloadFile pf;
+        pf.name    = f.name;
+        pf.mtimeMs = f.mtimeMs;
+        pf.data    = in.read(f.size);
+        if (qint64(pf.data.size()) != f.size)
+        {
+            out = Payload();
+            return refuse(Refusal::Malformed, QStringLiteral("that bundle ended early"), why, message);
+        }
+        out.files << pf;
+    }
+    return true;
+}
+
+LandResult landItemV2(const QString& root, QIODevice& in, QString& error)
+{
+    return landItemV2(root, in, error, LandOptions());
+}
+
+LandResult landItemV2(const QString& root, QIODevice& in, QString& error, const LandOptions& opts)
+{
+    error.clear();
+    BundleHeader h;
+    Refusal why = Refusal::None;
+    if (!decodeHeaderV2(in, h, why, error)) return LandResult::Refused;
+
+    QList<StagedFile> files;
+    for (const FileEntry& f : h.files)
+    {
+        StagedFile s;
+        s.name = f.name;
+        s.mtimeMs = f.mtimeMs;
+        files << s;
+    }
+    // The copy. Files are read in body order, which is the order landCommon asks for them; each goes straight
+    // from the body into the staging folder a chunk at a time, so an item is never in memory whole.
+    const WriteOne copyOne = [&in, &h](int index, const QString& path, QString& err) {
+        QFile out(path);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            err = QStringLiteral("could not write a file into the cache");
+            return false;
+        }
+        qint64 left = h.files.at(index).size;
+        while (left > 0)
+        {
+            const QByteArray chunk = in.read(qMin(left, kCopyChunk));
+            if (chunk.isEmpty())
+            {
+                err = QStringLiteral("that bundle ended early");
+                return false;
+            }
+            if (out.write(chunk) != qint64(chunk.size()))
+            {
+                err = QStringLiteral("the cache ran out of room");
+                return false;
+            }
+            left -= chunk.size();
+        }
+        out.close();
+        return true;
+    };
+    return landCommon(root, h.id, h.stamp, h.updatedMs, files, copyOne, opts, error);
+}
+
+// ------------------------------------------------------------------ 10. the spool (#291) -------------------
+
+QString openSpool(const QString& root, QFile& file)
+{
+    if (file.isOpen()) file.close();
+    const QString dir = incomingRoot(root);
+    if (!QDir().mkpath(dir)) return QString();
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const QString path = QFileInfo(dir + QStringLiteral("/bundle-")
+                                       + QUuid::createUuid().toString(QUuid::Id128)
+                                       + QStringLiteral(".spool")).absoluteFilePath();
+        file.setFileName(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+        {
+            QMutexLocker lock(&spoolMutex());
+            liveSpools().insert(path);
+            return path;
+        }
+    }
+    QDir().rmdir(dir);
+    return QString();
+}
+
+void discardSpool(QFile& file)
+{
+    const QString path = QFileInfo(file.fileName()).absoluteFilePath();
+    if (file.isOpen()) file.close();
+    if (!file.fileName().isEmpty()) QFile::remove(path);
+    {
+        QMutexLocker lock(&spoolMutex());
+        liveSpools().remove(path);
+    }
+    // Only ever the bookkeeping folder, and only when empty -- rmdir refuses anything else.
+    const QFileInfo parent(QFileInfo(path).absolutePath());
+    if (parent.fileName() == QLatin1String(kIncomingDir)) QDir().rmdir(parent.absoluteFilePath());
+}
+
+int spoolsInFlight()
+{
+    QMutexLocker lock(&spoolMutex());
+    return int(liveSpools().size());
+}
+
 
 } // namespace LibraryBundle

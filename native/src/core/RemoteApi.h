@@ -34,6 +34,11 @@ namespace RemoteApi
         // `X-EB-Token: <t>`. A CREDENTIAL: it is compared and then dropped -- never logged, never echoed into
         // a response body, never written to a transcript.
         QString token;
+        // Issue #291. The declared Content-Length as a 64-bit number (-1 when absent or unparseable) and the
+        // lower-cased media type with any parameters stripped. The streaming decision (bodyPlanFor) reads
+        // these off the HEADERS alone, before a body byte is accepted.
+        qint64     declaredLength = -1;
+        QByteArray contentType;
     };
 
     // Split a raw request into method / path / query / body, honouring Content-Length (a body shorter than
@@ -123,4 +128,17 @@ namespace RemoteApi
     constexpr int kDefaultRequestCap = 64 * 1024;
     constexpr int kBundleRequestCap  = 20 * 1024 * 1024;
     int requestCapBytes(const QByteArray& rawPrefix);
+
+    // Issue #291: the ONE request this surface does not buffer. A POST /bundle whose Content-Type is the
+    // raw-body bundle format is streamed to a spool file under the cache root instead, so its ceiling is not
+    // a memory figure. Decided from the parsed HEADERS, once they are in and before any body is accepted:
+    //   Buffer         -- every other request, exactly as before (requestCapBytes applies);
+    //   Stream         -- POST /bundle, raw-body type, a declared length within kBundleStreamCap;
+    //   TooLarge       -- the same, declaring more than kBundleStreamCap (413 without reading the body);
+    //   LengthRequired -- the same with no usable Content-Length (411: a stream needs to know where it ends).
+    // The server checks the paired token BEFORE acting on any of the three non-Buffer answers.
+    constexpr qint64 kBundleStreamCap = 65LL * 1024 * 1024;
+    constexpr const char* kBundleStreamContentType = "application/x-eb-bundle";
+    enum class BodyPlan { Buffer, Stream, TooLarge, LengthRequired };
+    BodyPlan bodyPlanFor(const Request& headers);
 }
