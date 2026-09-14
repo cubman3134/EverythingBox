@@ -305,6 +305,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libspeechd2 (issue #403): read-aloud (#145) pulls in Qt's texttospeech module, and its speechd backend
+      # plugin (libqtexttospeech_speechd.so) links libspeechd.so.2. linuxdeploy-plugin-qt resolves every
+      # dependency of every plugin it deploys and FAILS the package on one it cannot find, so without the
+      # client library here the AppImage step died after a full, successful build. libspeechd is not on the
+      # AppImage excludelist, so linuxdeploy bundles it and a user's host does not need it. Only the runtime
+      # library is needed (the plugin is prebuilt; nothing compiles against it), and --no-install-recommends
+      # keeps the speech-dispatcher DAEMON off the runner -- which the smoke step below relies on.
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -312,7 +319,8 @@ jobs:
             build-essential ninja-build \
             libmpv-dev libsdl2-dev \
             libgl1-mesa-dev libegl1-mesa-dev libpulse-dev \
-            libxkbcommon-dev libfuse2 file
+            libxkbcommon-dev libfuse2 file \
+            libspeechd2
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -383,6 +391,71 @@ jobs:
       # binary's own DT_NEEDED says it cannot start without.
       - name: Verify the archive
         run: python3 native/tools/verify-release-archive.py --kind appimage --archive EverythingBox-linux-x86_64.AppImage --repo .
+
+      # Bundling libspeechd (issue #403) must not cost a start on the common Linux host, which has no
+      # speech-dispatcher daemon. Two checks. First, the speechd plugin and the library it links are both in the
+      # image and the plugin resolves libspeechd.so.2 to the BUNDLED copy through its own RPATH, not to the one
+      # this runner installed to build with. Second, the AppImage itself is started headless with no daemon
+      # installed and an empty runtime dir (so no speechd socket either), and must still be running when the
+      # window has had 30 s, having logged startup.total -- the zero-timer after the first event-loop pass
+      # following show(). The TTS plugin is only loaded when a book is read aloud, so a daemon-less start is
+      # the property this pins; a missing daemon at that point is QTextToSpeech::Error, which ReadAloudController
+      # already turns into a stop. The offscreen platform plugin is taken from the image when it is there and
+      # otherwise from the SAME Qt install the image was deployed from (identical 6.8.3 build).
+      - name: Smoke-start the AppImage (headless, no speech-dispatcher)
+        run: |
+          set -u   # NOT pipefail: a `grep | grep -q` below would fail on the very match it looks for
+          if command -v speech-dispatcher >/dev/null 2>&1; then
+            echo "::error::speech-dispatcher is installed on this runner, so this smoke cannot test its absence"
+            exit 1
+          fi
+          rm -rf squashfs-root
+          ./EverythingBox-linux-x86_64.AppImage --appimage-extract >/dev/null
+          plugin=$(find "$PWD/squashfs-root" -name 'libqtexttospeech_speechd.so' | head -n1)
+          bundled=$(find squashfs-root -name 'libspeechd.so.2*' | head -n1)
+          if [ -z "$plugin" ] || [ -z "$bundled" ]; then
+            echo "::error::speechd plugin ('$plugin') or libspeechd.so.2 ('$bundled') is missing from the AppImage"
+            exit 1
+          fi
+          echo "bundled: $plugin"
+          echo "bundled: $bundled"
+          ldd "$plugin" | tee plugin-ldd.txt
+          if grep -q 'not found' plugin-ldd.txt; then
+            echo "::error::the bundled speechd plugin has an unresolved dependency"; exit 1
+          fi
+          if ! grep 'libspeechd.so.2' plugin-ldd.txt | grep -q 'squashfs-root/'; then
+            echo "::error::the speechd plugin resolves libspeechd.so.2 outside the image, so a host without it could not load it"
+            exit 1
+          fi
+
+          smoke=$(mktemp -d)
+          mkdir -p "$smoke/home" "$smoke/data" "$smoke/config" "$smoke/run"
+          chmod 700 "$smoke/run"
+          qpa_path=""
+          if [ -z "$(find squashfs-root -name 'libqoffscreen.so' | head -n1)" ]; then
+            qpa_path="$QT_ROOT_DIR/plugins/platforms"
+            echo "offscreen platform plugin is not in the image; using $qpa_path (the Qt the image was deployed from)"
+          fi
+          rc=0
+          env -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+              HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" XDG_CONFIG_HOME="$smoke/config" \
+              XDG_RUNTIME_DIR="$smoke/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+              EB_PERF=1 \
+              timeout --kill-after=10 30 ./EverythingBox-linux-x86_64.AppImage > smoke.log 2>&1 || rc=$?
+          pkill -f 'usr/bin/EverythingBox' || true   # the extract-and-run runtime may leave its child behind
+          echo "--- AppImage output (tail) ---"
+          tail -n 60 smoke.log
+          trace=$(find "$smoke" -name perf_trace.log | head -n1)
+          if [ -n "$trace" ]; then echo "--- $trace ---"; grep 'startup' "$trace" || true; fi
+          if [ "$rc" -ne 124 ]; then
+            echo "::error::the AppImage exited (rc=$rc) inside the 30 s smoke window instead of staying up"
+            exit 1
+          fi
+          if [ -z "$trace" ] || ! grep -q 'startup.total' "$trace"; then
+            echo "::error::no startup.total in perf_trace.log -- the window never reached its first event-loop pass"
+            exit 1
+          fi
+          echo "AppImage started headless with no speech-dispatcher and was still running at 30 s"
 
       - uses: actions/upload-artifact@v4
         with:
