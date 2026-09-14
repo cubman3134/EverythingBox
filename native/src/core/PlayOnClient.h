@@ -64,6 +64,11 @@ public:
     void sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
                         const QByteArray& payload, int format);
 
+    // #292: per system folder on the target, the ROMs present and the games its gamelist already lists. Its
+    // own request, on the bundle budget rather than kTimeoutMs -- the target walks its ROM tree to answer. A
+    // gamelist entry itself goes through sendBundleItem as a v2 body.
+    void fetchGamelists(const PlayOn::Peer& peer, const QString& token);
+
     // How long a peer has to answer before we call it gone.
     static constexpr int kTimeoutMs = 4000;
     // A bundle is megabytes over a LAN, not a control message: it gets its own budget. Still bounded, so a
@@ -85,8 +90,11 @@ signals:
 
     // #127. `ok` false means the peer did not answer or refused; `message` is then what to show.
     // `formats` (#291) is what the peer said it accepts -- {1} for a device that predates the raw-body format.
+    // `sidecars` (#292) is whether the peer takes gamelist entries -- false for any device that predates them.
     void inventoryArrived(const QString& peerId, const QList<LibraryBundle::Entry>& items,
-                          bool ok, const QString& message, const QList<int>& formats);
+                          bool ok, const QString& message, const QList<int>& formats, bool sidecars);
+    void gamelistsArrived(const QString& peerId, const QList<LibraryBundle::SidecarSystem>& systems,
+                          bool ok, const QString& message);
     // One item's answer: `result` is the receipt's word ("landed" / "kept" / "current" / "refused"),
     // `message` the peer's reason when it is not a plain success.
     void bundleItemDone(const QString& peerId, const QString& itemId, bool ok,
@@ -102,6 +110,8 @@ private:
     void post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body, const QString& token,
               int timeoutMs, const QString& contentType, std::function<void(int, const QByteArray&, bool)> done);
     void get(const PlayOn::Peer& peer, const QString& path, const QString& token,
+             std::function<void(int, const QByteArray&, bool)> done);
+    void get(const PlayOn::Peer& peer, const QString& path, const QString& token, int timeoutMs,
              std::function<void(int, const QByteArray&, bool)> done);
 
     QNetworkAccessManager* nam_ = nullptr;

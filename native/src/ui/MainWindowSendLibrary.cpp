@@ -33,6 +33,7 @@
 
 #include "../core/AppPaths.h"
 #include "../core/CastManager.h"
+#include "../core/GamelistStore.h"
 #include "../core/LibraryBundle.h"
 #include "../core/PlayOnClient.h"
 #include "../core/PlayOnHost.h"
@@ -69,8 +70,30 @@ QString MainWindow::libraryCacheRoot()
 QByteArray MainWindow::libraryInventoryJson() const
 {
     // What this device holds, stamped. Called only after RemoteServer has checked the caller's paired token —
-    // an inventory is a list of what someone owns, so it is not a public read.
-    return LibraryBundle::inventoryJson(LibraryBundle::inventoryFor(libraryCacheRoot()));
+    // an inventory is a list of what someone owns, so it is not a public read. #292: it also says this device
+    // takes gamelist entries, in a field an older source does not read.
+    return LibraryBundle::inventoryJson(LibraryBundle::inventoryFor(libraryCacheRoot()), true);
+}
+
+QByteArray MainWindow::libraryGamelistsJson() const
+{
+    // #292. Per system folder under THIS device's ROM root: the ROM files there, and the ones its gamelist
+    // already lists. Token-checked by RemoteServer before this runs.
+    return LibraryBundle::sidecarInventoryJson(LibraryBundle::sidecarInventoryFor(Settings::romsFolder()));
+}
+
+LibraryBundle::Receipt MainWindow::libraryReceiveSidecarStream(QIODevice& body)
+{
+    // #292. The ROM root is this device's own setting -- never a path from the source -- and the cache root is
+    // not handed over at all. landSidecarV2 refuses an unsafe system or ROM name before it builds a path, and
+    // writes only inside a system folder that already exists, for a ROM that is already there.
+    QString error;
+    const LibraryBundle::LandResult r = LibraryBundle::landSidecarV2(Settings::romsFolder(), body, error);
+    if (r == LibraryBundle::LandResult::Landed)
+        GamelistStore::clearCache();   // the next lookup reads the new entry
+    else if (r == LibraryBundle::LandResult::Refused || r == LibraryBundle::LandResult::WriteFailed)
+        slLog(QStringLiteral("bundle: refused a gamelist entry — %1").arg(error));
+    return LibraryBundle::receiptFor(r, error);
 }
 
 LibraryBundle::Receipt MainWindow::libraryReceiveBundle(const QByteArray& body)
@@ -151,6 +174,9 @@ void MainWindow::sendLibraryWithToken(const PlayOn::Peer& peer, const QString& t
     sendLibProgress_ = LibraryBundle::Progress();
     sendLibPeerId_ = peer.id;
     sendLibFormat_ = LibraryBundle::kFormatVersion;
+    sendLibSidecars_ = false;
+    sendGameQueue_.clear();
+    sendGameCursor_ = 0;
 
     notify(tr("Comparing libraries with %1…").arg(peer.name), 4000);
 
@@ -158,11 +184,14 @@ void MainWindow::sendLibraryWithToken(const PlayOn::Peer& peer, const QString& t
     PlayOnClient* c = playOnClient();
     connect(c, &PlayOnClient::inventoryArrived, this,
             [self, peer, token](const QString& id, const QList<LibraryBundle::Entry>& theirs,
-                                bool ok, const QString& message, const QList<int>& formats) {
+                                bool ok, const QString& message, const QList<int>& formats, bool sidecars) {
         if (!self || id != peer.id) return;
         if (!ok) { self->notify(message, 6000); return; }
         // #291: raw bodies to a target that says it takes them; v1, exactly as before, to one that does not.
         self->sendLibFormat_ = LibraryBundle::chooseBundleFormat(formats);
+        // #292: gamelist entries only to a target that says it takes them -- and those always ride v2, which
+        // any target that says so also takes.
+        self->sendLibSidecars_ = sidecars && self->sendLibFormat_ == LibraryBundle::kPayloadFormatV2;
 
         // THE DIFF, and it is the whole feature: only what is missing or newer leaves this machine.
         const QList<LibraryBundle::Entry> mine =
@@ -178,6 +207,8 @@ void MainWindow::sendLibraryWithToken(const PlayOn::Peer& peer, const QString& t
 
         if (plan.send.isEmpty())
         {
+            // Nothing in the art cache to move; the gamelists are still compared when the target takes them.
+            if (self->sendLibSidecars_) { self->sendLibraryGamelists(peer, token); return; }
             // The second run, and the sentence that says the feature worked.
             self->notify(LibraryBundle::describeProgress(self->sendLibProgress_, peer.name), 6000);
             return;
@@ -194,9 +225,11 @@ void MainWindow::sendLibraryNextItem(const PlayOn::Peer& peer, const QString& to
     if (sendLibPeerId_ != peer.id) return;                     // a newer run took over; this one is stale
     if (sendLibCursor_ >= sendLibQueue_.size())
     {
-        notify(LibraryBundle::describeProgress(sendLibProgress_, peer.name), 8000);
         sendLibQueue_.clear();
         sendLibCursor_ = 0;
+        // #292: one run, both kinds -- the art items, then the gamelist entries.
+        if (sendLibSidecars_) { sendLibraryGamelists(peer, token); return; }
+        notify(LibraryBundle::describeProgress(sendLibProgress_, peer.name), 8000);
         return;
     }
 
@@ -248,6 +281,92 @@ void MainWindow::sendLibraryNextItem(const PlayOn::Peer& peer, const QString& to
     // a third larger than the art it carries.
     sendLibProgress_.bytesSent += fileBytes;
     c->sendBundleItem(peer, token, itemId, wire, format);
+}
+
+// ---------------------------------------------------------------------------- gamelist entries (#292) -----
+
+void MainWindow::sendLibraryGamelists(const PlayOn::Peer& peer, const QString& token)
+{
+    if (sendLibPeerId_ != peer.id) return;
+    sendGameQueue_.clear();
+    sendGameCursor_ = 0;
+
+    QPointer<MainWindow> self(this);
+    PlayOnClient* c = playOnClient();
+    connect(c, &PlayOnClient::gamelistsArrived, this,
+            [self, peer, token](const QString& id, const QList<LibraryBundle::SidecarSystem>& theirs, bool ok,
+                                const QString& message) {
+        if (!self || id != peer.id || self->sendLibPeerId_ != peer.id) return;
+        if (!ok)
+        {
+            // The art half's result still stands; say what the gamelist half could not do.
+            if (!message.isEmpty()) slLog(QStringLiteral("bundle: gamelists — %1").arg(message));
+            self->notify(LibraryBundle::describeProgress(self->sendLibProgress_, peer.name) + QLatin1Char(' ')
+                             + tr("Its gamelists could not be compared: %1").arg(message),
+                         8000);
+            return;
+        }
+        // THE DIFF: games whose ROM the target has and whose entry its gamelist lacks. The rest never leave.
+        const LibraryBundle::SidecarPlan plan =
+            LibraryBundle::planSidecars(LibraryBundle::sidecarGamesFor(Settings::romsFolder()), theirs);
+        self->sendLibProgress_.gamelists          = true;
+        self->sendLibProgress_.gamesListed        = plan.alreadyListed;
+        self->sendLibProgress_.gamesNotApplicable = plan.notApplicable;
+        self->sendGameQueue_ = plan.send;
+        self->sendGameCursor_ = 0;
+        self->sendLibraryNextGame(peer, token);
+    }, Qt::SingleShotConnection);
+    c->fetchGamelists(peer, token);
+}
+
+void MainWindow::sendLibraryNextGame(const PlayOn::Peer& peer, const QString& token)
+{
+    if (sendLibPeerId_ != peer.id) return;
+    if (sendGameCursor_ >= sendGameQueue_.size())
+    {
+        notify(LibraryBundle::describeProgress(sendLibProgress_, peer.name), 8000);
+        sendGameQueue_.clear();
+        sendGameCursor_ = 0;
+        return;
+    }
+
+    const LibraryBundle::SidecarGame game = sendGameQueue_.at(sendGameCursor_);
+    LibraryBundle::SidecarPayload p;
+    QString error;
+    if (!LibraryBundle::readSidecarPayload(Settings::romsFolder(), game, p, error))
+    {
+        ++sendGameCursor_;
+        ++sendLibProgress_.gamesFailed;
+        QTimer::singleShot(0, this, [this, peer, token] { sendLibraryNextGame(peer, token); });
+        return;
+    }
+    const QByteArray wire = LibraryBundle::encodeSidecarV2(p);
+    // Honest bytes: the images that land, counted with the art items' bytes.
+    sendLibProgress_.bytesSent += LibraryBundle::fileBytesOf(p);
+    // A reply key for this one request; it names no path on either machine.
+    const QString key = QStringLiteral("gamelist:") + game.system + QLatin1Char('/') + game.rom;
+
+    QPointer<MainWindow> self(this);
+    PlayOnClient* c = playOnClient();
+    connect(c, &PlayOnClient::bundleItemDone, this,
+            [self, peer, token, key](const QString& pid, const QString& iid, bool ok,
+                                     const QString& result, const QString& message) {
+        if (!self || pid != peer.id || iid != key) return;
+        if (ok && result == QStringLiteral("landed"))             ++self->sendLibProgress_.gamesAdded;
+        else if (ok && result == QStringLiteral("current"))       ++self->sendLibProgress_.gamesListed;
+        else if (ok && result == QStringLiteral("notapplicable")) ++self->sendLibProgress_.gamesNotApplicable;
+        else
+        {
+            ++self->sendLibProgress_.gamesFailed;
+            if (!message.isEmpty()) slLog(QStringLiteral("bundle: gamelist entry — %1").arg(message));
+        }
+        ++self->sendGameCursor_;
+        // Past THIS delivery, for the same #28/#211 reason as the art items.
+        QTimer::singleShot(0, self, [self, peer, token] {
+            if (self) self->sendLibraryNextGame(peer, token);
+        });
+    }, Qt::SingleShotConnection);
+    c->sendBundleItem(peer, token, key, wire, LibraryBundle::kPayloadFormatV2);
 }
 
 // ---------------------------------------------------------------------------- the way in ------------------

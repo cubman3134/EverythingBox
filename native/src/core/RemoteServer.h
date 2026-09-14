@@ -14,8 +14,9 @@
 //     an unbounded request.
 //
 // #127 adds two more on the same terms: GET /inventory (what this device's art cache holds) and POST /bundle
-// (one item's art, landed atomically). They are credentialled exactly as /open is, they write nowhere but the
-// metadata cache, and /bundle is the ONE route allowed a payload-sized read cap -- decided by
+// (one item's art, landed atomically). They are credentialled exactly as /open is, an art bundle writes nowhere
+// but the metadata cache (#292's gamelist entries, a separate kind on the same route, write only beside ROMs
+// already in the ROM folder), and /bundle is the ONE route allowed a payload-sized read cap -- decided by
 // RemoteApi::requestCapBytes rather than by a condition in the read loop below.
 //
 // #143 adds two routes to this same listener and nothing else: POST /open (a hand-off — an item REFERENCE
@@ -69,6 +70,11 @@ public:
         // every outcome. Unset hooks degrade to a 503 before a body byte is accepted.
         std::function<QString()>                                        bundleRoot;
         std::function<LibraryBundle::Receipt(QIODevice& body)>          bundleStream;
+        // #292. `gamelists` answers GET /gamelists; `sidecarStream` lands a spooled v2 body whose header says
+        // it is a gamelist entry. Neither is handed the cache root. Unset, /gamelists is a 503 and a gamelist
+        // body is refused with a sentence (a device without the hook does not advertise the kind either).
+        std::function<QByteArray()>                                     gamelists;
+        std::function<LibraryBundle::Receipt(QIODevice& body)>          sidecarStream;
     };
 
     explicit RemoteServer(QObject* parent = nullptr);

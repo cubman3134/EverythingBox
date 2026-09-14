@@ -308,6 +308,19 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
             body = LibraryBundle::receiptJson(r);
             break;
         }
+        case RemoteApi::CommandKind::Gamelists:
+        {
+            // #292. What this device's ROM folders hold, for the source's gamelist diff. Token-checked above.
+            if (!hooks_.gamelists)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            body = hooks_.gamelists();
+            status = 200;
+            break;
+        }
         case RemoteApi::CommandKind::NotFound:
             status = 404;
             body = "{\"ok\":false,\"error\":\"not found\"}";
@@ -413,7 +426,17 @@ void RemoteServer::pumpStream(QTcpSocket* sock)
     {
         QFile body(spool->file.fileName());
         if (body.open(QIODevice::ReadOnly))
-            receipt = hooks_.bundleStream(body);
+        {
+            // #292: the header says which kind of body this is, and each kind has its own landing -- the art
+            // cache's, or the ROM folder's. A device without the gamelist hook refuses that kind in words.
+            if (LibraryBundle::bodyKindV2(body) == LibraryBundle::BodyKind::Gamelist)
+                receipt = hooks_.sidecarStream
+                              ? hooks_.sidecarStream(body)
+                              : LibraryBundle::receiptFor(LibraryBundle::LandResult::Refused,
+                                                          QStringLiteral("this device does not take gamelist entries"));
+            else
+                receipt = hooks_.bundleStream(body);
+        }
         else
             receipt = LibraryBundle::receiptFor(LibraryBundle::LandResult::WriteFailed,
                                                 QStringLiteral("this device could not read what it received"));

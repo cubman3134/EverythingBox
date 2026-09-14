@@ -49,7 +49,24 @@
 //      the ceiling is a 413 with no body sent; a disconnect or a stall mid-body leaves no spool; v1 still
 //      lands through the same listener.
 //
+// Issue #292 adds gamelist sidecars -- their own payload kind, landing beside ROMs rather than in the cache --
+// and pins them in 18-23 against two ROM trees (the cache-payload assertions above are unchanged):
+//
+//  18. NAMES. A system or ROM name that is not one safe segment (separators, "..", a drive, a UNC share, a
+//      device name, a leading dot) is refused before a file byte is read and before anything is written; so is
+//      a video, a non-image extension, a duplicate role, a length that does not add up, and the other kind.
+//  19. LANDING RULES. The target lands only in a system folder it already has, for a ROM file it already has;
+//      a game its gamelist lists (by GamelistStore's own rule) stays byte-identical; nothing is written outside
+//      <root>/<that system>/; GamelistStore reads the landed art back; and the second plan is empty.
+//  20. XML. Fields are escaped text -- "</game><game>" in a name injects nothing -- and the existing file's
+//      bytes are kept, with one block inserted before </gameList>; no list is created from a broken one.
+//  21. IMAGES. Named by the target, never overwriting an existing file (that image is dropped from the entry).
+//  22. ATOMIC. An interrupted rewrite leaves the old gamelist.xml and removes the images it wrote.
+//  23. INTEROP. Advertised in a field an old parser ignores; a gamelist body is refused readably by a target
+//      that does not take the kind; over a real socket, token first, the entry lands and the art path still works.
+//
 // Prints BUNDLEXFER-OK on success; any failure prints BUNDLEXFER-FAIL <cond> (line) and exits non-zero.
+#include "GamelistStore.h"
 #include "LibraryBundle.h"
 #include "PlayOnDevice.h"
 #include "RemoteApi.h"
@@ -75,6 +92,7 @@
 #include <QStringList>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QXmlStreamReader>
 
 #include <cstdio>
 #include <functional>
@@ -348,6 +366,117 @@ namespace fx
         const int sep = response.indexOf("\r\n\r\n");
         if (sep >= 0) r.body = response.mid(sep + 4);
         return r;
+    }
+
+    // ---- #292 fixtures ----
+
+    // Everything under `dir` -- files AND directories, hidden ones included -- as relative path -> sha256 (a
+    // directory maps to "<dir>"). A sidecar census has to see a folder that was created and a temp file that
+    // was left behind, which the art census above was never asked to.
+    static QMap<QString, QString> censusAll(const QString& dir)
+    {
+        QMap<QString, QString> out;
+        QDir root(dir);
+        QStringList stack;
+        stack << dir;
+        while (!stack.isEmpty())
+        {
+            const QString cur = stack.takeLast();
+            const QFileInfoList entries = QDir(cur).entryInfoList(
+                QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+            for (const QFileInfo& fi : entries)
+            {
+                const QString rel = root.relativeFilePath(fi.absoluteFilePath());
+                if (fi.isDir())
+                {
+                    out.insert(rel + QLatin1Char('/'), QStringLiteral("<dir>"));
+                    stack << fi.absoluteFilePath();
+                    continue;
+                }
+                out.insert(rel, QString::fromLatin1(
+                    QCryptographicHash::hash(readFile(fi.absoluteFilePath()), QCryptographicHash::Sha256).toHex()));
+            }
+        }
+        return out;
+    }
+
+    static void writeTree(const QString& path, const QByteArray& data)
+    {
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        writeFile(path, data);
+    }
+
+    static QJsonObject sideFile(const QString& role, const QString& ext, double size)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("role"), role);
+        o.insert(QStringLiteral("ext"), ext);
+        o.insert(QStringLiteral("size"), size);
+        return o;
+    }
+
+    static QJsonObject sideHeader(const QString& system, const QString& rom, const QJsonArray& files,
+                                  const QJsonObject& game = QJsonObject())
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("kind"), QStringLiteral("gamelist"));
+        o.insert(QStringLiteral("system"), system);
+        o.insert(QStringLiteral("rom"), rom);
+        QJsonObject g = game;
+        if (g.isEmpty()) g.insert(QStringLiteral("name"), QStringLiteral("A Name"));
+        o.insert(QStringLiteral("game"), g);
+        o.insert(QStringLiteral("files"), files);
+        return o;
+    }
+
+    // A hand-made payload for one game with the given images, so a landing case does not depend on a source tree.
+    static LibraryBundle::SidecarPayload sidePayload(const QString& system, const QString& rom, const QString& name,
+                                                     const QList<LibraryBundle::SidecarImage>& images)
+    {
+        LibraryBundle::SidecarPayload p;
+        p.system = system;
+        p.rom = rom;
+        p.fields.name = name;
+        p.images = images;
+        return p;
+    }
+
+    static LibraryBundle::SidecarImage sideImage(const QString& role, const QString& ext, const QByteArray& data)
+    {
+        LibraryBundle::SidecarImage i;
+        i.role = role;
+        i.ext = ext;
+        i.data = data;
+        return i;
+    }
+
+    // Land a wire through the target function exactly as the spool is read: a random-access device.
+    static LibraryBundle::LandResult landSide(const QString& romsRoot, const QByteArray& wire, QString* error,
+                                              qint64* posAfter, int failAfterFiles)
+    {
+        QByteArray copy = wire;
+        QBuffer in(&copy);
+        in.open(QIODevice::ReadOnly);
+        QString err;
+        LibraryBundle::LandOptions o;
+        o.failAfterFiles = failAfterFiles;
+        const LibraryBundle::LandResult r = LibraryBundle::landSidecarV2(romsRoot, in, err, o);
+        if (error) *error = err;
+        if (posAfter) *posAfter = in.pos();
+        return r;
+    }
+
+    static int countGameElements(const QByteArray& xml, bool* wellFormed)
+    {
+        QXmlStreamReader r(xml);
+        int n = 0;
+        while (!r.atEnd())
+        {
+            r.readNext();
+            if (r.isStartElement() && r.name() == QLatin1String("game")) ++n;
+        }
+        if (wellFormed) *wellFormed = !r.hasError();
+        return n;
     }
 }
 
@@ -1425,6 +1554,717 @@ int main(int argc, char** argv)
             CHECK(LibraryBundle::chooseBundleFormat(formats) == 2);
         }
         server.stop();
+    }
+
+    // ================================ #292: gamelist sidecars (18-23) ================================
+    //
+    // Two ROM trees stand in for two devices. The SOURCE's snes/gamelist.xml lists A, B and C with images (and a
+    // video for A, and a fanart path that climbs out of the system folder). The TARGET has ROMs A and B, and its
+    // own gamelist -- hand-kept, with a comment, attributes and bytes after </gameList> -- already lists B.
+    // A sibling folder beside the target's ROM root holds state that nothing may touch.
+    const QString gBase    = base + QStringLiteral("/gamelists");
+    const QString sRoms    = gBase + QStringLiteral("/source/roms");
+    const QString tBase    = gBase + QStringLiteral("/target");
+    const QString tRoms    = tBase + QStringLiteral("/roms");
+    const QByteArray artA  = QByteArray("\x89PNG\r\n\x1a\n", 8) + fx::noise(3000, 11);
+    const QByteArray artAm = QByteArray("\x89PNG\r\n\x1a\n", 8) + fx::noise(1700, 12);
+    const QByteArray artB  = QByteArray("\x89PNG\r\n\x1a\n", 8) + fx::noise(900, 13);
+    const QByteArray artC  = QByteArray("\x89PNG\r\n\x1a\n", 8) + fx::noise(800, 14);
+    {
+        fx::writeTree(sRoms + QStringLiteral("/snes/A.sfc"), QByteArray("ROM-A"));
+        fx::writeTree(sRoms + QStringLiteral("/snes/B.sfc"), QByteArray("ROM-B"));
+        fx::writeTree(sRoms + QStringLiteral("/snes/C.sfc"), QByteArray("ROM-C"));
+        fx::writeTree(sRoms + QStringLiteral("/snes/images/A-thumb.png"), artA);
+        fx::writeTree(sRoms + QStringLiteral("/snes/images/A-marquee.png"), artAm);
+        fx::writeTree(sRoms + QStringLiteral("/snes/images/B-thumb.png"), artB);
+        fx::writeTree(sRoms + QStringLiteral("/snes/images/C-thumb.png"), artC);
+        fx::writeTree(sRoms + QStringLiteral("/snes/videos/A-video.mp4"), QByteArray("MP4-NEVER-TRAVELS"));
+        fx::writeTree(sRoms + QStringLiteral("/outside-secret.png"), QByteArray("\x89PNG-SECRET", 11));
+        fx::writeTree(sRoms + QStringLiteral("/snes/gamelist.xml"), QByteArray(
+            "<?xml version=\"1.0\"?>\n<gameList>\n"
+            "\t<game>\n\t\t<path>./A.sfc</path>\n\t\t<name>Alpha Quest</name>\n"
+            "\t\t<desc>The first game &amp; the best.</desc>\n\t\t<releasedate>19930101T000000</releasedate>\n"
+            "\t\t<developer>Dev A</developer>\n\t\t<publisher>Pub A</publisher>\n\t\t<genre>RPG</genre>\n"
+            "\t\t<players>1</players>\n\t\t<rating>0.8</rating>\n"
+            "\t\t<thumbnail>./images/A-thumb.png</thumbnail>\n\t\t<marquee>./images/A-marquee.png</marquee>\n"
+            "\t\t<fanart>../outside-secret.png</fanart>\n\t\t<video>./videos/A-video.mp4</video>\n\t</game>\n"
+            "\t<game><path>./B.sfc</path><name>Bravo (Source)</name><thumbnail>./images/B-thumb.png</thumbnail></game>\n"
+            "\t<game><path>./C.sfc</path><name>Charlie</name><thumbnail>./images/C-thumb.png</thumbnail></game>\n"
+            "\t<game><path>./sub/D.sfc</path><name>Delta In A Subfolder</name></game>\n"
+            "</gameList>\n"));
+        // Gamelists that are NOT directly in a system folder under the root: never sent.
+        fx::writeTree(sRoms + QStringLiteral("/gamelist.xml"),
+                      QByteArray("<gameList><game><path>./E.sfc</path><name>Echo</name></game></gameList>"));
+        fx::writeTree(sRoms + QStringLiteral("/snes/extra/gamelist.xml"),
+                      QByteArray("<gameList><game><path>./F.sfc</path><name>Foxtrot</name></game></gameList>"));
+
+        fx::writeTree(tRoms + QStringLiteral("/snes/A.sfc"), QByteArray("ROM-A"));
+        fx::writeTree(tRoms + QStringLiteral("/snes/B.sfc"), QByteArray("ROM-B"));
+        fx::writeTree(tRoms + QStringLiteral("/snes/images/B-thumb.png"), QByteArray("TARGET-B-ART"));
+        fx::writeTree(tRoms + QStringLiteral("/snes/gamelist.xml"), QByteArray(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!-- kept by hand: do not reformat -->\r\n<gameList>\r\n"
+            "  <game id=\"7\" source=\"ScreenScraper\">\r\n    <path>./B.sfc</path>\r\n"
+            "    <name>Bravo (Target's own)</name>\r\n    <thumbnail>./images/B-thumb.png</thumbnail>\r\n"
+            "  </game>\r\n</gameList>\r\n<!-- trailing -->\r\n"));
+        fx::writeTree(tRoms + QStringLiteral("/megadrive/Sonic.md"), QByteArray("ROM-SONIC"));
+        fx::writeTree(tBase + QStringLiteral("/state/marks.json"), QByteArray("{\"watched\":true}"));
+    }
+
+    // ---- 18. sidecar names: one safe segment, or refused before anything is written (#292) ----------
+    {
+        const auto ok = [](const char* s) { return LibraryBundle::safePathSegment(QString::fromUtf8(s)); };
+        CHECK(ok("snes"));
+        CHECK(ok("megadrive"));
+        CHECK(ok("Super Mario World (USA).sfc"));
+        CHECK(ok("Legend of Zelda, The - A Link to the Past (USA) [!].sfc"));
+        const QString accented = QString::fromUtf8("Pok\xc3\xa9mon - Edici\xc3\xb3n Roja.gb");
+        CHECK(LibraryBundle::safePathSegment(accented));
+        CHECK(ok("Tom & Jerry's Game.nes"));
+        CHECK(!ok(""));
+        CHECK(!ok("."));
+        CHECK(!ok(".."));
+        CHECK(!ok("../snes"));
+        CHECK(!ok("snes/../.."));
+        CHECK(!ok("a/b"));
+        CHECK(!ok("a\\b"));
+        CHECK(!ok("C:"));
+        CHECK(!ok("C:snes"));
+        CHECK(!ok("C:\\Windows"));
+        CHECK(!ok("\\\\host\\share"));
+        CHECK(!ok("//host/share"));
+        CHECK(!ok("/etc"));
+        CHECK(!ok("con"));
+        CHECK(!ok("CON"));
+        CHECK(!ok("nul.sfc"));
+        CHECK(!ok("lpt1.sfc"));
+        CHECK(!ok("COM9.zip"));
+        CHECK(!ok(".hidden"));
+        CHECK(!ok(".A.sfc"));
+        CHECK(!ok("trailing."));
+        CHECK(!ok("trailing "));
+        CHECK(!ok("sn*es"));
+        CHECK(!ok("what?.sfc"));
+        CHECK(!ok("pipe|name"));
+        const QString control = QStringLiteral("ctl") + QChar(0x01) + QStringLiteral("name");
+        CHECK(!LibraryBundle::safePathSegment(control));
+        CHECK(!LibraryBundle::safePathSegment(QString(300, QLatin1Char('a'))));
+
+        // The TARGET names every image, GamelistWriter's way; a role that is not an image role has no name.
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A (USA).sfc"), QStringLiteral("thumbnail"), QStringLiteral("png"))
+              == QStringLiteral("A (USA)-thumb.png"));
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A.sfc"), QStringLiteral("image"), QStringLiteral("jpg"))
+              == QStringLiteral("A-image.jpg"));
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A.sfc"), QStringLiteral("marquee"), QStringLiteral("png"))
+              == QStringLiteral("A-marquee.png"));
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A.sfc"), QStringLiteral("fanart"), QStringLiteral("webp"))
+              == QStringLiteral("A-fanart.webp"));
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A.sfc"), QStringLiteral("video"), QStringLiteral("mp4")).isEmpty());
+        CHECK(LibraryBundle::sidecarImageName(QStringLiteral("A.sfc"), QStringLiteral("thumbnail"), QStringLiteral("exe")).isEmpty());
+        CHECK(LibraryBundle::sidecarImageRoles()
+              == (QStringList{ QStringLiteral("thumbnail"), QStringLiteral("image"), QStringLiteral("marquee"), QStringLiteral("fanart") }));
+        CHECK(LibraryBundle::sidecarImageExtension(QStringLiteral("png")));
+        CHECK(LibraryBundle::sidecarImageExtension(QStringLiteral("jpeg")));
+        CHECK(!LibraryBundle::sidecarImageExtension(QStringLiteral("svg")));    // an image that can carry script
+        CHECK(!LibraryBundle::sidecarImageExtension(QStringLiteral("mp4")));
+        CHECK(!LibraryBundle::sidecarImageExtension(QStringLiteral("../png")));
+
+        // Every hostile header, refused by the decoder AND by the landing, with no file byte read and nothing
+        // written anywhere under the target (its ROM tree and the state beside it).
+        auto sideRefused = [&](const QByteArray& hostile, LibraryBundle::Refusal expected, int line) {
+            const QMap<QString, QString> before = fx::censusAll(tBase);
+            const qint64 headerEnd = fx::headerEndOf(hostile);
+            QByteArray b1 = hostile;
+            QBuffer d1(&b1);
+            d1.open(QIODevice::ReadOnly);
+            LibraryBundle::SidecarHeader hh;
+            LibraryBundle::Refusal w = LibraryBundle::Refusal::None;
+            QString msg;
+            const bool decoded = LibraryBundle::decodeSidecarHeaderV2(d1, hh, w, msg);
+            qint64 pos = 0;
+            QString err;
+            const LibraryBundle::LandResult lr = fx::landSide(tRoms, hostile, &err, &pos, -1);
+            const bool untouched = fx::censusAll(tBase) == before;
+            if (decoded || w != expected || msg.isEmpty() || d1.pos() > headerEnd
+                || lr != LibraryBundle::LandResult::Refused || pos > headerEnd || !untouched)
+                std::fprintf(stderr, "BUNDLEXFER-FAIL sidecar refusal case from line %d (decoded=%d why=%d pos=%lld "
+                                     "land=%d landpos=%lld end=%lld untouched=%d)\n",
+                             line, int(decoded), int(w), qint64(d1.pos()), int(lr), pos, headerEnd, int(untouched));
+            CHECK(!decoded);
+            CHECK(w == expected);
+            CHECK(!msg.isEmpty());
+            CHECK(d1.pos() <= headerEnd);
+            CHECK(lr == LibraryBundle::LandResult::Refused);
+            CHECK(pos <= headerEnd);
+            CHECK(untouched);
+        };
+        const QByteArray png4("\x89PNG", 4);
+        QJsonArray oneThumb;
+        oneThumb.append(fx::sideFile(QStringLiteral("thumbnail"), QStringLiteral("png"), 4));
+
+        for (const char* sys : { "..", "../snes", "snes/../..", "C:", "C:\\Windows", "\\\\host\\share", "//host/share",
+                                 "/etc", "con", "CON", "nul.x", ".hidden", "", "snes ", "sn*es" })
+            sideRefused(fx::wireV2(fx::sideHeader(QString::fromUtf8(sys), QStringLiteral("A.sfc"), oneThumb), png4),
+                        LibraryBundle::Refusal::UnsafeId, __LINE__);
+        for (const char* rom : { "../A.sfc", "sub/A.sfc", "..\\A.sfc", "C:A.sfc", "lpt1.sfc", ".A.sfc", "gamelist.xml",
+                                 "A.sfc.", "..", "" })
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QString::fromUtf8(rom), oneThumb), png4),
+                        LibraryBundle::Refusal::UnsafeId, __LINE__);
+        {
+            QJsonObject noSystem = fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), oneThumb);
+            noSystem.remove(QStringLiteral("system"));
+            sideRefused(fx::wireV2(noSystem, png4), LibraryBundle::Refusal::UnsafeId, __LINE__);
+        }
+        // A VIDEO -- after a legitimate image, so a decoder that judged files as it reached them would already
+        // have read the image.
+        {
+            QJsonArray files;
+            files.append(fx::sideFile(QStringLiteral("thumbnail"), QStringLiteral("png"), 4));
+            files.append(fx::sideFile(QStringLiteral("video"), QStringLiteral("mp4"), 4));
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), files), QByteArray("\x89PNGMP4!", 8)),
+                        LibraryBundle::Refusal::UnsafeFileName, __LINE__);
+        }
+        for (const char* ext : { "exe", "svg", "mp4", "../png", "PNG/..", "" })
+        {
+            QJsonArray files;
+            files.append(fx::sideFile(QStringLiteral("thumbnail"), QString::fromUtf8(ext), 4));
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), files), png4),
+                        LibraryBundle::Refusal::UnsafeFileName, __LINE__);
+        }
+        {
+            QJsonArray files;
+            files.append(fx::sideFile(QStringLiteral("manual"), QStringLiteral("png"), 4));
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), files), png4),
+                        LibraryBundle::Refusal::UnsafeFileName, __LINE__);
+        }
+        {
+            QJsonArray dup;
+            dup.append(fx::sideFile(QStringLiteral("thumbnail"), QStringLiteral("png"), 4));
+            dup.append(fx::sideFile(QStringLiteral("thumbnail"), QStringLiteral("jpg"), 4));
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), dup), QByteArray("12345678")),
+                        LibraryBundle::Refusal::Malformed, __LINE__);
+            QJsonArray huge;
+            huge.append(fx::sideFile(QStringLiteral("thumbnail"), QStringLiteral("png"), double(LibraryBundle::kMaxFileBytes + 1)));
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), huge), png4),
+                        LibraryBundle::Refusal::TooLarge, __LINE__);
+            const QByteArray good = fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), oneThumb), png4);
+            QByteArray shortBody = good;
+            shortBody.chop(1);
+            sideRefused(shortBody, LibraryBundle::Refusal::Malformed, __LINE__);
+            sideRefused(good + QByteArray("X"), LibraryBundle::Refusal::Malformed, __LINE__);
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), oneThumb), png4, 3),
+                        LibraryBundle::Refusal::FutureFormat, __LINE__);
+            QJsonObject numericName;
+            numericName.insert(QStringLiteral("name"), 5);
+            sideRefused(fx::wireV2(fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), oneThumb, numericName), png4),
+                        LibraryBundle::Refusal::Malformed, __LINE__);
+        }
+        // An ART body handed to the sidecar decoder, and an unknown kind: refused as a kind, with a sentence.
+        {
+            QJsonArray files;
+            files.append(fx::fileJson(QStringLiteral("thumb.png"), 4));
+            sideRefused(fx::wireV2(fx::headerJson(idA, files), png4), LibraryBundle::Refusal::UnsupportedKind, __LINE__);
+            QJsonObject other = fx::sideHeader(QStringLiteral("snes"), QStringLiteral("A.sfc"), oneThumb);
+            other.insert(QStringLiteral("kind"), QStringLiteral("romfile"));
+            sideRefused(fx::wireV2(other, png4), LibraryBundle::Refusal::UnsupportedKind, __LINE__);
+        }
+    }
+
+    // ---- 19. landing rules: the target decides, and a listed game is never touched (#292) -----------
+    {
+        // THE SOURCE: exactly the three games in snes/gamelist.xml whose <path> is one segment. Not the
+        // root-level gamelist, not the one in snes/extra/, not the subfolder entry.
+        const QList<LibraryBundle::SidecarGame> games = LibraryBundle::sidecarGamesFor(sRoms);
+        QStringList keys;
+        for (const LibraryBundle::SidecarGame& g : games) keys << g.system + QLatin1Char('|') + g.rom;
+        CHECK(keys == (QStringList{ QStringLiteral("snes|A.sfc"), QStringLiteral("snes|B.sfc"), QStringLiteral("snes|C.sfc") }));
+
+        LibraryBundle::SidecarPayload payA;
+        QString err;
+        const LibraryBundle::SidecarGame* gameA = games.isEmpty() ? nullptr : &games.first();
+        CHECK(gameA && LibraryBundle::readSidecarPayload(sRoms, *gameA, payA, err));
+        CHECK(payA.fields.name == QStringLiteral("Alpha Quest"));
+        CHECK(payA.fields.desc == QStringLiteral("The first game & the best."));
+        CHECK(payA.fields.developer == QStringLiteral("Dev A") && payA.fields.rating == QStringLiteral("0.8"));
+        QStringList rolesA;
+        for (const LibraryBundle::SidecarImage& i : payA.images) rolesA << i.role;
+        // thumbnail and marquee. NOT the fanart whose path climbs out of the system folder, and never the video.
+        CHECK(rolesA == (QStringList{ QStringLiteral("thumbnail"), QStringLiteral("marquee") }));
+        CHECK(payA.images.size() == 2 && payA.images.at(0).data == artA && payA.images.at(1).data == artAm);
+        CHECK(LibraryBundle::fileBytesOf(payA) == qint64(artA.size() + artAm.size()));
+        const QByteArray wireA = LibraryBundle::encodeSidecarV2(payA);
+        CHECK(!wireA.contains("MP4-NEVER-TRAVELS"));
+        CHECK(!wireA.contains("SECRET"));
+        CHECK(!wireA.contains("./images/"));                    // no path from the source rides the wire
+
+        // THE TARGET's lists: the ROMs present, and which of them its gamelist lists.
+        const QList<LibraryBundle::SidecarSystem> inv = LibraryBundle::sidecarInventoryFor(tRoms);
+        const QByteArray invJson = LibraryBundle::sidecarInventoryJson(inv);
+        QList<LibraryBundle::SidecarSystem> invBack;
+        CHECK(LibraryBundle::parseSidecarInventory(invJson, invBack, err));
+        CHECK(invBack.size() == 2);
+        for (const LibraryBundle::SidecarSystem& s : invBack)
+        {
+            if (s.name == QStringLiteral("snes"))
+            {
+                CHECK(s.roms == (QStringList{ QStringLiteral("A.sfc"), QStringLiteral("B.sfc") }));
+                CHECK(s.listed == QStringList{ QStringLiteral("B.sfc") });
+            }
+            else
+            {
+                CHECK(s.name == QStringLiteral("megadrive"));
+                CHECK(s.roms == QStringList{ QStringLiteral("Sonic.md") } && s.listed.isEmpty());
+            }
+        }
+
+        // THE PLAN: A only; B is already listed; C is not applicable.
+        const LibraryBundle::SidecarPlan plan = LibraryBundle::planSidecars(games, invBack);
+        CHECK(plan.send.size() == 1 && !plan.send.isEmpty() && plan.send.first().rom == QStringLiteral("A.sfc"));
+        CHECK(plan.alreadyListed == 1);
+        CHECK(plan.notApplicable == 1);
+
+        // LAND A.
+        const QString listPath = tRoms + QStringLiteral("/snes/gamelist.xml");
+        const QByteArray oldList = fx::readFile(listPath);
+        const QMap<QString, QString> before = fx::censusAll(tBase);
+        CHECK(fx::landSide(tRoms, wireA, &err, nullptr, -1) == LibraryBundle::LandResult::Landed);
+        CHECK(fx::readFile(tRoms + QStringLiteral("/snes/images/A-thumb.png")) == artA);
+        CHECK(fx::readFile(tRoms + QStringLiteral("/snes/images/A-marquee.png")) == artAm);
+        CHECK(!QFileInfo::exists(tRoms + QStringLiteral("/snes/videos")));
+        CHECK(fx::readFile(tRoms + QStringLiteral("/snes/images/B-thumb.png")) == QByteArray("TARGET-B-ART"));
+
+        // The existing file's bytes are preserved; exactly one <game> is inserted before </gameList>.
+        const QByteArray newList = fx::readFile(listPath);
+        const int close = oldList.lastIndexOf("</gameList>");
+        CHECK(close > 0);
+        CHECK(newList.size() > oldList.size());
+        CHECK(newList.left(close) == oldList.left(close));
+        CHECK(newList.right(oldList.size() - close) == oldList.mid(close));
+        const QByteArray inserted = newList.mid(close, newList.size() - oldList.size());
+        CHECK(inserted.count("<game>") == 1 && inserted.count("</game>") == 1);
+        CHECK(inserted.contains("<path>./A.sfc</path>"));
+        CHECK(inserted.contains("<name>Alpha Quest</name>"));
+        CHECK(inserted.contains("<desc>The first game &amp; the best.</desc>"));
+        CHECK(inserted.contains("<thumbnail>./images/A-thumb.png</thumbnail>"));
+        CHECK(inserted.contains("<marquee>./images/A-marquee.png</marquee>"));
+        CHECK(!inserted.contains("fanart") && !inserted.contains("video"));
+        bool wellFormed = false;
+        CHECK(fx::countGameElements(newList, &wellFormed) == 2 && wellFormed);
+
+        // ...and GamelistStore -- the reader the UI uses -- now finds A's art on the target, and B unchanged.
+        GamelistStore::clearCache();
+        const MediaDetail dA = GamelistStore::lookup(tRoms + QStringLiteral("/snes/A.sfc"));
+        CHECK(dA.valid && dA.title == QStringLiteral("Alpha Quest"));
+        CHECK(dA.art.image(QStringLiteral("box")) == QDir::cleanPath(tRoms + QStringLiteral("/snes/images/A-thumb.png")));
+        CHECK(dA.art.image(QStringLiteral("logo")) == QDir::cleanPath(tRoms + QStringLiteral("/snes/images/A-marquee.png")));
+        CHECK(GamelistStore::lookup(tRoms + QStringLiteral("/snes/B.sfc")).title == QStringLiteral("Bravo (Target's own)"));
+
+        // THE GUARD: every new or changed entry is under <root>/<the existing system>/; nothing was removed;
+        // megadrive, the state folder and everything else are exactly as they were.
+        const QMap<QString, QString> after = fx::censusAll(tBase);
+        for (auto it = before.constBegin(); it != before.constEnd(); ++it) CHECK(after.contains(it.key()));
+        for (auto it = after.constBegin(); it != after.constEnd(); ++it)
+        {
+            const bool changed = !before.contains(it.key()) || before.value(it.key()) != it.value();
+            if (changed && !it.key().startsWith(QStringLiteral("roms/snes/")))
+                std::fprintf(stderr, "BUNDLEXFER-FAIL sidecar wrote outside its system: %s\n", qPrintable(it.key()));
+            CHECK(!changed || it.key().startsWith(QStringLiteral("roms/snes/")));
+        }
+
+        // B: already listed -> "current", and the gamelist stays BYTE-IDENTICAL.
+        LibraryBundle::SidecarPayload payB;
+        CHECK(games.size() == 3 && LibraryBundle::readSidecarPayload(sRoms, games.at(1), payB, err));
+        const QMap<QString, QString> beforeB = fx::censusAll(tBase);
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(payB), &err, nullptr, -1)
+              == LibraryBundle::LandResult::AlreadyCurrent);
+        CHECK(fx::readFile(listPath) == newList);
+        CHECK(fx::censusAll(tBase) == beforeB);
+
+        // C: no ROM there -> not applicable, no write. A system folder the target lacks -> not applicable, and
+        // the folder is NOT created. A "ROM" that is a directory is not a ROM.
+        LibraryBundle::SidecarPayload payC;
+        CHECK(games.size() == 3 && LibraryBundle::readSidecarPayload(sRoms, games.at(2), payC, err));
+        const QMap<QString, QString> beforeC = fx::censusAll(tBase);
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(payC), &err, nullptr, -1)
+              == LibraryBundle::LandResult::NotApplicable);
+        CHECK(!err.isEmpty());
+        LibraryBundle::SidecarPayload n64 = payA;
+        n64.system = QStringLiteral("n64");
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(n64), &err, nullptr, -1)
+              == LibraryBundle::LandResult::NotApplicable);
+        CHECK(!QFileInfo::exists(tRoms + QStringLiteral("/n64")));
+        LibraryBundle::SidecarPayload missing = payA;
+        missing.system = QStringLiteral("megadrive");
+        missing.rom = QStringLiteral("Missing.md");
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(missing), &err, nullptr, -1)
+              == LibraryBundle::LandResult::NotApplicable);
+        CHECK(fx::censusAll(tBase) == beforeC);
+        QDir().mkpath(tRoms + QStringLiteral("/megadrive/Folder.md"));
+        const QMap<QString, QString> beforeDir = fx::censusAll(tBase);
+        LibraryBundle::SidecarPayload dirRom = payA;
+        dirRom.system = QStringLiteral("megadrive");
+        dirRom.rom = QStringLiteral("Folder.md");
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(dirRom), &err, nullptr, -1)
+              == LibraryBundle::LandResult::NotApplicable);
+        CHECK(fx::censusAll(tBase) == beforeDir);
+        CHECK(!QFileInfo::exists(tRoms + QStringLiteral("/megadrive/gamelist.xml")));
+        QDir(tRoms + QStringLiteral("/megadrive/Folder.md")).removeRecursively();
+
+        // THE SECOND RUN moves nothing.
+        QList<LibraryBundle::SidecarSystem> inv2;
+        CHECK(LibraryBundle::parseSidecarInventory(
+            LibraryBundle::sidecarInventoryJson(LibraryBundle::sidecarInventoryFor(tRoms)), inv2, err));
+        const LibraryBundle::SidecarPlan plan2 = LibraryBundle::planSidecars(LibraryBundle::sidecarGamesFor(sRoms), inv2);
+        CHECK(plan2.send.isEmpty());
+        CHECK(plan2.alreadyListed == 2);
+        CHECK(plan2.notApplicable == 1);
+
+        // The sentences for both runs: games added counted on their own, including "0 added, N already listed".
+        LibraryBundle::Progress run1;
+        run1.gamelists = true; run1.gamesAdded = 1; run1.gamesListed = 1; run1.gamesNotApplicable = 1;
+        run1.bytesSent = LibraryBundle::fileBytesOf(payA);
+        const QString line1 = LibraryBundle::describeProgress(run1, QStringLiteral("Den"));
+        CHECK(line1.contains(QStringLiteral("1 game added")));
+        CHECK(line1.contains(QStringLiteral("1 already listed")));
+        CHECK(!line1.contains(QStringLiteral("could not")));
+        CHECK(!line1.contains(QStringLiteral("nothing to send")));
+        LibraryBundle::Progress run2;
+        run2.gamelists = true; run2.gamesListed = 2; run2.gamesNotApplicable = 1;
+        const QString line2 = LibraryBundle::describeProgress(run2, QStringLiteral("Den"));
+        CHECK(line2.contains(QStringLiteral("already up to date")));
+        CHECK(line2.contains(QStringLiteral("0 games added, 2 already listed")));
+        LibraryBundle::Progress both;
+        both.itemsTotal = 5; both.itemsSent = 5; both.bytesSent = 4096;
+        both.gamelists = true; both.gamesAdded = 3; both.gamesFailed = 1;
+        const QString line3 = LibraryBundle::describeProgress(both, QStringLiteral("Den"));
+        CHECK(line3.contains(QStringLiteral("Sent 5 of 5 items")));
+        CHECK(line3.contains(QStringLiteral("3 games added")));
+        CHECK(line3.contains(QStringLiteral("1 could not be added")));
+        LibraryBundle::Progress noSide;
+        CHECK(!LibraryBundle::describeProgress(noSide, QStringLiteral("Den")).contains(QStringLiteral("game")));
+
+        // GamelistStore's OWN matching rule decides "listed", on both ends: a GoodNES name against a No-Intro
+        // entry (clean title), a different extension (base name), and a game that is genuinely not there.
+        fx::writeTree(tRoms + QStringLiteral("/nes/Super Mario Bros 3 (U) [!].nes"), QByteArray("ROM"));
+        fx::writeTree(tRoms + QStringLiteral("/nes/Metroid.nes"), QByteArray("ROM"));
+        fx::writeTree(tRoms + QStringLiteral("/nes/Zelda.nes"), QByteArray("ROM"));
+        fx::writeTree(tRoms + QStringLiteral("/nes/gamelist.xml"), QByteArray(
+            "<gameList><game><path>./Super Mario Bros. 3 (USA) (Rev 1).nes</path><name>Super Mario Bros. 3</name></game>"
+            "<game><path>./metroid.zip</path><name>Metroid</name></game></gameList>"));
+        GamelistStore::clearCache();
+        for (const LibraryBundle::SidecarSystem& s : LibraryBundle::sidecarInventoryFor(tRoms))
+        {
+            if (s.name != QStringLiteral("nes")) continue;
+            CHECK(s.roms.size() == 3);
+            for (const QString& rom : s.roms)
+            {
+                const bool store = GamelistStore::has(tRoms + QStringLiteral("/nes/") + rom);
+                if (store != s.listed.contains(rom))
+                    std::fprintf(stderr, "BUNDLEXFER-FAIL listed disagrees with GamelistStore for %s\n", qPrintable(rom));
+                CHECK(store == s.listed.contains(rom));
+            }
+            CHECK(s.listed.size() == 2 && !s.listed.contains(QStringLiteral("Zelda.nes")));
+        }
+        const QByteArray nesBefore = fx::readFile(tRoms + QStringLiteral("/nes/gamelist.xml"));
+        LibraryBundle::SidecarPayload smb3 = fx::sidePayload(QStringLiteral("nes"), QStringLiteral("Super Mario Bros 3 (U) [!].nes"),
+                                                             QStringLiteral("SMB3 from elsewhere"), {});
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(smb3), &err, nullptr, -1)
+              == LibraryBundle::LandResult::AlreadyCurrent);
+        CHECK(fx::readFile(tRoms + QStringLiteral("/nes/gamelist.xml")) == nesBefore);
+    }
+
+    // ---- 20. XML: structured fields, escaped; the existing file preserved (#292) --------------------
+    {
+        CHECK(LibraryBundle::gamelistXmlText(QStringLiteral("a & b < c > d")) == QStringLiteral("a &amp; b &lt; c &gt; d"));
+        const QString withControl = QStringLiteral("x") + QChar(0x01) + QStringLiteral("y") + QChar(0xFFFF) + QStringLiteral("z");
+        CHECK(LibraryBundle::gamelistXmlText(withControl) == QStringLiteral("xyz"));
+
+        fx::writeTree(tRoms + QStringLiteral("/gba/Evil.gba"), QByteArray("ROM"));
+        fx::writeTree(tRoms + QStringLiteral("/gba/Other.gba"), QByteArray("ROM"));
+        const QByteArray gbaOld("<?xml version=\"1.0\"?>\n<gameList>\n\t<game>\n\t\t<path>./Other.gba</path>\n"
+                                "\t\t<name>Other</name>\n\t</game>\n</gameList>\n");
+        fx::writeTree(tRoms + QStringLiteral("/gba/gamelist.xml"), gbaOld);
+
+        const QString hostileName = QStringLiteral("Evil</name></game><game><path>./Other.gba</path><name>pwn</name>");
+        const QString hostileDesc = QStringLiteral("<![CDATA[ & ]]> <!-- --> ") + QChar(0x01) + QStringLiteral("end");
+        LibraryBundle::SidecarPayload evil = fx::sidePayload(QStringLiteral("gba"), QStringLiteral("Evil.gba"), hostileName, {});
+        evil.fields.desc = hostileDesc;
+        evil.fields.developer = QStringLiteral("\"quoted\" 'apos'");
+        QString err;
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(evil), &err, nullptr, -1) == LibraryBundle::LandResult::Landed);
+        const QByteArray gbaNew = fx::readFile(tRoms + QStringLiteral("/gba/gamelist.xml"));
+        bool wellFormed = false;
+        CHECK(fx::countGameElements(gbaNew, &wellFormed) == 2);      // not 3: no element was injected
+        CHECK(wellFormed);
+        const int gbaClose = gbaOld.lastIndexOf("</gameList>");
+        CHECK(gbaNew.left(gbaClose) == gbaOld.left(gbaClose));
+        CHECK(gbaNew.endsWith(gbaOld.mid(gbaClose)));
+        const QList<LibraryBundle::GamelistGame> parsed = LibraryBundle::parseGamelist(gbaNew);
+        CHECK(parsed.size() == 2);
+        if (parsed.size() == 2)
+        {
+            CHECK(parsed.at(0).path == QStringLiteral("./Other.gba") && parsed.at(0).fields.name == QStringLiteral("Other"));
+            CHECK(parsed.at(1).path == QStringLiteral("./Evil.gba"));
+            CHECK(parsed.at(1).fields.name == hostileName);        // the text survived as text
+            CHECK(parsed.at(1).fields.desc == QStringLiteral("<![CDATA[ & ]]> <!-- --> end"));
+        }
+        GamelistStore::clearCache();
+        CHECK(GamelistStore::lookup(tRoms + QStringLiteral("/gba/Other.gba")).title == QStringLiteral("Other"));
+
+        // No gamelist yet: a new, well-formed file holding the one entry.
+        LibraryBundle::SidecarPayload sonic = fx::sidePayload(QStringLiteral("megadrive"), QStringLiteral("Sonic.md"),
+                                                              QStringLiteral("Sonic"), {});
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(sonic), &err, nullptr, -1) == LibraryBundle::LandResult::Landed);
+        const QByteArray mdList = fx::readFile(tRoms + QStringLiteral("/megadrive/gamelist.xml"));
+        CHECK(mdList.startsWith("<?xml"));
+        CHECK(fx::countGameElements(mdList, &wellFormed) == 1 && wellFormed);
+
+        // A non-empty gamelist with no </gameList> is not rewritten: the landing fails, the file is untouched
+        // and no image it carried is left behind.
+        fx::writeTree(tRoms + QStringLiteral("/psx/Game.bin"), QByteArray("ROM"));
+        const QByteArray broken("<gameList><game><path>./Other.bin</path>");
+        fx::writeTree(tRoms + QStringLiteral("/psx/gamelist.xml"), broken);
+        const QMap<QString, QString> psxBefore = fx::censusAll(tRoms + QStringLiteral("/psx"));
+        LibraryBundle::SidecarPayload psx = fx::sidePayload(QStringLiteral("psx"), QStringLiteral("Game.bin"), QStringLiteral("Game"),
+            { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), QByteArray("PSXART")) });
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(psx), &err, nullptr, -1) == LibraryBundle::LandResult::WriteFailed);
+        CHECK(fx::censusAll(tRoms + QStringLiteral("/psx")) == psxBefore);
+
+        // The pure insert on its own terms.
+        QByteArray out;
+        CHECK(LibraryBundle::insertGamelistEntry(QByteArray("<gameList>\n</gameList>tail"), QByteArray("X\n"), out));
+        CHECK(out == QByteArray("<gameList>\nX\n</gameList>tail"));
+        CHECK(!LibraryBundle::insertGamelistEntry(broken, QByteArray("X"), out));
+        CHECK(LibraryBundle::insertGamelistEntry(QByteArray(), QByteArray("\t<game/>\n"), out) && out.contains("<gameList>"));
+    }
+
+    // ---- 21. images: target-named, never overwriting, never video (#292) ----------------------------
+    {
+        fx::writeTree(tRoms + QStringLiteral("/gbc/Kept.gbc"), QByteArray("ROM"));
+        fx::writeTree(tRoms + QStringLiteral("/gbc/images/Kept-thumb.png"), QByteArray("USER-ART"));
+        const QByteArray marquee = QByteArray("\x89PNG", 4) + fx::noise(500, 21);
+        const QByteArray thumb   = QByteArray("\x89PNG", 4) + fx::noise(600, 22);
+        LibraryBundle::SidecarPayload kept = fx::sidePayload(QStringLiteral("gbc"), QStringLiteral("Kept.gbc"), QStringLiteral("Kept"),
+            { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), thumb),
+              fx::sideImage(QStringLiteral("marquee"), QStringLiteral("png"), marquee) });
+        QString err;
+        CHECK(fx::landSide(tRoms, LibraryBundle::encodeSidecarV2(kept), &err, nullptr, -1) == LibraryBundle::LandResult::Landed);
+        CHECK(fx::readFile(tRoms + QStringLiteral("/gbc/images/Kept-thumb.png")) == QByteArray("USER-ART"));
+        CHECK(fx::readFile(tRoms + QStringLiteral("/gbc/images/Kept-marquee.png")) == marquee);
+        const QByteArray gbcList = fx::readFile(tRoms + QStringLiteral("/gbc/gamelist.xml"));
+        CHECK(!gbcList.contains("<thumbnail>"));                   // the dropped image is not in the entry
+        CHECK(gbcList.contains("<marquee>./images/Kept-marquee.png</marquee>"));
+
+        // A source whose gamelist names a video (and only a video) sends no file at all.
+        LibraryBundle::SidecarGame onlyVideo;
+        onlyVideo.system = QStringLiteral("snes");
+        onlyVideo.rom = QStringLiteral("A.sfc");
+        onlyVideo.fields.name = QStringLiteral("A");
+        onlyVideo.images << qMakePair(QStringLiteral("video"), QStringLiteral("./videos/A-video.mp4"));
+        LibraryBundle::SidecarPayload pv;
+        CHECK(LibraryBundle::readSidecarPayload(sRoms, onlyVideo, pv, err));
+        CHECK(pv.images.isEmpty());
+    }
+
+    // ---- 22. an interrupted gamelist rewrite leaves the old file (#292) -----------------------------
+    {
+        fx::writeTree(tRoms + QStringLiteral("/pce/Turbo.pce"), QByteArray("ROM"));
+        const QByteArray pceOld("<?xml version=\"1.0\"?>\n<gameList>\n\t<game>\n\t\t<path>./Other.pce</path>\n\t</game>\n</gameList>\n");
+        fx::writeTree(tRoms + QStringLiteral("/pce/gamelist.xml"), pceOld);
+        LibraryBundle::SidecarPayload turbo = fx::sidePayload(QStringLiteral("pce"), QStringLiteral("Turbo.pce"), QStringLiteral("Turbo"),
+            { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), QByteArray("\x89PNG-T", 6)),
+              fx::sideImage(QStringLiteral("fanart"), QStringLiteral("jpg"), QByteArray("JPEG-F")) });
+        const QByteArray wire = LibraryBundle::encodeSidecarV2(turbo);
+        const QMap<QString, QString> before = fx::censusAll(tRoms + QStringLiteral("/pce"));
+        QString err;
+        for (int failAfter : { 2, 1, 0 })        // 2 = at the gamelist rewrite itself; 1 and 0 = among the images
+        {
+            const LibraryBundle::LandResult r = fx::landSide(tRoms, wire, &err, nullptr, failAfter);
+            if (r != LibraryBundle::LandResult::Interrupted)
+                std::fprintf(stderr, "BUNDLEXFER-FAIL interrupt at %d gave %d\n", failAfter, int(r));
+            CHECK(r == LibraryBundle::LandResult::Interrupted);
+            CHECK(fx::readFile(tRoms + QStringLiteral("/pce/gamelist.xml")) == pceOld);
+            CHECK(fx::censusAll(tRoms + QStringLiteral("/pce")) == before);   // no image, no temp file, no folder
+        }
+        CHECK(fx::landSide(tRoms, wire, &err, nullptr, -1) == LibraryBundle::LandResult::Landed);
+        CHECK(fx::readFile(tRoms + QStringLiteral("/pce/images/Turbo-thumb.png")) == QByteArray("\x89PNG-T", 6));
+        CHECK(fx::readFile(tRoms + QStringLiteral("/pce/gamelist.xml")).contains("<fanart>./images/Turbo-fanart.jpg</fanart>"));
+    }
+
+    // ---- 23. interop: advertised, kind-marked, refused readably where not taken (#292) -------------
+    {
+        QList<LibraryBundle::Entry> entries;
+        LibraryBundle::Entry a; a.id = idA; a.stamp = QStringLiteral("aaa"); a.updatedMs = 1;
+        entries << a;
+        const QByteArray oldInv = LibraryBundle::inventoryJson(entries);
+        CHECK(!LibraryBundle::advertisesSidecars(oldInv));
+        CHECK(!LibraryBundle::advertisesSidecars(QByteArray("{\"v\":1,\"items\":[]}")));
+        CHECK(!LibraryBundle::advertisesSidecars(QByteArray("{\"v\":1,\"items\":[],\"sidecars\":\"junk\"}")));
+        const QByteArray newInv = LibraryBundle::inventoryJson(entries, true);
+        CHECK(LibraryBundle::advertisesSidecars(newInv));
+        const QJsonObject newObj = QJsonDocument::fromJson(newInv).object();
+        CHECK(newObj.value(QStringLiteral("v")).toInt() == 1);          // an old source still reads it
+        QList<LibraryBundle::Entry> out;
+        QList<int> formats;
+        QString err;
+        CHECK(LibraryBundle::parseInventory(newInv, out, formats, err) && out.size() == 1);
+        CHECK(LibraryBundle::chooseBundleFormat(formats) == 2);           // "bundle" means what it meant
+        CHECK(LibraryBundle::parseInventory(newInv, out, err));
+
+        // The kind marker, read from the header alone, with the device put back.
+        LibraryBundle::SidecarPayload sp = fx::sidePayload(QStringLiteral("snes"), QStringLiteral("A.sfc"), QStringLiteral("A"),
+            { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), QByteArray("\x89PNG", 4)) });
+        const QByteArray sideWire = LibraryBundle::encodeSidecarV2(sp);
+        LibraryBundle::Payload artP;
+        CHECK(LibraryBundle::readPayload(srcRoot, idB, artP, err));
+        const QByteArray artWire = LibraryBundle::encodePayloadV2(artP);
+        auto kindOf = [](const QByteArray& w, qint64* pos) {
+            QByteArray c = w;
+            QBuffer b(&c);
+            b.open(QIODevice::ReadOnly);
+            const LibraryBundle::BodyKind k = LibraryBundle::bodyKindV2(b);
+            if (pos) *pos = b.pos();
+            return k;
+        };
+        qint64 kpos = -1;
+        CHECK(kindOf(sideWire, &kpos) == LibraryBundle::BodyKind::Gamelist && kpos == 0);
+        CHECK(kindOf(artWire, &kpos) == LibraryBundle::BodyKind::Art && kpos == 0);
+        CHECK(kindOf(QByteArray("not a bundle at all"), &kpos) == LibraryBundle::BodyKind::Unknown && kpos == 0);
+
+        // A gamelist entry handed to the ART decoder -- a target that does not take the kind -- is refused as a
+        // kind, readably, before a file byte, and nothing lands in the cache.
+        {
+            const QString cacheBase = base + QStringLiteral("/sidecar-to-cache");
+            const QString cacheRoot = cacheBase + QStringLiteral("/metadata");
+            QDir().mkpath(cacheRoot);
+            const QMap<QString, QString> before = fx::censusAll(cacheBase);
+            QByteArray c1 = sideWire;
+            QBuffer d1(&c1);
+            d1.open(QIODevice::ReadOnly);
+            LibraryBundle::BundleHeader h;
+            LibraryBundle::Refusal why = LibraryBundle::Refusal::None;
+            QString msg;
+            CHECK(!LibraryBundle::decodeHeaderV2(d1, h, why, msg));
+            CHECK(why == LibraryBundle::Refusal::UnsupportedKind);
+            CHECK(msg.contains(QStringLiteral("gamelist")));
+            CHECK(d1.pos() <= fx::headerEndOf(sideWire));
+            QByteArray c2 = sideWire;
+            QBuffer d2(&c2);
+            d2.open(QIODevice::ReadOnly);
+            CHECK(LibraryBundle::landItemV2(cacheRoot, d2, err) == LibraryBundle::LandResult::Refused);
+            CHECK(fx::censusAll(cacheBase) == before);
+        }
+
+        // The routes.
+        {
+            const RemoteApi::Request get = RemoteApi::parseRequest("GET /gamelists HTTP/1.1\r\n\r\n");
+            CHECK(RemoteApi::route(get).kind == RemoteApi::CommandKind::Gamelists);
+            const RemoteApi::Request post = RemoteApi::parseRequest("POST /gamelists HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+            CHECK(RemoteApi::route(post).kind == RemoteApi::CommandKind::BadRequest);
+            CHECK(PlayOn::routeNeedsToken(QStringLiteral("/gamelists")));
+            CHECK(RemoteApi::requestCapBytes("GET /gamelists HTTP/1.1\r\n") == RemoteApi::kDefaultRequestCap);
+        }
+
+        // Over a real socket.
+        const QString sBase = base + QStringLiteral("/sidecar-socket");
+        const QString sCache = sBase + QStringLiteral("/metadata");
+        const QString sRomsT = sBase + QStringLiteral("/roms");
+        QDir().mkpath(sCache);
+        fx::writeTree(sRomsT + QStringLiteral("/snes/A.sfc"), QByteArray("ROM-A"));
+        const QString token = QStringLiteral("probe-fixture-credential-292");
+        const auto head = [&token](const QByteArray& method, const QByteArray& path, qint64 length, bool withToken) {
+            QByteArray h = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+            if (length >= 0) h += "Content-Type: application/x-eb-bundle\r\nContent-Length: " + QByteArray::number(length) + "\r\n";
+            if (withToken) h += "X-EB-Token: " + token.toLatin1() + "\r\n";
+            return h + "\r\n";
+        };
+
+        RemoteServer::Hooks hooks;
+        hooks.tokens = [token] { return QSet<QString>{ token }; };
+        hooks.inventory = [sCache] { return LibraryBundle::inventoryJson(LibraryBundle::inventoryFor(sCache)); };
+        hooks.bundleRoot = [sCache] { return sCache; };
+        hooks.bundleStream = [sCache](QIODevice& body) {
+            QString e;
+            return LibraryBundle::receiptFor(LibraryBundle::landItemV2(sCache, body, e), e);
+        };
+
+        // (a) A target WITHOUT the sidecar hooks: does not advertise, refuses the kind with a sentence, 503 on the list.
+        {
+            RemoteServer old;
+            old.setHooks(hooks);
+            CHECK(old.start(0));
+            const QMap<QString, QString> before = fx::censusAll(sBase);
+            const fx::HttpResult r = fx::httpRequest(old.port(), head("POST", "/bundle", sideWire.size(), true), sideWire, -1, false);
+            CHECK(r.status == 400);
+            LibraryBundle::Receipt rec;
+            CHECK(LibraryBundle::parseReceipt(r.body, rec) && rec.result == QStringLiteral("refused"));
+            CHECK(rec.reason.contains(QStringLiteral("gamelist")));
+            CHECK(fx::censusAll(sBase) == before);
+            const fx::HttpResult inv = fx::httpRequest(old.port(), head("GET", "/inventory", -1, true), QByteArray(), 0, false);
+            CHECK(inv.status == 200 && !LibraryBundle::advertisesSidecars(inv.body));
+            CHECK(fx::httpRequest(old.port(), head("GET", "/gamelists", -1, true), QByteArray(), 0, false).status == 503);
+            CHECK(fx::httpRequest(old.port(), head("GET", "/gamelists", -1, false), QByteArray(), 0, false).status == 401);
+            old.stop();
+        }
+        // (b) A target WITH them: advertises, answers the lists behind the token, lands the entry beside the ROM.
+        {
+            RemoteServer::Hooks full = hooks;
+            full.inventory = [sCache] { return LibraryBundle::inventoryJson(LibraryBundle::inventoryFor(sCache), true); };
+            full.gamelists = [sRomsT] { return LibraryBundle::sidecarInventoryJson(LibraryBundle::sidecarInventoryFor(sRomsT)); };
+            full.sidecarStream = [sRomsT](QIODevice& body) {
+                QString e;
+                return LibraryBundle::receiptFor(LibraryBundle::landSidecarV2(sRomsT, body, e), e);
+            };
+            RemoteServer srv;
+            srv.setHooks(full);
+            CHECK(srv.start(0));
+            const fx::HttpResult inv = fx::httpRequest(srv.port(), head("GET", "/inventory", -1, true), QByteArray(), 0, false);
+            CHECK(inv.status == 200 && LibraryBundle::advertisesSidecars(inv.body));
+            CHECK(fx::httpRequest(srv.port(), head("GET", "/gamelists", -1, false), QByteArray(), 0, false).status == 401);
+            const fx::HttpResult lists = fx::httpRequest(srv.port(), head("GET", "/gamelists", -1, true), QByteArray(), 0, false);
+            CHECK(lists.status == 200);
+            QList<LibraryBundle::SidecarSystem> systems;
+            CHECK(LibraryBundle::parseSidecarInventory(lists.body, systems, err));
+            CHECK(systems.size() == 1 && systems.first().roms == QStringList{ QStringLiteral("A.sfc") });
+            // Without the token: 401 before a spool exists.
+            CHECK(fx::httpRequest(srv.port(), head("POST", "/bundle", sideWire.size(), false), sideWire, 0, false).status == 401);
+            const fx::HttpResult r = fx::httpRequest(srv.port(), head("POST", "/bundle", sideWire.size(), true), sideWire, -1, false);
+            CHECK(r.status == 200);
+            LibraryBundle::Receipt rec;
+            CHECK(LibraryBundle::parseReceipt(r.body, rec) && rec.result == QStringLiteral("landed"));
+            CHECK(fx::readFile(sRomsT + QStringLiteral("/snes/images/A-thumb.png")) == QByteArray("\x89PNG", 4));
+            CHECK(fx::readFile(sRomsT + QStringLiteral("/snes/gamelist.xml")).contains("<path>./A.sfc</path>"));
+            CHECK(fx::spoolFilesUnder(sCache).isEmpty());
+            CHECK(!QFileInfo::exists(sCache + QStringLiteral("/.eb-incoming")));
+            // An ART body still lands in the cache through the same listener.
+            const fx::HttpResult art = fx::httpRequest(srv.port(), head("POST", "/bundle", artWire.size(), true), artWire, -1, false);
+            CHECK(art.status == 200);
+            CHECK(QFileInfo::exists(sCache + QLatin1Char('/') + idB + QStringLiteral("/meta.json")));
+            // And the second plan is empty.
+            const fx::HttpResult lists2 = fx::httpRequest(srv.port(), head("GET", "/gamelists", -1, true), QByteArray(), 0, false);
+            QList<LibraryBundle::SidecarGame> srcGames;
+            LibraryBundle::SidecarGame g;
+            g.system = QStringLiteral("snes"); g.rom = QStringLiteral("A.sfc"); g.fields.name = QStringLiteral("A");
+            srcGames << g;
+            CHECK(LibraryBundle::parseSidecarInventory(lists2.body, systems, err));
+            CHECK(LibraryBundle::planSidecars(srcGames, systems).send.isEmpty());
+            srv.stop();
+        }
+
+        // Size: a library with thousands of ROMs, which is why the lists do not ride /inventory.
+        QList<LibraryBundle::SidecarSystem> big;
+        for (int s = 0; s < 10; ++s)
+        {
+            LibraryBundle::SidecarSystem sys;
+            sys.name = QStringLiteral("system%1").arg(s);
+            for (int i = 0; i < 500; ++i)
+            {
+                sys.roms << QStringLiteral("Some Fairly Typical Game Title %1 (USA) (Rev 1).zip").arg(i);
+                if (i % 2 == 0) sys.listed << sys.roms.last();
+            }
+            big << sys;
+        }
+        std::printf("BUNDLEXFER-INFO /gamelists for 5000 ROMs (half listed) is %lld bytes\n",
+                    qint64(LibraryBundle::sidecarInventoryJson(big).size()));
     }
 
     QDir(base).removeRecursively();
