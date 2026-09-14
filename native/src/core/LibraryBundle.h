@@ -30,9 +30,11 @@
 //
 //   4. NOTHING BUT ART MOVES. The transferable set is an EXTENSION ALLOWLIST (meta.json + image roles + xml),
 //      so a trailer, a theme song and a manual — the megabyte roles — stay where they are, and an item id
-//      that is not a 40-character MetaCache hash is refused outright. There is no path in this file that can
-//      name a directory outside the cache root, and no state store (marks, favourites, resume) is opened at
-//      all: this moves art, and art is the only thing it can move.
+//      that is not a 40-character MetaCache hash is refused outright. There is no path in sections 1-10 that
+//      can name a directory outside the cache root, and no state store (marks, favourites, resume) is opened
+//      at all: this moves art, and art is the only thing it can move. (Section 11, issue #292, is gamelist
+//      sidecars: a separate payload kind with its own root -- the target's ROM folder -- and its own guard,
+//      and no function there is handed the cache root.)
 //
 //   5. LANDING IS ATOMIC PER ITEM. Files are staged in `.eb-incoming/<id>`, the live folder is set aside in
 //      `.eb-retired/<id>`, the files the payload did NOT carry (that trailer, that manual) are moved across
@@ -64,6 +66,7 @@
 #pragma once
 #include <QByteArray>
 #include <QList>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
@@ -168,7 +171,9 @@ namespace LibraryBundle
 
     QByteArray encodePayload(const Payload& p);
 
-    enum class Refusal { None, Malformed, FutureFormat, UnsafeId, UnsafeFileName, TooLarge, Empty };
+    // UnsupportedKind (#292): a v2 body of a kind this decoder does not land -- a gamelist entry handed to the
+    // art-cache decoder, or the other way round. Refused with a sentence, never half-understood.
+    enum class Refusal { None, Malformed, FutureFormat, UnsafeId, UnsafeFileName, TooLarge, Empty, UnsupportedKind };
 
     // Decode + validate in one call: a payload that survives this is safe to land. `why` names the refusal and
     // `message` is the sentence the source is shown (never a path, never a credential).
@@ -191,7 +196,9 @@ namespace LibraryBundle
     // transferable bytes exceed kMaxItemBytes.
     bool readPayload(const QString& root, const QString& id, Payload& out, QString& error);
 
-    enum class LandResult { Landed, KeptNewer, AlreadyCurrent, Refused, Interrupted, WriteFailed };
+    // NotApplicable (#292): a gamelist entry for a system folder or a ROM this device does not have. Nothing is
+    // written, and it is counted as such -- not reported as a failure.
+    enum class LandResult { Landed, KeptNewer, AlreadyCurrent, Refused, Interrupted, WriteFailed, NotApplicable };
 
     // Test seam for the interruption case, and nothing else: fail after this many files have been staged
     // (-1 = never). It exists because "an interrupted transfer leaves the target consistent" is a promise
@@ -233,7 +240,14 @@ namespace LibraryBundle
         int    keptNewer    = 0;   // the target's copy was newer
         int    unchanged    = 0;   // identical stamp; never left this machine
         int    failed       = 0;
-        qint64 bytesSent    = 0;
+        qint64 bytesSent    = 0;   // #292: includes the gamelist images sent
+        // #292: the gamelist half of the run. `gamelists` is false when it did not run (a target that does not
+        // take gamelist entries), and then the sentence says nothing about them.
+        bool   gamelists          = false;
+        int    gamesAdded         = 0;
+        int    gamesListed        = 0;   // already in the target's gamelist; never touched
+        int    gamesNotApplicable = 0;   // the target has no such system folder or no such ROM
+        int    gamesFailed        = 0;
     };
 
     // Bytes as a sentence. Kilobytes below a megabyte: a run that moved 300 KB of PNG reporting "0.0 MB"
@@ -320,4 +334,168 @@ namespace LibraryBundle
 
     // How many spools this process has in flight (a probe's view; nothing decides on it).
     int spoolsInFlight();
+
+    // ---- 11. gamelist sidecars (issue #292) --------------------------------------------------------------
+    //
+    // An ES/RetroBat `gamelist.xml` lives beside the ROMs, not in the cache, so it is its OWN payload kind with
+    // its own destination rule and its own guard. Nothing in this section takes the cache root, and nothing
+    // above takes the ROM root.
+    //
+    //   * THE UNIT is one game: its gamelist entry plus its images, keyed by (system, ROM file name). On the
+    //     source, `system` is the folder directly under romsFolder() holding the gamelist.xml; a gamelist
+    //     anywhere else is not sent.
+    //   * THE TARGET DECIDES WHERE IT LANDS: `<its romsRoot>/<system>/`, only when that folder already exists
+    //     (it is never created) and the ROM named by the entry is a file in it. Otherwise NotApplicable.
+    //     A system or ROM name that is not one safe path segment is refused before anything is written, and a
+    //     path the source names is never used as a path.
+    //   * WARM, NEVER FIGHT. A game the target's gamelist already lists (by GamelistStore's own rule: file
+    //     name, base name, or clean title) is never touched, and the plan does not send it.
+    //   * STRUCTURED FIELDS, NEVER RAW XML. The target writes the entry itself, escaped, into the existing
+    //     file's bytes just before `</gameList>` (or a new file), through a temp file and a rename.
+    //   * IMAGES ONLY, NAMED BY THE TARGET: `<rom base name>-thumb.<ext>` and so on, GamelistWriter's
+    //     convention, in `<system>/images/`. An existing file of that name is not overwritten; that image is
+    //     dropped from the entry. Videos never travel.
+    //
+    // WIRE. The target advertises "sidecars":[1] in its inventory (a field an older parser ignores). The
+    // per-system lists travel in their own token-gated GET /gamelists, not in /inventory: a library with
+    // thousands of ROMs is hundreds of kilobytes of names and a walk of the ROM tree, and the art inventory
+    // (answered on a 4 s budget) should not pay for either. One game rides the v2 container on POST /bundle,
+    // through the same token-first, length-first spooled path, with a header of
+    //     {"kind":"gamelist","system","rom","game":{name,desc,...},"files":[{"role","ext","size"},...]}
+    // followed by the image bytes in header order.
+
+    constexpr int         kSidecarFormat       = 1;
+    constexpr const char* kSidecarKindGamelist = "gamelist";
+    constexpr const char* kGamelistFileName    = "gamelist.xml";
+    constexpr int         kMaxSidecarImages    = 4;
+    constexpr qint64      kMaxSidecarFileBytes = kMaxSidecarImages * kMaxFileBytes;
+
+    // One path segment a device will create or look up under its ROM root: not empty, no separator, no drive
+    // or stream colon, no "..", no leading dot, no trailing dot or space, no control or Windows-invalid
+    // character, and not a Windows device name. Spaces, brackets and non-ASCII letters -- real ROM names --
+    // are fine.
+    bool safePathSegment(const QString& segment);
+
+    // The image extensions a sidecar may carry (lower case, no dot): png, jpg, jpeg, webp, gif, bmp.
+    bool sidecarImageExtension(const QString& ext);
+
+    // The ES media roles that travel, in the order they are sent: thumbnail, image, marquee, fanart.
+    QStringList sidecarImageRoles();
+
+    // The file name the TARGET gives one image: the ROM's base name, the role's suffix (-thumb, -image,
+    // -marquee, -fanart) and the extension. Empty for any other role or when the result is not safe.
+    QString sidecarImageName(const QString& romName, const QString& role, const QString& ext);
+
+    struct GamelistFields
+    {
+        QString name, desc, releasedate, developer, publisher, genre, players, rating;
+    };
+
+    // One <game> as it stands in a gamelist file.
+    struct GamelistGame
+    {
+        QString path;                   // <path> exactly as stored
+        QString rom;                    // the ROM file name when <path> is one segment ("./x.sfc"); else empty
+        GamelistFields fields;
+        QList<QPair<QString, QString>> media;   // (role, relative path as stored), video included
+    };
+
+    QList<GamelistGame> parseGamelist(const QByteArray& xml);
+
+    // Whether `games` already lists `romName`, by the rule GamelistStore matches a ROM with.
+    bool gamelistLists(const QList<GamelistGame>& games, const QString& romName);
+
+    // SOURCE: every game in `<romsRoot>/<system>/gamelist.xml`, for each system folder directly under the root.
+    struct SidecarGame
+    {
+        QString system;
+        QString rom;
+        GamelistFields fields;
+        QList<QPair<QString, QString>> images;  // (role, relative path as stored), image roles only
+    };
+    QList<SidecarGame> sidecarGamesFor(const QString& romsRoot);
+
+    // TARGET: per system folder, the ROM files present and which of them its gamelist already lists.
+    struct SidecarSystem
+    {
+        QString     name;
+        QStringList roms;
+        QStringList listed;
+    };
+    QList<SidecarSystem> sidecarInventoryFor(const QString& romsRoot);
+    QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems);
+    bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, QString& error);
+
+    // The capability. inventoryJson(entries) is inventoryJson(entries, false): a device only says it takes
+    // gamelist entries when it has somewhere to land them.
+    QByteArray inventoryJson(const QList<Entry>& entries, bool sidecars);
+    bool advertisesSidecars(const QByteArray& inventoryJson);
+
+    // The diff: send a game only when the target has the ROM and its gamelist does not list it.
+    struct SidecarPlan
+    {
+        QList<SidecarGame> send;
+        int alreadyListed = 0;
+        int notApplicable = 0;
+    };
+    SidecarPlan planSidecars(const QList<SidecarGame>& source, const QList<SidecarSystem>& target);
+
+    struct SidecarImage
+    {
+        QString    role;
+        QString    ext;
+        QByteArray data;
+    };
+    struct SidecarPayload
+    {
+        QString system;
+        QString rom;
+        GamelistFields fields;
+        QList<SidecarImage> images;
+    };
+
+    // SOURCE: read one game's images. An image outside the game's system folder, missing, over kMaxFileBytes
+    // or not on the image allowlist is left out. false only for a game whose names are not safe.
+    bool readSidecarPayload(const QString& romsRoot, const SidecarGame& game, SidecarPayload& out, QString& error);
+    qint64 fileBytesOf(const SidecarPayload& p);
+    QByteArray encodeSidecarV2(const SidecarPayload& p);
+
+    // Which decoder a v2 body belongs to, read from its header alone; the device is put back at 0.
+    enum class BodyKind { Art, Gamelist, Unknown };
+    BodyKind bodyKindV2(QIODevice& in);
+
+    struct SidecarFile
+    {
+        QString role;
+        QString ext;
+        qint64  size = 0;
+    };
+    struct SidecarHeader
+    {
+        QString system;
+        QString rom;
+        GamelistFields fields;
+        QList<SidecarFile> files;
+        qint64 fileBytes = 0;
+    };
+
+    // Every refusal before a file byte is read: not a gamelist kind, an unsafe system or ROM name, a role that
+    // is not an image role (a video), an extension off the allowlist, a file over kMaxFileBytes, a duplicate
+    // role, and declared sizes that do not account for exactly the bytes remaining.
+    bool decodeSidecarHeaderV2(QIODevice& in, SidecarHeader& out, Refusal& why, QString& message);
+    bool decodeSidecarV2(QIODevice& in, SidecarPayload& out, Refusal& why, QString& message);
+
+    // Text for an XML element: characters XML 1.0 cannot hold are dropped, and & < > are escaped.
+    QString gamelistXmlText(const QString& value);
+    // One <game> block, GamelistWriter's layout. `media` is (role, "./images/<name>").
+    QByteArray gamelistEntryXml(const QString& romName, const GamelistFields& fields,
+                                const QList<QPair<QString, QString>>& media);
+    // The existing file's bytes with `block` inserted before the last </gameList>, or a new document when
+    // `existing` is empty. false when a non-empty file has no </gameList> to insert before.
+    bool insertGamelistEntry(const QByteArray& existing, const QByteArray& block, QByteArray& out);
+
+    // TARGET: land one game under `romsRoot`. LandOptions::failAfterFiles counts images written; reaching it
+    // at the gamelist rewrite interrupts that write (the old file stays) and removes this landing's images.
+    LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error);
+    LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts);
 }

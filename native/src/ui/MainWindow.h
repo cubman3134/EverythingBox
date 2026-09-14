@@ -837,10 +837,14 @@ private:
     LibraryBundle::Receipt libraryReceiveBundle(const QByteArray& body);  // the POST /bundle hook
     LibraryBundle::Receipt libraryReceiveBundleStream(QIODevice& body);   // the POST /bundle raw-body hook (#291)
     static QString         libraryCacheRoot();                            // <dataDir>/metadata, one spelling
+    QByteArray             libraryGamelistsJson() const;                  // the GET /gamelists hook (#292)
+    LibraryBundle::Receipt libraryReceiveSidecarStream(QIODevice& body);  // a gamelist-entry body (#292)
 
     void sendLibraryTo(const PlayOn::Peer& peer);                         // pair if needed, then diff + send
     void sendLibraryWithToken(const PlayOn::Peer& peer, const QString& token);
     void sendLibraryNextItem(const PlayOn::Peer& peer, const QString& token);
+    void sendLibraryGamelists(const PlayOn::Peer& peer, const QString& token);   // #292: after the art items
+    void sendLibraryNextGame(const PlayOn::Peer& peer, const QString& token);
     void showSendLibraryMenu();                                // reachable from Settings on BOTH layouts
 
     // The state of ONE run. A transfer is one item per request, so this is all the resumability it needs:
@@ -850,6 +854,9 @@ private:
     LibraryBundle::Progress sendLibProgress_;
     QString                sendLibPeerId_;
     int                    sendLibFormat_ = 1;   // #291: the payload format the target advertised (1 or 2)
+    bool                   sendLibSidecars_ = false;             // #292: the target takes gamelist entries
+    QList<LibraryBundle::SidecarGame> sendGameQueue_;            // #292: the gamelist games the plan sends
+    int                    sendGameCursor_ = 0;
 
     // ---- Store backends (issue #118). DEFINED IN src/ui/MainWindowStoreBackend.cpp, for the same reason
     // the block above is: MainWindow.cpp is the busiest merge surface here, and these three reach the class

@@ -309,6 +309,19 @@ namespace RemoteApi
             return c;
         }
 
+        // #292: what this device's ROM folders hold, for a gamelist diff. A read, credentialled like /inventory.
+        if (req.path == QStringLiteral("/gamelists"))
+        {
+            if (req.method != Method::Get)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/gamelists is GET only");
+                return c;
+            }
+            c.kind = CommandKind::Gamelists;
+            return c;
+        }
+
         if (req.path == QStringLiteral("/bundle"))
         {
             if (req.method != Method::Post)

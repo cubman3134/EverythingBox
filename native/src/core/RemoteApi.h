@@ -54,8 +54,11 @@ namespace RemoteApi
     // GET /inventory answers with what this device's art cache holds (item id + content stamp), POST /bundle
     // carries ONE item's art. Their bodies, like /open's, are left in Request::body and decoded by
     // LibraryBundle, so this unit never learns the bundle vocabulary either.
+    // Gamelists is #292's GET /gamelists: per system folder under the ROM root, the ROM files present and the
+    // games its gamelist already lists. Credentialled like /inventory; a gamelist entry itself rides POST
+    // /bundle as a v2 body of its own kind.
     enum class CommandKind { State, Player, Input, Open, PairBegin, PairRedeem,
-                             Inventory, Bundle, NotFound, BadRequest };
+                             Inventory, Bundle, NotFound, BadRequest, Gamelists };
 
     // The /player verbs. PlayPause is the toggle a single remote button wants; Play/Pause force a state.
     enum class PlayerAction

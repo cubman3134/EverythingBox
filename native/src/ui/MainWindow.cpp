@@ -5366,6 +5366,9 @@ void MainWindow::updateRemoteServer()
     // #291 — a raw-body bundle is spooled under the cache root by RemoteServer and landed from that file.
     h.bundleRoot   = [] { return libraryCacheRoot(); };
     h.bundleStream = [this](QIODevice& body) { return libraryReceiveBundleStream(body); };
+    // #292 — gamelist sidecars: the ROM folders' lists, and one game's entry landed beside its ROM.
+    h.gamelists     = [this] { return libraryGamelistsJson(); };
+    h.sidecarStream = [this](QIODevice& body) { return libraryReceiveSidecarStream(body); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.268 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.269 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -3575,8 +3575,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LibraryBundle.cpp src/core/LibraryBundle.h
         src/core/PlayOnDevice.cpp  src/core/PlayOnDevice.h
         src/core/RemoteApi.cpp     src/core/RemoteApi.h
-        src/core/RemoteServer.cpp  src/core/RemoteServer.h)   # #291: the streaming path, on a real loopback socket
-    target_include_directories(probe_bundlexfer PRIVATE src src/core)
+        src/core/RemoteServer.cpp  src/core/RemoteServer.h    # #291: the streaming path, on a real loopback socket
+        # #292: gamelist sidecars land where GamelistStore reads them, so the probe reads them back with it.
+        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp src/core/StreamHeaders.cpp)
+    target_include_directories(probe_bundlexfer PRIVATE src src/core src/addons)
     target_link_libraries(probe_bundlexfer PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped

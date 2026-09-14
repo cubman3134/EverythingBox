@@ -502,9 +502,11 @@ bool routeNeedsToken(const QString& path)
     // holds and WRITE INTO ITS CACHE, which is if anything a stronger reason: an inventory is a list of what
     // someone owns, and a bundle puts files on their disk. All three take the same paired credential; /pair
     // cannot (it is how a token is obtained) and #76's /state / /player / /input keep that issue's posture.
+    // /gamelists (#292) is the same kind of read as /inventory: the names of the ROMs someone has.
     return path == QLatin1String("/open")
         || path == QLatin1String("/inventory")
-        || path == QLatin1String("/bundle");
+        || path == QLatin1String("/bundle")
+        || path == QLatin1String("/gamelists");
 }
 
 bool authorized(const QString& presented, const QSet<QString>& issuedTokens)

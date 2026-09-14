@@ -72,10 +72,16 @@ void PlayOnClient::post(const PlayOn::Peer& peer, const QString& path, const QBy
 void PlayOnClient::get(const PlayOn::Peer& peer, const QString& path, const QString& token,
                        std::function<void(int, const QByteArray&, bool)> done)
 {
+    get(peer, path, token, kTimeoutMs, done);
+}
+
+void PlayOnClient::get(const PlayOn::Peer& peer, const QString& path, const QString& token, int timeoutMs,
+                       std::function<void(int, const QByteArray&, bool)> done)
+{
     QNetworkRequest req{ QUrl(base(peer) + path) };
     if (!token.isEmpty()) req.setRawHeader("X-EB-Token", token.toLatin1());
     QNetworkReply* r = nam_->get(req);
-    QTimer::singleShot(kTimeoutMs, r, [r] { if (r->isRunning()) r->abort(); });
+    QTimer::singleShot(timeoutMs, r, [r] { if (r->isRunning()) r->abort(); });
     connect(r, &QNetworkReply::finished, this, [r, done] {
         r->deleteLater();
         const int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -164,20 +170,40 @@ void PlayOnClient::fetchInventory(const PlayOn::Peer& peer, const QString& token
                 QString err;
                 if (LibraryBundle::parseInventory(body, items, formats, err))
                 {
-                    emit inventoryArrived(id, items, true, QString(), formats);
+                    emit inventoryArrived(id, items, true, QString(), formats, LibraryBundle::advertisesSidecars(body));
                     return;
                 }
-                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false, err, QList<int>{ 1 });
+                emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false, err, QList<int>{ 1 }, false);
                 return;
             }
             if (status == 401)
             {
                 emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
-                                      tr("%1 needs pairing again.").arg(name), QList<int>{ 1 });
+                                      tr("%1 needs pairing again.").arg(name), QList<int>{ 1 }, false);
                 return;
             }
             emit inventoryArrived(id, QList<LibraryBundle::Entry>(), false,
-                                  reasonOf(body, tr("%1 did not answer.").arg(name)), QList<int>{ 1 });
+                                  reasonOf(body, tr("%1 did not answer.").arg(name)), QList<int>{ 1 }, false);
+        });
+}
+
+void PlayOnClient::fetchGamelists(const PlayOn::Peer& peer, const QString& token)
+{
+    const QString id = peer.id;
+    const QString name = peer.name;
+    get(peer, QStringLiteral("/gamelists"), token, kBundleTimeoutMs,
+        [this, id, name](int status, const QByteArray& body, bool ok) {
+            QList<LibraryBundle::SidecarSystem> systems;
+            if (ok && status == 200)
+            {
+                QString err;
+                if (LibraryBundle::parseSidecarInventory(body, systems, err)) emit gamelistsArrived(id, systems, true, QString());
+                else emit gamelistsArrived(id, systems, false, err);
+                return;
+            }
+            emit gamelistsArrived(id, systems, false,
+                                  status == 401 ? tr("%1 needs pairing again.").arg(name)
+                                                : reasonOf(body, tr("%1 did not answer.").arg(name)));
         });
 }
 
