@@ -419,7 +419,8 @@ jobs:
           fi
           echo "bundled: $plugin"
           echo "bundled: $bundled"
-          ldd "$plugin" | tee plugin-ldd.txt
+          # Without install-qt-action's LD_LIBRARY_PATH (the build Qt): resolve the way a user's host would.
+          env -u LD_LIBRARY_PATH ldd "$plugin" | tee plugin-ldd.txt
           if grep -q 'not found' plugin-ldd.txt; then
             echo "::error::the bundled speechd plugin has an unresolved dependency"; exit 1
           fi
@@ -437,7 +438,10 @@ jobs:
             echo "offscreen platform plugin is not in the image; using $qpa_path (the Qt the image was deployed from)"
           fi
           rc=0
+          # install-qt-action exported LD_LIBRARY_PATH / QT_PLUGIN_PATH / QML2_IMPORT_PATH at the build Qt; drop
+          # them so the image runs on its own bundled Qt, as it would on a user's machine.
           env -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+              -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
               HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" XDG_CONFIG_HOME="$smoke/config" \
               XDG_RUNTIME_DIR="$smoke/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
               EB_PERF=1 \
