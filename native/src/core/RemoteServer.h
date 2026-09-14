@@ -36,6 +36,7 @@
 
 class QTcpServer;
 class QTcpSocket;
+class QTimer;
 
 class RemoteServer : public QObject
 {
@@ -75,6 +76,12 @@ public:
         // body is refused with a sentence (a device without the hook does not advertise the kind either).
         std::function<QByteArray()>                                     gamelists;
         std::function<LibraryBundle::Receipt(QIODevice& body)>          sidecarStream;
+        // #401. The target commits landed gamelist entries in batches. `gamelistFlush` answers POST
+        // /gamelists/flush (the source's "that system is done", token-checked like the rest) with the flush
+        // result JSON; `gamelistIdle` commits everything pending, and runs when no gamelist request has arrived
+        // for the sidecar idle timeout, and from stop(). Unset, the flush route is a 503.
+        std::function<QByteArray(const QByteArray& body)>               gamelistFlush;
+        std::function<void()>                                           gamelistIdle;
     };
 
     explicit RemoteServer(QObject* parent = nullptr);
@@ -98,6 +105,8 @@ public:
     qint64 bufferedHighWater() const { return bufferHighWater_; }
     int    streamsInFlight() const { return int(spools_.size()); }
     void   setBodyIdleTimeoutMs(int ms) { bodyIdleTimeoutMs_ = ms; }
+    // #401: how long after the last gamelist request the pending batches are committed anyway.
+    void   setSidecarIdleTimeoutMs(int ms) { sidecarIdleTimeoutMs_ = ms; }
 
 private:
     struct Spool;
@@ -107,6 +116,7 @@ private:
     void beginStream(QTcpSocket* sock, const RemoteApi::Request& head, RemoteApi::BodyPlan plan);
     void pumpStream(QTcpSocket* sock);
     void dropStream(QTcpSocket* sock);
+    void armSidecarIdle();   // #401
     void noteBuffered(qint64 n) { if (n > bufferHighWater_) bufferHighWater_ = n; }
 
     QTcpServer* server_ = nullptr;
@@ -117,6 +127,8 @@ private:
     QSet<QTcpSocket*> answered_;               // a response has been written; later bytes are drained, never re-routed
     qint64 bufferHighWater_ = 0;
     int    bodyIdleTimeoutMs_ = 30000;
+    int    sidecarIdleTimeoutMs_ = 30000;   // #401: mirrors the body idle timeout
+    QTimer* sidecarIdle_       = nullptr;    // #401: restarted by every gamelist request; owned by this
 
     // The per-request read cap is RemoteApi::requestCapBytes (#76's tiny one for every route, a payload-sized
     // one for POST /bundle alone). Kept there rather than here so the exception is a testable function.

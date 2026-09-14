@@ -11,6 +11,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QStringList>
 #include <QUrl>
 #include <QVector>
 #include <QXmlStreamReader>
@@ -25,18 +26,37 @@ struct Entry
     bool found = false;
 };
 
-// Normalized "clean" title for fuzzy matching: drop everything in () or [] (region / revision / hack tags),
-// then keep only lowercase alphanumerics. So "Super Mario Bros 3 (U) (PRG 0)" and the gamelist's
-// "Super Mario Bros. 3 (USA) (Rev 1)" / name "Super Mario Bros. 3" all collapse to "supermariobros3" — which
-// is how a GoodNES-named ROM matches a No-Intro-scraped gamelist (a very common RetroBat mismatch).
-static QString cleanTitle(const QString& s)
+using GamelistStore::cleanTitle;
+
+// THE KEYS (#401), the one spelling of the rule both the on-disk cache below and GamelistStore::ListMatcher use.
+// An entry is found by its path's file name, its path's base name, and the clean titles of that base and of its
+// <name>; a ROM is looked up by its own file name, base name and clean base name, in that order.
+struct EntryKeys
 {
-    static const QRegularExpression tags(QStringLiteral("[\\(\\[][^\\)\\]]*[\\)\\]]"));
-    QString t = s;
-    t.remove(tags);
-    QString out;
-    for (const QChar c : t) if (c.isLetterOrNumber()) out += c.toLower();
-    return out;
+    QString file, base;
+    QStringList clean;   // non-empty clean keys only
+};
+
+EntryKeys entryKeysOf(const QString& path, const QString& name)
+{
+    EntryKeys k;
+    const QFileInfo fi(path);
+    k.file = fi.fileName().toLower();
+    k.base = fi.completeBaseName().toLower();
+    for (const QString& c : { cleanTitle(fi.completeBaseName()), cleanTitle(name) })
+        if (!c.isEmpty()) k.clean << c;
+    return k;
+}
+
+struct RomKeys
+{
+    QString file, base, clean;   // clean may be empty, and an empty clean key matches nothing
+};
+
+RomKeys romKeysOf(const QString& romFileName)
+{
+    const QFileInfo rfi(romFileName);
+    return { rfi.fileName().toLower(), rfi.completeBaseName().toLower(), cleanTitle(rfi.completeBaseName()) };
 }
 
 // A parsed gamelist for one system folder: games keyed by ROM filename, by base-name (no extension), and by
@@ -88,20 +108,18 @@ const Parsed& parsedFor(const QString& romDir)
             else if (tag == QStringLiteral("fanart"))      e.fanart = val;
         }
         if (path.isEmpty()) continue;
-        const QFileInfo fi(path);
-        p.byFile.insert(fi.fileName().toLower(), e);
-        p.byBase.insert(fi.completeBaseName().toLower(), e);
+        const EntryKeys keys = entryKeysOf(path, e.name);
+        p.byFile.insert(keys.file, e);
+        p.byBase.insert(keys.base, e);
         // Fuzzy keys from BOTH the path base and the <name>, so a differently-named ROM still matches. On a
         // collision (several regional/hacked entries clean to the same title) prefer the richer one — the one
         // that actually has a video — so a fuzzy match isn't stuck with a video-less duplicate.
-        auto insertClean = [&](const QString& key) {
-            if (key.isEmpty()) return;
+        for (const QString& key : keys.clean)
+        {
             auto ex = p.byClean.find(key);
             if (ex == p.byClean.end()) p.byClean.insert(key, e);
             else if (!e.video.isEmpty() && ex.value().video.isEmpty()) ex.value() = e;
-        };
-        insertClean(cleanTitle(fi.completeBaseName()));
-        insertClean(cleanTitle(e.name));
+        }
     }
     return p;
 }
@@ -110,12 +128,12 @@ const Entry* entryFor(const QString& romPath)
 {
     const QFileInfo rfi(romPath);
     const Parsed& p = parsedFor(rfi.absolutePath());
-    auto it = p.byFile.constFind(rfi.fileName().toLower());       // exact filename
+    const RomKeys keys = romKeysOf(rfi.fileName());
+    auto it = p.byFile.constFind(keys.file);                      // exact filename
     if (it != p.byFile.constEnd()) return &it.value();
-    it = p.byBase.constFind(rfi.completeBaseName().toLower());    // filename minus extension
+    it = p.byBase.constFind(keys.base);                           // filename minus extension
     if (it != p.byBase.constEnd()) return &it.value();
-    const QString clean = cleanTitle(rfi.completeBaseName());     // fuzzy: tags/punctuation stripped
-    it = clean.isEmpty() ? p.byClean.constEnd() : p.byClean.constFind(clean);
+    it = keys.clean.isEmpty() ? p.byClean.constEnd() : p.byClean.constFind(keys.clean);   // fuzzy
     return it != p.byClean.constEnd() ? &it.value() : nullptr;
 }
 
@@ -128,6 +146,49 @@ QString yearOf(const QString& releasedate)
     return (ok && n > 1900 && n < 2100) ? y : QString();
 }
 } // namespace
+
+// Normalized "clean" title for fuzzy matching: drop everything in () or [] (region / revision / hack tags),
+// then keep only lowercase alphanumerics. So "Super Mario Bros 3 (U) (PRG 0)" and the gamelist's
+// "Super Mario Bros. 3 (USA) (Rev 1)" / name "Super Mario Bros. 3" all collapse to "supermariobros3" — which
+// is how a GoodNES-named ROM matches a No-Intro-scraped gamelist (a very common RetroBat mismatch).
+QString GamelistStore::cleanTitle(const QString& s)
+{
+    static const QRegularExpression tags(QStringLiteral("[\\(\\[][^\\)\\]]*[\\)\\]]"));
+    QString t = s;
+    t.remove(tags);
+    QString out;
+    for (const QChar c : t) if (c.isLetterOrNumber()) out += c.toLower();
+    return out;
+}
+
+void GamelistStore::ListMatcher::add(const ListedGame& game)
+{
+    if (game.path.isEmpty()) return;   // an entry with no <path> is not an entry (the on-disk reader skips it too)
+    const EntryKeys keys = entryKeysOf(game.path, game.name);
+    byFile_.insert(keys.file);
+    byBase_.insert(keys.base);
+    for (const QString& c : keys.clean) byClean_.insert(c);
+}
+
+bool GamelistStore::ListMatcher::lists(const QString& romFileName) const
+{
+    const RomKeys keys = romKeysOf(romFileName);
+    if (byFile_.contains(keys.file)) return true;
+    if (byBase_.contains(keys.base)) return true;
+    return !keys.clean.isEmpty() && byClean_.contains(keys.clean);
+}
+
+GamelistStore::ListMatcher GamelistStore::matcherFor(const QList<ListedGame>& games)
+{
+    ListMatcher m;
+    for (const ListedGame& g : games) m.add(g);
+    return m;
+}
+
+bool GamelistStore::listsRom(const QList<ListedGame>& games, const QString& romFileName)
+{
+    return matcherFor(games).lists(romFileName);
+}
 
 bool GamelistStore::has(const QString& romPath)
 {

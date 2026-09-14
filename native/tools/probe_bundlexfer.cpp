@@ -65,6 +65,20 @@
 //  23. INTEROP. Advertised in a field an old parser ignores; a gamelist body is refused readably by a target
 //      that does not take the kind; over a real socket, token first, the entry lands and the art path still works.
 //
+// Issue #401 batches the target's gamelist commit, folds name case where the filesystem does, and makes the
+// "already listed" rule GamelistStore's one public matcher. Pinned in 24-27:
+//
+//  24. BATCHES. N games for one system are ONE list write (counted by the batcher); the 250-game bound and the
+//      block-byte bound each commit and start a new batch; a flush commits; over a real socket the flush route is
+//      token-gated and answers the tally, the idle timer commits what landed, and stop() commits too.
+//  25. INTERRUPTION. Mid-stage, after the list's temporary write, on a failed commit and before the image move:
+//      the old list is intact until the commit, images/ never holds an image the list does not reference, a
+//      failed commit's games are resent by the next plan, a crash's staging is swept (or, after a commit,
+//      finished) by the next landing, and a staging folder still being filled is not swept.
+//  26. ONE MATCHER. GamelistStore::listsRom on every case #292's agreement check had, and has() agrees with it.
+//  27. CASE. resolveName folds with caseInsensitive=true (writing the target's spelling), matches exactly with
+//      false, and calls a pair differing only by case Ambiguous; the plan, the landing and /gamelists agree.
+//
 // Prints BUNDLEXFER-OK on success; any failure prints BUNDLEXFER-FAIL <cond> (line) and exits non-zero.
 #include "GamelistStore.h"
 #include "LibraryBundle.h"
@@ -466,6 +480,59 @@ namespace fx
         return r;
     }
 
+    // ---- #401 fixtures ----
+
+    // Every file directly in <system>/images that the system's gamelist does NOT reference. The property #401
+    // holds at every interruption point: this is always empty.
+    static QStringList orphanImages(const QString& sysDir)
+    {
+        QSet<QString> referenced;
+        for (const LibraryBundle::GamelistGame& g : LibraryBundle::parseGamelist(readFile(sysDir + QStringLiteral("/gamelist.xml"))))
+            for (const auto& m : g.media) referenced.insert(m.second);
+        QStringList out;
+        const QStringList files = QDir(sysDir + QStringLiteral("/images")).entryList(QDir::Files | QDir::Hidden);
+        for (const QString& f : files)
+            if (!referenced.contains(QStringLiteral("./images/") + f)) out << f;
+        return out;
+    }
+
+    static QStringList imagesIn(const QString& sysDir)
+    {
+        return QDir(sysDir + QStringLiteral("/images")).entryList(QDir::Files | QDir::Hidden, QDir::Name);
+    }
+
+    static QStringList stagingDirs(const QString& sysDir)
+    {
+        return QDir(sysDir).entryList(QStringList{ QString::fromLatin1(LibraryBundle::kGamelistStagingPrefix) + QLatin1Char('*') },
+                                      QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot);
+    }
+
+    // One game with one generated thumbnail, on the wire.
+    static QByteArray gameWire(const QString& system, const QString& rom, const QString& name, int seed,
+                               const QString& desc = QString())
+    {
+        QByteArray png("\x89PNG\r\n\x1a\n", 8);
+        for (int b = 0; b < 64; ++b) png += char((seed * 13 + b) & 0xff);
+        LibraryBundle::SidecarPayload p = sidePayload(system, rom, name,
+                                                      { sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), png) });
+        p.fields.desc = desc;
+        return LibraryBundle::encodeSidecarV2(p);
+    }
+
+    static LibraryBundle::LandResult stageWire(LibraryBundle::GamelistBatcher& b, const QString& romsRoot,
+                                               const QByteArray& wire, QString* error = nullptr, int failAfterFiles = -1)
+    {
+        QByteArray copy = wire;
+        QBuffer in(&copy);
+        in.open(QIODevice::ReadOnly);
+        QString err;
+        LibraryBundle::LandOptions o;
+        o.failAfterFiles = failAfterFiles;
+        const LibraryBundle::LandResult r = b.stage(romsRoot, in, err, o);
+        if (error) *error = err;
+        return r;
+    }
+
     static int countGameElements(const QByteArray& xml, bool* wellFormed)
     {
         QXmlStreamReader r(xml);
@@ -480,12 +547,85 @@ namespace fx
     }
 }
 
+namespace timing
+{
+    // #401's measurement, run only with EB_BUNDLEXFER_TIMING=1 (it writes thousands of files): a system whose
+    // gamelist already lists 3,000 games, and 2,000 new games each with one small generated image, landed
+    // through the target's own code path. `land` lands one wire; `finish` runs after the last one.
+    static int run(const QString& base, const std::function<LibraryBundle::LandResult(QIODevice&)>& land,
+                   const std::function<void()>& finish)
+    {
+        const QString roms = base + QStringLiteral("/timing/roms");
+        const QString sys = roms + QStringLiteral("/snes");
+        QDir(base + QStringLiteral("/timing")).removeRecursively();
+        QDir().mkpath(sys);
+        QByteArray list("<?xml version=\"1.0\"?>\n<gameList>\n");
+        for (int i = 0; i < 3000; ++i)
+        {
+            list += QStringLiteral("\t<game>\n\t\t<path>./Existing Game %1 (USA).sfc</path>\n\t\t<name>Existing Game %1</name>\n"
+                                   "\t\t<desc>A generated description for existing game %1, long enough to look like a scraped "
+                                   "summary of a real game, with a sentence or two of text in it.</desc>\n"
+                                   "\t\t<thumbnail>./images/Existing Game %1 (USA)-thumb.png</thumbnail>\n"
+                                   "\t\t<developer>Fixture Dev</developer>\n\t\t<genre>Action</genre>\n\t</game>\n")
+                        .arg(i).toUtf8();
+        }
+        list += "</gameList>\n";
+        fx::writeFile(sys + QStringLiteral("/gamelist.xml"), list);
+        QList<QByteArray> wires;
+        for (int i = 0; i < 2000; ++i)
+        {
+            const QString rom = QStringLiteral("New Game %1 (USA).sfc").arg(i);
+            fx::writeFile(sys + QLatin1Char('/') + rom, QByteArray("ROM"));
+            QByteArray png("\x89PNG\r\n\x1a\n", 8);
+            for (int b = 0; b < 1500; ++b) png += char((i * 31 + b * 7) & 0xff);
+            LibraryBundle::SidecarPayload p = fx::sidePayload(QStringLiteral("snes"), rom,
+                                                              QStringLiteral("New Game %1").arg(i),
+                                                              { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), png) });
+            p.fields.desc = QStringLiteral("A generated description for new game %1.").arg(i);
+            wires << LibraryBundle::encodeSidecarV2(p);
+        }
+        std::printf("BUNDLEXFER-TIMING fixture: existing gamelist %lld bytes (3000 entries), 2000 new games\n",
+                    qint64(list.size()));
+        int landed = 0;
+        QElapsedTimer t;
+        t.start();
+        for (QByteArray& w : wires)
+        {
+            QBuffer in(&w);
+            in.open(QIODevice::ReadOnly);
+            if (land(in) == LibraryBundle::LandResult::Landed) ++landed;
+        }
+        finish();
+        const qint64 ms = t.elapsed();
+        bool wf = false;
+        const int games = fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), &wf);
+        std::printf("BUNDLEXFER-TIMING landed %d of 2000 in %lld ms; the list now has %d games (well-formed %d, %lld bytes)\n",
+                    landed, ms, games, int(wf), qint64(QFileInfo(sys + QStringLiteral("/gamelist.xml")).size()));
+        QDir(base + QStringLiteral("/timing")).removeRecursively();
+        return landed == 2000 && games == 5000 && wf ? 0 : 1;
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);   // #291: section 17 runs a real loopback socket
     const QString base = QDir::tempPath() + QStringLiteral("/eb-bundlexfer-probe");
     QDir(base).removeRecursively();
     QDir().mkpath(base);
+    if (qEnvironmentVariableIntValue("EB_BUNDLEXFER_TIMING") == 1)
+    {
+        // The target's own path since #401: every game staged into one batcher, then the source's flush. (The
+        // pre-#401 measurement landed each wire with landSidecarV2, one commit per game.)
+        const QString roms = base + QStringLiteral("/timing/roms");
+        const auto batcher = std::make_shared<LibraryBundle::GamelistBatcher>();
+        return timing::run(base, [roms, batcher](QIODevice& in) {
+            QString e;
+            return batcher->stage(roms, in, e);
+        }, [roms, batcher] {
+            batcher->flush(roms, QStringLiteral("snes"));
+            std::printf("BUNDLEXFER-TIMING %d list write(s)\n", batcher->listWrites());
+        });
+    }
 
     const QString srcRoot = base + QStringLiteral("/source/metadata");
     const QString dstBase = base + QStringLiteral("/target");
@@ -2265,6 +2405,500 @@ int main(int argc, char** argv)
         }
         std::printf("BUNDLEXFER-INFO /gamelists for 5000 ROMs (half listed) is %lld bytes\n",
                     qint64(LibraryBundle::sidecarInventoryJson(big).size()));
+    }
+
+    // ---- 24. batched commits: one gamelist write per batch (#401) ------------------------------------------
+    {
+        const QString roms = base + QStringLiteral("/batch/roms");
+        LibraryBundle::GamelistBatcher::Options exact;
+        exact.caseInsensitive = false;
+        QString err;
+
+        // (a) TEN games for one system are ONE write, and nothing reaches the list or images/ before it.
+        {
+            const QString sys = roms + QStringLiteral("/snes");
+            const QByteArray listOld("<?xml version=\"1.0\"?>\r\n<gameList>\r\n\t<game>\r\n\t\t<path>./Old.sfc</path>\r\n"
+                                     "\t\t<name>Old</name>\r\n\t</game>\r\n</gameList>\r\n");
+            fx::writeTree(sys + QStringLiteral("/gamelist.xml"), listOld);
+            fx::writeTree(sys + QStringLiteral("/Old.sfc"), QByteArray("ROM"));
+            for (int i = 0; i < 10; ++i)
+                fx::writeTree(sys + QStringLiteral("/B%1.sfc").arg(i, 3, 10, QLatin1Char('0')), QByteArray("ROM"));
+            LibraryBundle::GamelistBatcher b(exact);
+            QList<LibraryBundle::GamelistCommit> commits;
+            b.setOnCommit([&commits](const LibraryBundle::GamelistCommit& c) { commits << c; });
+            int landed = 0;
+            for (int i = 0; i < 10; ++i)
+                if (fx::stageWire(b, roms, fx::gameWire(QStringLiteral("snes"), QStringLiteral("B%1.sfc").arg(i, 3, 10, QLatin1Char('0')),
+                                                        QStringLiteral("Batch Game %1").arg(i), i), &err)
+                    == LibraryBundle::LandResult::Landed)
+                    ++landed;
+            CHECK(landed == 10);
+            CHECK(b.listWrites() == 0);
+            CHECK(b.pendingGames() == 10);
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")) == listOld);   // not written per game
+            CHECK(fx::imagesIn(sys).isEmpty());                                     // no image in images/ yet
+            CHECK(fx::stagingDirs(sys).size() == 1);
+            // A game already in the pending batch is already current.
+            CHECK(fx::stageWire(b, roms, fx::gameWire(QStringLiteral("snes"), QStringLiteral("B003.sfc"), QStringLiteral("Again"), 99))
+                  == LibraryBundle::LandResult::AlreadyCurrent);
+            const LibraryBundle::GamelistFlushResult fr = b.flush(roms, QStringLiteral("snes"));
+            CHECK(fr.committed == 10 && fr.failed == 0);
+            if (b.listWrites() != 1) std::fprintf(stderr, "BUNDLEXFER-FAIL ten games took %d list writes\n", b.listWrites());
+            CHECK(b.listWrites() == 1);                                             // TEN games, ONE write
+            CHECK(commits.size() == 1 && commits.first().ok && commits.first().games == 10);
+            CHECK(b.pendingGames() == 0);
+            const QByteArray after = fx::readFile(sys + QStringLiteral("/gamelist.xml"));
+            bool wf = false;
+            CHECK(fx::countGameElements(after, &wf) == 11 && wf);
+            const int close = int(listOld.lastIndexOf("</gameList>"));
+            CHECK(after.startsWith(listOld.left(close)) && after.endsWith(listOld.mid(close)));   // old bytes kept
+            CHECK(fx::imagesIn(sys).size() == 10);
+            CHECK(fx::orphanImages(sys).isEmpty());
+            CHECK(fx::stagingDirs(sys).isEmpty());
+            GamelistStore::clearCache();
+            const MediaDetail d3 = GamelistStore::lookup(sys + QStringLiteral("/B003.sfc"));
+            CHECK(d3.title == QStringLiteral("Batch Game 3") && d3.imageUrl.endsWith(QStringLiteral("/images/B003-thumb.png")));
+            const LibraryBundle::GamelistFlushResult again = b.flush(roms, QStringLiteral("snes"));
+            CHECK(again.committed == 0 && again.failed == 0 && b.listWrites() == 1);   // nothing pending, no write
+        }
+
+        // (b) THE GAME BOUND. 600 games: a commit at the 250th and the 500th, the rest at the flush.
+        {
+            const QString sys = roms + QStringLiteral("/gba");
+            for (int i = 0; i < 600; ++i)
+                fx::writeTree(sys + QStringLiteral("/C%1.gba").arg(i, 3, 10, QLatin1Char('0')), QByteArray("ROM"));
+            LibraryBundle::GamelistBatcher b(exact);
+            int landed = 0;
+            for (int i = 0; i < 600; ++i)
+            {
+                if (fx::stageWire(b, roms, fx::gameWire(QStringLiteral("gba"), QStringLiteral("C%1.gba").arg(i, 3, 10, QLatin1Char('0')),
+                                                        QStringLiteral("Bound %1").arg(i), i))
+                    == LibraryBundle::LandResult::Landed)
+                    ++landed;
+                if (i == 248) CHECK(b.listWrites() == 0 && b.pendingGames() == 249);
+                if (i == 249) CHECK(b.listWrites() == 1 && b.pendingGames() == 0);   // the bound commits...
+                if (i == 250) CHECK(b.listWrites() == 1 && b.pendingGames() == 1);   // ...and a new batch starts
+                if (i == 499) CHECK(b.listWrites() == 2 && b.pendingGames() == 0);
+            }
+            CHECK(landed == 600);
+            CHECK(b.pendingGames() == 100 && b.listWrites() == 2);
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), nullptr) == 500);
+            b.flushAll();
+            CHECK(b.listWrites() == 3);
+            bool wf = false;
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), &wf) == 600 && wf);
+            CHECK(fx::imagesIn(sys).size() == 600 && fx::orphanImages(sys).isEmpty() && fx::stagingDirs(sys).isEmpty());
+            const LibraryBundle::GamelistFlushResult fr = b.flush(roms, QStringLiteral("gba"));
+            CHECK(fr.committed == 600 && fr.failed == 0);                           // the tally since the last flush
+        }
+
+        // (c) THE BYTE BOUND commits too.
+        {
+            const QString sys = roms + QStringLiteral("/nes");
+            const QString longDesc = QString(900, QLatin1Char('x'));
+            LibraryBundle::GamelistFields lf;
+            lf.name = QStringLiteral("Long 0");
+            lf.desc = longDesc;
+            const qint64 block = LibraryBundle::gamelistEntryXml(QStringLiteral("D0.nes"), lf,
+                { qMakePair(QStringLiteral("thumbnail"), QStringLiteral("./images/D0-thumb.png")) }).size();
+            LibraryBundle::GamelistBatcher::Options small = exact;
+            small.maxBlockBytes = block * 5 / 2;                                    // the third block crosses it
+            LibraryBundle::GamelistBatcher b(small);
+            for (int i = 0; i < 6; ++i)
+            {
+                fx::writeTree(sys + QStringLiteral("/D%1.nes").arg(i), QByteArray("ROM"));
+                CHECK(fx::stageWire(b, roms, fx::gameWire(QStringLiteral("nes"), QStringLiteral("D%1.nes").arg(i),
+                                                          QStringLiteral("Long %1").arg(i), i, longDesc))
+                      == LibraryBundle::LandResult::Landed);
+            }
+            CHECK(b.listWrites() == 2 && b.pendingGames() == 0);                    // 3 + 3
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), nullptr) == 6);
+        }
+
+        // (d) The batcher commits what is pending when it goes away.
+        {
+            const QString sys = roms + QStringLiteral("/pce");
+            fx::writeTree(sys + QStringLiteral("/E0.pce"), QByteArray("ROM"));
+            {
+                LibraryBundle::GamelistBatcher b(exact);
+                CHECK(fx::stageWire(b, roms, fx::gameWire(QStringLiteral("pce"), QStringLiteral("E0.pce"), QStringLiteral("E0"), 1))
+                      == LibraryBundle::LandResult::Landed);
+                CHECK(!QFileInfo::exists(sys + QStringLiteral("/gamelist.xml")));
+            }
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")).contains("<path>./E0.pce</path>"));
+            CHECK(fx::imagesIn(sys) == QStringList{ QStringLiteral("E0-thumb.png") } && fx::stagingDirs(sys).isEmpty());
+        }
+
+        // (e) Over a real socket: the flush route (token first), the idle timer, and stop().
+        {
+            const QString sRoms = base + QStringLiteral("/batch-socket/roms");
+            const QString sys = sRoms + QStringLiteral("/md");
+            for (int i = 0; i < 4; ++i) fx::writeTree(sys + QStringLiteral("/F%1.md").arg(i), QByteArray("ROM"));
+            const auto batcher = std::make_shared<LibraryBundle::GamelistBatcher>(exact);
+            const QString token = QStringLiteral("probe-fixture-credential-401");
+            const auto head = [&token](const QByteArray& method, const QByteArray& path, const QByteArray& type, qint64 length,
+                                       bool withToken) {
+                QByteArray h = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+                if (length >= 0) h += "Content-Type: " + type + "\r\nContent-Length: " + QByteArray::number(length) + "\r\n";
+                if (withToken) h += "X-EB-Token: " + token.toLatin1() + "\r\n";
+                return h + "\r\n";
+            };
+            RemoteServer::Hooks hooks;
+            hooks.tokens = [token] { return QSet<QString>{ token }; };
+            hooks.bundleRoot = [sRoms] { return sRoms + QStringLiteral("/../metadata"); };
+            QDir().mkpath(sRoms + QStringLiteral("/../metadata"));
+            hooks.bundleStream = [](QIODevice&) { return LibraryBundle::receiptFor(LibraryBundle::LandResult::Refused, QString()); };
+            hooks.sidecarStream = [batcher, sRoms](QIODevice& body) {
+                QString e;
+                return LibraryBundle::receiptFor(batcher->stage(sRoms, body, e), e);
+            };
+            hooks.gamelistFlush = [batcher, sRoms](const QByteArray& body) {
+                QString system;
+                if (!LibraryBundle::parseGamelistFlushRequest(body, system)) return QByteArray();
+                return LibraryBundle::gamelistFlushResultJson(batcher->flush(sRoms, system));
+            };
+            hooks.gamelistIdle = [batcher] { batcher->flushAll(); };
+            RemoteServer srv;
+            srv.setHooks(hooks);
+            srv.setSidecarIdleTimeoutMs(1500);
+            CHECK(srv.start(0));
+            const auto postGame = [&](int i) {
+                const QByteArray w = fx::gameWire(QStringLiteral("md"), QStringLiteral("F%1.md").arg(i), QStringLiteral("F%1").arg(i), i);
+                const fx::HttpResult r = fx::httpRequest(srv.port(), head("POST", "/bundle", "application/x-eb-bundle", w.size(), true),
+                                                         w, -1, false);
+                LibraryBundle::Receipt rec;
+                return r.status == 200 && LibraryBundle::parseReceipt(r.body, rec) && rec.result == QStringLiteral("landed");
+            };
+            CHECK(postGame(0));
+            CHECK(postGame(1));
+            CHECK(!QFileInfo::exists(sys + QStringLiteral("/gamelist.xml")) && batcher->listWrites() == 0);
+            const QByteArray flushBody = LibraryBundle::gamelistFlushRequestJson(QStringLiteral("md"));
+            CHECK(fx::httpRequest(srv.port(), head("POST", "/gamelists/flush", "application/json", flushBody.size(), false),
+                                  flushBody, -1, false).status == 401);
+            CHECK(batcher->listWrites() == 0);                                      // no token, no commit
+            const fx::HttpResult fl = fx::httpRequest(srv.port(), head("POST", "/gamelists/flush", "application/json",
+                                                                       flushBody.size(), true), flushBody, -1, false);
+            CHECK(fl.status == 200);
+            LibraryBundle::GamelistFlushResult fr;
+            CHECK(LibraryBundle::parseGamelistFlushResult(fl.body, fr) && fr.committed == 2 && fr.failed == 0);
+            CHECK(batcher->listWrites() == 1);
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), nullptr) == 2);
+            // THE IDLE PATH: a game lands, the source goes quiet, and the batch is committed anyway.
+            CHECK(postGame(2));
+            CHECK(batcher->listWrites() == 1 && batcher->pendingGames() == 1);
+            CHECK(fx::spinUntil([&] { return batcher->listWrites() == 2; }, 5000));
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), nullptr) == 3);
+            CHECK(fx::orphanImages(sys).isEmpty() && fx::stagingDirs(sys).isEmpty());
+            // STOP commits what is pending.
+            srv.setSidecarIdleTimeoutMs(60000);
+            CHECK(postGame(3));
+            CHECK(batcher->pendingGames() == 1);
+            srv.stop();
+            CHECK(batcher->listWrites() == 3 && batcher->pendingGames() == 0);
+            CHECK(fx::countGameElements(fx::readFile(sys + QStringLiteral("/gamelist.xml")), nullptr) == 4);
+        }
+    }
+
+    // ---- 25. interruption: old list until the commit, never an orphan image (#401) ------------------------
+    {
+        const QString roms = base + QStringLiteral("/interrupt/roms");
+        LibraryBundle::GamelistBatcher::Options exact;
+        exact.caseInsensitive = false;
+        const QByteArray listOld("<?xml version=\"1.0\"?>\n<gameList>\n\t<game>\n\t\t<path>./Old.sfc</path>\n\t</game>\n</gameList>\n");
+        const auto setup = [&](const QString& system, int n) {
+            const QString sys = roms + QLatin1Char('/') + system;
+            fx::writeTree(sys + QStringLiteral("/gamelist.xml"), listOld);
+            for (int i = 0; i < n; ++i) fx::writeTree(sys + QStringLiteral("/I%1.sfc").arg(i), QByteArray("ROM"));
+            return sys;
+        };
+        const auto wire = [](const QString& system, int i) {
+            return fx::gameWire(system, QStringLiteral("I%1.sfc").arg(i), QStringLiteral("Interrupted %1").arg(i), i);
+        };
+        // The source side of "the next run resends them": which of I0..I(n-1) the next plan would send.
+        const auto nextPlanSends = [&](const QString& system, int n) {
+            QList<LibraryBundle::SidecarGame> games;
+            for (int i = 0; i < n; ++i)
+            {
+                LibraryBundle::SidecarGame g;
+                g.system = system;
+                g.rom = QStringLiteral("I%1.sfc").arg(i);
+                g.fields.name = QStringLiteral("x");
+                games << g;
+            }
+            QStringList out;
+            for (const LibraryBundle::SidecarGame& g : LibraryBundle::planSidecars(games, LibraryBundle::sidecarInventoryFor(roms)).send)
+                out << g.rom;
+            return out;
+        };
+        QString err;
+
+        // (a) MID-STAGE: the interrupted game's staged images go; the batch's other games still commit.
+        {
+            const QString sys = setup(QStringLiteral("a"), 2);
+            LibraryBundle::GamelistBatcher b(exact);
+            CHECK(fx::stageWire(b, roms, wire(QStringLiteral("a"), 0)) == LibraryBundle::LandResult::Landed);
+            LibraryBundle::SidecarPayload two = fx::sidePayload(QStringLiteral("a"), QStringLiteral("I1.sfc"), QStringLiteral("Two"),
+                { fx::sideImage(QStringLiteral("thumbnail"), QStringLiteral("png"), QByteArray("\x89PNG-1", 6)),
+                  fx::sideImage(QStringLiteral("marquee"), QStringLiteral("png"), QByteArray("\x89PNG-2", 6)) });
+            CHECK(fx::stageWire(b, roms, LibraryBundle::encodeSidecarV2(two), &err, 1) == LibraryBundle::LandResult::Interrupted);
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")) == listOld);
+            CHECK(fx::imagesIn(sys).isEmpty());
+            const QStringList staged = fx::stagingDirs(sys);
+            CHECK(staged.size() == 1
+                  && QDir(sys + QLatin1Char('/') + staged.value(0)).entryList(QDir::Files) == QStringList{ QStringLiteral("I0-thumb.png") });
+            b.flushAll();
+            const QByteArray after = fx::readFile(sys + QStringLiteral("/gamelist.xml"));
+            CHECK(after.contains("./I0.sfc") && !after.contains("./I1.sfc"));
+            CHECK(fx::imagesIn(sys) == QStringList{ QStringLiteral("I0-thumb.png") });
+            CHECK(fx::orphanImages(sys).isEmpty() && fx::stagingDirs(sys).isEmpty());
+            CHECK(nextPlanSends(QStringLiteral("a"), 2) == QStringList{ QStringLiteral("I1.sfc") });
+        }
+
+        // (b) AFTER THE LIST'S TEMPORARY WRITE, and (c) A COMMIT THAT FAILS: the old list, byte for byte; no temp
+        // file, no staging, no image; the flush answer counts the failure; the next plan resends every game.
+        for (const auto fp : { LibraryBundle::GamelistBatcher::FailPoint::AfterListTemp,
+                               LibraryBundle::GamelistBatcher::FailPoint::CommitFails })
+        {
+            const QString system = fp == LibraryBundle::GamelistBatcher::FailPoint::AfterListTemp ? QStringLiteral("b") : QStringLiteral("c");
+            const QString sys = setup(system, 3);
+            const QMap<QString, QString> before = fx::censusAll(sys);
+            LibraryBundle::GamelistBatcher b(exact);
+            QList<LibraryBundle::GamelistCommit> commits;
+            b.setOnCommit([&commits](const LibraryBundle::GamelistCommit& c) { commits << c; });
+            for (int i = 0; i < 3; ++i) CHECK(fx::stageWire(b, roms, wire(system, i)) == LibraryBundle::LandResult::Landed);
+            b.setFailPointForTest(fp);
+            const LibraryBundle::GamelistFlushResult fr = b.flush(roms, system);
+            CHECK(fr.committed == 0 && fr.failed == 3);
+            CHECK(commits.size() == 1 && !commits.first().ok && commits.first().games == 3 && !commits.first().error.isEmpty());
+            CHECK(b.listWrites() == 0);
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")) == listOld);
+            if (fx::censusAll(sys) != before)
+                std::fprintf(stderr, "BUNDLEXFER-FAIL a failed commit (%s) left files behind\n", qPrintable(system));
+            CHECK(fx::censusAll(sys) == before);                                 // no image, no staging, no temp file
+            CHECK(fx::orphanImages(sys).isEmpty());
+            CHECK(nextPlanSends(system, 3).size() == 3);                         // still unlisted: resent next run
+            b.setFailPointForTest(LibraryBundle::GamelistBatcher::FailPoint::None);
+            for (int i = 0; i < 3; ++i) CHECK(fx::stageWire(b, roms, wire(system, i)) == LibraryBundle::LandResult::Landed);
+            b.flushAll();
+            CHECK(nextPlanSends(system, 3).isEmpty() && fx::imagesIn(sys).size() == 3 && fx::orphanImages(sys).isEmpty());
+        }
+
+        // (d) BEFORE THE IMAGE MOVE -- a crash after the list's commit. The list is the new one (the commit is the
+        // atomic point); images/ still holds nothing the list does not reference; and the next landing's sweep
+        // finishes the move.
+        {
+            const QString sys = setup(QStringLiteral("d"), 3);
+            {
+                LibraryBundle::GamelistBatcher b(exact);
+                for (int i = 0; i < 2; ++i) CHECK(fx::stageWire(b, roms, wire(QStringLiteral("d"), i)) == LibraryBundle::LandResult::Landed);
+                b.setFailPointForTest(LibraryBundle::GamelistBatcher::FailPoint::BeforeImageMove);
+                b.flushAll();
+                CHECK(b.listWrites() == 1);
+            }
+            const QByteArray committed = fx::readFile(sys + QStringLiteral("/gamelist.xml"));
+            CHECK(committed.contains("./I0.sfc") && committed.contains("./I1.sfc"));
+            CHECK(fx::imagesIn(sys).isEmpty() && fx::orphanImages(sys).isEmpty());
+            CHECK(fx::stagingDirs(sys).size() == 1);
+            CHECK(LibraryBundle::sweepGamelistStaging(sys) == 2);
+            CHECK(fx::imagesIn(sys) == (QStringList{ QStringLiteral("I0-thumb.png"), QStringLiteral("I1-thumb.png") }));
+            CHECK(fx::orphanImages(sys).isEmpty() && fx::stagingDirs(sys).isEmpty());
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")) == committed);   // the sweep does not write the list
+        }
+
+        // (e) A CRASH MID-BATCH: the old list, no image, and the next landing into that system sweeps the staging.
+        {
+            const QString sys = setup(QStringLiteral("e"), 3);
+            {
+                LibraryBundle::GamelistBatcher b(exact);
+                for (int i = 0; i < 2; ++i) CHECK(fx::stageWire(b, roms, wire(QStringLiteral("e"), i)) == LibraryBundle::LandResult::Landed);
+                b.abandonForTest();
+            }
+            CHECK(fx::readFile(sys + QStringLiteral("/gamelist.xml")) == listOld);
+            CHECK(fx::imagesIn(sys).isEmpty());
+            const QStringList stale = fx::stagingDirs(sys);
+            CHECK(stale.size() == 1);
+            LibraryBundle::GamelistBatcher b2(exact);
+            CHECK(fx::stageWire(b2, roms, wire(QStringLiteral("e"), 2)) == LibraryBundle::LandResult::Landed);
+            const QStringList now = fx::stagingDirs(sys);
+            CHECK(now.size() == 1 && !now.contains(stale.value(0)));            // the stale one is gone
+            CHECK(fx::imagesIn(sys).isEmpty());
+            b2.flushAll();
+            CHECK(fx::imagesIn(sys) == QStringList{ QStringLiteral("I2-thumb.png") });
+            CHECK(fx::orphanImages(sys).isEmpty() && fx::stagingDirs(sys).isEmpty());
+            CHECK(nextPlanSends(QStringLiteral("e"), 3) == (QStringList{ QStringLiteral("I0.sfc"), QStringLiteral("I1.sfc") }));
+        }
+
+        // (f) A staging folder a batcher is still filling is never swept from under it.
+        {
+            const QString sys = setup(QStringLiteral("f"), 1);
+            LibraryBundle::GamelistBatcher b(exact);
+            CHECK(fx::stageWire(b, roms, wire(QStringLiteral("f"), 0)) == LibraryBundle::LandResult::Landed);
+            CHECK(LibraryBundle::sweepGamelistStaging(sys) == 0);
+            CHECK(fx::stagingDirs(sys).size() == 1);
+            b.flushAll();
+            CHECK(fx::imagesIn(sys) == QStringList{ QStringLiteral("I0-thumb.png") } && fx::orphanImages(sys).isEmpty());
+        }
+    }
+
+    // ---- 26. one matcher: GamelistStore's rule, public, and the only one (#401) ----------------------------
+    {
+        using GamelistStore::ListedGame;
+        const QList<ListedGame> nes = {
+            { QStringLiteral("./Super Mario Bros. 3 (USA) (Rev 1).nes"), QStringLiteral("Super Mario Bros. 3") },
+            { QStringLiteral("./metroid.zip"), QStringLiteral("Metroid") },
+        };
+        // #292's three agreement cases: a GoodNES name against a No-Intro entry, another extension, and absent.
+        CHECK(GamelistStore::listsRom(nes, QStringLiteral("Super Mario Bros 3 (U) [!].nes")));
+        CHECK(GamelistStore::listsRom(nes, QStringLiteral("Metroid.nes")));
+        CHECK(!GamelistStore::listsRom(nes, QStringLiteral("Zelda.nes")));
+        // And the rule's edges: the whole file name in any case, a <path> in a sub-folder, a clean title from <name>
+        // alone, no <path> at all, and two ROMs whose clean title is empty.
+        CHECK(GamelistStore::listsRom(nes, QStringLiteral("METROID.ZIP")));
+        CHECK(GamelistStore::listsRom({ { QStringLiteral("./sub/Deep Game.sfc"), QString() } }, QStringLiteral("Deep Game.sfc")));
+        CHECK(GamelistStore::listsRom({ { QStringLiteral("./a1.sfc"), QStringLiteral("Chrono Trigger") } },
+                                      QStringLiteral("Chrono Trigger (USA).sfc")));
+        CHECK(!GamelistStore::listsRom({ { QString(), QStringLiteral("Zelda") } }, QStringLiteral("Zelda.nes")));
+        CHECK(!GamelistStore::listsRom({ { QStringLiteral("./(Beta).sfc"), QString() } }, QStringLiteral("[!].sfc")));
+        const GamelistStore::ListMatcher m = GamelistStore::matcherFor(nes);
+        for (const QString& rom : { QStringLiteral("Super Mario Bros 3 (U) [!].nes"), QStringLiteral("Metroid.nes"),
+                                    QStringLiteral("Zelda.nes"), QStringLiteral("METROID.ZIP") })
+            CHECK(m.lists(rom) == GamelistStore::listsRom(nes, rom));
+        // has() on disk says the same thing for every ROM.
+        const QString dir = base + QStringLiteral("/matcher/nes");
+        fx::writeTree(dir + QStringLiteral("/gamelist.xml"), QByteArray(
+            "<gameList><game><path>./Super Mario Bros. 3 (USA) (Rev 1).nes</path><name>Super Mario Bros. 3</name></game>"
+            "<game><path>./metroid.zip</path><name>Metroid</name></game></gameList>"));
+        GamelistStore::clearCache();
+        for (const QString& rom : { QStringLiteral("Super Mario Bros 3 (U) [!].nes"), QStringLiteral("Metroid.nes"),
+                                    QStringLiteral("Zelda.nes"), QStringLiteral("METROID.ZIP") })
+        {
+            const bool store = GamelistStore::has(dir + QLatin1Char('/') + rom);
+            if (store != GamelistStore::listsRom(nes, rom))
+                std::fprintf(stderr, "BUNDLEXFER-FAIL has() and listsRom disagree for %s\n", qPrintable(rom));
+            CHECK(store == GamelistStore::listsRom(nes, rom));
+        }
+    }
+
+    // ---- 27. case: fold where the filesystem does, write the target's spelling, never guess (#401) --------
+    {
+        using LibraryBundle::NameMatch;
+        QString res;
+        CHECK(LibraryBundle::resolveName(QStringLiteral("snes"), { QStringLiteral("SNES"), QStringLiteral("gba") }, true, res)
+                  == NameMatch::Found && res == QStringLiteral("SNES"));
+        CHECK(LibraryBundle::resolveName(QStringLiteral("snes"), { QStringLiteral("SNES"), QStringLiteral("gba") }, false, res)
+              == NameMatch::Missing);
+        CHECK(LibraryBundle::resolveName(QStringLiteral("SNES"), { QStringLiteral("SNES") }, false, res) == NameMatch::Found
+              && res == QStringLiteral("SNES"));
+        CHECK(LibraryBundle::resolveName(QStringLiteral("snes"), { QStringLiteral("SNES"), QStringLiteral("snes") }, true, res)
+              == NameMatch::Ambiguous);
+        CHECK(LibraryBundle::resolveName(QStringLiteral("snes"), { QStringLiteral("SNES"), QStringLiteral("snes") }, false, res)
+                  == NameMatch::Found && res == QStringLiteral("snes"));
+        CHECK(LibraryBundle::resolveName(QStringLiteral("game.sfc"), { QStringLiteral("Game.SFC") }, true, res) == NameMatch::Found
+              && res == QStringLiteral("Game.SFC"));
+        for (const bool fold : { true, false })
+        {
+            CHECK(LibraryBundle::resolveName(QStringLiteral(".."), { QStringLiteral("..") }, fold, res) == NameMatch::Missing);
+            CHECK(LibraryBundle::resolveName(QStringLiteral("con"), { QStringLiteral("CON") }, fold, res) == NameMatch::Missing);
+            CHECK(LibraryBundle::resolveName(QStringLiteral("a/b"), { QStringLiteral("a/b") }, fold, res) == NameMatch::Missing);
+        }
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+        CHECK(LibraryBundle::foldsNameCase());
+#else
+        CHECK(!LibraryBundle::foldsNameCase());
+#endif
+
+        // THE LANDING. The target has SNES/Game.SFC; the source names snes/game.sfc.
+        const QString roms = base + QStringLiteral("/case/roms");
+        fx::writeTree(roms + QStringLiteral("/SNES/Game.SFC"), QByteArray("ROM"));
+        const QByteArray w = fx::gameWire(QStringLiteral("snes"), QStringLiteral("game.sfc"), QStringLiteral("Case Game"), 7);
+        const QMap<QString, QString> before = fx::censusAll(roms);
+        {
+            LibraryBundle::GamelistBatcher::Options o;
+            o.caseInsensitive = false;
+            LibraryBundle::GamelistBatcher b(o);
+            CHECK(fx::stageWire(b, roms, w) == LibraryBundle::LandResult::NotApplicable);
+            b.flushAll();
+            CHECK(fx::censusAll(roms) == before);                                   // exact: nothing written
+        }
+        {
+            LibraryBundle::GamelistBatcher::Options o;
+            o.caseInsensitive = true;
+            LibraryBundle::GamelistBatcher b(o);
+            CHECK(fx::stageWire(b, roms, w) == LibraryBundle::LandResult::Landed);
+            CHECK(b.flush(roms, QStringLiteral("snes")).committed == 1);            // the flush resolves the same way
+            const QMap<QString, QString> after = fx::censusAll(roms);
+            QStringList keys = after.keys();
+            CHECK(keys == (QStringList{ QStringLiteral("SNES/"), QStringLiteral("SNES/Game.SFC"), QStringLiteral("SNES/gamelist.xml"),
+                                        QStringLiteral("SNES/images/"), QStringLiteral("SNES/images/Game-thumb.png") }));
+            const QByteArray list = fx::readFile(roms + QStringLiteral("/SNES/gamelist.xml"));
+            CHECK(list.contains("<path>./Game.SFC</path>") && list.contains("<thumbnail>./images/Game-thumb.png</thumbnail>"));
+            GamelistStore::clearCache();
+            CHECK(GamelistStore::lookup(roms + QStringLiteral("/SNES/Game.SFC")).title == QStringLiteral("Case Game"));
+            CHECK(fx::stageWire(b, roms, w) == LibraryBundle::LandResult::AlreadyCurrent);
+        }
+
+        // THE PLAN makes the same decision from the target's lists.
+        const auto sys = [](const QString& name, const QStringList& romsIn, const QStringList& listed) {
+            LibraryBundle::SidecarSystem s;
+            s.name = name;
+            s.roms = romsIn;
+            s.listed = listed;
+            return s;
+        };
+        const auto game = [](const QString& system, const QString& rom) {
+            LibraryBundle::SidecarGame g;
+            g.system = system;
+            g.rom = rom;
+            g.fields.name = rom;
+            return g;
+        };
+        const QList<LibraryBundle::SidecarSystem> tgt = { sys(QStringLiteral("SNES"), { QStringLiteral("Game.SFC"), QStringLiteral("Other.sfc") },
+                                                              { QStringLiteral("Other.sfc") }) };
+        const QList<LibraryBundle::SidecarGame> src = { game(QStringLiteral("snes"), QStringLiteral("game.sfc")),
+                                                        game(QStringLiteral("snes"), QStringLiteral("other.SFC")),
+                                                        game(QStringLiteral("snes"), QStringLiteral("missing.sfc")) };
+        const LibraryBundle::SidecarPlan folded = LibraryBundle::planSidecars(src, tgt, true);
+        CHECK(folded.send.size() == 1 && folded.send.value(0).rom == QStringLiteral("game.sfc"));
+        CHECK(folded.alreadyListed == 1 && folded.notApplicable == 1);
+        const LibraryBundle::SidecarPlan exactPlan = LibraryBundle::planSidecars(src, tgt, false);
+        CHECK(exactPlan.send.isEmpty() && exactPlan.notApplicable == 3);
+        CHECK(LibraryBundle::planSidecars(src, tgt).notApplicable == 3);
+        // Ambiguous, on the system and on the ROM: not applicable.
+        CHECK(LibraryBundle::planSidecars({ game(QStringLiteral("snes"), QStringLiteral("A.sfc")) },
+                                          { sys(QStringLiteral("SNES"), { QStringLiteral("A.sfc") }, {}),
+                                            sys(QStringLiteral("snes"), { QStringLiteral("A.sfc") }, {}) }, true).notApplicable == 1);
+        CHECK(LibraryBundle::planSidecars({ game(QStringLiteral("SNES"), QStringLiteral("a.SFC")) },
+                                          { sys(QStringLiteral("SNES"), { QStringLiteral("A.sfc"), QStringLiteral("a.sfc") }, {}) },
+                                          true).notApplicable == 1);
+
+        // /gamelists says which rule; an older answer means exact.
+        QList<LibraryBundle::SidecarSystem> back;
+        bool ci = false;
+        QString err;
+        CHECK(LibraryBundle::parseSidecarInventory(LibraryBundle::sidecarInventoryJson(tgt, true), back, ci, err) && ci
+              && back.size() == 1 && back.first().roms == tgt.first().roms);
+        ci = true;
+        CHECK(LibraryBundle::parseSidecarInventory(LibraryBundle::sidecarInventoryJson(tgt), back, ci, err) && !ci);
+        ci = true;
+        CHECK(LibraryBundle::parseSidecarInventory(LibraryBundle::sidecarInventoryJson(tgt, false), back, ci, err) && !ci);
+
+        // The flush wire and its route.
+        QString flushed;
+        CHECK(LibraryBundle::parseGamelistFlushRequest(LibraryBundle::gamelistFlushRequestJson(QStringLiteral("SNES")), flushed)
+              && flushed == QStringLiteral("SNES"));
+        CHECK(!LibraryBundle::parseGamelistFlushRequest(QByteArray("{}"), flushed));
+        CHECK(!LibraryBundle::parseGamelistFlushRequest(QByteArray("{\"system\":\"../x\"}"), flushed));
+        LibraryBundle::GamelistFlushResult fr;
+        LibraryBundle::GamelistFlushResult sent;
+        sent.committed = 3;
+        sent.failed = 2;
+        CHECK(LibraryBundle::parseGamelistFlushResult(LibraryBundle::gamelistFlushResultJson(sent), fr) && fr.committed == 3
+              && fr.failed == 2);
+        CHECK(!LibraryBundle::parseGamelistFlushResult(QByteArray("not json"), fr));
+        CHECK(RemoteApi::route(RemoteApi::parseRequest("POST /gamelists/flush HTTP/1.1\r\nContent-Length: 17\r\n\r\n{\"system\":\"snes\"}")).kind
+              == RemoteApi::CommandKind::GamelistFlush);
+        CHECK(RemoteApi::route(RemoteApi::parseRequest("GET /gamelists/flush HTTP/1.1\r\n\r\n")).kind == RemoteApi::CommandKind::BadRequest);
+        CHECK(PlayOn::routeNeedsToken(QStringLiteral("/gamelists/flush")));
     }
 
     QDir(base).removeRecursively();

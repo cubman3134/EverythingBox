@@ -92,6 +92,9 @@ void RemoteServer::stop()
     }
     buffers_.clear();
     answered_.clear();
+    // #401: gamelist entries that landed but are not committed yet are committed now, not lost with the listener.
+    if (sidecarIdle_) sidecarIdle_->stop();
+    if (hooks_.gamelistIdle) hooks_.gamelistIdle();
     if (server_)
     {
         server_->close();
@@ -321,6 +324,25 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
             status = 200;
             break;
         }
+        case RemoteApi::CommandKind::GamelistFlush:
+        {
+            // #401. Commit the named system's pending gamelist entries now. Token-checked above.
+            if (!hooks_.gamelistFlush)
+            {
+                status = 503;
+                body = "{\"ok\":false,\"error\":\"no dispatcher\"}";
+                break;
+            }
+            body = hooks_.gamelistFlush(req.body);
+            if (body.isEmpty())
+            {
+                status = 400;
+                body = "{\"ok\":false,\"error\":\"that flush did not name a system\"}";
+                break;
+            }
+            status = 200;
+            break;
+        }
         case RemoteApi::CommandKind::NotFound:
             status = 404;
             body = "{\"ok\":false,\"error\":\"not found\"}";
@@ -430,10 +452,13 @@ void RemoteServer::pumpStream(QTcpSocket* sock)
             // #292: the header says which kind of body this is, and each kind has its own landing -- the art
             // cache's, or the ROM folder's. A device without the gamelist hook refuses that kind in words.
             if (LibraryBundle::bodyKindV2(body) == LibraryBundle::BodyKind::Gamelist)
+            {
                 receipt = hooks_.sidecarStream
                               ? hooks_.sidecarStream(body)
                               : LibraryBundle::receiptFor(LibraryBundle::LandResult::Refused,
                                                           QStringLiteral("this device does not take gamelist entries"));
+                armSidecarIdle();   // #401: a source that goes quiet from here still has what landed committed
+            }
             else
                 receipt = hooks_.bundleStream(body);
         }
@@ -443,6 +468,20 @@ void RemoteServer::pumpStream(QTcpSocket* sock)
     }
     dropStream(sock);
     finish(sock, receiptResponse(receipt));
+}
+
+void RemoteServer::armSidecarIdle()
+{
+    if (!hooks_.gamelistIdle) return;
+    if (!sidecarIdle_)
+    {
+        sidecarIdle_ = new QTimer(this);
+        sidecarIdle_->setSingleShot(true);
+        connect(sidecarIdle_, &QTimer::timeout, this, [this] {
+            if (hooks_.gamelistIdle) hooks_.gamelistIdle();
+        });
+    }
+    sidecarIdle_->start(sidecarIdleTimeoutMs_);
 }
 
 void RemoteServer::dropStream(QTcpSocket* sock)

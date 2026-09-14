@@ -5368,7 +5368,12 @@ void MainWindow::updateRemoteServer()
     h.bundleStream = [this](QIODevice& body) { return libraryReceiveBundleStream(body); };
     // #292 — gamelist sidecars: the ROM folders' lists, and one game's entry landed beside its ROM.
     h.gamelists     = [this] { return libraryGamelistsJson(); };
-    h.sidecarStream = [this](QIODevice& body) { return libraryReceiveSidecarStream(body); };
+    // #401 — landed entries are committed per system in batches. The hooks hold the batcher, not `this`: stop()
+    // commits what is pending and can run from RemoteServer's destructor.
+    const auto gamelistBatches = libraryMakeGamelistBatcher();
+    h.sidecarStream = [gamelistBatches](QIODevice& body) { return libraryReceiveSidecarStream(*gamelistBatches, body); };
+    h.gamelistFlush = [gamelistBatches](const QByteArray& body) { return libraryFlushGamelist(*gamelistBatches, body); };
+    h.gamelistIdle  = [gamelistBatches] { gamelistBatches->flushAll(); };
     remoteServer_->setHooks(h);
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))

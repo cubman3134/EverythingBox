@@ -68,6 +68,9 @@ public:
     // own request, on the bundle budget rather than kTimeoutMs -- the target walks its ROM tree to answer. A
     // gamelist entry itself goes through sendBundleItem as a v2 body.
     void fetchGamelists(const PlayOn::Peer& peer, const QString& token);
+    // #401: the target commits landed gamelist entries in batches; this says one system's entries are all sent,
+    // so it commits that batch now and answers with what committed and what failed.
+    void flushGamelist(const PlayOn::Peer& peer, const QString& token, const QString& system);
 
     // How long a peer has to answer before we call it gone.
     static constexpr int kTimeoutMs = 4000;
@@ -93,8 +96,12 @@ signals:
     // `sidecars` (#292) is whether the peer takes gamelist entries -- false for any device that predates them.
     void inventoryArrived(const QString& peerId, const QList<LibraryBundle::Entry>& items,
                           bool ok, const QString& message, const QList<int>& formats, bool sidecars);
+    // `caseInsensitive` (#401) is the peer's name rule -- false for a device that predates saying so.
     void gamelistsArrived(const QString& peerId, const QList<LibraryBundle::SidecarSystem>& systems,
-                          bool ok, const QString& message);
+                          bool ok, const QString& message, bool caseInsensitive);
+    // #401. `ok` false means the peer did not answer the flush (an older device has no such route); the counts
+    // are then zero and mean nothing.
+    void gamelistFlushed(const QString& peerId, const QString& system, bool ok, int committed, int failed);
     // One item's answer: `result` is the receipt's word ("landed" / "kept" / "current" / "refused"),
     // `message` the peer's reason when it is not a plain success.
     void bundleItemDone(const QString& peerId, const QString& itemId, bool ok,

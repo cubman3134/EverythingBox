@@ -1,4 +1,5 @@
 #include "LibraryBundle.h"
+#include "GamelistStore.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -1263,48 +1264,13 @@ namespace
         return QString();
     }
 
-    // GamelistStore's fuzzy key, exactly: drop every (...) and [...] tag, keep lower-case letters and digits.
-    QString cleanTitle(const QString& s)
+    // #401: "does this list already have that ROM" is GamelistStore's one public rule. This only hands it a parsed
+    // list in the shape it takes.
+    GamelistStore::ListMatcher matcherOf(const QList<GamelistGame>& games)
     {
-        static const QRegularExpression tags(QStringLiteral("[\\(\\[][^\\)\\]]*[\\)\\]]"));
-        QString t = s;
-        t.remove(tags);
-        QString out;
-        for (const QChar c : t)
-            if (c.isLetterOrNumber()) out += c.toLower();
-        return out;
-    }
-
-    // The three keys GamelistStore finds a ROM by, over one parsed list.
-    struct ListedIndex
-    {
-        QSet<QString> byFile, byBase, byClean;
-    };
-
-    ListedIndex indexOf(const QList<GamelistGame>& games)
-    {
-        ListedIndex ix;
-        for (const GamelistGame& g : games)
-        {
-            if (g.path.isEmpty()) continue;
-            const QFileInfo fi(g.path);
-            ix.byFile.insert(fi.fileName().toLower());
-            ix.byBase.insert(fi.completeBaseName().toLower());
-            const QString c1 = cleanTitle(fi.completeBaseName());
-            const QString c2 = cleanTitle(g.fields.name);
-            if (!c1.isEmpty()) ix.byClean.insert(c1);
-            if (!c2.isEmpty()) ix.byClean.insert(c2);
-        }
-        return ix;
-    }
-
-    bool listedIn(const ListedIndex& ix, const QString& romName)
-    {
-        const QFileInfo rfi(romName);
-        if (ix.byFile.contains(rfi.fileName().toLower())) return true;
-        if (ix.byBase.contains(rfi.completeBaseName().toLower())) return true;
-        const QString clean = cleanTitle(rfi.completeBaseName());
-        return !clean.isEmpty() && ix.byClean.contains(clean);
+        GamelistStore::ListMatcher m;
+        for (const GamelistGame& g : games) m.add({ g.path, g.fields.name });
+        return m;
     }
 
     QByteArray readWhole(const QString& path)
@@ -1336,6 +1302,53 @@ namespace
     const char* const kSidecarUnsafe      = "that gamelist entry named a place this device will not write";
     const char* const kSidecarFileRefused = "that gamelist entry carried a file this device will not write";
     const char* const kSidecarUnreadable  = "that gamelist entry was not readable";
+
+    // A folder's names, looked up by the #401 rule: exactly, or case-folded -- and then only when exactly one
+    // entry folds to the name, so a pair differing only by case is never guessed between.
+    class NameIndex
+    {
+    public:
+        NameIndex() = default;
+        explicit NameIndex(const QStringList& names) { reset(names); }
+
+        void reset(const QStringList& names)
+        {
+            exact_.clear();
+            folded_.clear();
+            for (const QString& n : names)
+            {
+                if (exact_.contains(n)) continue;
+                exact_.insert(n);
+                folded_[n.toCaseFolded()] << n;
+            }
+        }
+
+        NameMatch resolve(const QString& wanted, bool caseInsensitive, QString& resolved) const
+        {
+            resolved.clear();
+            if (!safePathSegment(wanted)) return NameMatch::Missing;
+            QString found;
+            if (!caseInsensitive)
+            {
+                if (!exact_.contains(wanted)) return NameMatch::Missing;
+                found = wanted;
+            }
+            else
+            {
+                const QStringList hits = folded_.value(wanted.toCaseFolded());
+                if (hits.isEmpty()) return NameMatch::Missing;
+                if (hits.size() > 1) return NameMatch::Ambiguous;
+                found = hits.first();
+            }
+            if (!safePathSegment(found)) return NameMatch::Missing;   // the resolved name is judged too
+            resolved = found;
+            return NameMatch::Found;
+        }
+
+    private:
+        QSet<QString> exact_;
+        QHash<QString, QStringList> folded_;
+    };
 }
 
 bool safePathSegment(const QString& segment)
@@ -1409,11 +1422,6 @@ QList<GamelistGame> parseGamelist(const QByteArray& xml)
     return out;
 }
 
-bool gamelistLists(const QList<GamelistGame>& games, const QString& romName)
-{
-    return listedIn(indexOf(games), romName);
-}
-
 QList<SidecarGame> sidecarGamesFor(const QString& romsRoot)
 {
     QList<SidecarGame> out;
@@ -1464,9 +1472,9 @@ QList<SidecarSystem> sidecarInventoryFor(const QString& romsRoot)
         const QString listPath = dir + QLatin1Char('/') + QLatin1String(kGamelistFileName);
         if (!s.roms.isEmpty() && QFileInfo(listPath).isFile())
         {
-            const ListedIndex ix = indexOf(parseGamelist(readWhole(listPath)));
+            const GamelistStore::ListMatcher matcher = matcherOf(parseGamelist(readWhole(listPath)));
             for (const QString& rom : s.roms)
-                if (listedIn(ix, rom)) s.listed << rom;
+                if (matcher.lists(rom)) s.listed << rom;
         }
         out << s;
     }
@@ -1474,6 +1482,11 @@ QList<SidecarSystem> sidecarInventoryFor(const QString& romsRoot)
 }
 
 QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems)
+{
+    return sidecarInventoryJson(systems, false);
+}
+
+QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems, bool caseInsensitive)
 {
     QJsonArray arr;
     for (const SidecarSystem& s : systems)
@@ -1487,12 +1500,21 @@ QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems)
     QJsonObject root;
     root.insert(QStringLiteral("v"), kSidecarFormat);
     root.insert(QStringLiteral("systems"), arr);
+    // #401: a field an older source ignores. Absent means exact, which is what every older device did.
+    if (caseInsensitive) root.insert(QStringLiteral("caseInsensitive"), true);
     return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
 bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, QString& error)
 {
+    bool caseInsensitive = false;
+    return parseSidecarInventory(json, out, caseInsensitive, error);
+}
+
+bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, bool& caseInsensitive, QString& error)
+{
     out.clear();
+    caseInsensitive = false;
     const QJsonDocument doc = QJsonDocument::fromJson(json);
     if (!doc.isObject())
     {
@@ -1511,6 +1533,7 @@ bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, QS
             if (x.isString()) l << x.toString();
         return l;
     };
+    caseInsensitive = doc.object().value(QStringLiteral("caseInsensitive")).toBool(false);
     const QJsonArray systems = doc.object().value(QStringLiteral("systems")).toArray();
     for (const QJsonValue& v : systems)
     {
@@ -1546,19 +1569,41 @@ bool advertisesSidecars(const QByteArray& inventory)
 
 SidecarPlan planSidecars(const QList<SidecarGame>& source, const QList<SidecarSystem>& target)
 {
-    QHash<QString, QPair<QSet<QString>, QSet<QString>>> bySystem;
+    return planSidecars(source, target, false);
+}
+
+SidecarPlan planSidecars(const QList<SidecarGame>& source, const QList<SidecarSystem>& target, bool caseInsensitive)
+{
+    // The target's names, merged per system and looked up by the TARGET's rule (#401) -- the resolution its
+    // landing makes, so a game the plan sends is a game the target will take, and the reverse.
+    struct TargetSystem
+    {
+        QStringList   roms;
+        QSet<QString> listed;
+    };
+    QHash<QString, TargetSystem> bySystem;
+    QStringList systemNames;
     for (const SidecarSystem& s : target)
     {
-        auto& e = bySystem[s.name];
-        for (const QString& r : s.roms)   e.first.insert(r);
-        for (const QString& r : s.listed) e.second.insert(r);
+        if (!bySystem.contains(s.name)) systemNames << s.name;
+        TargetSystem& t = bySystem[s.name];
+        t.roms << s.roms;
+        for (const QString& r : s.listed) t.listed.insert(r);
     }
+    const NameIndex systems(systemNames);
+    QHash<QString, NameIndex> romIndex;   // built on first use, per target system
+
     SidecarPlan p;
     for (const SidecarGame& g : source)
     {
-        const auto it = bySystem.constFind(g.system);
-        if (it == bySystem.constEnd() || !it.value().first.contains(g.rom)) { ++p.notApplicable; continue; }
-        if (it.value().second.contains(g.rom)) { ++p.alreadyListed; continue; }
+        QString system;
+        if (systems.resolve(g.system, caseInsensitive, system) != NameMatch::Found) { ++p.notApplicable; continue; }
+        const TargetSystem& t = bySystem[system];
+        auto ix = romIndex.find(system);
+        if (ix == romIndex.end()) ix = romIndex.insert(system, NameIndex(t.roms));
+        QString rom;
+        if (ix.value().resolve(g.rom, caseInsensitive, rom) != NameMatch::Found) { ++p.notApplicable; continue; }
+        if (t.listed.contains(rom)) { ++p.alreadyListed; continue; }
         p.send << g;
     }
     return p;
@@ -1818,61 +1863,353 @@ LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error)
 
 LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts)
 {
+    // #401: one game, landed and committed on its own -- a batch of one, through exactly the rules the batched
+    // target uses. The interruption seam keeps #292's meaning: reached among the images it stops before the next
+    // one; reached at the rewrite it stops the list's temporary write. Either way nothing is left behind.
+    GamelistBatcher batch;
+    int written = 0;
+    const LandResult r = batch.stageImpl(romsRoot, in, error, opts, &written);
+    if (r != LandResult::Landed) return r;
+    const bool interrupt = opts.failAfterFiles >= 0 && written >= opts.failAfterFiles;
+    if (interrupt) batch.setFailPointForTest(GamelistBatcher::FailPoint::AfterListTemp);
+    QString commitError;
+    batch.setOnCommit([&commitError](const GamelistCommit& c) {
+        if (!c.ok) commitError = c.error;
+    });
+    batch.flushAll();
+    if (interrupt)
+    {
+        error = QStringLiteral("the transfer was interrupted");
+        return LandResult::Interrupted;
+    }
+    if (!commitError.isEmpty())
+    {
+        error = commitError;
+        return LandResult::WriteFailed;
+    }
+    return LandResult::Landed;
+}
+
+// ------------------------------------------------------------------ 12. names and batched commits (#401) ----
+namespace
+{
+    QStringList systemFoldersIn(const QString& romsRoot)
+    {
+        return QDir(romsRoot).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
+    }
+
+    QStringList romFilesIn(const QString& sysDir)
+    {
+        QStringList out;
+        const QStringList files = QDir(sysDir).entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
+        for (const QString& f : files)
+            if (f.compare(QLatin1String(kGamelistFileName), Qt::CaseInsensitive) != 0) out << f;
+        return out;
+    }
+
+    // The staging folders a batcher in this process is filling. A sweep never touches one of these, whichever
+    // batcher (or probe) asks for the sweep.
+    QMutex& stagingMutex()
+    {
+        static QMutex m;
+        return m;
+    }
+    QSet<QString>& stagingLive()
+    {
+        static QSet<QString> s;
+        return s;
+    }
+    QString stagingKey(const QString& path) { return QDir::cleanPath(QFileInfo(path).absoluteFilePath()); }
+    void registerStaging(const QString& path)
+    {
+        QMutexLocker lock(&stagingMutex());
+        stagingLive().insert(stagingKey(path));
+    }
+    void unregisterStaging(const QString& path)
+    {
+        QMutexLocker lock(&stagingMutex());
+        stagingLive().remove(stagingKey(path));
+    }
+    bool stagingIsLive(const QString& path)
+    {
+        QMutexLocker lock(&stagingMutex());
+        return stagingLive().contains(stagingKey(path));
+    }
+
+    // `inner` is really a folder inside `sysDir`: a link pointing elsewhere does not count.
+    bool insideSystem(const QString& sysDir, const QString& inner)
+    {
+        const QString canonSys = QFileInfo(sysDir).canonicalFilePath();
+        const QFileInfo fi(inner);
+        return !canonSys.isEmpty() && fi.isDir() && fi.canonicalFilePath().startsWith(canonSys + QLatin1Char('/'));
+    }
+
+    bool ensureImagesDir(const QString& sysDir, const QString& imagesDir)
+    {
+        if (!QFileInfo::exists(imagesDir) && !QFileInfo(imagesDir).isSymLink() && !QDir().mkdir(imagesDir)) return false;
+        return insideSystem(sysDir, imagesDir);
+    }
+
+    QList<QPair<QString, QString>> imagePaths(const QList<QPair<QString, QString>>& roleAndName)
+    {
+        QList<QPair<QString, QString>> out;
+        for (const auto& m : roleAndName) out << qMakePair(m.first, QStringLiteral("./images/") + m.second);
+        return out;
+    }
+
+    const char* const kImagesPrefix = "./images/";
+}
+
+bool foldsNameCase()
+{
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    return true;
+#else
+    return false;
+#endif
+}
+
+NameMatch resolveName(const QString& wanted, const QStringList& present, bool caseInsensitive, QString& resolved)
+{
+    return NameIndex(present).resolve(wanted, caseInsensitive, resolved);
+}
+
+QByteArray gamelistFlushRequestJson(const QString& system)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("system"), system);
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
+bool parseGamelistFlushRequest(const QByteArray& json, QString& system)
+{
+    system.clear();
+    const QJsonValue v = QJsonDocument::fromJson(json).object().value(QStringLiteral("system"));
+    if (!v.isString() || !safePathSegment(v.toString())) return false;
+    system = v.toString();
+    return true;
+}
+
+QByteArray gamelistFlushResultJson(const GamelistFlushResult& r)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("ok"), true);
+    o.insert(QStringLiteral("committed"), r.committed);
+    o.insert(QStringLiteral("failed"), r.failed);
+    return QJsonDocument(o).toJson(QJsonDocument::Compact);
+}
+
+bool parseGamelistFlushResult(const QByteArray& json, GamelistFlushResult& out)
+{
+    out = GamelistFlushResult();
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) return false;
+    const QJsonObject o = doc.object();
+    const QJsonValue c = o.value(QStringLiteral("committed"));
+    const QJsonValue f = o.value(QStringLiteral("failed"));
+    if (!c.isDouble() || !f.isDouble() || c.toInt(-1) < 0 || f.toInt(-1) < 0) return false;
+    out.committed = c.toInt();
+    out.failed = f.toInt();
+    return true;
+}
+
+int sweepGamelistStaging(const QString& systemDir)
+{
+    const QFileInfoList entries = QDir(systemDir).entryInfoList(
+        QStringList{ QString::fromLatin1(kGamelistStagingPrefix) + QLatin1Char('*') },
+        QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+    if (entries.isEmpty()) return 0;
+
+    const QString imagesDir = systemDir + QStringLiteral("/images");
+    QSet<QString> referenced;
+    bool haveReferences = false;
+    int moved = 0;
+    for (const QFileInfo& fi : entries)
+    {
+        const QString path = fi.absoluteFilePath();
+        if (stagingIsLive(path)) continue;                     // a batcher is still filling this one
+        if (fi.isSymLink() || fi.isJunction() || !insideSystem(systemDir, path))
+        {
+            // Not something a batcher made: never followed, only the entry itself is removed.
+            if (!QFile::remove(path)) QDir().rmdir(path);
+            continue;
+        }
+        if (!haveReferences)
+        {
+            // What the COMMITTED list points at. Read once, and only when there is staging to judge.
+            const QString listPath = systemDir + QLatin1Char('/') + QLatin1String(kGamelistFileName);
+            QFile lf(listPath);
+            if (lf.open(QIODevice::ReadOnly))
+                for (const GamelistGame& g : parseGamelist(lf.readAll()))
+                    for (const auto& m : g.media)
+                        if (m.second.startsWith(QLatin1String(kImagesPrefix)))
+                            referenced.insert(m.second.mid(int(qstrlen(kImagesPrefix))));
+            haveReferences = true;
+        }
+        const QStringList files = QDir(path).entryList(QDir::Files | QDir::Hidden | QDir::System);
+        for (const QString& name : files)
+        {
+            const QString staged = path + QLatin1Char('/') + name;
+            const QString placed = imagesDir + QLatin1Char('/') + name;
+            // The list was committed and the move was not: finish it. Anything else is an orphan and goes.
+            if (referenced.contains(name) && safePathSegment(name) && !QFileInfo::exists(placed)
+                && ensureImagesDir(systemDir, imagesDir) && QFile::rename(staged, placed))
+            {
+                ++moved;
+                continue;
+            }
+            QFile::remove(staged);
+        }
+        QDir(path).removeRecursively();
+    }
+    return moved;
+}
+
+struct GamelistBatcher::Batch
+{
+    QString sysDir;       // absolute, the target's spelling
+    QString listPath;
+    QString imagesDir;
+    QString stagingDir;   // empty until the first image is staged
+
+    // THE ONE READ: the list as it was when the batch opened, and how to tell whether it changed since.
+    QByteArray existing;
+    bool       existed = false;
+    qint64     existingSize = -1;
+    qint64     existingMtimeMs = 0;
+
+    GamelistStore::ListMatcher matcher;   // the list plus every game staged so far
+    NameIndex roms;
+
+    struct Game
+    {
+        QString rom;                                // the target's spelling
+        GamelistFields fields;
+        QList<QPair<QString, QString>> media;       // (role, file name in staging)
+        QByteArray block;
+    };
+    QList<Game>   games;
+    QSet<QString> stagedNames;   // case-folded, so two games never stage one name
+    qint64        blockBytes = 0;
+};
+
+GamelistBatcher::GamelistBatcher() = default;
+
+GamelistBatcher::GamelistBatcher(const Options& options) : options_(options) {}
+
+GamelistBatcher::~GamelistBatcher()
+{
+    flushAll();
+}
+
+LandResult GamelistBatcher::stage(const QString& romsRoot, QIODevice& in, QString& error)
+{
+    return stageImpl(romsRoot, in, error, LandOptions(), nullptr);
+}
+
+LandResult GamelistBatcher::stage(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts)
+{
+    return stageImpl(romsRoot, in, error, opts, nullptr);
+}
+
+LandResult GamelistBatcher::stageImpl(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts,
+                                      int* writtenOut)
+{
     error.clear();
+    if (writtenOut) *writtenOut = 0;
     SidecarHeader h;
     Refusal why = Refusal::None;
     if (!decodeSidecarHeaderV2(in, h, why, error)) return LandResult::Refused;
 
-    // THE TARGET DECIDES. Its own ROM root, the system folder only if it is already there (never created), and
-    // only for a ROM that is a file in it.
+    // THE TARGET DECIDES. Its own ROM root; a system folder it already has (never created), resolved by this
+    // device's name rule and written with this device's spelling.
     if (romsRoot.isEmpty())
     {
         error = QStringLiteral("this device has no ROM folder");
         return LandResult::NotApplicable;
     }
-    const QString sysDir = romsRoot + QLatin1Char('/') + h.system;
-    if (!QFileInfo(sysDir).isDir())
+    QString system;
+    const NameMatch sm = NameIndex(systemFoldersIn(romsRoot)).resolve(h.system, options_.caseInsensitive, system);
+    if (sm == NameMatch::Ambiguous)
+    {
+        error = QStringLiteral("this device has two folders for that system whose names differ only by case");
+        return LandResult::NotApplicable;
+    }
+    const QString sysDir = romsRoot + QLatin1Char('/') + system;
+    if (sm != NameMatch::Found || !QFileInfo(sysDir).isDir())
     {
         error = QStringLiteral("this device has no folder for that system");
         return LandResult::NotApplicable;
     }
-    if (!QFileInfo(sysDir + QLatin1Char('/') + h.rom).isFile())
+
+    std::shared_ptr<Batch> batch = batches_.value(sysDir);
+    bool unreadable = false;
+    if (!batch)
+    {
+        // A NEW BATCH for this system: sweep what an interrupted run left, then read the list -- once.
+        sweepGamelistStaging(sysDir);
+        batch = std::make_shared<Batch>();
+        batch->sysDir = sysDir;
+        batch->listPath = sysDir + QLatin1Char('/') + QLatin1String(kGamelistFileName);
+        batch->imagesDir = sysDir + QStringLiteral("/images");
+        const QFileInfo lf(batch->listPath);
+        if (lf.exists())
+        {
+            QFile f(batch->listPath);
+            unreadable = !f.open(QIODevice::ReadOnly);
+            batch->existing = f.readAll();
+            batch->existed = true;
+            batch->existingSize = lf.size();
+            batch->existingMtimeMs = lf.lastModified().toMSecsSinceEpoch();
+        }
+        batch->matcher = matcherOf(parseGamelist(batch->existing));
+        batch->roms.reset(romFilesIn(sysDir));
+        // A list this device cannot read is not a batch to keep: the next game tries again.
+        if (!unreadable) batches_.insert(sysDir, batch);
+    }
+
+    QString rom;
+    NameMatch rm = batch->roms.resolve(h.rom, options_.caseInsensitive, rom);
+    if (rm == NameMatch::Missing && QFileInfo::exists(sysDir + QLatin1Char('/') + h.rom))
+    {
+        // A ROM that arrived after the batch opened.
+        batch->roms.reset(romFilesIn(sysDir));
+        rm = batch->roms.resolve(h.rom, options_.caseInsensitive, rom);
+    }
+    if (rm == NameMatch::Ambiguous)
+    {
+        error = QStringLiteral("this device has two files for that game whose names differ only by case");
+        return LandResult::NotApplicable;
+    }
+    if (rm != NameMatch::Found || !QFileInfo(sysDir + QLatin1Char('/') + rom).isFile())
     {
         error = QStringLiteral("this device does not have that game");
         return LandResult::NotApplicable;
     }
 
-    // WARM, NEVER FIGHT: a game the list already has -- by GamelistStore's own rule -- is left exactly as it is.
-    const QString listPath = sysDir + QLatin1Char('/') + QLatin1String(kGamelistFileName);
-    QByteArray existing;
-    if (QFileInfo::exists(listPath))
+    if (unreadable)
     {
-        QFile f(listPath);
-        if (!f.open(QIODevice::ReadOnly))
-        {
-            error = QStringLiteral("this device could not read that system's gamelist");
-            return LandResult::WriteFailed;
-        }
-        existing = f.readAll();
+        error = QStringLiteral("this device could not read that system's gamelist");
+        return LandResult::WriteFailed;
     }
-    if (gamelistLists(parseGamelist(existing), h.rom)) return LandResult::AlreadyCurrent;
+    // WARM, NEVER FIGHT: a game the list already has -- or the batch already holds -- is left exactly as it is.
+    if (batch->matcher.lists(rom)) return LandResult::AlreadyCurrent;
+    if (!batch->existing.trimmed().isEmpty() && batch->existing.lastIndexOf("</gameList>") < 0)
     {
-        QByteArray check;
-        if (!insertGamelistEntry(existing, QByteArray(), check))
-        {
-            error = QStringLiteral("that system's gamelist is not one this device can add to");
-            return LandResult::WriteFailed;
-        }
+        error = QStringLiteral("that system's gamelist is not one this device can add to");
+        return LandResult::WriteFailed;
     }
 
-    // THE IMAGES, named here. A name already taken is not overwritten -- the image is dropped from the entry --
-    // and every file this landing creates is removed again if the landing does not finish.
-    const QString imagesDir = sysDir + QStringLiteral("/images");
+    // THE IMAGES, named here and STAGED, never written into images/ before the list says so. A name already taken
+    // is not overwritten -- the image is dropped from the entry -- and a game that does not finish staging takes
+    // its own staged files with it.
     QStringList created;
-    bool madeImagesDir = false;
-    const auto rollback = [&created, &madeImagesDir, &imagesDir] {
-        for (const QString& p : created) QFile::remove(p);
-        if (madeImagesDir) QDir().rmdir(imagesDir);
+    const auto rollback = [&created, &batch] {
+        for (const QString& p : created)
+        {
+            QFile::remove(p);
+            batch->stagedNames.remove(QFileInfo(p).fileName().toCaseFolded());
+        }
     };
     QList<QPair<QString, QString>> media;
     int written = 0;
@@ -1884,9 +2221,9 @@ LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error,
             error = QStringLiteral("the transfer was interrupted");
             return LandResult::Interrupted;
         }
-        const QString name = sidecarImageName(h.rom, f.role, f.ext);
-        const QString path = imagesDir + QLatin1Char('/') + name;
-        if (name.isEmpty() || QFileInfo::exists(path))
+        const QString name = sidecarImageName(rom, f.role, f.ext);
+        if (name.isEmpty() || QFileInfo::exists(batch->imagesDir + QLatin1Char('/') + name)
+            || batch->stagedNames.contains(name.toCaseFolded()))
         {
             if (f.size > 0 && in.skip(f.size) != f.size)
             {
@@ -1896,25 +2233,21 @@ LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error,
             }
             continue;
         }
-        if (!QFileInfo(imagesDir).isDir())
+        if (batch->stagingDir.isEmpty())
         {
-            if (QFileInfo::exists(imagesDir) || !QDir().mkdir(imagesDir))
+            const QString dir = sysDir + QLatin1Char('/') + QLatin1String(kGamelistStagingPrefix)
+                              + QUuid::createUuid().toString(QUuid::Id128);
+            if (!QDir().mkdir(dir) || !insideSystem(sysDir, dir))
             {
+                QDir().rmdir(dir);
                 rollback();
-                error = QStringLiteral("this device could not make that system's images folder");
+                error = QStringLiteral("this device could not stage that game's images");
                 return LandResult::WriteFailed;
             }
-            madeImagesDir = true;
+            batch->stagingDir = dir;
+            registerStaging(dir);
         }
-        // The images folder must really be inside the system folder: a link that points elsewhere is not followed.
-        const QString canonSys = QFileInfo(sysDir).canonicalFilePath();
-        const QString canonImages = QFileInfo(imagesDir).canonicalFilePath();
-        if (canonSys.isEmpty() || !canonImages.startsWith(canonSys + QLatin1Char('/')))
-        {
-            rollback();
-            error = QStringLiteral("that system's images folder is not inside it");
-            return LandResult::WriteFailed;
-        }
+        const QString path = batch->stagingDir + QLatin1Char('/') + name;
         QFile outFile(path);
         if (!outFile.open(QIODevice::WriteOnly | QIODevice::NewOnly))
         {
@@ -1923,6 +2256,7 @@ LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error,
             return LandResult::WriteFailed;
         }
         created << path;
+        batch->stagedNames.insert(name.toCaseFolded());
         qint64 left = f.size;
         while (left > 0)
         {
@@ -1937,37 +2271,192 @@ LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error,
             left -= chunk.size();
         }
         outFile.close();
-        media << qMakePair(f.role, QStringLiteral("./images/") + name);
+        media << qMakePair(f.role, name);
         ++written;
     }
+    if (writtenOut) *writtenOut = written;
 
-    // THE LIST, rewritten atomically: a temporary file beside it, renamed over it only once it is whole.
-    QByteArray updated;
-    insertGamelistEntry(existing, gamelistEntryXml(h.rom, h.fields, media), updated);
-    QSaveFile save(listPath);
-    if (!save.open(QIODevice::WriteOnly))
-    {
-        rollback();
-        error = QStringLiteral("this device could not write that system's gamelist");
-        return LandResult::WriteFailed;
-    }
-    if (opts.failAfterFiles >= 0 && written >= opts.failAfterFiles)
-    {
-        // The test seam: half the new list is in the temporary file when the write stops.
-        save.write(updated.left(updated.size() / 2));
-        save.cancelWriting();
-        rollback();
-        error = QStringLiteral("the transfer was interrupted");
-        return LandResult::Interrupted;
-    }
-    if (save.write(updated) != qint64(updated.size()) || !save.commit())
-    {
-        rollback();
-        error = QStringLiteral("this device could not write that system's gamelist");
-        return LandResult::WriteFailed;
-    }
+    // INTO THE BATCH. The receipt says landed: the batch rules guarantee the commit is made.
+    Batch::Game g;
+    g.rom = rom;
+    g.fields = h.fields;
+    g.media = media;
+    g.block = gamelistEntryXml(rom, h.fields, imagePaths(media));
+    batch->blockBytes += g.block.size();
+    batch->matcher.add({ QStringLiteral("./") + rom, h.fields.name });
+    batch->games << g;
+    if (batch->games.size() >= options_.maxGames || batch->blockBytes >= options_.maxBlockBytes)
+        commit(sysDir, nullptr);   // THE BOUND: a crash never loses more than this
     return LandResult::Landed;
 }
 
+bool GamelistBatcher::commit(const QString& key, QString* errorOut)
+{
+    const std::shared_ptr<Batch> b = batches_.take(key);
+    if (!b) return true;
+    GamelistCommit report;
+    report.systemDir = b->sysDir;
+    report.games = int(b->games.size());
+
+    const auto dropStaging = [&b] {
+        if (b->stagingDir.isEmpty()) return;
+        QDir(b->stagingDir).removeRecursively();
+        unregisterStaging(b->stagingDir);
+    };
+    const auto fail = [&](const QString& why) {
+        // The staged images go with the batch; the list is untouched; those games stay unlisted, so the next
+        // run's diff sends them again.
+        dropStaging();
+        report.ok = false;
+        report.error = why;
+        tally_[key].failed += report.games;
+        if (errorOut) *errorOut = why;
+        if (onCommit_) onCommit_(report);
+        return false;
+    };
+    if (b->games.isEmpty())
+    {
+        dropStaging();
+        return true;
+    }
+
+    // THE ONE READ, reused -- unless the list changed since the batch opened (a scrape's write-back, say). Then
+    // it is read again, and a game it now lists is not added a second time.
+    QByteArray current = b->existing;
+    const QFileInfo lf(b->listPath);
+    const bool changed = lf.exists() != b->existed
+                      || (lf.exists() && (lf.size() != b->existingSize
+                                          || lf.lastModified().toMSecsSinceEpoch() != b->existingMtimeMs));
+    if (changed)
+    {
+        current.clear();
+        if (lf.exists())
+        {
+            QFile f(b->listPath);
+            if (!f.open(QIODevice::ReadOnly)) return fail(QStringLiteral("this device could not read that system's gamelist"));
+            current = f.readAll();
+        }
+        const GamelistStore::ListMatcher now = matcherOf(parseGamelist(current));
+        QList<Batch::Game> keep;
+        for (const Batch::Game& g : b->games)
+        {
+            if (!now.lists(g.rom)) { keep << g; continue; }
+            for (const auto& m : g.media) QFile::remove(b->stagingDir + QLatin1Char('/') + m.second);
+        }
+        b->games = keep;
+        report.games = int(keep.size());
+        if (keep.isEmpty())
+        {
+            dropStaging();
+            return true;
+        }
+    }
+
+    // An image name taken in images/ since it was staged is still not overwritten: that image leaves the entry.
+    QByteArray blocks;
+    for (Batch::Game& g : b->games)
+    {
+        QList<QPair<QString, QString>> kept;
+        for (const auto& m : g.media)
+        {
+            if (QFileInfo::exists(b->imagesDir + QLatin1Char('/') + m.second))
+                QFile::remove(b->stagingDir + QLatin1Char('/') + m.second);
+            else
+                kept << m;
+        }
+        if (kept.size() != g.media.size())
+        {
+            g.media = kept;
+            g.block = gamelistEntryXml(g.rom, g.fields, imagePaths(kept));
+        }
+        blocks += g.block;
+    }
+
+    // The images folder, when there is one, must really be a folder inside the system folder.
+    const QFileInfo imf(b->imagesDir);
+    if ((imf.exists() || imf.isSymLink()) && !insideSystem(b->sysDir, b->imagesDir))
+        return fail(QStringLiteral("that system's images folder is not inside it"));
+
+    // THE LIST, written once: a temporary file beside it, renamed over it only once it is whole.
+    QByteArray updated;
+    if (!insertGamelistEntry(current, blocks, updated))
+        return fail(QStringLiteral("that system's gamelist is not one this device can add to"));
+    QSaveFile save(b->listPath);
+    if (!save.open(QIODevice::WriteOnly)) return fail(QStringLiteral("this device could not write that system's gamelist"));
+    if (failPoint_ == FailPoint::AfterListTemp)
+    {
+        save.write(updated.left(updated.size() / 2));
+        save.cancelWriting();
+        return fail(QStringLiteral("the transfer was interrupted"));
+    }
+    if (failPoint_ == FailPoint::CommitFails)
+    {
+        save.write(updated);
+        save.cancelWriting();
+        return fail(QStringLiteral("this device could not write that system's gamelist"));
+    }
+    if (save.write(updated) != qint64(updated.size()) || !save.commit())
+        return fail(QStringLiteral("this device could not write that system's gamelist"));
+    ++listWrites_;
+    tally_[key].committed += report.games;
+    report.ok = true;
+
+    if (failPoint_ == FailPoint::BeforeImageMove)
+    {
+        // The test seam: stop exactly as a crash here would. The staging folder is no longer anyone's, so the
+        // next landing's sweep finishes the move.
+        if (!b->stagingDir.isEmpty()) unregisterStaging(b->stagingDir);
+        if (onCommit_) onCommit_(report);
+        return true;
+    }
+
+    // ONLY NOW do the images move in, beside the list that references them.
+    if (!b->stagingDir.isEmpty())
+    {
+        const bool haveImages = ensureImagesDir(b->sysDir, b->imagesDir);
+        int unplaced = 0;
+        for (const Batch::Game& g : b->games)
+            for (const auto& m : g.media)
+                if (!haveImages
+                    || !QFile::rename(b->stagingDir + QLatin1Char('/') + m.second, b->imagesDir + QLatin1Char('/') + m.second))
+                    ++unplaced;
+        if (unplaced > 0)
+            report.error = QStringLiteral("%1 image(s) could not be moved into that system's images folder").arg(unplaced);
+        dropStaging();
+    }
+    if (onCommit_) onCommit_(report);
+    return true;
+}
+
+GamelistFlushResult GamelistBatcher::flush(const QString& romsRoot, const QString& system)
+{
+    if (romsRoot.isEmpty()) return GamelistFlushResult();
+    QString resolved;
+    if (NameIndex(systemFoldersIn(romsRoot)).resolve(system, options_.caseInsensitive, resolved) != NameMatch::Found)
+        return GamelistFlushResult();
+    const QString key = romsRoot + QLatin1Char('/') + resolved;
+    commit(key, nullptr);
+    return tally_.take(key);
+}
+
+void GamelistBatcher::flushAll()
+{
+    const QStringList keys = batches_.keys();
+    for (const QString& k : keys) commit(k, nullptr);
+}
+
+int GamelistBatcher::pendingGames() const
+{
+    int n = 0;
+    for (const std::shared_ptr<Batch>& b : batches_) n += int(b->games.size());
+    return n;
+}
+
+void GamelistBatcher::abandonForTest()
+{
+    for (const std::shared_ptr<Batch>& b : batches_)
+        if (!b->stagingDir.isEmpty()) unregisterStaging(b->stagingDir);
+    batches_.clear();
+}
 
 } // namespace LibraryBundle
