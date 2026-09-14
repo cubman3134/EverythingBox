@@ -28,6 +28,12 @@ permissions:
 env:
   QT_VERSION: '6.8.3'
   SDL2_VERSION: '2.30.9'
+  # Every install-qt-action step pins aqtinstall and py7zr instead of taking the action's defaults. The defaults
+  # are part of the action's cache key, so a moved action tag changed them, missed the cache, and the cold
+  # install met an aqt that could not resolve Qt 6.8.3 for Android (#405). 3.3.0 is the first aqt that lists
+  # Android under all_os; 1.1.0 is v4.4.0's own default (its Windows Bad7zFile workaround).
+  AQT_VERSION: '==3.3.0'
+  PY7ZR_VERSION: '==1.1.0'
 
 jobs:
   # ---------------------------------------------------------------- Windows ---
@@ -43,9 +49,11 @@ jobs:
           submodules: recursive
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: windows
           target: desktop
           arch: win64_msvc2022_64
@@ -183,9 +191,11 @@ jobs:
         run: brew install mpv sdl2
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: mac
           target: desktop
           arch: clang_64
@@ -237,9 +247,11 @@ jobs:
 
       # Host (desktop) Qt first — qt-cmake for iOS chains to its build tools via QT_HOST_PATH.
       - name: Install Qt (host, macOS)
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: mac
           target: desktop
           arch: clang_64
@@ -249,9 +261,11 @@ jobs:
         run: echo "QT_HOST_DIR=$QT_ROOT_DIR" >> "$GITHUB_ENV"
 
       - name: Install Qt (iOS)
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: mac
           target: ios
           modules: 'qtmultimedia qtpdf qtspeech'
@@ -323,9 +337,11 @@ jobs:
             libspeechd2
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: linux
           target: desktop
           arch: linux_gcc_64
@@ -511,18 +527,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # An explicit package list. The action's default asks for the legacy 'tools' package, which cmdline-tools
+      # 16.0 no longer provides, and a missing package is fatal (#405). platforms;android-34 matches
+      # QT_ANDROID_TARGET_SDK_VERSION in native/CMakeLists.txt; the NDK is Qt 6.8's r26b (NDK_VERSION above).
       - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@v3
-      - name: Install NDK + platform
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;${{ env.NDK_VERSION }}'
+      - name: Point the build at the NDK
         run: |
-          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       # Host Qt (tools: moc/rcc/androiddeployqt run on the runner) ...
       - name: Install Qt (host desktop)
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
           host: linux
           target: desktop
           arch: linux_gcc_64
@@ -534,10 +556,14 @@ jobs:
         run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
       # ... and the Android Qt (per-ABI) that we actually link against.
       - name: Install Qt (Android ${{ matrix.name }})
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
         with:
           version: ${{ env.QT_VERSION }}
-          host: linux
+          aqtversion: ${{ env.AQT_VERSION }}
+          py7zrversion: ${{ env.PY7ZR_VERSION }}
+          # Qt 6.7+ publishes Android kits under all_os/android on download.qt.io; linux_x64/android stops at
+          # 6.7.3, so `host: linux` cannot resolve 6.8.3 on a cold install (#405).
+          host: all_os
           target: android
           arch: ${{ env.QT_ANDROID_ARCH }}
           # QtPdf isn't published for Android (PdfView is stubbed there); qtdeclarative (QtQuick/QtQml) is a
