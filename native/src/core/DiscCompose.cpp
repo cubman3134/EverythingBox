@@ -5,7 +5,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
+#if QT_CONFIG(process)
+#  include <QProcess>
+#endif
 #include <QStorageInfo>
 #include <QThread>
 #include <QUuid>
@@ -31,6 +33,16 @@ namespace
     {
         if (aborted()) { *error = DiscCompose::cancelledMessage(); return false; }
 
+#if !QT_CONFIG(process)
+        // iOS (#403): Qt has no QProcess there, and an app cannot start a separate tool binary anyway. Composing
+        // a disc image is a desktop job; say so rather than failing to compile.
+        Q_UNUSED(tool);
+        Q_UNUSED(args);
+        Q_UNUSED(kToolTimeoutMs);
+        Q_UNUSED(kPollSliceMs);
+        *error = QStringLiteral("the disc tool cannot run on this platform");
+        return false;
+#else
         QProcess p;
         p.start(tool, args);
         if (!p.waitForStarted(30000))
@@ -80,6 +92,7 @@ namespace
             return false;
         }
         return true;
+#endif // QT_CONFIG(process)
     }
 }
 

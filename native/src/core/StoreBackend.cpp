@@ -12,7 +12,9 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QObject>
-#include <QProcess>
+#if QT_CONFIG(process)
+#  include <QProcess>
+#endif
 #include <QProcessEnvironment>
 #include <QSettings>
 #include <QThreadPool>
@@ -132,6 +134,13 @@ storeback::ToolRun storeback::run(const QString& exe, const QStringList& args, i
     ToolRun r;
     if (exe.isEmpty()) return r;                   // started == false: "no such tool", a normal answer
 
+#if !QT_CONFIG(process)
+    // iOS (#403): Qt has no QProcess there and no store tool can be installed beside an app. The answer is the
+    // absent-tool one (started == false), which the caller already turns into its readable reason.
+    Q_UNUSED(args);
+    Q_UNUSED(timeoutMs);
+    return r;
+#else
     QProcess p;
     p.setProgram(exe);
     p.setArguments(args);
@@ -164,6 +173,7 @@ storeback::ToolRun storeback::run(const QString& exe, const QStringList& args, i
     // sentence either way, and a fifth status nobody can act on differently is noise.
     r.exitCode = (p.exitStatus() == QProcess::NormalExit) ? p.exitCode() : -1;
     return r;
+#endif // QT_CONFIG(process)
 }
 
 // ---- the listing cache ---------------------------------------------------------------------------------

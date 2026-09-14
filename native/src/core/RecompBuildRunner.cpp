@@ -5,7 +5,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
+#if QT_CONFIG(process)
+#  include <QProcess>
+#endif
 
 namespace recompbuild {
 
@@ -48,6 +50,13 @@ StepOutcome Runner::runStep(const Step& step)
     }
     if (!step.workDir.isEmpty()) QDir().mkpath(step.workDir);
 
+#if !QT_CONFIG(process)
+    // iOS (#403): Qt has no QProcess there and an app cannot run a compiler. A recomp build is a desktop job;
+    // this answers exactly like a program that would not start (started == false), which callers already handle.
+    writeLog(QStringLiteral("\n[EverythingBox] cannot run %1: this platform cannot start a program\n").arg(step.program));
+    out.elapsedMs = clock.elapsed();
+    return out;
+#else
     QProcess p;
     p.setProgram(step.program);
     p.setArguments(step.args);
@@ -138,6 +147,7 @@ StepOutcome Runner::runStep(const Step& step)
                  .arg(out.exitCode)
                  .arg(out.crashed && !out.cancelled ? QStringLiteral(", did not exit normally") : QString()));
     return out;
+#endif // QT_CONFIG(process)
 }
 
 }  // namespace recompbuild

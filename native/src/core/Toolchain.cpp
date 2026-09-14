@@ -16,7 +16,9 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QProcess>
+#if QT_CONFIG(process)
+#  include <QProcess>
+#endif
 #include <QStandardPaths>
 
 #include "AppPaths.h"
@@ -30,6 +32,14 @@ namespace {
 // broken install cannot hang the section that asked.
 QString banner(const QString& program, const QStringList& args, int timeoutMs = 4000)
 {
+#if !QT_CONFIG(process)
+    // iOS (#403): Qt has no QProcess there, and no compiler can run beside an app. An empty banner is the
+    // "did not answer" result, which leaves every version unset and lets decide() say there is no toolchain.
+    Q_UNUSED(program);
+    Q_UNUSED(args);
+    Q_UNUSED(timeoutMs);
+    return QString();
+#else
     QProcess p;
     p.setProcessChannelMode(QProcess::MergedChannels);
     // No inherited stdin. A tool that decides to prompt (an expired licence, a first-run notice) would
@@ -44,6 +54,7 @@ QString banner(const QString& program, const QStringList& args, int timeoutMs = 
         return QString();
     }
     return QString::fromLocal8Bit(p.readAll()).trimmed();
+#endif // QT_CONFIG(process)
 }
 
 // `which`, plus the places a Windows installer puts a program when the user did not tick "add to PATH" —

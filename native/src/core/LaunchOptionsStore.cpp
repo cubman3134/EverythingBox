@@ -6,8 +6,9 @@
 #include <QDateTime>
 #include <QHash>
 #include <QJsonDocument>
-#include <QProcess>       // splitCommand - the shell-style argv tokeniser buildArgs cuts with (issue #237)
 #include <QSettings>
+
+#include "CommandSplit.h"   // the shell-style argv tokeniser buildArgs cuts with (#237), QProcess-free (#403)
 
 // Shares the portable everythingbox.ini with the other per-item stores (same AppPaths::dataDir() posture).
 // Coherence with any other QSettings on the same file comes from every writer calling sync().
@@ -191,13 +192,14 @@ QString LaunchOpts::applyConfArg(const QString& resolved, const QString& confArg
 QStringList LaunchOpts::buildArgs(const QString& resolved, const QString& romNative)
 {
     QStringList args;
-    // Shell-style cut (issue #237). QProcess::splitCommand is the same tokeniser Qt uses for
-    // QProcess::startCommand: whitespace separates, a double-quoted run is ONE token, three consecutive
-    // double quotes are a literal quote, and a backslash is NOT an escape (so a quoted Windows path keeps its
-    // separators). With no double quote in the string it is exactly the plain space-split this replaced, which
-    // is why every shipping template tokenises byte-for-byte as before - probe_launchopts pins that against an
-    // independent oracle over the whole built-in registry.
-    const QStringList parts = QProcess::splitCommand(resolved);
+    // Shell-style cut (issue #237). CommandSplit::split is QProcess::splitCommand's algorithm written out
+    // (#403: iOS's Qt has no QProcess, and this file is in the iOS app): whitespace separates, a double-quoted
+    // run is ONE token, three consecutive double quotes are a literal quote, and a backslash is NOT an escape
+    // (so a quoted Windows path keeps its separators). With no double quote in the string it is exactly the
+    // plain space-split this replaced, which is why every shipping template tokenises byte-for-byte as before -
+    // probe_launchopts pins that against an independent oracle over the whole built-in registry, and
+    // probe_contentinstall pins the splitter against QProcess::splitCommand itself on desktop.
+    const QStringList parts = CommandSplit::split(resolved);
     for (QString a : parts)
     {
         // Placeholders are substituted AFTER the cut, per token, so a ROM path containing spaces lands inside
