@@ -352,7 +352,7 @@ bool ComicView::openComic(const QString& path, QString* error)
         if (!buf.open(QIODevice::ReadOnly)) { pageSizes_.append(QSize()); continue; }
         pageSizes_.append(QImageReader(&buf).size());
     }
-    stripCache_.clear();
+    clearStripCache();   // #286: and a new generation, so a decode for the old pages is dropped
     railCache_.clear();
     // Leaving photo mode. openFolder() clears pages_ on the way in, and this is the same door in the other
     // direction: MainWindow reuses ONE ComicView for both, so a comic opened after a photo folder was viewed
@@ -419,7 +419,7 @@ bool ComicView::openFolder(const QString& folder, const QString& startFile, QStr
     half_ = -1;
     resumeHalf_ = ComicRead::kNoStoredHalf;   // #285: a photo folder carries no resume, so it names no half
     pageSizes_.clear();
-    stripCache_.clear();
+    clearStripCache();   // #286: and a new generation, so a decode for the old pages is dropped
     railCache_.clear();
     applyMode();
 

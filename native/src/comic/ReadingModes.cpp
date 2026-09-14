@@ -236,6 +236,49 @@ QVector<int> prefetchWindow(int current, int total, int radius)
     return out;
 }
 
+// ---- Webtoon: decoding off the paint path (#286) -------------------------------------------------------------
+
+QVector<int> stripRequests(const QVector<int>& window, const QSet<int>& cached,
+                           const QHash<int, quint64>& inFlight, quint64 generation)
+{
+    QVector<int> out;
+    out.reserve(window.size());
+    for (int page : window)
+    {
+        if (cached.contains(page)) continue;
+        const auto it = inFlight.constFind(page);
+        if (it != inFlight.constEnd() && it.value() == generation) continue;   // an older request does not count
+        out.append(page);
+    }
+    return out;
+}
+
+bool acceptStripResult(const StripResult& r, quint64 generation, int width, const QVector<int>& window)
+{
+    if (r.generation != generation) return false;   // the cache it was meant for has been emptied since
+    if (r.width != width) return false;             // scaled for a strip that is no longer this wide
+    return window.contains(r.page);                 // the reader has moved on; caching it would leak
+}
+
+bool stripJobWanted(int page, quint64 jobGeneration, quint64 liveGeneration, int windowFirst, int windowLast)
+{
+    return jobGeneration == liveGeneration && page >= windowFirst && page <= windowLast;
+}
+
+int stripLastVisible(const Strip& s, int y, int viewportH)
+{
+    if (s.count() == 0) return 0;
+    int p = 0;
+    // The last pixel row on screen is y + viewportH - 1; stripPositionAt clamps it to the strip's end.
+    stripPositionAt(s, y + qMax(1, viewportH) - 1, &p, nullptr);
+    return p;
+}
+
+QVector<int> stripWindow(const Strip& s, int current, int lastVisible)
+{
+    return prefetchWindow(current, s.count(), qMax(kPrefetchRadius, lastVisible - current));
+}
+
 // ---- The store key -------------------------------------------------------------------------------------------
 
 QString seriesKeyFor(const QString& comicInfoSeries, const QString& filePath)

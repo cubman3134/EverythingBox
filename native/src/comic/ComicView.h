@@ -12,6 +12,7 @@
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
+#include <memory>
 #include "ReadingModes.h"          // #154: the mode, the split/crop/filter rules, the webtoon strip
 #include "../theme2/HostedReader.h"
 
@@ -19,6 +20,7 @@ class QScrollArea;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QThreadPool;
 // #154: the two surfaces webtoon mode adds — the continuous strip and its thumbnail rail. Both are plain
 // QWidgets defined in ComicView.cpp: they carry no signals of their own, are never named outside it and so
 // need no header and no moc. They live INSIDE the reader rather than in the themed chrome on purpose —
@@ -50,6 +52,7 @@ class ComicView : public QWidget, public HostedReader
     Q_OBJECT
 public:
     explicit ComicView(QWidget* parent = nullptr);
+    ~ComicView() override;   // #286: stands the strip's decode workers down before the view goes (ComicViewModes.cpp)
 
     bool openComic(const QString& path, QString* error = nullptr);
 
@@ -188,8 +191,14 @@ private:
     bool pageSplits(int index) const;   // does page `index` split, under the override and this viewport
     QSize rawPageSize(int index) const; // the page's own pixel size, from its header — no decode
     QImage preparedPage(int index, int half) const;            // decode + crop + split + filter
-    QPixmap stripPixmap(int index);     // webtoon: the prepared page scaled to the strip's width (cached)
+    QPixmap stripReady(int index) const; // webtoon: the page at strip width IF a worker has delivered it — never decodes
     QPixmap railThumb(int index);       // webtoon: a small thumbnail for the rail (cached)
+    // #286: the strip's pages are decoded on stripPool_, never on the paint path. See ComicViewModes.cpp.
+    struct StripDecodeShared;           // the live generation + window bounds a worker re-reads when it starts
+    void clearStripCache();             // empty stripCache_ AND bump the generation, so in-flight work is dropped
+    void requestStripPages();           // queue the window's pages that are neither cached nor already in flight
+    void onStripPageReady(int page, quint64 generation, int width, const QImage& image, bool skipped);
+    void publishStripWindow();          // hand the current generation + window bounds to the workers
     void updateBarButtons();            // relabel the classic bar's five per-series buttons
     ComicRead::PageOptions optionsFor(int half) const;
 
@@ -232,6 +241,13 @@ private:
     QHash<int, QPixmap> stripCache_;  // webtoon: prepared pages at strip width, held to the prefetch window
     QHash<int, QPixmap> railCache_;   // webtoon: rail thumbnails (small; kept for the whole comic)
     int  stripCacheWidth_ = 0;    // the width stripCache_ was built at — a resize invalidates it whole
+    // #286: off-paint decoding. stripGen_ is bumped by every clearStripCache() and never 0 (0 is "closing").
+    QThreadPool* stripPool_ = nullptr;                  // dedicated, 2 threads; a child of this view
+    std::shared_ptr<StripDecodeShared> stripShared_;    // shared by value with every queued job
+    quint64 stripGen_ = 1;
+    QVector<int> stripWindow_;                          // the current window, in prefetchWindow's priority order
+    QHash<int, quint64> stripInFlight_;                 // page -> the generation its outstanding request was made at
+    int  stripLastVisible_ = -1;                        // the last page on screen when the window was computed
     bool railFocus_ = false;      // the rail holds the key cursor (Up/Down step it, Enter jumps)
     int  railIndex_ = 0;
     double resumeFraction_ = 0.0; // webtoon: the stored fraction into the resume page, until it is applied

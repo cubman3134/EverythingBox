@@ -17,26 +17,33 @@
 
 #include <QBuffer>
 #include <QColor>
+#include <QCoreApplication>
 #include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QTimer>
+#include <QThreadPool>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
+#include <atomic>
 #include <iterator>
 
 namespace
 {
     const QColor kPageBg(0x15, 0x17, 0x1c);
+    const QColor kPlaceholderBg(0x26, 0x2B, 0x33);    // #286: a page still being decoded — visibly not the gutter
+    const QColor kPlaceholderText(0x7A, 0x86, 0x94);
     const QColor kRailBg(0x0E, 0x12, 0x18);
     const QColor kRailEdge(0x22, 0x30, 0x3C);
     const QColor kRailSel(0x3B, 0x71, 0xB0);
@@ -53,6 +60,10 @@ namespace
 // that happens to have been cut into files, and any furniture between the pieces is a seam its artist did not
 // draw. Only the pages that intersect the exposed rectangle are asked for, so the paint cost is a screenful
 // however long the chapter is.
+//
+// #286: AND THE PAINT NEVER DECODES. It draws what the workers have already delivered; a page that is not ready
+// yet is a flat placeholder of EXACTLY its laid-out height (from the image header, like every other offset in
+// the strip), so nothing below it moves when the real page lands and only that page's rectangle is repainted.
 class ComicStripWidget : public QWidget
 {
 public:
@@ -70,9 +81,33 @@ protected:
             const int top = s.tops[i];
             if (top + s.heights[i] - 1 < y0) continue;
             if (top > y1) break;                       // the strip is in order, so the first miss ends it
-            const QPixmap pm = owner_->stripPixmap(i);
-            if (pm.isNull()) continue;
-            p.drawPixmap((width() - pm.width()) / 2, top, pm);
+            const QPixmap pm = owner_->stripReady(i);
+            if (!pm.isNull())
+            {
+                p.drawPixmap((width() - pm.width()) / 2, top, pm);
+                continue;
+            }
+            paintPlaceholder(p, e->rect(), i, QRect((width() - s.width) / 2, top, s.width, s.heights[i]));
+        }
+    }
+
+private:
+    // The page number is repeated once per viewport height down the placeholder, at positions fixed in STRIP
+    // coordinates: a webtoon page is many screens tall, so a single centred label would usually be off screen,
+    // and a label that followed the viewport would be smeared by the scroll area's blit as it moved.
+    void paintPlaceholder(QPainter& p, const QRect& exposed, int index, const QRect& slot)
+    {
+        p.fillRect(slot & exposed, kPlaceholderBg);
+        QFont f = font();
+        if (f.pointSizeF() > 0) f.setPointSizeF(f.pointSizeF() * 0.9);
+        p.setFont(f);
+        p.setPen(kPlaceholderText);
+        const int step = qMax(200, owner_->scroll_->viewport()->height());
+        const QString label = QString::number(index + 1);
+        for (int y = slot.top() + qMin(slot.height(), step) / 2; y < slot.top() + slot.height(); y += step)
+        {
+            const QRect r(slot.left(), y - 12, slot.width(), 24);
+            if (r.intersects(exposed)) p.drawText(r, Qt::AlignCenter, label);
         }
     }
 
@@ -169,6 +204,28 @@ private:
     int offset_ = 0;
 };
 
+// ---- Off-paint decoding (#286) -----------------------------------------------------------------------------
+// What a queued job may read of the view: NOTHING of ComicView itself, only this block, which the view and
+// every job share by value. The view writes it on the GUI thread; a job reads it when it starts (and again
+// after the decode, the expensive half) and stands down if its generation is gone or its page left the window.
+// The bounds are ONE atomic, packed, so a job never reads a first from one window and a last from another.
+struct ComicView::StripDecodeShared
+{
+    std::atomic<quint64> generation{ 1 };
+    std::atomic<quint64> bounds{ pack(0, -1) };
+
+    static quint64 pack(int first, int last)
+    {
+        return (quint64(quint32(first)) << 32) | quint64(quint32(last));
+    }
+    bool wanted(int page, quint64 jobGeneration) const
+    {
+        const quint64 b = bounds.load();
+        return ComicRead::stripJobWanted(page, jobGeneration, generation.load(),
+                                         int(qint32(quint32(b >> 32))), int(qint32(quint32(b))));
+    }
+};
+
 // ---- Construction ----------------------------------------------------------------------------------------
 
 void ComicView::installModeControls()
@@ -204,6 +261,31 @@ void ComicView::installModeSurfaces(QVBoxLayout* column)
     column->addWidget(row, 1);
 
     connect(scroll_->verticalScrollBar(), &QScrollBar::valueChanged, this, &ComicView::onStripScrolled);
+
+    // #286: the strip's decode pool. DEDICATED, not QThreadPool::globalInstance() — MetaCache, the store backend
+    // and others queue work there, and a chapter of 12000-px decodes must neither wait behind them nor starve
+    // them. TWO threads: the landed page and the one after it decode side by side (the pair a reader sees first
+    // after a jump), while the GUI thread, mpv and the rest of the app keep cores of their own; and each job
+    // transiently holds a full-size decode plus its strip-width copy (~85 MB for a 900x9000 page), so two is
+    // also the memory ceiling of a flick. More threads would only decode pages further from the reader sooner.
+    stripShared_ = std::make_shared<StripDecodeShared>();
+    stripPool_ = new QThreadPool(this);
+    stripPool_->setObjectName(QStringLiteral("ComicStripDecode"));
+    stripPool_->setMaxThreadCount(2);
+}
+
+ComicView::~ComicView()
+{
+    // No live generation is ever 0, so every job still queued stands down the moment it starts, and one that is
+    // mid-decode stands down before it scales. clear() drops the ones that have not started at all; waitForDone
+    // then waits only for the (at most two) running decodes. Their deliveries hold a QPointer to this view and
+    // are posted to the application object, so one that lands after this destructor finds a null pointer.
+    if (stripShared_) stripShared_->generation.store(0);
+    if (stripPool_)
+    {
+        stripPool_->clear();
+        stripPool_->waitForDone();
+    }
 }
 
 // ---- The per-series options ------------------------------------------------------------------------------
@@ -253,7 +335,11 @@ void ComicView::applyMode()
     }
     else
     {
-        stripCache_.clear();
+        // #286: leaving the strip empties the window too, so every decode still queued for it stands down.
+        clearStripCache();
+        stripWindow_.clear();
+        stripLastVisible_ = -1;
+        publishStripWindow();
         railFocus_ = false;
     }
     if (railWidget_) railWidget_->setVisible(webtoon && railOn_);
@@ -264,7 +350,7 @@ void ComicView::rebuildStrip()
 {
     const int vw = qMax(64, scroll_->viewport()->width() - 4);
     strip_ = ComicRead::stripLayout(pageSizes_, vw);
-    if (stripCacheWidth_ != vw) { stripCache_.clear(); stripCacheWidth_ = vw; }
+    if (stripCacheWidth_ != vw) { clearStripCache(); stripCacheWidth_ = vw; }   // #286: a new generation too
     if (stripWidget_)
     {
         stripWidget_->resize(qMax(vw, scroll_->viewport()->width()), qMax(1, strip_.totalHeight));
@@ -308,7 +394,15 @@ void ComicView::onStripScrolled()
     int p = 0; double f = 0.0;
     ComicRead::stripPositionAt(strip_, scroll_->verticalScrollBar()->value(), &p, &f);
     resumeFraction_ = f;          // every scroll, not just every page: this IS the resume position
-    if (p == current_) return;
+    if (p == current_)
+    {
+        // #286: the page at the top has not changed, but the bottom edge may have crossed onto a page the
+        // window does not reach yet (only possible with pages shorter than a third of the viewport).
+        if (ComicRead::stripLastVisible(strip_, scroll_->verticalScrollBar()->value(),
+                                        scroll_->viewport()->height()) != stripLastVisible_)
+            prefetchAround(p);
+        return;
+    }
 
     current_ = p;
     prefetchAround(p);
@@ -323,19 +417,115 @@ void ComicView::onStripScrolled()
 
 // The +/-3 window, and the eviction that makes it a window rather than a leak: a chapter of full-width
 // pixmaps is tens of megabytes, and a reader who scrolls to the end of a 200-page strip would otherwise hold
-// all of it. The decode itself is deferred to the next event-loop turn so a flick does not decode seven pages
-// inside the scroll event that started it.
+// all of it. #286: the decode is no longer done here or on the next event-loop turn — the window is handed to
+// the workers (requestStripPages), and whatever they were still going to do for the previous window stands down.
 void ComicView::prefetchAround(int page)
 {
-    const QVector<int> want = ComicRead::prefetchWindow(page, pageTotal());
+    stripLastVisible_ = ComicRead::stripLastVisible(strip_, scroll_->verticalScrollBar()->value(),
+                                                    scroll_->viewport()->height());
+    stripWindow_ = ComicRead::stripWindow(strip_, page, stripLastVisible_);
     for (auto it = stripCache_.begin(); it != stripCache_.end(); )
-        it = want.contains(it.key()) ? std::next(it) : stripCache_.erase(it);
+        it = stripWindow_.contains(it.key()) ? std::next(it) : stripCache_.erase(it);
+    publishStripWindow();
+    requestStripPages();
+}
 
-    QTimer::singleShot(0, this, [this, want] {
-        if (mode_ != ComicRead::Mode::Webtoon) return;
-        for (int i : want) stripPixmap(i);
-        if (stripWidget_) stripWidget_->update();
-    });
+// ---- The strip's workers (#286) --------------------------------------------------------------------------
+
+// Every clear of the strip cache is a new generation: whatever a worker is still preparing was prepared for
+// pages (or a width, or a filter) that are gone, and ComicRead::acceptStripResult drops it when it lands.
+void ComicView::clearStripCache()
+{
+    stripCache_.clear();
+    ++stripGen_;
+    publishStripWindow();
+}
+
+void ComicView::publishStripWindow()
+{
+    if (!stripShared_) return;
+    int first = 0, last = -1;
+    if (!stripWindow_.isEmpty())
+    {
+        first = *std::min_element(stripWindow_.cbegin(), stripWindow_.cend());
+        last  = *std::max_element(stripWindow_.cbegin(), stripWindow_.cend());
+    }
+    stripShared_->bounds.store(StripDecodeShared::pack(first, last));
+    stripShared_->generation.store(stripGen_);
+}
+
+void ComicView::requestStripPages()
+{
+    if (!stripPool_ || !stripShared_ || mode_ != ComicRead::Mode::Webtoon || photoMode_) return;
+    QSet<int> cached;
+    for (auto it = stripCache_.cbegin(); it != stripCache_.cend(); ++it) cached.insert(it.key());
+    const QVector<int> ask = ComicRead::stripRequests(stripWindow_, cached, stripInFlight_, stripGen_);
+    if (ask.isEmpty()) return;
+
+    // Everything a job needs, BY VALUE: the encoded bytes (implicitly shared, so this is a reference count and
+    // not a copy), the options, the width, the page, the generation, the shared block and a guarded pointer
+    // back. A job never dereferences the view; it only hands its result to the application object's queue.
+    const ComicRead::PageOptions opts = optionsFor(-1);
+    const int width = qMax(1, strip_.width);
+    const quint64 gen = stripGen_;
+    const std::shared_ptr<StripDecodeShared> shared = stripShared_;
+    const QPointer<ComicView> self(this);
+    for (int page : ask)
+    {
+        if (page < 0 || page >= pages_.size()) continue;
+        stripInFlight_.insert(page, gen);
+        const QByteArray bytes = pages_[page];
+        stripPool_->start([bytes, opts, width, page, gen, shared, self] {
+            QImage out;
+            bool skipped = true;
+            if (shared->wanted(page, gen))
+            {
+                QImage img;
+                img.loadFromData(bytes);
+                if (shared->wanted(page, gen))      // the decode is the long half: look again before scaling
+                {
+                    skipped = false;
+                    if (!img.isNull()) img = ComicRead::preparePage(img, opts);
+                    if (!img.isNull())
+                    {
+                        out = img.scaledToWidth(width, Qt::SmoothTransformation);
+                        // In the format a raster QPixmap wraps as-is, so the GUI thread's fromImage is not a copy.
+                        const QImage::Format fmt = out.hasAlphaChannel() ? QImage::Format_ARGB32_Premultiplied
+                                                                         : QImage::Format_RGB32;
+                        if (out.format() != fmt) out = out.convertToFormat(fmt);
+                    }
+                }
+            }
+            // A posted call, not a signal: it runs on the GUI thread on a later event-loop turn of its own, never
+            // inside some other emission, and the view it names may have been closed and destroyed by then.
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [self, page, gen, width, out, skipped] {
+                if (ComicView* v = self.data()) v->onStripPageReady(page, gen, width, out, skipped);
+            }, Qt::QueuedConnection);
+        });
+    }
+}
+
+void ComicView::onStripPageReady(int page, quint64 generation, int width, const QImage& image, bool skipped)
+{
+    // The in-flight mark is cleared only by the request that set it: an answer from an older generation must not
+    // unmark the newer request for the same page that is still running.
+    const auto it = stripInFlight_.find(page);
+    if (it != stripInFlight_.end() && it.value() == generation) stripInFlight_.erase(it);
+    if (mode_ != ComicRead::Mode::Webtoon || photoMode_) return;
+
+    const ComicRead::StripResult r{ page, generation, width };
+    if (skipped || !ComicRead::acceptStripResult(r, stripGen_, qMax(1, strip_.width), stripWindow_))
+    {
+        // Dropped. If the page is still wanted under the CURRENT state (a job that stood down against a window
+        // that has since come back, say), this asks for it again; otherwise it asks for nothing, because every
+        // page it could name is already cached or in flight.
+        requestStripPages();
+        return;
+    }
+    // A page that would not decode is cached as a null pixmap: it stays a placeholder and is not asked for again.
+    stripCache_.insert(page, image.isNull() ? QPixmap() : QPixmap::fromImage(image));
+    if (stripWidget_ && page < strip_.count())
+        stripWidget_->update(QRect(0, strip_.tops[page], stripWidget_->width(), strip_.heights[page]));
 }
 
 void ComicView::currentPosition(int* page, double* fraction) const
@@ -382,16 +572,11 @@ QImage ComicView::preparedPage(int index, int half) const
     return ComicRead::preparePage(src, optionsFor(half));
 }
 
-QPixmap ComicView::stripPixmap(int index)
+// #286: a cache read and nothing else. The paint path calls this for every page on screen, so it must never be
+// the thing that decodes — a page that is not here yet is a placeholder, and the workers are already on it.
+QPixmap ComicView::stripReady(int index) const
 {
-    const auto it = stripCache_.constFind(index);
-    if (it != stripCache_.constEnd()) return it.value();
-    if (index < 0 || index >= pageTotal()) return QPixmap();
-    const QImage img = preparedPage(index, -1);
-    if (img.isNull()) return QPixmap();
-    const QPixmap pm = QPixmap::fromImage(img.scaledToWidth(qMax(1, strip_.width), Qt::SmoothTransformation));
-    stripCache_.insert(index, pm);
-    return pm;
+    return stripCache_.value(index);
 }
 
 // A rail thumbnail is decoded SCALED (QImageReader::setScaledSize), so a 800x12000 webtoon page costs a
@@ -454,7 +639,7 @@ void ComicView::toggleBorderCrop()
     if (photoMode_) return;
     crop_ = !crop_;
     writeOption(ComicRead::Opt::kCrop, crop_ ? 1 : 0);
-    stripCache_.clear();
+    clearStripCache();   // #286: a new generation (showPage below re-requests the window in webtoon mode)
     showPage(current_);
     updateBarButtons();
     emit pageInfoChanged();
@@ -465,9 +650,14 @@ void ComicView::cycleColorFilter()
     if (photoMode_) return;
     filter_ = ComicRead::Filter((int(filter_) + 1) % 5);
     writeOption(ComicRead::Opt::kFilter, int(filter_));
-    stripCache_.clear();
+    clearStripCache();   // #286: a new generation, so a page still being tinted the old way is dropped
     railCache_.clear();
-    if (mode_ == ComicRead::Mode::Webtoon) { if (stripWidget_) stripWidget_->update(); if (railWidget_) railWidget_->update(); }
+    if (mode_ == ComicRead::Mode::Webtoon)
+    {
+        requestStripPages();   // the paint no longer decodes, so the re-tinted window has to be asked for
+        if (stripWidget_) stripWidget_->update();
+        if (railWidget_) railWidget_->update();
+    }
     else showPage(current_);
     updateBarButtons();
     emit pageInfoChanged();

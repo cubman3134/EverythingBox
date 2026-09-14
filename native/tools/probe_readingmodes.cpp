@@ -394,6 +394,78 @@ int main()
         CHECK(ComicRead::prefetchWindow(5, 100, 3).size() == 7);
     }
 
+    // ---- 6b. Decoding off the paint path (#286) ----------------------------------------------------------
+    {
+        using ComicRead::StripResult;
+        const QVector<int> win = ComicRead::prefetchWindow(10, 100);          // 10, 11, 9, 12, 8, 13, 7
+
+        // A rail jump lands where nothing is cached or in flight: every page of the window is requested, the
+        // landed page FIRST, and in prefetchWindow's own order after it.
+        const QVector<int> jump = ComicRead::stripRequests(win, {}, {}, 1);
+        CHECK(jump == win);
+        CHECK(!jump.isEmpty() && jump.first() == 10);
+
+        // Already cached, and already in flight under THIS generation: neither is asked for twice. The order
+        // of what is left is still the window's.
+        const QSet<int> cached{ 11, 8 };
+        const QHash<int, quint64> flying{ { 12, quint64(1) }, { 9, quint64(1) } };
+        CHECK(ComicRead::stripRequests(win, cached, flying, 1) == QVector<int>({ 10, 13, 7 }));
+        // A page cached AND in flight is still not requested.
+        CHECK(ComicRead::stripRequests({ 4 }, { 4 }, { { 4, quint64(1) } }, 1).isEmpty());
+        // Pages outside the window are never requested, whatever the sets say about them.
+        CHECK(!ComicRead::stripRequests(win, {}, { { 50, quint64(1) } }, 1).contains(50));
+
+        // A GENERATION BUMP re-requests: the in-flight marks were made under generation 1, the cache has been
+        // cleared since (generation 2), so those old requests will be dropped when they land and the pages
+        // must be asked for again now.
+        CHECK(ComicRead::stripRequests(win, {}, flying, 2) == win);
+        CHECK(ComicRead::stripRequests(win, cached, flying, 2) == QVector<int>({ 10, 9, 12, 13, 7 }));
+
+        // An empty window asks for nothing.
+        CHECK(ComicRead::stripRequests({}, {}, {}, 1).isEmpty());
+
+        // ACCEPT: the current generation, the current width, a page inside the current window.
+        const StripResult current{ 12, 7, 800 };
+        CHECK(ComicRead::acceptStripResult(current, 7, 800, win));
+        // DROP: a stale generation (older, and — defensively — newer).
+        CHECK(!ComicRead::acceptStripResult(StripResult{ 12, 6, 800 }, 7, 800, win));
+        CHECK(!ComicRead::acceptStripResult(StripResult{ 12, 8, 800 }, 7, 800, win));
+        // DROP: a stale width (the strip was resized while the page was being scaled).
+        CHECK(!ComicRead::acceptStripResult(StripResult{ 12, 7, 799 }, 7, 800, win));
+        // DROP: a page the window has moved away from, even at the right generation and width.
+        CHECK(!ComicRead::acceptStripResult(StripResult{ 40, 7, 800 }, 7, 800, win));
+        CHECK(!ComicRead::acceptStripResult(StripResult{ 14, 7, 800 }, 7, 800, win));   // one past the edge
+        CHECK(ComicRead::acceptStripResult(StripResult{ 13, 7, 800 }, 7, 800, win));    // the edge itself
+        CHECK(!ComicRead::acceptStripResult(StripResult{ -1, 7, 800 }, 7, 800, win));
+        CHECK(!ComicRead::acceptStripResult(current, 7, 800, {}));                       // no window at all
+
+        // THE WORKER'S START CHECK: a job does nothing once its generation is gone or its page left the window.
+        CHECK(ComicRead::stripJobWanted(12, 3, 3, 7, 13));
+        CHECK(ComicRead::stripJobWanted(7, 3, 3, 7, 13) && ComicRead::stripJobWanted(13, 3, 3, 7, 13));
+        CHECK(!ComicRead::stripJobWanted(12, 2, 3, 7, 13));
+        CHECK(!ComicRead::stripJobWanted(6, 3, 3, 7, 13));
+        CHECK(!ComicRead::stripJobWanted(14, 3, 3, 7, 13));
+        CHECK(!ComicRead::stripJobWanted(12, 3, 3, 0, -1));                               // an empty window
+
+        // THE WINDOW NEVER EXCLUDES A PAGE ON SCREEN. Tall pages: the viewport shows one page, and the window
+        // is prefetchWindow's +/-3 exactly.
+        const ComicRead::Strip tall = ComicRead::stripLayout(QVector<QSize>(30, QSize(900, 9000)), 900);
+        CHECK(ComicRead::stripLastVisible(tall, ComicRead::stripOffset(tall, 12, 0.5), 700) == 12);
+        CHECK(ComicRead::stripLastVisible(tall, tall.tops[12] + 9000 - 100, 700) == 13);   // straddling a seam
+        CHECK(ComicRead::stripWindow(tall, 12, 13) == ComicRead::prefetchWindow(12, 30));
+        CHECK(ComicRead::stripWindow(tall, 12, 12) == ComicRead::prefetchWindow(12, 30));
+        // Short pages (50 px each at this width): a 400 px viewport at the top shows pages 0..7, which is past
+        // +3, so the radius widens to reach page 7 — and keeps prefetchWindow's order.
+        const ComicRead::Strip shortPages = ComicRead::stripLayout(QVector<QSize>(20, QSize(100, 50)), 100);
+        CHECK(ComicRead::stripLastVisible(shortPages, 0, 400) == 7);
+        CHECK(ComicRead::stripLastVisible(shortPages, 25, 400) == 8);                       // 25..424 reaches 8
+        CHECK(ComicRead::stripLastVisible(shortPages, 950, 400) == 19);                     // clamped to the end
+        CHECK(ComicRead::stripWindow(shortPages, 0, 7) == ComicRead::prefetchWindow(0, 20, 7));
+        CHECK(ComicRead::stripWindow(shortPages, 0, 7).contains(7));
+        CHECK(ComicRead::stripLastVisible(ComicRead::stripLayout({}, 100), 0, 400) == 0);
+        CHECK(ComicRead::stripWindow(ComicRead::stripLayout({}, 100), 0, 0).isEmpty());
+    }
+
     // ---- 7. The colour filters ---------------------------------------------------------------------------
     {
         const QRgb px = qRgb(200, 100, 50);
