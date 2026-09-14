@@ -342,8 +342,32 @@ void ComicView::applyMode()
         publishStripWindow();
         railFocus_ = false;
     }
-    if (railWidget_) railWidget_->setVisible(webtoon && railOn_);
+    if (railWidget_) railWidget_->setVisible(ComicRead::railShown(webtoon, railOn_));
     updateBarButtons();
+}
+
+// #397: which of this reader's pixels are its own controls, for the themed host's pointer filter. The geometry
+// is read live and mapped into this widget's coordinates; the decision is ComicRead::ownsPointerAt, which the
+// probe drives. The rail's "shown" is the same rule applyMode shows it by, not the widget's visibility, so the
+// answer does not depend on whether the reader itself is on screen yet.
+bool ComicView::ownsPointerAt(const QPoint& readerPos) const
+{
+    const auto rectIn = [this](const QWidget* w) {
+        return w ? QRect(w->mapTo(this, QPoint(0, 0)), w->size()) : QRect();
+    };
+    ComicRead::PointerControls c;
+    c.railShown = railWidget_ && ComicRead::railShown(mode_ == ComicRead::Mode::Webtoon && !photoMode_, railOn_);
+    c.rail = rectIn(railWidget_);
+    if (scroll_)
+    {
+        const QScrollBar* vb = scroll_->verticalScrollBar();
+        const QScrollBar* hb = scroll_->horizontalScrollBar();
+        c.vBarShown = vb && vb->isVisibleTo(this);
+        c.vBar = rectIn(vb);
+        c.hBarShown = hb && hb->isVisibleTo(this);
+        c.hBar = rectIn(hb);
+    }
+    return ComicRead::ownsPointerAt(readerPos, c);
 }
 
 void ComicView::rebuildStrip()
@@ -668,7 +692,7 @@ void ComicView::toggleThumbnailRail()
     if (photoMode_) return;
     railOn_ = !railOn_;
     writeOption(ComicRead::Opt::kRail, railOn_ ? 1 : 0);
-    const bool visible = railOn_ && mode_ == ComicRead::Mode::Webtoon;
+    const bool visible = ComicRead::railShown(mode_ == ComicRead::Mode::Webtoon, railOn_);   // photoMode_ returned above
     if (railWidget_)
     {
         railWidget_->setVisible(visible);

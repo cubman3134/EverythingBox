@@ -185,4 +185,39 @@ inline Kind longPressAction(const Config& cfg, double x, double y, double vw, do
     return Kind::Select;
 }
 
+// ---- Who a pointer press belongs to (#397) -------------------------------------------------------------
+
+// A mouse press inside the reader: the HOST's (it runs the tap-zone map on release) or the READER's (it
+// reaches the widget under the cursor untouched)?
+//
+//   1. A point the reader says is one of its OWN CONTROLS (a comic's thumbnail rail, a scroll bar) is the
+//      reader's. This is checked before the top band on purpose: the rail runs the full height of the reader,
+//      so its top slots sit under the band, and the band is an invisible zone while the rail is a control you
+//      can see. The band still covers the rest of the top of the page.
+//   2. The top band is the host's: that is the menu.
+//   3. Below it, a reader that handles its own clicks (a book: it pages and follows footnote links) keeps
+//      them; one that does not (a pdf, a comic's page) gives them to the zone map.
+inline bool claimsClick(double y, double topBandPx, bool readerHandlesClicks, bool readerOwnsPoint)
+{
+    if (readerOwnsPoint) return false;
+    if (y <= topBandPx) return true;
+    return !readerHandlesClicks;
+}
+
+// Who a touch sequence belongs to, decided ONCE from where its first finger went down.
+//   Inert  - it started in the OS's edge band: consumed and ignored (#147), even over the reader's own
+//            controls, because the rail sits against the right edge and a system back swipe must not jump it.
+//   Reader - it started on one of the reader's own controls: not consumed, so Qt synthesizes the mouse press
+//            the control already understands, and no tap, swipe or pinch is run for it.
+//   Host   - everything else: tap zones, swipe, long-press and pinch, as before.
+enum class TouchOwner { Inert, Reader, Host };
+
+inline TouchOwner touchStartOwner(const Config& cfg, double x, double y, double vw, double vh,
+                                  bool readerOwnsPoint)
+{
+    if (inertStart(cfg, x, y, vw, vh)) return TouchOwner::Inert;
+    if (readerOwnsPoint) return TouchOwner::Reader;
+    return TouchOwner::Host;
+}
+
 } // namespace ReaderGestures

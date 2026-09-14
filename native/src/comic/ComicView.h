@@ -112,6 +112,9 @@ public:
     int  currentPage() const override { return current_ + 1; } // 1-based (leftmost page of the current spread)
     int  pageCount()  const override { return qMax(1, pageTotal()); }
     int  chromeTopReserve() const override { return 38; } // themed top strip height (no reserved page inset)
+    // #397: the thumbnail rail (while shown) and the scroll area's bars are the comic's own controls, so the
+    // themed host leaves presses on them alone; the page itself stays the tap-zone map.
+    bool ownsPointerAt(const QPoint& readerPos) const override;
     void zoomDelta(int steps) override;  // + = zoom in, - = zoom out (per step, matching the +/- buttons)
     void fitWidth() override;
     void setTwoUp(bool on) override;     // enable/disable the double-page spread preference

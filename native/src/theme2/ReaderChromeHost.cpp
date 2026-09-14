@@ -785,10 +785,19 @@ void ReaderChromeHost::watchReaderTree()
 // follows an in-book footnote link, and swallowing those to run a zone map would break both. A pdf and a comic
 // do not handle the mouse at all, so without this a finger could page them and a mouse could not — the same
 // split that left the menu band answering only touch.
+//
+// Issue #397: a comic DOES have controls of its own inside the widget - the webtoon thumbnail rail and the scroll
+// bars - and "every point below the band" swallowed them too, so a mouse could never jump the rail. The reader is
+// asked first (HostedReader::ownsPointerAt); the order, and why ownership outranks the band, is
+// ReaderGestures::claimsClick's.
 bool ReaderChromeHost::claimsClickAt(const QPointF& pos) const
 {
-    if (pos.y() <= topBandHeight()) return true;
-    return kind_ != ReaderKind::Book;
+    return ReaderGestures::claimsClick(pos.y(), topBandHeight(), kind_ == ReaderKind::Book, readerOwnsPoint(pos));
+}
+
+bool ReaderChromeHost::readerOwnsPoint(const QPointF& pos) const
+{
+    return reader_ && reader_->ownsPointerAt(pos.toPoint());
 }
 
 // The zone map, now a PRESET (issue #147) instead of a fixed left/right/centre. The Config is rebuilt on
@@ -817,6 +826,38 @@ bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
 {
     if (!themed_) return false;
     const auto pts = te->points();
+
+    // Issue #397: who owns the sequence is decided once, on the press, from where the FIRST finger went down.
+    // One that starts on the reader's own control (a comic's thumbnail rail, a scroll bar) is not consumed at
+    // all - Qt then synthesizes the mouse press that control already answers - and it runs no tap, no swipe and
+    // no pinch for its whole life, including a second finger added later: the rail is not a zoomable surface,
+    // and a zoom fired from a hand resting on it would be a surprise. A pinch that starts on the page is still a
+    // pinch wherever its fingers travel. The edge band outranks ownership (ReaderGestures::touchStartOwner).
+    if (te->type() == QEvent::TouchBegin)
+    {
+        touchToReader_ = false;
+        if (!pts.isEmpty())
+        {
+            const QWidget* rw0 = reader_->asWidget();
+            const QPointF start = pts.first().position();
+            touchToReader_ = ReaderGestures::touchStartOwner(
+                                 ReaderGestures::configFromSettings(topBandHeight()), start.x(), start.y(),
+                                 rw0 ? double(rw0->width()) : 1.0, rw0 ? double(rw0->height()) : 1.0,
+                                 readerOwnsPoint(start))
+                             == ReaderGestures::TouchOwner::Reader;
+        }
+        if (touchToReader_)
+        {
+            sawMulti_ = false;
+            pinchBaseDist_ = 0.0;
+            return false;
+        }
+    }
+    else if (touchToReader_)
+    {
+        if (te->type() == QEvent::TouchEnd) touchToReader_ = false;
+        return false;
+    }
 
     if (pts.size() >= 2)   // pinch: read the zoom straight off the two-finger separation
     {

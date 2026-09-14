@@ -9,6 +9,7 @@
 // zoom + fit; comic additionally: a two-up spread toggle); every other method keeps a harmless default so a view
 // never has to spell out a command it does not offer. The wrappers are thin — they call exactly what the reader's
 // own bar buttons already call, so there is ZERO render/scroll-logic change behind this interface.
+#include <QPoint>
 #include <QPointF>
 #include <QStringList>
 #include <QVector>
@@ -27,6 +28,14 @@ public:
     virtual void nextPage() = 0;
     virtual void prevPage() = 0;
     virtual int  chromeTopReserve() const = 0;  // px the themed top strip aligns to (book's menu inset)
+
+    // Is this point one of the reader's OWN CONTROLS (issue #397)? `readerPos` is in the reader widget's own
+    // coordinates. The themed host filters every press inside the reader and turns the ones it claims into the
+    // tap-zone map; it asks this FIRST, and a point answered true is left entirely to the reader — the press,
+    // the drag and the release reach the widget under the pointer exactly as they do on the classic layout, and
+    // a touch that starts there runs no tap, swipe or pinch. Only the reader knows where its controls are, so
+    // the host never guesses by widget type. The default owns nothing, which is every reader's behaviour before.
+    virtual bool ownsPointerAt(const QPoint& /*readerPos*/) const { return false; }
 
     // Settings-row commands — a kind overrides the ones its chrome offers; the rest stay inert.
     virtual void fontDelta(int) {}              // book: change the reading font by ±pt

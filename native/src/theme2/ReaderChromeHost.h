@@ -227,6 +227,7 @@ private:
     // events but mean the same thing, and having decided the zones twice is how they drift apart.
     void tapAt(const QPointF& pos);
     bool claimsClickAt(const QPointF& pos) const;      // is this click the host's, or the reader's own?
+    bool readerOwnsPoint(const QPointF& pos) const;    // #397: is it one of the reader's own controls?
     qreal topBandHeight() const;                       // the menu band, shared by the tap and the click paths
     QPointF toReaderPos(QWidget* from, const QPointF& p) const;  // a child's coords -> the reader's
     void watchReaderTree();                            // filter the reader AND its child widgets
@@ -257,6 +258,8 @@ private:
     // When the press landed, for the long-press-to-select duration (issue #136). The number itself is #162's,
     // read off PlayerGestures::Config through ReaderGestures - this only remembers WHEN.
     qint64  touchStartMs_ = 0;
+    // Issue #397: this sequence started on one of the reader's own controls, so it is left to the reader.
+    bool    touchToReader_ = false;
 
     // Mouse state, for telling a click from the tail of a drag. The reader is read with a mouse at least as
     // often as with a finger, and until now the zone map was reachable only by touch.
