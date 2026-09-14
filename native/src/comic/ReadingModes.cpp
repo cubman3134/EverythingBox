@@ -291,4 +291,11 @@ QString seriesKeyFor(const QString& comicInfoSeries, const QString& filePath)
     return ComicName::seriesKey(p.cleaned);   // cleaned is never empty (ComicName.h)
 }
 
+bool ownsPointerAt(const QPoint& p, const PointerControls& c)
+{
+    return (c.railShown && c.rail.contains(p))
+        || (c.vBarShown && c.vBar.contains(p))
+        || (c.hBarShown && c.hBar.contains(p));
+}
+
 } // namespace ComicRead

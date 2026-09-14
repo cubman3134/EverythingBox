@@ -4736,15 +4736,44 @@ QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::S
 // per-item context menu (HomeView::showItemContextMenu, on Qt::CustomContextMenu), which is one of the two
 // browse-side routes to the #193 queue verbs. Without it that route cannot be driven from this channel at
 // all, and an undriveable route is one nobody checks: the same reason the key table carries "m".
+//
+// Two more pointer shapes ride the same command (#397), because a control inside a reader is judged on more
+// than a click: "X Y wheel DY" scrolls the wheel by DY (120 = one notch, positive = away from the user) at the
+// point, and "X Y drag X2 Y2" presses at the first point, moves in steps to the second and releases there.
 bool uitestRunClick(QWindow* win, const QString& arg)
 {
     if (!win) return true;                                 // no window: accepted, nothing to click
     const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     if (t.size() < 2) return false;
-    const bool right = t.value(2).toLower() == QStringLiteral("right");
-    const Qt::MouseButton btn = right ? Qt::RightButton : Qt::LeftButton;
     const QPointF local(t[0].toDouble(), t[1].toDouble());
     const QPointF global = win->mapToGlobal(local.toPoint());
+    const QString shape = t.value(2).toLower();
+    if (shape == QStringLiteral("wheel"))
+    {
+        if (t.size() < 4) return false;
+        const int dy = t[3].toInt();
+        QWindowSystemInterface::handleWheelEvent(win, local, global, QPoint(), QPoint(0, dy));
+        return true;
+    }
+    if (shape == QStringLiteral("drag"))
+    {
+        if (t.size() < 5) return false;
+        const QPointF to(t[3].toDouble(), t[4].toDouble());
+        QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::LeftButton, Qt::LeftButton,
+                                                 QEvent::MouseButtonPress, Qt::NoModifier);
+        const int steps = 8;
+        for (int s = 1; s <= steps; ++s)
+        {
+            const QPointF p = local + (to - local) * (qreal(s) / steps);
+            QWindowSystemInterface::handleMouseEvent(win, p, win->mapToGlobal(p.toPoint()), Qt::LeftButton,
+                                                     Qt::NoButton, QEvent::MouseMove, Qt::NoModifier);
+        }
+        QWindowSystemInterface::handleMouseEvent(win, to, win->mapToGlobal(to.toPoint()), Qt::NoButton,
+                                                 Qt::LeftButton, QEvent::MouseButtonRelease, Qt::NoModifier);
+        return true;
+    }
+    const bool right = shape == QStringLiteral("right");
+    const Qt::MouseButton btn = right ? Qt::RightButton : Qt::LeftButton;
     QWindowSystemInterface::handleMouseEvent(win, local, global, btn, btn,
                                              QEvent::MouseButtonPress, Qt::NoModifier);
     QWindowSystemInterface::handleMouseEvent(win, local, global, Qt::NoButton, btn,

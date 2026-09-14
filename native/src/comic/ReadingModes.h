@@ -285,6 +285,29 @@ namespace ComicRead
     int stripLastVisible(const Strip& s, int y, int viewportH);
     QVector<int> stripWindow(const Strip& s, int current, int lastVisible);
 
+    // ---- THE READER'S OWN CONTROLS (#397) ------------------------------------------------------------------
+    // The themed chrome host filters every pointer press inside the reader and, for a comic, turns it into the
+    // tap-zone map. The comic has controls of its own inside that same widget — the webtoon thumbnail rail and
+    // the scroll area's bars — and a press on one of those is not a page tap. Only the comic knows where they
+    // are, so it answers the host's question with this, and the host never guesses by widget type.
+    //
+    // The rail shows only in the webtoon strip with the rail switched on; applyMode and the rail toggle show it
+    // by this same rule, so "shown" and "owned" cannot disagree.
+    inline bool railShown(bool webtoon, bool railOn) { return webtoon && railOn; }
+
+    // Every rectangle is in the READER's coordinates. A control that is not shown owns nothing, whatever its
+    // last geometry says: a hidden widget keeps its old rectangle.
+    struct PointerControls
+    {
+        bool  railShown = false;
+        QRect rail;
+        bool  vBarShown = false;   // the scroll area's vertical bar (the strip's, in webtoon mode)
+        QRect vBar;
+        bool  hBarShown = false;   // ... and its horizontal one (a zoomed paged page)
+        QRect hBar;
+    };
+    bool ownsPointerAt(const QPoint& p, const PointerControls& c);
+
     // How far Up/Down move in webtoon mode, as a fraction of the viewport height. Less than 1 on purpose:
     // a full-viewport jump loses the line you were on at the seam between two presses.
     inline constexpr double kScrollFraction = 0.85;

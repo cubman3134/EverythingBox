@@ -11,6 +11,7 @@
 //                                                   Distinct from a touch tap on purpose: Qt routes a click to
 //                                                   the child widget under the cursor, so the two reach
 //                                                   different objects and must both be testable.
+//   click X Y wheel DY | click X Y drag X2 Y2       a wheel notch (120) / a press-move-release drag (#397)
 //   touch tap X Y                                   synthesize a real touch tap at window coords (X, Y)
 //   touch flick X1 Y1 X2 Y2 [MS]                    a real drag/flick from (X1,Y1) to (X2,Y2) over MS (default 150)
 //   touch pinch CX CY SCALE [MS]                    two fingers around (CX,CY) diverging by SCALE over MS

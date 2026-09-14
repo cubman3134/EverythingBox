@@ -466,6 +466,65 @@ int main()
         CHECK(ComicRead::stripWindow(ComicRead::stripLayout({}, 100), 0, 0).isEmpty());
     }
 
+    // ---- 6c. The reader's own controls (#397) -------------------------------------------------------------
+    // A 1100 x 800 reader in the webtoon strip: the 116-px rail flush right, the strip's 17-px vertical bar
+    // just left of it, no horizontal bar. The rail starts at y = 0, under the host's 38-px top band.
+    {
+        using ComicRead::PointerControls;
+        const QRect rail(984, 0, 116, 800);
+        const QRect vBar(967, 0, 17, 800);
+        const QRect hBar(0, 783, 967, 17);
+        const auto controls = [&](bool webtoon, bool railOn, bool vBar_, bool hBar_) {
+            PointerControls c;
+            c.railShown = ComicRead::railShown(webtoon, railOn);
+            c.rail = rail;
+            c.vBarShown = vBar_;
+            c.vBar = vBar;
+            c.hBarShown = hBar_;
+            c.hBar = hBar;
+            return c;
+        };
+        const PointerControls strip = controls(true, true, true, false);
+
+        // The rule that shows the rail: only the strip, only with the rail on.
+        CHECK(ComicRead::railShown(true, true));
+        CHECK(!ComicRead::railShown(true, false));
+        CHECK(!ComicRead::railShown(false, true));
+        CHECK(!ComicRead::railShown(false, false));
+
+        // A point inside the visible rail is the reader's: a far thumbnail, a top slot under the band, both
+        // corners.
+        const QPoint onRail(1040, 600);
+        CHECK(ComicRead::ownsPointerAt(onRail, strip));
+        CHECK(ComicRead::ownsPointerAt(QPoint(1040, 10), strip));
+        CHECK(ComicRead::ownsPointerAt(QPoint(984, 0), strip));
+        CHECK(ComicRead::ownsPointerAt(QPoint(1099, 799), strip));
+
+        // The same point with the rail switched off, or in a paged mode (where the rail is never shown), is not.
+        CHECK(!ComicRead::ownsPointerAt(onRail, controls(true, false, true, false)));
+        CHECK(!ComicRead::ownsPointerAt(onRail, controls(false, true, true, false)));
+        CHECK(!ComicRead::ownsPointerAt(onRail, controls(false, true, false, false)));
+
+        // A point on the page is never the reader's — it stays a tap zone, including right beside the bar.
+        CHECK(!ComicRead::ownsPointerAt(QPoint(480, 400), strip));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(966, 400), strip));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(480, 10), strip));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(-1, 400), strip));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(1100, 400), strip));   // one past the rail's right edge
+
+        // The scroll bars: owned while shown, nothing once hidden.
+        CHECK(ComicRead::ownsPointerAt(QPoint(975, 400), strip));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(975, 400), controls(true, true, false, false)));
+        CHECK(ComicRead::ownsPointerAt(QPoint(480, 790), controls(false, false, true, true)));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(480, 790), strip));
+
+        // Nothing shown: a point on any of the three old rectangles belongs to the page.
+        const PointerControls none = controls(false, false, false, false);
+        CHECK(!ComicRead::ownsPointerAt(onRail, none));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(975, 400), none));
+        CHECK(!ComicRead::ownsPointerAt(QPoint(480, 790), none));
+    }
+
     // ---- 7. The colour filters ---------------------------------------------------------------------------
     {
         const QRgb px = qRgb(200, 100, 50);

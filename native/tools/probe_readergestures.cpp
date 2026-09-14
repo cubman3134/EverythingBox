@@ -295,6 +295,47 @@ int main(int argc, char** argv)
         FormFactor::instance().refresh();
     }
 
+    // ---- 7b. Who a press belongs to (#397): the reader's own controls, the menu band, the zone map. -------
+    {
+        const double band = 38.0;   // a comic's declared top inset (ComicView::chromeTopReserve)
+
+        // A comic does not handle clicks itself: below the band its page is the zone map's...
+        CHECK(claimsClick(400.0, band, false, false));
+        // ...but a press on one of its own controls (the thumbnail rail) is not, anywhere down the rail.
+        CHECK(!claimsClick(400.0, band, false, true));
+        CHECK(!claimsClick(799.0, band, false, true));
+        // The rail runs up under the band; its top slots stay reachable, so ownership wins there too.
+        CHECK(!claimsClick(10.0, band, false, true));
+        CHECK(!claimsClick(band, band, false, true));
+        // Off the rail, the band is still the menu, at and above its edge, for every kind.
+        CHECK(claimsClick(10.0, band, false, false));
+        CHECK(claimsClick(band, band, false, false));
+        CHECK(claimsClick(10.0, band, true, false));
+        // A book below the band keeps its clicks (paging, footnote links), as it always did.
+        CHECK(!claimsClick(band + 1.0, band, true, false));
+        CHECK(!claimsClick(400.0, band, true, false));
+        CHECK(!claimsClick(400.0, band, true, true));
+        // Nothing owned: exactly the rule this replaced (band, else not-a-book), at every height.
+        for (double y : { 0.0, 37.0, 38.0, 39.0, 400.0, 1399.0 })
+            for (bool book : { false, true })
+                CHECK(claimsClick(y, band, book, false) == (y <= band || !book));
+
+        // Touch, on a touch form factor: the edge band first, then the reader's controls, then the host.
+        const Config c = touchConfig(TapPreset::RightForward);
+        const double i = double(c.edgeInsetPx);
+        CHECK(touchStartOwner(c, 900.0, 700.0, kW, kH, true) == TouchOwner::Reader);    // a finger on the rail
+        CHECK(touchStartOwner(c, 900.0, 700.0, kW, kH, false) == TouchOwner::Host);     // a finger on the page
+        CHECK(touchStartOwner(c, 900.0, 10.0 + i, kW, kH, true) == TouchOwner::Reader); // a top rail slot
+        // The rail is flush against the right edge: a system swipe starting there stays inert, not a jump.
+        CHECK(touchStartOwner(c, kW - i + 1.0, 700.0, kW, kH, true) == TouchOwner::Inert);
+        CHECK(touchStartOwner(c, kW - i + 1.0, 700.0, kW, kH, false) == TouchOwner::Inert);
+        // With the form-factor gate shut (a desktop touchscreen) there is no edge band; ownership still holds.
+        const Config legacy;
+        CHECK(!legacy.enabled);
+        CHECK(touchStartOwner(legacy, kW - 1.0, 700.0, kW, kH, true) == TouchOwner::Reader);
+        CHECK(touchStartOwner(legacy, kW - 1.0, 700.0, kW, kH, false) == TouchOwner::Host);
+    }
+
     // ---- 8. Keep the screen awake: acquired on open, released on close, and released by DESTRUCTION. -----
     {
         int ons = 0, offs = 0;
