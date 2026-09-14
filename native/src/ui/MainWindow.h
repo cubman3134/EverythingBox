@@ -835,6 +835,7 @@ private:
     // datum is how sync bugs are born.
     QByteArray             libraryInventoryJson() const;                  // the GET /inventory hook
     LibraryBundle::Receipt libraryReceiveBundle(const QByteArray& body);  // the POST /bundle hook
+    LibraryBundle::Receipt libraryReceiveBundleStream(QIODevice& body);   // the POST /bundle raw-body hook (#291)
     static QString         libraryCacheRoot();                            // <dataDir>/metadata, one spelling
 
     void sendLibraryTo(const PlayOn::Peer& peer);                         // pair if needed, then diff + send
@@ -848,6 +849,7 @@ private:
     int                    sendLibCursor_ = 0;
     LibraryBundle::Progress sendLibProgress_;
     QString                sendLibPeerId_;
+    int                    sendLibFormat_ = 1;   // #291: the payload format the target advertised (1 or 2)
 
     // ---- Store backends (issue #118). DEFINED IN src/ui/MainWindowStoreBackend.cpp, for the same reason
     // the block above is: MainWindow.cpp is the busiest merge surface here, and these three reach the class

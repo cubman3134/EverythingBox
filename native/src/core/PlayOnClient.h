@@ -58,12 +58,19 @@ public:
     void fetchInventory(const PlayOn::Peer& peer, const QString& token);
     void sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
                         const QByteArray& payload);
+    // #291: the same, in a chosen payload format. v1 goes as application/json with v1's budget, exactly as
+    // above; v2 goes as the raw-body type, with a budget that grows with the body (a 64 MiB item over a slow
+    // link must not be cut off at the minute a 12 MiB one was given).
+    void sendBundleItem(const PlayOn::Peer& peer, const QString& token, const QString& itemId,
+                        const QByteArray& payload, int format);
 
     // How long a peer has to answer before we call it gone.
     static constexpr int kTimeoutMs = 4000;
     // A bundle is megabytes over a LAN, not a control message: it gets its own budget. Still bounded, so a
     // peer that goes off the network mid-transfer fails in seconds rather than leaving a spinner up.
     static constexpr int kBundleTimeoutMs = 60000;
+    // #291: a v2 body's budget is kBundleTimeoutMs plus a second for every half mebibyte it carries.
+    static int bundleTimeoutMsFor(qint64 bodyBytes, int format);
 
 signals:
     void pairingOffered(const QString& peerId);                       // the code is now on the peer's screen
@@ -77,8 +84,9 @@ signals:
     void pullArrived(const QString& peerId, const PlayOn::Pull& pull);
 
     // #127. `ok` false means the peer did not answer or refused; `message` is then what to show.
+    // `formats` (#291) is what the peer said it accepts -- {1} for a device that predates the raw-body format.
     void inventoryArrived(const QString& peerId, const QList<LibraryBundle::Entry>& items,
-                          bool ok, const QString& message);
+                          bool ok, const QString& message, const QList<int>& formats);
     // One item's answer: `result` is the receipt's word ("landed" / "kept" / "current" / "refused"),
     // `message` the peer's reason when it is not a plain success.
     void bundleItemDone(const QString& peerId, const QString& itemId, bool ok,
@@ -91,6 +99,8 @@ private:
               std::function<void(int, const QByteArray&, bool)> done);
     void post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body, const QString& token,
               int timeoutMs, std::function<void(int, const QByteArray&, bool)> done);
+    void post(const PlayOn::Peer& peer, const QString& path, const QByteArray& body, const QString& token,
+              int timeoutMs, const QString& contentType, std::function<void(int, const QByteArray&, bool)> done);
     void get(const PlayOn::Peer& peer, const QString& path, const QString& token,
              std::function<void(int, const QByteArray&, bool)> done);
 

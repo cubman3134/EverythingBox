@@ -26,6 +26,8 @@
 #pragma once
 #include <QHash>
 #include <QObject>
+#include <QSet>
+#include <memory>
 #include "LibraryBundle.h"
 #include "PlayOnDevice.h"
 #include "RemoteApi.h"
@@ -61,6 +63,12 @@ public:
         // a MetaCache hash and a file name that is not art.
         std::function<QByteArray()>                                    inventory;
         std::function<LibraryBundle::Receipt(const QByteArray& body)>   bundle;
+        // #291. A raw-body (v2) POST /bundle is never buffered: once its headers are in and its token has
+        // passed, the body is written as it arrives to a spool file under `bundleRoot()` (inside
+        // `.eb-incoming`, nowhere else), and `bundleStream` lands it from that file. The spool is removed on
+        // every outcome. Unset hooks degrade to a 503 before a body byte is accepted.
+        std::function<QString()>                                        bundleRoot;
+        std::function<LibraryBundle::Receipt(QIODevice& body)>          bundleStream;
     };
 
     explicit RemoteServer(QObject* parent = nullptr);
@@ -79,14 +87,30 @@ public:
     // loopback URL if no LAN address is found. Pure best-effort presentation; never empty.
     static QString lanUrl(quint16 port);
 
+    // #291 test seams. The largest request buffer any connection has held (a streamed body never enters
+    // one), how many bodies are spooling right now, and the idle time after which a stalled body is dropped.
+    qint64 bufferedHighWater() const { return bufferHighWater_; }
+    int    streamsInFlight() const { return int(spools_.size()); }
+    void   setBodyIdleTimeoutMs(int ms) { bodyIdleTimeoutMs_ = ms; }
+
 private:
+    struct Spool;
+
     void onReadyRead(QTcpSocket* sock);
     void finish(QTcpSocket* sock, const QByteArray& responseBytes);
+    void beginStream(QTcpSocket* sock, const RemoteApi::Request& head, RemoteApi::BodyPlan plan);
+    void pumpStream(QTcpSocket* sock);
+    void dropStream(QTcpSocket* sock);
+    void noteBuffered(qint64 n) { if (n > bufferHighWater_) bufferHighWater_ = n; }
 
     QTcpServer* server_ = nullptr;
     Hooks       hooks_;
     quint16     port_ = 0;
     QHash<QTcpSocket*, QByteArray> buffers_;   // per-connection accumulation until a full request has arrived
+    QHash<QTcpSocket*, std::shared_ptr<Spool>> spools_;   // #291: connections whose body is going to disk
+    QSet<QTcpSocket*> answered_;               // a response has been written; later bytes are drained, never re-routed
+    qint64 bufferHighWater_ = 0;
+    int    bodyIdleTimeoutMs_ = 30000;
 
     // The per-request read cap is RemoteApi::requestCapBytes (#76's tiny one for every route, a payload-sized
     // one for POST /bundle alone). Kept there rather than here so the exception is a testable function.

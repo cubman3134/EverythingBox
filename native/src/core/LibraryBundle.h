@@ -40,11 +40,35 @@
 //      any step leaves either the old item or the new one — never half of either — and sweepPartials() puts
 //      the tree back on the next run, which is why a resumed transfer picks up from the diff instead of
 //      restarting.
+//
+// THE RAW-BODY FORMAT (issue #291). v1 carries art as base64 inside JSON, and base64 is a third larger than
+// the bytes, so an item past ~12 MiB of art could never fit the target's 20 MiB buffered request -- it was
+// skipped on every run, and the second run never came up empty. Payload format v2 carries the SAME item as a
+// binary body instead:
+//
+//     offset 0      8 bytes   magic "EBBUNDLE"
+//     offset 8      u32 BE    format version (2)
+//     offset 12     u32 BE    header length N (1 .. kMaxV2HeaderBytes)
+//     offset 16     N bytes   compact JSON: {"id","stamp","updated","files":[{"name","mtime","size"},...]}
+//     offset 16+N   the file bytes, concatenated in header order
+//
+// The decision stays here and stays pure: decodeHeaderV2() validates the WHOLE header -- every refusal v1
+// has, plus the rule that the declared sizes sum to exactly the bytes that follow -- before a single file
+// byte is read, and landItemV2() only starts staging once it has. The target never buffers a v2 body:
+// RemoteServer spools it to a file under the cache root (openSpool) and lands it from there.
+//
+// v1 stays, on both ends, forever. The inventory keeps "v":1 (an old source refuses a higher one) and says
+// it can take v2 in a field an old parser ignores ("bundle":[1,2]); a source sends v2 only to a target that
+// says so, and v1 -- with v1's 12 MiB item cap, skipping exactly what it skipped before -- to one that
+// does not.
 #pragma once
 #include <QByteArray>
 #include <QList>
 #include <QString>
 #include <QStringList>
+
+class QFile;
+class QIODevice;
 
 namespace LibraryBundle
 {
@@ -220,4 +244,80 @@ namespace LibraryBundle
     // and INCLUDING the items the target kept because its own were newer, which is a decision the source made
     // and must not report as an absence of one.
     QString describeProgress(const Progress& p, const QString& deviceName);
+
+    // ---- 9. the raw-body format (issue #291) --------------------------------------------------------------
+
+    constexpr int    kPayloadFormatV2  = 2;
+    // v2's own item ceiling. kMaxFileBytes is deliberately NOT raised: it decides what the stamp covers, and
+    // an older device computes its stamps with 8 MiB. An item over THIS is still skipped and reported, but
+    // that is now a library with pathological art rather than ordinary box art.
+    constexpr qint64 kMaxItemBytesV2   = 64LL * 1024 * 1024;
+    constexpr qint64 kMaxV2HeaderBytes = 256LL * 1024;
+    constexpr qint64 kV2PreambleBytes  = 16;
+    // The largest well-formed v2 body. RemoteServer refuses a declared Content-Length over its stream cap
+    // before accepting a byte, and that cap is asserted (at compile time, in RemoteServer.cpp) to cover this.
+    constexpr qint64 kMaxV2BodyBytes   = kV2PreambleBytes + kMaxV2HeaderBytes + kMaxItemBytesV2;
+    constexpr const char* kBundleV2ContentType = "application/x-eb-bundle";
+
+    // What a target's inventory says it accepts. An inventory with no "bundle" field is an older device's,
+    // and an older device takes v1 only. `formats` is never empty after a successful parse.
+    bool parseInventory(const QByteArray& json, QList<Entry>& out, QList<int>& formats, QString& error);
+
+    // The source's choice: v2 when the target advertises it, v1 otherwise.
+    int chooseBundleFormat(const QList<int>& advertised);
+
+    // The item ceiling that applies to a format (v1: kMaxItemBytes; v2: kMaxItemBytesV2).
+    qint64 maxItemBytesFor(int format);
+
+    // readPayload with an explicit item ceiling -- the v2 source reads under kMaxItemBytesV2.
+    bool readPayload(const QString& root, const QString& id, Payload& out, QString& error, qint64 maxItemBytes);
+
+    // What an item puts on the target's disk: the sum of its file sizes. Progress::bytesSent counts THIS, for
+    // both formats, rather than the wire size, which for v1 is a third larger than what landed.
+    qint64 fileBytesOf(const Payload& p);
+
+    QByteArray encodePayloadV2(const Payload& p);
+
+    struct BundleHeader
+    {
+        int     version = kPayloadFormatV2;
+        QString id;
+        QString stamp;
+        qint64  updatedMs = 0;
+        QList<FileEntry> files;    // name, size and mtime of each file, in body order
+        qint64  fileBytes = 0;     // the sum of the sizes -- exactly the bytes that follow the header
+    };
+
+    // Read and validate a v2 preamble + header from `in`, leaving it positioned at the first file byte. Every
+    // refusal is decided HERE, before any file byte is read: bad magic, a missing or future version, an
+    // unsafe id or file name, a file over kMaxFileBytes, an empty item, an item over kMaxItemBytesV2, and
+    // declared sizes that do not sum to exactly the bytes remaining (a truncated or over-long body is
+    // Malformed). `in` must be random-access -- that last check needs its size -- which is why the target
+    // spools a v2 body to a file rather than reading it off the socket.
+    bool decodeHeaderV2(QIODevice& in, BundleHeader& out, Refusal& why, QString& message);
+
+    // The whole v2 payload into memory (the probe's round trip; the target lands with landItemV2 instead).
+    bool decodePayloadV2(QIODevice& in, Payload& out, Refusal& why, QString& message);
+
+    // Validate the header, then land the item by copying each file straight from `in` into the staging
+    // folder -- the same recovery, keep-the-newer rule and atomic swap as landItem. A refused header returns
+    // Refused having read no file byte and written nothing.
+    LandResult landItemV2(const QString& root, QIODevice& in, QString& error);
+    LandResult landItemV2(const QString& root, QIODevice& in, QString& error, const LandOptions& opts);
+
+    // ---- 10. the spool (issue #291) ----------------------------------------------------------------------
+
+    // Create and open (write-only) a fresh spool file for one incoming v2 body, INSIDE `<root>/.eb-incoming`
+    // and nowhere else, and register it as in flight. Returns its path, or an empty string when the cache
+    // cannot be written. The name is `bundle-<uuid>.spool`: not an item id (so the inventory walk ignores
+    // it), not an image extension and not `thumb.*` (so MetaCache's image-cap sweep neither counts nor
+    // evicts it).
+    QString openSpool(const QString& root, QFile& file);
+
+    // Close, delete and unregister a spool. Called on every outcome -- landed, refused, a disconnect, a
+    // timeout. sweepPartials() removes any spool that is NOT registered, which after a crash is all of them.
+    void discardSpool(QFile& file);
+
+    // How many spools this process has in flight (a probe's view; nothing decides on it).
+    int spoolsInFlight();
 }
