@@ -74,7 +74,10 @@ void EmulatorManager::setLaunchFullscreen(bool) {}
 // the setter is a no-op: callers (the Emulators settings panel) link and read the same value unchanged.
 bool EmulatorManager::manageControllers(const QString&) { return true; }
 void EmulatorManager::setManageControllers(const QString&, bool) {}
-void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&, const EmuGfx::Settings&)
+// The two trailing QStrings are #189's update/DLC levers. This stub must track the header's signature by hand:
+// nothing but the iOS build compiles it, and ec51f816 grew play() without it (issue #403).
+void EmulatorManager::play(const ExternalEmulator&, const QString&, const QString&, const EmuGfx::Settings&,
+                           const QString&, const QString&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }
 void EmulatorManager::install(const ExternalEmulator&)
 { emit failed(tr("Standalone emulators aren't available on iOS.")); }

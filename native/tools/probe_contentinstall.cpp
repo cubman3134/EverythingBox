@@ -58,6 +58,11 @@
 #include <QJsonObject>
 #include <cstdio>
 
+#include "CommandSplit.h"
+#if QT_CONFIG(process)
+#  include <QProcess>   // ONLY as the oracle CommandSplit::split must equal (#403); the app no longer calls it
+#endif
+
 static int failures = 0;
 #define CHECK(cond) do { \
     if (!(cond)) { std::fprintf(stderr, "CONTENTINSTALL-FAIL %s (line %d)\n", #cond, __LINE__); ++failures; } \
@@ -746,6 +751,102 @@ int main(int argc, char** argv)
         // The extension filter still decides everything else, unchanged.
         CHECK(RomRouting::acceptUnderSystemFolder(QStringLiteral("nsp")));
         CHECK(!RomRouting::acceptUnderSystemFolder(QStringLiteral("srm")));
+    }
+
+    // ==== 16. The shared argv cut is QProcess::splitCommand, without QProcess (#403) =========================
+    // cliArgv (this header, compiled into the iOS app) and LaunchOpts::buildArgs used to call
+    // QProcess::splitCommand, which iOS's Qt never declares. CommandSplit::split replaces it and must be the SAME
+    // function: every input below is compared against Qt's own splitter wherever this build has one, and a
+    // handful are also pinned to hand-derived answers so the check still means something without it.
+    {
+        const QString nbsp = QString(QChar(0x00A0));
+        const QString ideo = QString(QChar(0x3000));
+        const QStringList table{
+            QString(),                                                  // empty
+            QStringLiteral(" "),                                        // only a space
+            QStringLiteral("\t \t"),                                    // only tabs and spaces
+            QStringLiteral("a b"),
+            QStringLiteral("  a   b  "),                                // runs of spaces, leading and trailing
+            QStringLiteral("a\tb\nc\r\nd\ve\ff"),                       // every ASCII whitespace separates
+            QStringLiteral("a") + nbsp + QStringLiteral("b") + ideo + QStringLiteral("c"),  // QChar::isSpace, not ' '
+            QStringLiteral("\"a b\""),                                  // quoted space
+            QStringLiteral("\"a b\" c"),
+            QStringLiteral("a\"b c\"d"),                                // quotes glue into the surrounding token
+            QStringLiteral("\"a\tb\""),                                 // quoted tab
+            QStringLiteral("\"\"\""),                                   // three quotes: a literal quote
+            QStringLiteral("\"a \"\"\" b\""),                           // a literal quote inside a quoted run
+            QStringLiteral("\"\""),                                     // two quotes: nothing at all
+            QStringLiteral("x \"\" y"),                                 // ...and never an empty token
+            QStringLiteral("a\"\"b"),
+            QStringLiteral("\"a\"\"b\""),
+            QStringLiteral("\"\"\"\""),                                 // four
+            QStringLiteral("\"\"\"\"\""),                               // five
+            QStringLiteral("\"\"\"\" a"),                               // four, then the pending one toggles
+            QStringLiteral("\"\"\"\"\"\""),                             // six: two literal quotes
+            QStringLiteral("\"unterminated space"),                     // unterminated quote
+            QStringLiteral("ends in a quote\""),
+            QStringLiteral("trailing whitespace \t "),
+            QStringLiteral("a\\\"b c\\\""),                             // backslash is NOT an escape
+            QStringLiteral("C:\\Program Files\\x \"C:\\Program Files\\y\""),
+            QStringLiteral("--headless --installpkg {file}"),
+            QStringLiteral("--installpkg \"{file} with spaces\" -x"),
+            QStringLiteral("-L \"{rom}\" --fullscreen"),
+        };
+        int compared = 0;
+        for (const QString& in : table)
+        {
+#if QT_CONFIG(process)
+            const QStringList want = QProcess::splitCommand(in);
+            const QStringList got  = CommandSplit::split(in);
+            ++compared;
+            if (got != want)
+            {
+                std::fprintf(stderr, "CONTENTINSTALL-FAIL split(%s): got [%s] want [%s]\n",
+                             qPrintable(in), qPrintable(got.join(QLatin1Char('|'))),
+                             qPrintable(want.join(QLatin1Char('|'))));
+                ++failures;
+            }
+#else
+            Q_UNUSED(in);
+#endif
+        }
+#if QT_CONFIG(process)
+        CHECK(compared == table.size());
+#endif
+
+        // Hand-derived answers (Qt's rule: whitespace separates, a double-quoted run is one token, three
+        // consecutive quotes are a literal quote, two are nothing, a backslash is an ordinary character).
+        const QString q = QStringLiteral("\"");
+        CHECK(CommandSplit::split(QString()).isEmpty());
+        CHECK(CommandSplit::split(QStringLiteral(" \t ")).isEmpty());
+        CHECK(CommandSplit::split(QStringLiteral("\"a b\" c")) == (QStringList{ QStringLiteral("a b"), QStringLiteral("c") }));
+        CHECK(CommandSplit::split(QStringLiteral("a\"b c\"d")) == QStringList{ QStringLiteral("ab cd") });
+        CHECK(CommandSplit::split(QStringLiteral("\"\"\"")) == QStringList{ q });
+        CHECK(CommandSplit::split(QStringLiteral("\"a \"\"\" b\"")) == QStringList{ QStringLiteral("a ") + q + QStringLiteral(" b") });
+        CHECK(CommandSplit::split(QStringLiteral("x \"\" y")) == (QStringList{ QStringLiteral("x"), QStringLiteral("y") }));
+        CHECK(CommandSplit::split(QStringLiteral("\"unterminated space")) == QStringList{ QStringLiteral("unterminated space") });
+        CHECK(CommandSplit::split(QStringLiteral("\"\"\"\" a")) == QStringList{ q + QStringLiteral(" a") });
+        {
+            const QStringList win = CommandSplit::split(QStringLiteral("C:\\Program Files\\x \"C:\\Program Files\\y\""));
+            CHECK(win.size() == 3);
+            CHECK(win.size() == 3 && win[2] == QStringLiteral("C:\\Program Files\\y"));
+        }
+        {
+            const QStringList spaced = CommandSplit::split(QStringLiteral("a") + ideo + QStringLiteral("b"));
+            CHECK(spaced.size() == 2);
+        }
+
+        // Both callers really cut with it: a quoted arg and a {file}/{rom} carrying spaces land as ONE token each.
+        Recipe cli;
+        cli.kind = QStringLiteral("cli");
+        cli.args = QStringLiteral("--installpkg {file} --title \"A \"\"\"B\"\"\" C\"");
+        const QStringList cargv = ContentRecipe::cliArgv(cli, QStringLiteral("/p/My Game Update.pkg"));
+        CHECK(cargv == (QStringList{ QStringLiteral("--installpkg"), QStringLiteral("/p/My Game Update.pkg"),
+                                     QStringLiteral("--title"), QStringLiteral("A ") + q + QStringLiteral("B") + q + QStringLiteral(" C") }));
+        const QStringList largv = LaunchOpts::buildArgs(QStringLiteral("-L \"C:\\Cores\\my core.dll\" {rom}"),
+                                                        QStringLiteral("C:\\Roms\\A Game.bin"));
+        CHECK(largv == (QStringList{ QStringLiteral("-L"), QStringLiteral("C:\\Cores\\my core.dll"),
+                                     QStringLiteral("C:\\Roms\\A Game.bin") }));
     }
 
     if (failures == 0) std::printf("CONTENTINSTALL-OK\n");

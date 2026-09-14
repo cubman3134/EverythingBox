@@ -115,7 +115,8 @@ namespace LaunchOpts
     // separators and no quote characters are ever baked into the argument. Every placeholder must keep being
     // substituted here, after the cut, for that to hold.
     //
-    // The cut itself is QProcess::splitCommand - Qt's own shell-style tokeniser. A token containing a space is
+    // The cut itself is CommandSplit::split - Qt's QProcess::splitCommand rule, written out without QProcess so
+    // it compiles on iOS (#403) and pinned equal to Qt's on desktop by probe_contentinstall. A token containing a space is
     // written in double quotes (--config "My Profile" is TWO arguments), three consecutive double quotes are a
     // literal quote, and - load-bearing on Windows - a backslash is NOT an escape, so a quoted
     // "C:\Program Files\..." survives with its backslashes intact. A template with no double quote in it

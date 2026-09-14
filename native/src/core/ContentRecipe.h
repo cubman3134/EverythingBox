@@ -44,8 +44,9 @@
 #include <QJsonValue>
 #include <QDir>
 #include <QFileInfo>
-#include <QProcess>
 #include <QRegularExpression>
+
+#include "CommandSplit.h"   // the #237 tokeniser WITHOUT QProcess, which iOS's Qt does not declare (#403)
 
 namespace ContentRecipe
 {
@@ -247,12 +248,13 @@ namespace ContentRecipe
 
     // ---- pure: the argv a "cli" recipe produces (#237's rule) ---------------------------------------------
     // Cut shell-style FIRST, substitute {file} per token AFTER, exactly like LaunchOpts::buildArgs — which is
-    // why a package path containing spaces has never needed quoting. Empty tokens are dropped.
+    // why a package path containing spaces has never needed quoting. Empty tokens are dropped. The cut is
+    // CommandSplit::split, not QProcess::splitCommand: this header is compiled into the iOS app (#403).
     inline QStringList cliArgv(const Recipe& r, const QString& fileNative)
     {
         QStringList out;
         if (r.kind != QLatin1String("cli")) return out;
-        for (QString t : QProcess::splitCommand(r.args))
+        for (QString t : CommandSplit::split(r.args))
         {
             t.replace(QStringLiteral("{file}"), fileNative);
             if (!t.isEmpty()) out << t;
