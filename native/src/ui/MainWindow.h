@@ -838,7 +838,12 @@ private:
     LibraryBundle::Receipt libraryReceiveBundleStream(QIODevice& body);   // the POST /bundle raw-body hook (#291)
     static QString         libraryCacheRoot();                            // <dataDir>/metadata, one spelling
     QByteArray             libraryGamelistsJson() const;                  // the GET /gamelists hook (#292)
-    LibraryBundle::Receipt libraryReceiveSidecarStream(QIODevice& body);  // a gamelist-entry body (#292)
+    // #292 / #401: a gamelist-entry body, staged into the target's batches; the source's flush; the batcher itself.
+    // Static, and handed the batcher, because RemoteServer's hooks outlive nothing of MainWindow's but may run
+    // from its destructor (stop() commits what is pending).
+    static std::shared_ptr<LibraryBundle::GamelistBatcher> libraryMakeGamelistBatcher();
+    static LibraryBundle::Receipt libraryReceiveSidecarStream(LibraryBundle::GamelistBatcher& batches, QIODevice& body);
+    static QByteArray             libraryFlushGamelist(LibraryBundle::GamelistBatcher& batches, const QByteArray& body);
 
     void sendLibraryTo(const PlayOn::Peer& peer);                         // pair if needed, then diff + send
     void sendLibraryWithToken(const PlayOn::Peer& peer, const QString& token);
@@ -857,6 +862,7 @@ private:
     bool                   sendLibSidecars_ = false;             // #292: the target takes gamelist entries
     QList<LibraryBundle::SidecarGame> sendGameQueue_;            // #292: the gamelist games the plan sends
     int                    sendGameCursor_ = 0;
+    int                    sendGameFlushedAt_ = -1;              // #401: the cursor a system flush was sent for
 
     // ---- Store backends (issue #118). DEFINED IN src/ui/MainWindowStoreBackend.cpp, for the same reason
     // the block above is: MainWindow.cpp is the busiest merge surface here, and these three reach the class

@@ -322,6 +322,26 @@ namespace RemoteApi
             return c;
         }
 
+        // #401: the source's "that system is done" -- the target commits the system's pending gamelist entries.
+        // A write, credentialled like /bundle; the body names the system and LibraryBundle decodes it.
+        if (req.path == QStringLiteral("/gamelists/flush"))
+        {
+            if (req.method != Method::Post)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/gamelists/flush is POST only");
+                return c;
+            }
+            if (req.body.trimmed().isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/gamelists/flush needs a system");
+                return c;
+            }
+            c.kind = CommandKind::GamelistFlush;
+            return c;
+        }
+
         if (req.path == QStringLiteral("/bundle"))
         {
             if (req.method != Method::Post)

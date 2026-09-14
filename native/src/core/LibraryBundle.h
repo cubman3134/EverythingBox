@@ -65,10 +65,14 @@
 // does not.
 #pragma once
 #include <QByteArray>
+#include <QHash>
 #include <QList>
 #include <QPair>
 #include <QString>
 #include <QStringList>
+
+#include <functional>
+#include <memory>
 
 class QFile;
 class QIODevice;
@@ -402,8 +406,7 @@ namespace LibraryBundle
 
     QList<GamelistGame> parseGamelist(const QByteArray& xml);
 
-    // Whether `games` already lists `romName`, by the rule GamelistStore matches a ROM with.
-    bool gamelistLists(const QList<GamelistGame>& games, const QString& romName);
+    // (#401: "does this list already have that ROM" is GamelistStore::ListMatcher -- the one rule, used directly.)
 
     // SOURCE: every game in `<romsRoot>/<system>/gamelist.xml`, for each system folder directly under the root.
     struct SidecarGame
@@ -425,6 +428,10 @@ namespace LibraryBundle
     QList<SidecarSystem> sidecarInventoryFor(const QString& romsRoot);
     QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems);
     bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, QString& error);
+    // #401: the same answer, also saying how this device matches names ("caseInsensitive":true on Windows and
+    // macOS). A list without that field is an older device's, and an older device matched exactly.
+    QByteArray sidecarInventoryJson(const QList<SidecarSystem>& systems, bool caseInsensitive);
+    bool parseSidecarInventory(const QByteArray& json, QList<SidecarSystem>& out, bool& caseInsensitive, QString& error);
 
     // The capability. inventoryJson(entries) is inventoryJson(entries, false): a device only says it takes
     // gamelist entries when it has somewhere to land them.
@@ -439,6 +446,8 @@ namespace LibraryBundle
         int notApplicable = 0;
     };
     SidecarPlan planSidecars(const QList<SidecarGame>& source, const QList<SidecarSystem>& target);
+    // #401: with the target's name rule (see section 12). The two-argument form matches exactly.
+    SidecarPlan planSidecars(const QList<SidecarGame>& source, const QList<SidecarSystem>& target, bool caseInsensitive);
 
     struct SidecarImage
     {
@@ -498,4 +507,125 @@ namespace LibraryBundle
     // at the gamelist rewrite interrupts that write (the old file stays) and removes this landing's images.
     LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error);
     LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts);
+
+    // ---- 12. names and batched commits (issue #401) -------------------------------------------------------
+    //
+    // CASE. Windows and macOS name one folder `SNES` and `snes`; Linux and Android do not. So the target resolves
+    // a source's system and ROM names against the entries it ACTUALLY HAS -- case-insensitively on the first two,
+    // exactly on the others -- and writes with ITS OWN spelling. The platform picks the rule (foldsNameCase);
+    // resolveName takes it as an argument, so a probe drives both rules on any OS. Two entries that differ only
+    // by case (a case-sensitive macOS volume can hold both) are Ambiguous: not applicable, never a guess.
+    // safePathSegment is applied to the name asked for AND to the name it resolves to.
+    //
+    // BATCHES. A first run into a large gamelist used to rewrite that whole file once per game. The payload is
+    // still one game per request, but the TARGET now stages each landed game -- its <game> block in memory, its
+    // images in a staging folder inside the system folder -- and writes gamelist.xml ONCE per batch, from one
+    // read of the existing file, through one QSaveFile commit. A batch is committed by whichever comes first:
+    //   * the source saying the system is done (POST /gamelists/flush, token-gated like the rest);
+    //   * the batch reaching kGamelistBatchMaxGames games or kGamelistBatchMaxBytes of block text, so a crash
+    //     loses a bounded amount;
+    //   * RemoteServer's idle timer after the last gamelist request, so a source that vanishes mid-run still has
+    //     what landed committed (RemoteServer::stop() commits too, and so does the batcher's destructor).
+    // A staged game's receipt says `landed`, because those rules guarantee its commit is made. A commit that
+    // FAILS removes its batch's staged images, is reported through onCommit (the app logs it) and in the flush
+    // answer's `failed` count, and leaves those games unlisted -- so the next run's diff simply resends them.
+    //
+    // STAGING. `<system>/.eb-incoming-gamelist-<batch>/`, inside the system folder and nowhere else. Images move
+    // into `<system>/images/` only AFTER the list commit succeeds. The first landing into a system sweeps that
+    // system's stale staging folders: an image the COMMITTED list references and images/ lacks is moved in (the
+    // list was written, the move was not), and everything else is deleted. So an interruption before the commit
+    // leaves the old list and no new file in images/, and one after it is finished by the next landing.
+
+    enum class NameMatch { Found, Missing, Ambiguous };
+
+    // true on Windows and macOS, false elsewhere.
+    bool foldsNameCase();
+
+    // Resolve `wanted` against the names `present` holds. Found sets `resolved` to the PRESENT spelling. A name
+    // that is not a safe path segment, on either side, is Missing.
+    NameMatch resolveName(const QString& wanted, const QStringList& present, bool caseInsensitive, QString& resolved);
+
+    constexpr int         kGamelistBatchMaxGames = 250;
+    constexpr qint64      kGamelistBatchMaxBytes = 16LL * 1024 * 1024;
+    constexpr const char* kGamelistStagingPrefix = ".eb-incoming-gamelist-";
+
+    // One batch commit, as the app hears about it.
+    struct GamelistCommit
+    {
+        QString systemDir;   // absolute, the target's spelling
+        int     games = 0;   // entries the batch carried
+        bool    ok = false;
+        QString error;
+    };
+
+    // What POST /gamelists/flush answers: for that system since its last flush (a batch the size bound committed
+    // earlier included), the games committed and the games whose commit failed.
+    struct GamelistFlushResult
+    {
+        int committed = 0;
+        int failed = 0;
+    };
+    QByteArray gamelistFlushRequestJson(const QString& system);
+    bool parseGamelistFlushRequest(const QByteArray& json, QString& system);
+    QByteArray gamelistFlushResultJson(const GamelistFlushResult& r);
+    bool parseGamelistFlushResult(const QByteArray& json, GamelistFlushResult& out);
+
+    // Put one system folder's staging back after an interrupted run (see STAGING). A staging folder a batcher in
+    // this process is still filling is left alone. Returns how many staged images it moved into images/.
+    int sweepGamelistStaging(const QString& systemDir);
+
+    class GamelistBatcher
+    {
+    public:
+        // Test seams, and nothing else: where a commit stops. AfterListTemp writes half the new list into the
+        // temporary file and cancels it; CommitFails cancels a whole temporary file, as a failed rename would;
+        // BeforeImageMove commits the list and then stops as a crash would, leaving the staged images in place.
+        enum class FailPoint { None, AfterListTemp, CommitFails, BeforeImageMove };
+
+        struct Options
+        {
+            int    maxGames = kGamelistBatchMaxGames;
+            qint64 maxBlockBytes = kGamelistBatchMaxBytes;
+            bool   caseInsensitive = foldsNameCase();
+        };
+
+        GamelistBatcher();
+        explicit GamelistBatcher(const Options& options);
+        ~GamelistBatcher();   // commits whatever is still pending
+        GamelistBatcher(const GamelistBatcher&) = delete;
+        GamelistBatcher& operator=(const GamelistBatcher&) = delete;
+
+        // Stage one game under `romsRoot`: every refusal and not-applicable answer landSidecarV2 gives, decided
+        // the same way; Landed once its images are staged and its block is in the batch.
+        LandResult stage(const QString& romsRoot, QIODevice& in, QString& error);
+        LandResult stage(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts);
+
+        // Commit the pending batch for `system` (the SOURCE's name, resolved by the same rule) and answer with that
+        // system's tally since its last flush.
+        GamelistFlushResult flush(const QString& romsRoot, const QString& system);
+        // Commit every pending batch.
+        void flushAll();
+
+        int pendingGames() const;
+        int listWrites() const { return listWrites_; }   // committed gamelist.xml writes: the probe's counter
+        void setOnCommit(const std::function<void(const GamelistCommit&)>& cb) { onCommit_ = cb; }
+        void setFailPointForTest(FailPoint p) { failPoint_ = p; }
+        // Simulate a crash: forget every pending batch without committing it or cleaning its staging folder.
+        void abandonForTest();
+
+    private:
+        // landSidecarV2 is a batch of one, and needs to know how many images staged to keep #292's seam.
+        friend LandResult landSidecarV2(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts);
+        struct Batch;
+        LandResult stageImpl(const QString& romsRoot, QIODevice& in, QString& error, const LandOptions& opts,
+                             int* written);
+        bool commit(const QString& key, QString* error);
+
+        Options   options_;
+        FailPoint failPoint_ = FailPoint::None;
+        int       listWrites_ = 0;
+        QHash<QString, std::shared_ptr<Batch>> batches_;   // key: the absolute system folder
+        QHash<QString, GamelistFlushResult>    tally_;     // per system folder, since its last flush
+        std::function<void(const GamelistCommit&)> onCommit_;
+    };
 }

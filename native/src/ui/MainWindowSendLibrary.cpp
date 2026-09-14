@@ -27,6 +27,7 @@
 
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QLineEdit>
 #include <QPointer>
 #include <QTimer>
@@ -78,22 +79,51 @@ QByteArray MainWindow::libraryInventoryJson() const
 QByteArray MainWindow::libraryGamelistsJson() const
 {
     // #292. Per system folder under THIS device's ROM root: the ROM files there, and the ones its gamelist
-    // already lists. Token-checked by RemoteServer before this runs.
-    return LibraryBundle::sidecarInventoryJson(LibraryBundle::sidecarInventoryFor(Settings::romsFolder()));
+    // already lists. Token-checked by RemoteServer before this runs. #401: and the name rule this device lands
+    // by, so the source's plan resolves `snes` against a `SNES` folder exactly as the landing here will.
+    return LibraryBundle::sidecarInventoryJson(LibraryBundle::sidecarInventoryFor(Settings::romsFolder()),
+                                               LibraryBundle::foldsNameCase());
 }
 
-LibraryBundle::Receipt MainWindow::libraryReceiveSidecarStream(QIODevice& body)
+std::shared_ptr<LibraryBundle::GamelistBatcher> MainWindow::libraryMakeGamelistBatcher()
+{
+    // #401. ONE batcher per listener: landed gamelist entries are committed per system in batches (the source's
+    // flush, a size bound, RemoteServer's idle timer, or stop()), not once per game. Every commit clears the
+    // gamelist cache so the next lookup reads the new entries; a failed one is logged, and its games -- still
+    // unlisted -- are simply sent again by the next run's diff.
+    auto batcher = std::make_shared<LibraryBundle::GamelistBatcher>();
+    batcher->setOnCommit([](const LibraryBundle::GamelistCommit& c) {
+        GamelistStore::clearCache();
+        // One line per BATCH, never per game: the folder name and a count, no path and nothing from the source.
+        const QString folder = QFileInfo(c.systemDir).fileName();
+        if (!c.ok)
+            slLog(QStringLiteral("bundle: %1 gamelist entr(ies) for %2 not committed — %3").arg(c.games).arg(folder, c.error));
+        else
+            slLog(QStringLiteral("bundle: gamelist for %1 committed with %2 new entr(ies)%3")
+                      .arg(folder).arg(c.games)
+                      .arg(c.error.isEmpty() ? QString() : QStringLiteral(" — ") + c.error));
+    });
+    return batcher;
+}
+
+LibraryBundle::Receipt MainWindow::libraryReceiveSidecarStream(LibraryBundle::GamelistBatcher& batches, QIODevice& body)
 {
     // #292. The ROM root is this device's own setting -- never a path from the source -- and the cache root is
-    // not handed over at all. landSidecarV2 refuses an unsafe system or ROM name before it builds a path, and
+    // not handed over at all. The batcher refuses an unsafe system or ROM name before it builds a path, and
     // writes only inside a system folder that already exists, for a ROM that is already there.
     QString error;
-    const LibraryBundle::LandResult r = LibraryBundle::landSidecarV2(Settings::romsFolder(), body, error);
-    if (r == LibraryBundle::LandResult::Landed)
-        GamelistStore::clearCache();   // the next lookup reads the new entry
-    else if (r == LibraryBundle::LandResult::Refused || r == LibraryBundle::LandResult::WriteFailed)
+    const LibraryBundle::LandResult r = batches.stage(Settings::romsFolder(), body, error);
+    if (r == LibraryBundle::LandResult::Refused || r == LibraryBundle::LandResult::WriteFailed)
         slLog(QStringLiteral("bundle: refused a gamelist entry — %1").arg(error));
     return LibraryBundle::receiptFor(r, error);
+}
+
+QByteArray MainWindow::libraryFlushGamelist(LibraryBundle::GamelistBatcher& batches, const QByteArray& body)
+{
+    // #401. The source says one system is done: commit it now. An empty answer is a body naming no system.
+    QString system;
+    if (!LibraryBundle::parseGamelistFlushRequest(body, system)) return QByteArray();
+    return LibraryBundle::gamelistFlushResultJson(batches.flush(Settings::romsFolder(), system));
 }
 
 LibraryBundle::Receipt MainWindow::libraryReceiveBundle(const QByteArray& body)
@@ -290,12 +320,13 @@ void MainWindow::sendLibraryGamelists(const PlayOn::Peer& peer, const QString& t
     if (sendLibPeerId_ != peer.id) return;
     sendGameQueue_.clear();
     sendGameCursor_ = 0;
+    sendGameFlushedAt_ = -1;
 
     QPointer<MainWindow> self(this);
     PlayOnClient* c = playOnClient();
     connect(c, &PlayOnClient::gamelistsArrived, this,
             [self, peer, token](const QString& id, const QList<LibraryBundle::SidecarSystem>& theirs, bool ok,
-                                const QString& message) {
+                                const QString& message, bool caseInsensitive) {
         if (!self || id != peer.id || self->sendLibPeerId_ != peer.id) return;
         if (!ok)
         {
@@ -306,14 +337,16 @@ void MainWindow::sendLibraryGamelists(const PlayOn::Peer& peer, const QString& t
                          8000);
             return;
         }
-        // THE DIFF: games whose ROM the target has and whose entry its gamelist lacks. The rest never leave.
-        const LibraryBundle::SidecarPlan plan =
-            LibraryBundle::planSidecars(LibraryBundle::sidecarGamesFor(Settings::romsFolder()), theirs);
+        // THE DIFF: games whose ROM the target has and whose entry its gamelist lacks. The rest never leave. #401:
+        // names are matched by the TARGET's rule, which it states (a Windows `SNES` takes a source's `snes`).
+        const LibraryBundle::SidecarPlan plan = LibraryBundle::planSidecars(
+            LibraryBundle::sidecarGamesFor(Settings::romsFolder()), theirs, caseInsensitive);
         self->sendLibProgress_.gamelists          = true;
         self->sendLibProgress_.gamesListed        = plan.alreadyListed;
         self->sendLibProgress_.gamesNotApplicable = plan.notApplicable;
         self->sendGameQueue_ = plan.send;
         self->sendGameCursor_ = 0;
+        self->sendGameFlushedAt_ = -1;
         self->sendLibraryNextGame(peer, token);
     }, Qt::SingleShotConnection);
     c->fetchGamelists(peer, token);
@@ -322,6 +355,41 @@ void MainWindow::sendLibraryGamelists(const PlayOn::Peer& peer, const QString& t
 void MainWindow::sendLibraryNextGame(const PlayOn::Peer& peer, const QString& token)
 {
     if (sendLibPeerId_ != peer.id) return;
+
+    // #401: the target commits gamelist entries per system in batches. When the queue moves past a system (the
+    // plan keeps each system's games together) or ends, say so, and wait for the answer: a batch whose commit
+    // failed is counted as not added, and the final sentence must not be written before that is known.
+    const int n = int(sendGameQueue_.size());
+    if (sendGameCursor_ > 0 && sendGameFlushedAt_ != sendGameCursor_
+        && (sendGameCursor_ >= n
+            || sendGameQueue_.at(sendGameCursor_).system != sendGameQueue_.at(sendGameCursor_ - 1).system))
+    {
+        sendGameFlushedAt_ = sendGameCursor_;
+        const QString system = sendGameQueue_.at(sendGameCursor_ - 1).system;
+        QPointer<MainWindow> self(this);
+        PlayOnClient* c = playOnClient();
+        connect(c, &PlayOnClient::gamelistFlushed, this,
+                [self, peer, token, system](const QString& pid, const QString& sys, bool ok, int, int failed) {
+            if (!self || pid != peer.id || sys != system) return;
+            // An older target has no flush route: it committed every game as it landed, so there is nothing
+            // to correct. A newer one says how many of this system's "landed" games did not commit after all.
+            if (ok && failed > 0)
+            {
+                const int moved = qMin(failed, self->sendLibProgress_.gamesAdded);
+                self->sendLibProgress_.gamesAdded  -= moved;
+                self->sendLibProgress_.gamesFailed += moved;
+                slLog(QStringLiteral("bundle: %1 gamelist entr(ies) for %2 were not committed by the target")
+                          .arg(failed).arg(system));
+            }
+            // Past THIS delivery, for the same #28/#211 reason as every other leg.
+            QTimer::singleShot(0, self, [self, peer, token] {
+                if (self) self->sendLibraryNextGame(peer, token);
+            });
+        }, Qt::SingleShotConnection);
+        c->flushGamelist(peer, token, system);
+        return;
+    }
+
     if (sendGameCursor_ >= sendGameQueue_.size())
     {
         notify(LibraryBundle::describeProgress(sendLibProgress_, peer.name), 8000);

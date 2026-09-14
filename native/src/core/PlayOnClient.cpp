@@ -197,14 +197,29 @@ void PlayOnClient::fetchGamelists(const PlayOn::Peer& peer, const QString& token
             if (ok && status == 200)
             {
                 QString err;
-                if (LibraryBundle::parseSidecarInventory(body, systems, err)) emit gamelistsArrived(id, systems, true, QString());
-                else emit gamelistsArrived(id, systems, false, err);
+                bool caseInsensitive = false;
+                if (LibraryBundle::parseSidecarInventory(body, systems, caseInsensitive, err))
+                    emit gamelistsArrived(id, systems, true, QString(), caseInsensitive);
+                else
+                    emit gamelistsArrived(id, systems, false, err, false);
                 return;
             }
             emit gamelistsArrived(id, systems, false,
                                   status == 401 ? tr("%1 needs pairing again.").arg(name)
-                                                : reasonOf(body, tr("%1 did not answer.").arg(name)));
+                                                : reasonOf(body, tr("%1 did not answer.").arg(name)),
+                                  false);
         });
+}
+
+void PlayOnClient::flushGamelist(const PlayOn::Peer& peer, const QString& token, const QString& system)
+{
+    const QString id = peer.id;
+    post(peer, QStringLiteral("/gamelists/flush"), LibraryBundle::gamelistFlushRequestJson(system), token, kBundleTimeoutMs,
+         QStringLiteral("application/json"), [this, id, system](int status, const QByteArray& body, bool ok) {
+             LibraryBundle::GamelistFlushResult r;
+             const bool answered = ok && status == 200 && LibraryBundle::parseGamelistFlushResult(body, r);
+             emit gamelistFlushed(id, system, answered, r.committed, r.failed);
+         });
 }
 
 int PlayOnClient::bundleTimeoutMsFor(qint64 bodyBytes, int format)
