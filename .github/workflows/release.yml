@@ -667,8 +667,12 @@ jobs:
             got=$(ls "$data/$d" 2>/dev/null | sort | tr '\n' ' ')
             echo "run1: $d in image: $want"
             echo "run1: $d in XDG:   $got"
-            [ -n "$want" ] && [ "$want" = "$got" ] || fail "run1: $data/$d does not hold the image's stock $d"
+            # Every stock entry must have arrived; the app may add its own beside them (addons/_storage).
+            missing=""
+            for e in $want; do [ -e "$data/$d/$e" ] || missing="$missing $e"; done
+            [ -n "$want" ] && [ -z "$missing" ] || fail "run1: $data/$d lacks the image's stock$missing"
           done
+          echo "run1: themes2 and addons in XDG hold every stock entry the image ships"
           extracted=$(grep -c 'AssetBootstrap: extracted assets from /tmp/.mount_' "$log")
           grep 'AssetBootstrap: extracted assets from' "$log"
           [ "$extracted" -eq 1 ] || fail "run1: expected one AssetBootstrap extraction from the mount, logged $extracted"
@@ -730,6 +734,9 @@ jobs:
           [ -z "$wf" ] || { echo "$wf"; fail "run2: the app logged a write failure"; }
           [ "$(sha256sum "$image" | cut -d' ' -f1)" = "$image_sha_before" ] || fail "the AppImage file changed across the runs"
           echo "run2: no write failure logged; the AppImage is byte-identical after both runs"
+          echo "--- $data/perf_trace.log (both runs) ---"
+          grep 'startup.total' "$data/perf_trace.log"
+          [ "$(grep -c 'startup.total' "$data/perf_trace.log")" -eq 2 ] || fail "expected startup.total from exactly two launches in perf_trace.log"
           echo "AppImage kept its state across two FUSE-mounted launches"
 
       - uses: actions/upload-artifact@v4
