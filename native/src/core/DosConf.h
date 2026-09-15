@@ -40,6 +40,7 @@
 #include <QJsonValue>
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
@@ -192,6 +193,10 @@ namespace DosConf
         QMap<QString, QString> values;   // conf value (lowercased) -> option value; empty = pass through
         QString transform;               // "" | "cycles"
         QString note;                    // optional human phrase used when this key is ignored
+        // The core READS this option as a number, so a positive decimal count it does not list is still honoured
+        // (issue #288). Data, and strict by default: only a mapping whose core option is cited as number-parsed
+        // sets it. See checkAgainstCore.
+        bool acceptsNumber = false;
     };
 
     // The `conf` block of one core entry in a launch recipe.
@@ -218,6 +223,11 @@ namespace DosConf
             m.to        = mo.value(QStringLiteral("to")).toString().trimmed();
             m.transform = mo.value(QStringLiteral("transform")).toString().trimmed().toLower();
             m.note      = mo.value(QStringLiteral("note")).toString().trimmed();
+            // #288: `"acceptsNumber": true` — the core parses this option as a number rather than matching its
+            // declared list. Set in msdos.json on cpu.cycles ONLY: dosbox-pure 1.0-preview6 (a4a0bab)
+            // dosbox_pure_libretro.cpp:2405-2414 reads dosbox_pure_cycles with atoi whenever the value starts
+            // with a digit, while core_options.h:503-523 declares only auto, max and eleven named counts.
+            m.acceptsNumber = mo.value(QStringLiteral("acceptsNumber")).toBool(false);
             const QJsonObject vals = mo.value(QStringLiteral("values")).toObject();
             for (auto it = vals.constBegin(); it != vals.constEnd(); ++it)
             {
@@ -241,6 +251,7 @@ namespace DosConf
         QString confValue;    // "fixed 5000"
         QString option;       // "dosbox_pure_cycles"
         QString optionValue;  // "5000"
+        bool    acceptsNumber = false;   // copied from the Mapping (#288): an undeclared positive count still counts
     };
     struct Ignored
     {
@@ -260,6 +271,10 @@ namespace DosConf
         QMap<QString, QString> options;   // what to seed on the core
         QList<Applied> applied;
         QList<Ignored> ignored;
+        // #288: entries the recipe AND the core would have applied, but the user already set that option
+        // themselves (per core or per game), so the conf did not change it. Neither applied nor ignored, and
+        // not counted in the report's "N of M settings applied".
+        QList<Applied> kept;
         bool    ok = false;               // false => the conf could not be read; options is empty
         QString error;
         CoreCheck coreCheck = CoreCheck::NotChecked;
@@ -273,8 +288,8 @@ namespace DosConf
     //   "5000"                -> "5000"
     // Anything else yields "" and the key is ignored with a reason, which is the whole point of returning a
     // string rather than guessing a number. Whether the loaded core ACCEPTS a given count is not this
-    // function's question: dosbox-pure declares a fixed list of counts (issue #288), and checkAgainstCore()
-    // below is what refuses one it does not declare.
+    // function's question: checkAgainstCore() below answers it from the core's declared list, and the
+    // mapping's `acceptsNumber` flag (issue #288) is what lets a count the core reads but does not list through.
     inline QString transformCycles(const QString& raw)
     {
         const QString v = raw.trimmed().toLower();
@@ -349,6 +364,7 @@ namespace DosConf
 
             Applied ap;
             ap.from = q; ap.confValue = e.value; ap.option = hit->to; ap.optionValue = outValue;
+            ap.acceptsNumber = hit->acceptsNumber;
             p.applied.push_back(ap);
             p.options.insert(hit->to, outValue);   // a repeated key: the last one wins, as DOSBox does
         }
@@ -401,6 +417,17 @@ namespace DosConf
     //
     // This is the one rule, and it governs a user's override recipe exactly as it governs the shipped one:
     // nothing here names a core or a key.
+    // A positive decimal integer, spelled as digits only ("3000"; never "+5", "-5", "0", "12 34", "5x"), small
+    // enough to be an int — the only shape an `acceptsNumber` mapping lets past a core's declared value list.
+    inline bool isPositiveCount(const QString& v)
+    {
+        if (v.isEmpty()) return false;
+        for (const QChar c : v) if (c < QLatin1Char('0') || c > QLatin1Char('9')) return false;
+        bool ok = false;
+        const int n = v.toInt(&ok);
+        return ok && n > 0;
+    }
+
     inline Plan checkAgainstCore(const Plan& p, const Declared& declared)
     {
         Plan out = p;
@@ -416,7 +443,8 @@ namespace DosConf
             const auto it = declared.constFind(a.option);
             if (it == declared.constEnd())
                 reason = QStringLiteral("the loaded core does not offer %1").arg(a.option);
-            else if (!it.value().isEmpty() && !it.value().contains(a.optionValue))
+            else if (!it.value().isEmpty() && !it.value().contains(a.optionValue)
+                     && !(a.acceptsNumber && isPositiveCount(a.optionValue)))
                 reason = QStringLiteral("the loaded core does not accept %1 for %2").arg(a.optionValue, a.option);
             if (!reason.isEmpty())
             {
@@ -430,6 +458,26 @@ namespace DosConf
         // Demoted entries go ahead of the plan's own ignored list: they were settings the recipe knew, and the
         // [autoexec] line stays last where the report has always put it.
         out.ignored = demoted + p.ignored;
+        return out;
+    }
+
+    // The plan with the USER'S OWN settings honoured, and said so (issue #288). Pure. `userKeys` is every core
+    // option the user has already set for this core or this game; the launch never seeds a conf value over one
+    // of those, so an applied entry naming one moves to `kept`: not applied (it changed nothing), not ignored
+    // (nothing was wrong with it), not counted in "N of M settings applied", and not in `options`. An unreadable
+    // plan is returned as it is.
+    inline Plan keepUserSettings(const Plan& p, const QSet<QString>& userKeys)
+    {
+        Plan out = p;
+        if (!p.ok || userKeys.isEmpty()) return out;
+        out.applied.clear();
+        out.options.clear();
+        for (const Applied& a : p.applied)
+        {
+            if (userKeys.contains(a.option)) { out.kept.push_back(a); continue; }
+            out.applied.push_back(a);
+            out.options.insert(a.option, a.optionValue);
+        }
         return out;
     }
 
@@ -492,20 +540,31 @@ namespace DosConf
         if (!p.ok)
             return QStringLiteral("%1 could not be read (%2), so none of it was applied.")
                        .arg(head, p.error);
-        if (p.applied.isEmpty() && p.ignored.isEmpty())
+        if (p.applied.isEmpty() && p.ignored.isEmpty() && p.kept.isEmpty())
             return QStringLiteral("%1 holds no settings, so nothing changed.").arg(head);
 
+        // `kept` entries (#288) are outside the count: the user's own setting stood, so the conf neither applied
+        // nor failed to apply them.
         const int total = int(p.applied.size() + p.ignored.size());
         QStringList appliedBits;
         for (const Applied& a : p.applied)
             appliedBits.push_back(QStringLiteral("%1 → %2=%3").arg(a.from, a.option, a.optionValue));
+        QStringList keptBits;
+        for (const Applied& k : p.kept) keptBits.push_back(k.from);
         QStringList ignoredBits;
         for (const Ignored& i : p.ignored) ignoredBits.push_back(i.from);
 
-        QString s = QStringLiteral("%1: %2 of %3 settings applied")
-                        .arg(head).arg(p.applied.size()).arg(total);
-        if (!appliedBits.isEmpty()) s += QStringLiteral(" (%1)").arg(appliedBits.join(QStringLiteral(", ")));
-        s += QLatin1Char('.');
+        QString s;
+        if (total == 0)
+            s = QStringLiteral("%1: nothing was applied.").arg(head);
+        else
+        {
+            s = QStringLiteral("%1: %2 of %3 settings applied").arg(head).arg(p.applied.size()).arg(total);
+            if (!appliedBits.isEmpty()) s += QStringLiteral(" (%1)").arg(appliedBits.join(QStringLiteral(", ")));
+            s += QLatin1Char('.');
+        }
+        if (!keptBits.isEmpty())
+            s += QStringLiteral(" Kept your own setting for %1.").arg(keptBits.join(QStringLiteral(", ")));
         if (!ignoredBits.isEmpty())
             s += QStringLiteral(" Ignored: %1.").arg(ignoredBits.join(QStringLiteral(", ")));
         return s;
@@ -523,6 +582,9 @@ namespace DosConf
         for (const Applied& a : p.applied)
             out.push_back(QStringLiteral("applied %1=%2 -> %3=%4")
                               .arg(a.from, a.confValue, a.option, a.optionValue));
+        for (const Applied& k : p.kept)
+            out.push_back(QStringLiteral("kept %1=%2 (your own setting for %3 stands)")
+                              .arg(k.from, k.confValue, k.option));
         for (const Ignored& i : p.ignored)
             out.push_back(QStringLiteral("ignored %1=%2 (%3)").arg(i.from, i.confValue, i.reason));
         return out;

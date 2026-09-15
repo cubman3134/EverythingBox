@@ -15,9 +15,10 @@
 //   * dosbox_pure_cpu_type's "pentium_mmx" exists only #if C_MMX (core_options.h:912), and include/config.h:46
 //     defines C_MMX 0 at this commit, so it is NOT declared and NOT listed.
 //
-// dosbox_pure_cycles is a FIXED list (core_options.h:507-521): auto, max and eleven named cycle counts. The core
-// reads a numeric value with atoi (dosbox_pure_libretro.cpp:2407-2414), but it DECLARES only these, and the
-// declaration is what a frontend is entitled to set — so a conf's `cycles=fixed 3000` is not an accepted value.
+// dosbox_pure_cycles DECLARES a fixed list (core_options.h:507-521): auto, max and eleven named cycle counts.
+// But the core READS it with atoi whenever the value starts with a digit (dosbox_pure_libretro.cpp:2405-2414),
+// so any positive count works — which is why msdos.json marks cpu.cycles `"acceptsNumber": true`, and why
+// probe_recipes allows that flag on this one option only.
 #pragma once
 #include "libretro/LibretroCore.h"   // CoreOption — the exact shape LibretroCore::options() hands out
 #include <vector>

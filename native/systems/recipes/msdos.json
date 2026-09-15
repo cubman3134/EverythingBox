@@ -53,6 +53,7 @@
             "from": "cpu.cycles",
             "to": "dosbox_pure_cycles",
             "transform": "cycles",
+            "acceptsNumber": true,
             "note": "DOSBox-Pure's Emulated Performance option takes auto, max or a cycle count, and this value is none of those"
           },
           {

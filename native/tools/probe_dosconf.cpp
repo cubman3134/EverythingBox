@@ -565,7 +565,9 @@ int main(int argc, char** argv)
         const DosConf::Plan openPlan = planFor(QByteArray("[cpu]\ncycles=fixed 3000\n"), open, nullptr);
         CHECK(openPlan.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String("3000"));
 
-        // (f) cycles, per the REAL declaration: a fixed list of auto, max and eleven counts.
+        // (f) cycles, per the REAL core: it DECLARES a fixed list of auto, max and eleven counts, but it READS the
+        //     option with atoi (dosbox_pure_libretro.cpp:2405-2414), so the recipe marks cpu.cycles
+        //     acceptsNumber and any positive decimal count is honoured. Shapes with no positive count are not.
         struct CyclesCase { const char* conf; const char* applied; const char* ignoredNaming; };
         const CyclesCase cases[] = {
             { "auto",                  "auto", nullptr },
@@ -578,8 +580,8 @@ int main(int argc, char** argv)
             { "fixed 7800",            "7800", nullptr },
             { "7800",                  "7800", nullptr },
             { "fixed 1000000",         "1000000", nullptr },
-            { "fixed 3000",            nullptr, "3000" },    // a real count, but not one dosbox-pure offers
-            { "20000",                 nullptr, "20000" },
+            { "fixed 3000",            "3000", nullptr },    // not in the list, but a count the core reads
+            { "20000",                 "20000", nullptr },
         };
         for (const CyclesCase& c : cases)
         {
@@ -600,10 +602,52 @@ int main(int argc, char** argv)
                 CHECK(ignoredReason(cp, QStringLiteral("cpu.cycles")).contains(QLatin1String(c.ignoredNaming)));
             }
         }
-        // …and a shape with no option form at all is still ignored with the recipe's own note.
-        const DosConf::Plan bare = planFor(QByteArray("[cpu]\ncycles=fixed\n"), declared, nullptr);
-        CHECK(bare.options.isEmpty());
-        CHECK(!ignoredReason(bare, QStringLiteral("cpu.cycles")).isEmpty());
+        // …and a shape with no positive count is ignored with the recipe's own note, flag or no flag.
+        for (const char* bad : { "fixed", "fixed abc", "-5", "0", "fixed -5", "fixed 0" })
+        {
+            const DosConf::Plan bp = planFor(QByteArray("[cpu]\ncycles=") + bad + "\n", declared, nullptr);
+            if (!bp.options.isEmpty()) std::fprintf(stderr, "DOSCONF-FAIL cycles=%s was applied\n", bad);
+            CHECK(bp.options.isEmpty());
+            CHECK(bp.applied.isEmpty());
+            CHECK(!ignoredReason(bp, QStringLiteral("cpu.cycles")).isEmpty());
+        }
+
+        // (f2) the acceptsNumber flag is DATA and strict by default. The same count through a mapping WITHOUT
+        //      the flag is held to the declared list and ignored, naming the value; with the flag, a value that
+        //      is not a positive decimal integer is still ignored, naming the value. The KEY check still applies.
+        {
+            DosConf::Spec strict;
+            DosConf::Mapping sm; sm.from = QStringLiteral("cpu.cycles"); sm.to = QStringLiteral("dosbox_pure_cycles");
+            sm.transform = QStringLiteral("cycles");            // acceptsNumber left at its default
+            strict.map.push_back(sm);
+            DosConf::File f; DosConf::parse(QByteArray("[cpu]\ncycles=fixed 3000\n"), &f);
+            const DosConf::Plan sp = DosConf::checkAgainstCore(DosConf::translate(f, strict), declared);
+            CHECK(sp.options.isEmpty());
+            CHECK(ignoredReason(sp, QStringLiteral("cpu.cycles")).contains(QStringLiteral("3000")));
+
+            DosConf::Spec flagged;
+            DosConf::Mapping pm; pm.from = QStringLiteral("cpu.cycles"); pm.to = QStringLiteral("dosbox_pure_cycles");
+            pm.acceptsNumber = true;                             // pass-through: the value reaches the check verbatim
+            flagged.map.push_back(pm);
+            for (const char* v : { "abc", "-5", "0", "+5", "5x", "12 34", "99999999999" })
+            {
+                DosConf::File g; DosConf::parse(QByteArray("[cpu]\ncycles=") + v + "\n", &g);
+                const DosConf::Plan fp = DosConf::checkAgainstCore(DosConf::translate(g, flagged), declared);
+                if (!fp.options.isEmpty()) std::fprintf(stderr, "DOSCONF-FAIL acceptsNumber took '%s'\n", v);
+                CHECK(fp.options.isEmpty());
+                CHECK(ignoredReason(fp, QStringLiteral("cpu.cycles")).contains(QLatin1String(v)));
+            }
+            DosConf::File h; DosConf::parse(QByteArray("[cpu]\ncycles=3000\n"), &h);
+            const DosConf::Plan ok = DosConf::checkAgainstCore(DosConf::translate(h, flagged), declared);
+            CHECK(ok.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String("3000"));
+            // The flag never excuses a key the core does not declare.
+            DosConf::Declared noCycles = declared;
+            noCycles.remove(QStringLiteral("dosbox_pure_cycles"));
+            const DosConf::Plan nk = DosConf::checkAgainstCore(DosConf::translate(h, flagged), noCycles);
+            CHECK(nk.options.isEmpty());
+            CHECK(ignoredReason(nk, QStringLiteral("cpu.cycles"))
+                  == QLatin1String("the loaded core does not offer dosbox_pure_cycles"));
+        }
 
         // (g) an unreadable conf stays unreadable — the check never invents an applied entry.
         const DosConf::Plan broken = planFor(QByteArray("[cpu\ncycles=max\n"), declared, nullptr);
@@ -611,15 +655,56 @@ int main(int argc, char** argv)
         CHECK(broken.options.isEmpty());
         CHECK(broken.applied.isEmpty());
 
-        // (h) the GOG conf from section 4 on the real core: cycles=fixed 20000 was "applied" by the recipe
-        //     alone, and the loaded core's declaration turns it into an honest ignored line.
+        // (h) the GOG conf from section 4 on the real core: every one of its seven mapped settings — including
+        //     cycles=fixed 20000, a count the core reads though it does not list it — is still applied after
+        //     the loaded core's check. (The applied -> ignored transition itself is case (b).)
         DosConf::Plan gogPre;
         const DosConf::Plan gog = planFor(gogConf(), declared, &gogPre);
         CHECK(isApplied(gogPre, QStringLiteral("cpu.cycles")));
-        CHECK(!isApplied(gog, QStringLiteral("cpu.cycles")));
-        CHECK(ignoredReason(gog, QStringLiteral("cpu.cycles")).contains(QStringLiteral("20000")));
+        CHECK(isApplied(gog, QStringLiteral("cpu.cycles")));
+        CHECK(gog.options.value(QStringLiteral("dosbox_pure_cycles")) == QLatin1String("20000"));
+        CHECK(gog.options == gogPre.options);
         CHECK(DosConf::report(QStringLiteral("Doom"), QStringLiteral("DOSBOX.CONF"), gog)
-                  .contains(QStringLiteral("6 of 11 settings applied")));
+                  .contains(QStringLiteral("7 of 11 settings applied")));
+
+        // (i) THE USER'S OWN SETTING WINS, AND THE REPORT SAYS SO. openGame never seeds a conf key the user has
+        //     set per core or per game. Counting it as applied would be the same lie as (b), so it is its own
+        //     outcome: kept — not applied, not ignored, not in "N of M", not in the seed.
+        const QSet<QString> userKeys = { QStringLiteral("dosbox_pure_cycles"), QStringLiteral("dosbox_pure_nosuch") };
+        const DosConf::Plan kept = DosConf::keepUserSettings(gog, userKeys);
+        CHECK(!isApplied(kept, QStringLiteral("cpu.cycles")));
+        CHECK(ignoredReason(kept, QStringLiteral("cpu.cycles")).isEmpty());
+        CHECK(kept.kept.size() == 1);
+        CHECK(kept.kept.value(0).from == QLatin1String("cpu.cycles"));
+        CHECK(kept.kept.value(0).option == QLatin1String("dosbox_pure_cycles"));
+        CHECK(!kept.options.contains(QStringLiteral("dosbox_pure_cycles")));
+        CHECK(kept.options.size() == gog.options.size() - 1);
+        CHECK(kept.applied.size() == gog.applied.size() - 1);
+        CHECK(kept.ignored.size() == gog.ignored.size());
+        CHECK(kept.applied.size() + kept.ignored.size() + kept.kept.size() == gog.applied.size() + gog.ignored.size());
+        const QString keptReport = DosConf::report(QStringLiteral("Doom"), QStringLiteral("DOSBOX.CONF"), kept);
+        CHECK(keptReport.contains(QStringLiteral("6 of 10 settings applied")));
+        CHECK(keptReport.contains(QStringLiteral("Kept your own setting for cpu.cycles.")));
+        CHECK(!keptReport.contains(QStringLiteral("dosbox_pure_cycles=20000")));
+        const QString keptLog = DosConf::logLines(kept).join(QLatin1Char('\n'));
+        CHECK(keptLog.contains(QStringLiteral("kept cpu.cycles=fixed 20000")));
+        CHECK(DosConf::logLines(kept).size() == kept.applied.size() + kept.ignored.size() + kept.kept.size());
+        // No user keys: nothing moves, and the report has no kept clause.
+        const DosConf::Plan none = DosConf::keepUserSettings(gog, QSet<QString>());
+        CHECK(none.options == gog.options);
+        CHECK(none.kept.isEmpty());
+        CHECK(!DosConf::report(QString(), QStringLiteral("DOSBOX.CONF"), none).contains(QStringLiteral("Kept")));
+        // Everything kept: the report says nothing was applied rather than "0 of 0".
+        DosConf::File onlyCycles; DosConf::parse(QByteArray("[cpu]\ncycles=max\n"), &onlyCycles);
+        const DosConf::Plan allKept = DosConf::keepUserSettings(
+            DosConf::checkAgainstCore(DosConf::translate(onlyCycles, pure->conf), declared), userKeys);
+        const QString allKeptReport = DosConf::report(QStringLiteral("Doom"), QStringLiteral("DOSBOX.CONF"), allKept);
+        CHECK(allKept.options.isEmpty());
+        CHECK(!allKeptReport.contains(QStringLiteral("0 of 0")));
+        CHECK(allKeptReport.contains(QStringLiteral("nothing was applied")));
+        CHECK(allKeptReport.contains(QStringLiteral("Kept your own setting for cpu.cycles.")));
+        // An unreadable plan is left as it is.
+        CHECK(!DosConf::keepUserSettings(broken, userKeys).ok);
     }
 
     if (failures == 0) std::printf("DOSCONF-OK\n");

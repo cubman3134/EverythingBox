@@ -1427,20 +1427,29 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     // key of it is seeded. setOptionValue does not validate, so a key the core never declared, or a value off
     // its list, would otherwise be stored, reported "applied" and never read. What the check drops is not
     // seeded; the checked plan is what the launcher reports. The MIDI seed (confOptions_) goes on top, as before.
+    // A key the user already set (per core, or per game) is never seeded from the conf — and, since #288, the
+    // plan says so: such an entry is reported as "kept your own setting", not as applied.
     QMap<QString, QString> confSeed;
-    if (hasConfPlan)
-    {
-        checkedConfPlan_ = DosConf::checkAgainstCore(confPlan, DosConf::declaredFrom(core_.options()));
-        checkedConfName_ = confName;
-        hasCheckedConfPlan_ = true;
-        if (checkedConfPlan_.ok) confSeed = checkedConfPlan_.options;
-    }
-    for (auto it = confOptions_.constBegin(); it != confOptions_.constEnd(); ++it)
-        confSeed.insert(it.key(), it.value());
-    if (!confSeed.isEmpty())
+    if (hasConfPlan || !confOptions_.isEmpty())
     {
         const QMap<QString, QString> gameDelta = (coreName.isEmpty() || overrideToken_.isEmpty())
             ? QMap<QString, QString>() : Settings::gameOptionDelta(overrideToken_, coreName);
+        if (hasConfPlan)
+        {
+            const DosConf::Plan checked =
+                DosConf::checkAgainstCore(confPlan, DosConf::declaredFrom(core_.options()));
+            QSet<QString> userKeys;
+            for (auto it = checked.options.constBegin(); it != checked.options.constEnd(); ++it)
+                if ((!coreName.isEmpty() && !Settings::optionValue(coreName, it.key()).isEmpty())
+                    || gameDelta.contains(it.key()))
+                    userKeys.insert(it.key());
+            checkedConfPlan_ = DosConf::keepUserSettings(checked, userKeys);
+            checkedConfName_ = confName;
+            hasCheckedConfPlan_ = true;
+            if (checkedConfPlan_.ok) confSeed = checkedConfPlan_.options;
+        }
+        for (auto it = confOptions_.constBegin(); it != confOptions_.constEnd(); ++it)
+            confSeed.insert(it.key(), it.value());
         for (auto it = confSeed.constBegin(); it != confSeed.constEnd(); ++it)
         {
             if (!coreName.isEmpty() && !Settings::optionValue(coreName, it.key()).isEmpty()) continue; // user chose

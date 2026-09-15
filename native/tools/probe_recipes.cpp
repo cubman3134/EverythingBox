@@ -795,6 +795,24 @@ int main(int argc, char** argv)
                 QStringLiteral("dosbox_pure_sblaster_adlib_mode") };
             CHECK(mappedTo == seven);
         }
+
+        // `acceptsNumber` lets an UNDECLARED positive count through the loaded-core check, so it may be set only
+        // on an option whose core is cited as parsing it as a number. Today that is exactly dosbox_pure_cycles
+        // (dosbox-pure 1.0-preview6 dosbox_pure_libretro.cpp:2405-2414, atoi). Every shipped recipe, every core.
+        QSet<QString> numberParsed;
+        for (const QString& id : shipped)
+        {
+            const LaunchRecipe r = LaunchRecipes::load(id, QString());
+            for (const RecipeCore& rc : r.cores)
+                for (const DosConf::Mapping& m : rc.conf.map)
+                    if (m.acceptsNumber)
+                    {
+                        std::fprintf(stderr, "RECIPES-INFO %s: %s -> %s acceptsNumber\n", qPrintable(id),
+                                     qPrintable(m.from), qPrintable(m.to));
+                        numberParsed.insert(rc.core + QLatin1Char('/') + m.to);
+                    }
+        }
+        CHECK(numberParsed == QSet<QString>{ QStringLiteral("dosbox_pure/dosbox_pure_cycles") });
     }
 
     if (failures == 0) std::printf("RECIPES-OK\n");
