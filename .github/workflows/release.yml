@@ -491,7 +491,9 @@ jobs:
       # Same offscreen / no-daemon / no-build-Qt environment as the smoke above.
       - name: Persist state across two launches of the FUSE-mounted AppImage
         run: |
-          set -u
+          # The default step shell is `bash -e`; every check below is explicit, and a non-zero `wait` or a failed
+          # probe of a not-yet-listening channel must be READ, not end the step without a word.
+          set +e -u
           fail() { echo "::error::$*"; exit 1; }
           image="$PWD/EverythingBox-linux-x86_64.AppImage"
           [ -d squashfs-root/usr/bin ] || fail "squashfs-root from the smoke step is missing"
@@ -583,6 +585,22 @@ jobs:
               fail "$1: a write under the mount succeeded; it is not read-only"
             fi
             echo "$1: write under the mount refused: $(cat "$p/touch.err")"
+            echo "$1: app signal masks: $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+          }
+
+          # $1 = run label. The app must still be up when its drive is done (it did not exit on its own inside
+          # the window); then the 30 s timeout ends it. rc 124 = SIGTERM was enough; rc 137 = timeout had to
+          # follow up with SIGKILL after --kill-after, i.e. the process was still there -- also a timeout, not a
+          # self-exit. Anything else is the app's own exit status.
+          finish() {
+            kill -0 "$app" 2>/dev/null || { tail -n 40 "$p/$1.out"; fail "$1: the app exited on its own inside its 30 s window"; }
+            wait "$tpid"; rc=$?
+            pkill -f '/usr/bin/EverythingBox' || true
+            echo "$1: timeout ended the still-running app (rc=$rc)"
+            case "$rc" in
+              124|137) ;;
+              *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of being stopped by the timeout" ;;
+            esac
           }
 
           wait_ready() {
@@ -612,7 +630,7 @@ jobs:
           launch run1 uitest
           wait_ready || { tail -n 40 "$p/run1.out"; fail "run1: the UI-test channel never reported ready"; }
           assert_mounted run1
-          wait_title
+          wait_title || true
           state1=$(uit state)
           title1=$(printf '%s' "$state1" | field panelTitle)
           echo "run1: first screen panelTitle='$title1' page='$(printf '%s' "$state1" | field page)'"
@@ -632,9 +650,7 @@ jobs:
           uit key enter >/dev/null
           for _ in $(seq 1 20); do [ "$(inival onboarding done)" = true ] && break; sleep 0.5; done
           echo "run1: after choosing a new library panelTitle='$(uit state | field panelTitle)'"
-          wait "$tpid"; rc1=$?
-          pkill -f '/usr/bin/EverythingBox' || true
-          [ "$rc1" -eq 124 ] || { tail -n 40 "$p/run1.out"; fail "run1: the AppImage exited (rc=$rc1) inside its 30 s window"; }
+          finish run1
 
           echo "--- run 1 wrote into $data ---"
           ls -la "$data"
@@ -692,16 +708,14 @@ jobs:
           fi
           echo "run2: UI-test channel answered 'ok ready' with EB_UITEST unset -> debug/uiTestChannel was read from the persisted ini"
           assert_mounted run2
-          wait_title
+          wait_title || true
           state2=$(uit state)
           title2=$(printf '%s' "$state2" | field panelTitle)
           echo "run2: first screen panelTitle='$title2' page='$(printf '%s' "$state2" | field page)'"
           [ "$title2" != "Welcome to EverythingBox" ] || fail "run2: onboarding was shown again"
           # onboarding/done=true routes showEvent to promptStartupProfile(), whose themed title is this.
           [ "$title2" = "Who's using EverythingBox?" ] || { echo "$state2"; fail "run2: expected the profile picker, got '$title2'"; }
-          wait "$tpid"; rc2=$?
-          pkill -f '/usr/bin/EverythingBox' || true
-          [ "$rc2" -eq 124 ] || { tail -n 40 "$p/run2.out"; fail "run2: the AppImage exited (rc=$rc2) inside its 30 s window"; }
+          finish run2
 
           echo "run2: everythingbox.ini [debug] uiTestChannel=$(inival debug uiTestChannel) [onboarding] done=$(inival onboarding done)"
           [ "$(inival debug uiTestChannel)" = true ] || fail "run2: debug/uiTestChannel did not survive in the ini"
