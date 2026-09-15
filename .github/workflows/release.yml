@@ -545,8 +545,8 @@ jobs:
                 EB_PERF=1 EB_UITEST_PIPE="$EB_UITEST_PIPE" $extra \
                 timeout --kill-after=10 30 "$image" > "$p/$1.out" 2>&1 &
             tpid=$!
-            # The app is timeout's child or grandchild (the runtime's parent process execs AppRun once the mount
-            # is up; its forked child serves the FUSE mount). Take whichever descendant is the EverythingBox binary.
+            # The app need not be timeout's direct child: on the runner an AppImage runtime process sits between
+            # them (the chain is printed below). Take whichever child or grandchild is the EverythingBox binary.
             app=""
             for _ in $(seq 1 40); do
               for c in $(pgrep -P "$tpid") $(for k in $(pgrep -P "$tpid"); do pgrep -P "$k"; done); do
@@ -586,17 +586,20 @@ jobs:
             fi
             echo "$1: write under the mount refused: $(cat "$p/touch.err")"
             echo "$1: app signal masks: $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+            mid=$(ps -o ppid= -p "$app" | tr -d ' ')
+            echo "$1: process chain: timeout $tpid -> $mid ($(readlink "/proc/$mid/exe" 2>/dev/null)) -> app $app"
           }
 
-          # $1 = run label. The app must still be up when its drive is done (it did not exit on its own inside
-          # the window); then the 30 s timeout ends it. rc 124 = SIGTERM was enough; rc 137 = timeout had to
-          # follow up with SIGKILL after --kill-after, i.e. the process was still there -- also a timeout, not a
-          # self-exit. Anything else is the app's own exit status.
+          # $1 = run label. The app must still be up when its drive is done, i.e. it did not exit on its own inside
+          # the window; then the 30 s timeout ends the run. timeout watches only its DIRECT child, which on the
+          # mounted image is the runtime, not the app. rc 124 = that child exited after SIGTERM. rc 137 = it had
+          # not exited 10 s later, so timeout sent SIGKILL to its whole process group, itself included (bash then
+          # reports the job "Killed"). Either way the timeout ended the run; anything else is an exit of its own.
           finish() {
             kill -0 "$app" 2>/dev/null || { tail -n 40 "$p/$1.out"; fail "$1: the app exited on its own inside its 30 s window"; }
             wait "$tpid"; rc=$?
             pkill -f '/usr/bin/EverythingBox' || true
-            echo "$1: timeout ended the still-running app (rc=$rc)"
+            echo "$1: the 30 s timeout ended the run (rc=$rc)"
             case "$rc" in
               124|137) ;;
               *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of being stopped by the timeout" ;;
