@@ -22,6 +22,7 @@
 #include "CheatSearch.h"    // pure cheat-search engine (#96): snapshot RAM -> narrow candidates -> freeze
 #include "Runahead.h"       // pure runahead schedule + eligibility (#100): the ordering, testable off a core
 #include "../core/Hardcore.h" // the ONE hardcore-mode policy (#94): which affordances a hardcore session forbids
+#include "../core/DosConf.h"  // #288: the dosbox.conf plan, checked against the loaded core's declared options
 
 class QTimer;
 class QThread;
@@ -63,12 +64,29 @@ public:
                   const QString& coreName = QString(), QString* error = nullptr,
                   const QString& title = QString(), const QString& systemId = QString(),
                   const QString& gameKey = QString());
-    // The core options translated from a dosbox.conf sitting beside the game (issue #191), pushed in by the
-    // launcher just before openGame. The LAUNCHER computes them because it owns the user-facing report — the
-    // applied/ignored sentence — and it must be able to say what happened even when the launch is refused for
-    // some other reason. Set on EVERY libretro launch (usually to an empty map), so a conf can never leak from
-    // one game into the next: the value is consumed and cleared by openGame.
+    // Extra core options for the next openGame (issue #191) — since #288 the MS-DOS MIDI-device seed; the
+    // dosbox.conf translation travels as a plan through setConfPlan below. Set on EVERY libretro launch
+    // (usually to an empty map), so a seed can never leak from one game into the next: the value is consumed
+    // and cleared by openGame.
     void setConfOptions(const QMap<QString, QString>& options) { confOptions_ = options; }
+    // #288: the dosbox.conf PLAN for the next openGame, translated by the launcher from the recipe alone. The
+    // recipe cannot know what the core will declare, so openGame re-classifies it against the LOADED core's
+    // own options (DosConf::checkAgainstCore) before seeding anything, and seeds only what survives. Consumed
+    // by openGame like setConfOptions; the launcher collects the checked plan with takeCheckedConfPlan to build
+    // the report and the log. `confOptions` above still carries the MIDI seed, applied after the plan's.
+    void setConfPlan(const DosConf::Plan& plan, const QString& confName)
+    {
+        pendingConfPlan_ = plan; pendingConfName_ = confName; hasPendingConfPlan_ = true;
+    }
+    // The plan as the last openGame checked it, once. False when there was none, or the core never loaded.
+    bool takeCheckedConfPlan(DosConf::Plan* plan, QString* confName)
+    {
+        if (!hasCheckedConfPlan_) return false;
+        if (plan) *plan = checkedConfPlan_;
+        if (confName) *confName = checkedConfName_;
+        hasCheckedConfPlan_ = false;
+        return true;
+    }
 
     void stop();
     bool running() const { return running_; }
@@ -330,6 +348,12 @@ private:
     QString overrideToken_;   // Settings::gameToken of the running game's identity; keys its per-game overrides (#95)
     QString systemId_;        // the running game's system ("nes", "snes", …); namespaces NEW save files
     QMap<QString, QString> confOptions_;  // #191: dosbox.conf -> core options for the NEXT openGame; consumed there
+    DosConf::Plan pendingConfPlan_;       // #288: the recipe-only plan for the NEXT openGame; consumed there
+    QString pendingConfName_;
+    bool hasPendingConfPlan_ = false;
+    DosConf::Plan checkedConfPlan_;       // #288: that plan re-classified against the loaded core's options
+    QString checkedConfName_;
+    bool hasCheckedConfPlan_ = false;
     QString gameTitle_;       // the running game's display name, recorded in the saves-meta sidecar
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
