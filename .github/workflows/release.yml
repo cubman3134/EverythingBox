@@ -495,8 +495,9 @@ jobs:
           fail() { echo "::error::$*"; exit 1; }
           image="$PWD/EverythingBox-linux-x86_64.AppImage"
           [ -d squashfs-root/usr/bin ] || fail "squashfs-root from the smoke step is missing"
-          if ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
-            echo "no fusermount binary on PATH; installing fuse3 so the AppImage runtime can mount"
+          # The type2 runtime links libfuse 3 and needs a fusermount of major version 3 (fuse2's alone is refused).
+          if ! command -v fusermount3 >/dev/null 2>&1; then
+            echo "no fusermount3 on PATH; installing fuse3 so the AppImage runtime can mount"
             sudo apt-get install -y --no-install-recommends fuse3 >/dev/null || fail "could not install fuse3"
           fi
           echo "fusermount: $(command -v fusermount3 || true) $(command -v fusermount || true)"
@@ -591,6 +592,17 @@ jobs:
             done
             return 1
           }
+          # "ready" means the window exists; the first screen is presented a tick after show (MainWindow::showEvent's
+          # zero-timer), so wait for it to carry a title rather than racing it.
+          wait_title() {
+            title=""
+            for _ in $(seq 1 40); do
+              title=$(uit state 2>/dev/null | field panelTitle 2>/dev/null)
+              [ -n "$title" ] && return 0
+              sleep 0.5
+            done
+            return 1
+          }
 
           # Unwritable-directory failures the app would hit if it still wrote beside its binary.
           write_failures() { grep -n -E 'AccessError|Read-only file system|EROFS' "$log" "$p/$1.out" || true; }
@@ -600,6 +612,7 @@ jobs:
           launch run1 uitest
           wait_ready || { tail -n 40 "$p/run1.out"; fail "run1: the UI-test channel never reported ready"; }
           assert_mounted run1
+          wait_title
           state1=$(uit state)
           title1=$(printf '%s' "$state1" | field panelTitle)
           echo "run1: first screen panelTitle='$title1' page='$(printf '%s' "$state1" | field page)'"
@@ -607,12 +620,17 @@ jobs:
           # makes run 2's "not shown" mean something.
           [ "$title1" = "Welcome to EverythingBox" ] || { echo "$state1"; fail "run1: a fresh data dir did not show onboarding"; }
           # Answer it the way a user does -- row 2, "Set up a new library" -- so the APP writes onboarding/done.
-          uit key down >/dev/null
-          focus1=$(uit state | field panelFocus)
-          echo "run1: onboarding focus='$focus1'"
+          focus1=""
+          for _ in 1 2 3; do
+            case "$focus1" in *"new library"*) break ;; esac
+            uit key down >/dev/null
+            sleep 0.5
+            focus1=$(uit state | field panelFocus)
+            echo "run1: onboarding focus='$focus1'"
+          done
           case "$focus1" in *"new library"*) ;; *) fail "run1: expected 'Set up a new library' focused, got '$focus1'" ;; esac
           uit key enter >/dev/null
-          for _ in $(seq 1 20); do grep -qx 'done=true' "$ini" 2>/dev/null && break; sleep 0.5; done
+          for _ in $(seq 1 20); do [ "$(inival onboarding done)" = true ] && break; sleep 0.5; done
           echo "run1: after choosing a new library panelTitle='$(uit state | field panelTitle)'"
           wait "$tpid"; rc1=$?
           pkill -f '/usr/bin/EverythingBox' || true
@@ -674,6 +692,7 @@ jobs:
           fi
           echo "run2: UI-test channel answered 'ok ready' with EB_UITEST unset -> debug/uiTestChannel was read from the persisted ini"
           assert_mounted run2
+          wait_title
           state2=$(uit state)
           title2=$(printf '%s' "$state2" | field panelTitle)
           echo "run2: first screen panelTitle='$title2' page='$(printf '%s' "$state2" | field page)'"
