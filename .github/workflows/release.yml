@@ -477,6 +477,271 @@ jobs:
           fi
           echo "AppImage started headless with no speech-dispatcher and was still running at 30 s"
 
+      # Issue #341: the user's data lives in $XDG_DATA_HOME/EverythingBox and AssetBootstrap seeds it, because
+      # inside an AppImage the binary's own directory is a READ-ONLY squashfs mount. The smoke above runs
+      # extract-and-run (the job sets APPIMAGE_EXTRACT_AND_RUN for linuxdeploy), where the "app dir" is a
+      # writable squashfs-root and so proves nothing about that. This step runs the image the way a user's
+      # desktop does -- the runtime FUSE-mounts it read-only under /tmp/.mount_* -- twice, against one fresh set
+      # of XDG dirs, and asserts from the process table, the mount table and the app's own log that:
+      #   run 1 ran from the mount, was a first launch (onboarding shown), wrote everythingbox.ini and the
+      #         seeded themes2/ + addons/ + .assets-version stamp into XDG, and logged no write failure;
+      #   run 2, after a real Settings > Debug key (debug/uiTestChannel) is written into that ini, read the key
+      #         at startup (the UI-test channel comes up with EB_UITEST unset), kept what run 1 wrote, did not
+      #         re-extract the bundled assets and did not show onboarding.
+      # Same offscreen / no-daemon / no-build-Qt environment as the smoke above.
+      - name: Persist state across two launches of the FUSE-mounted AppImage
+        run: |
+          # The default step shell is `bash -e`; every check below is explicit, and a non-zero `wait` or a failed
+          # probe of a not-yet-listening channel must be READ, not end the step without a word.
+          set +e -u
+          fail() { echo "::error::$*"; exit 1; }
+          image="$PWD/EverythingBox-linux-x86_64.AppImage"
+          [ -d squashfs-root/usr/bin ] || fail "squashfs-root from the smoke step is missing"
+          # The type2 runtime links libfuse 3 and needs a fusermount of major version 3 (fuse2's alone is refused).
+          if ! command -v fusermount3 >/dev/null 2>&1; then
+            echo "no fusermount3 on PATH; installing fuse3 so the AppImage runtime can mount"
+            sudo apt-get install -y --no-install-recommends fuse3 >/dev/null || fail "could not install fuse3"
+          fi
+          echo "fusermount: $(command -v fusermount3 || true) $(command -v fusermount || true)"
+          ls -l /dev/fuse || fail "/dev/fuse is absent: this runner cannot FUSE-mount"
+          ./EverythingBox-linux-x86_64.AppImage --appimage-version 2>&1 | head -n1
+          image_sha_before=$(sha256sum "$image" | cut -d' ' -f1)
+
+          app_version=$(sed -n 's/.*kAppVersion = "\([^"]*\)".*/\1/p' native/src/main.cpp | head -n1)
+          [ -n "$app_version" ] || fail "could not read kAppVersion from native/src/main.cpp"
+          qpa_path=""
+          if [ -z "$(find squashfs-root -name 'libqoffscreen.so' | head -n1)" ]; then
+            qpa_path="$QT_ROOT_DIR/plugins/platforms"
+          fi
+          p=$(mktemp -d)
+          mkdir -p "$p/home" "$p/data" "$p/config" "$p/run"
+          chmod 700 "$p/run"
+          data="$p/data/EverythingBox"
+          ini="$data/everythingbox.ini"
+          log="$data/stream_debug.log"
+          export EB_UITEST_PIPE="eb341-$$"      # uitest.py and the app both honour it; /tmp/<name> on Linux
+          uit() { EB_UITEST_TIMEOUT=5 python3 native/tools/uitest.py "$@"; }
+          field() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1"; }
+          # One key of the QSettings ini, read by section so a same-named key elsewhere cannot answer for it.
+          inival() {
+            python3 -c '
+          import configparser, sys
+          c = configparser.ConfigParser(interpolation=None, strict=False)
+          c.optionxform = str
+          c.read(sys.argv[1], encoding="utf-8")
+          print(c.get(sys.argv[2], sys.argv[3], fallback=""))' "$ini" "$1" "$2" 2>/dev/null
+          }
+          fsig() { stat -c 'inode=%i mtime=%Y ctime=%Z' "$1"; }
+
+          # $1 = run label; $2 = "uitest" to set EB_UITEST=1 (run 1 only). APPIMAGE_EXTRACT_AND_RUN is UNSET, so
+          # the runtime mounts the image instead of extracting it.
+          launch() {
+            extra=""; [ "$2" = uitest ] && extra="EB_UITEST=1"
+            env -u APPIMAGE_EXTRACT_AND_RUN -u EB_UITEST \
+                -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+                -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+                HOME="$p/home" XDG_DATA_HOME="$p/data" XDG_CONFIG_HOME="$p/config" \
+                XDG_RUNTIME_DIR="$p/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+                EB_PERF=1 EB_UITEST_PIPE="$EB_UITEST_PIPE" $extra \
+                timeout --kill-after=10 30 "$image" > "$p/$1.out" 2>&1 &
+            tpid=$!
+            # The app need not be timeout's direct child: on the runner an AppImage runtime process sits between
+            # them (the chain is printed below). Take whichever child or grandchild is the EverythingBox binary.
+            app=""
+            for _ in $(seq 1 40); do
+              for c in $(pgrep -P "$tpid") $(for k in $(pgrep -P "$tpid"); do pgrep -P "$k"; done); do
+                if readlink "/proc/$c/exe" 2>/dev/null | grep -q '/usr/bin/EverythingBox$'; then app=$c; break; fi
+              done
+              [ -n "$app" ] && break
+              sleep 0.5
+            done
+            if [ -z "$app" ]; then
+              ps -o pid,ppid,args --ppid "$tpid" || true
+              tail -n 40 "$p/$1.out"
+              fail "$1: no EverythingBox process appeared under the AppImage runtime"
+            fi
+          }
+
+          # Evidence that THIS process runs from a read-only FUSE mount of the image, not an extracted tree.
+          assert_mounted() {
+            exe=$(readlink "/proc/$app/exe")
+            echo "$1: /proc/$app/exe -> $exe"
+            case "$exe" in
+              /tmp/.mount_*/usr/bin/EverythingBox) ;;
+              *) fail "$1: the app is not running from a /tmp/.mount_* FUSE mount (exe=$exe)" ;;
+            esac
+            case "$exe" in *squashfs-root*|*appimage_extracted*) fail "$1: exe is an extracted tree ($exe)" ;; esac
+            mnt=${exe%/usr/bin/EverythingBox}
+            line=$(awk -v m="$mnt" '$2 == m' /proc/mounts)
+            echo "$1: /proc/mounts: $line"
+            [ -n "$line" ] || fail "$1: $mnt is not in the mount table"
+            echo "$line" | awk '{print $3}' | grep -q '^fuse' || fail "$1: $mnt is not a FUSE mount"
+            echo "$line" | awk '{print $4}' | tr ',' '\n' | grep -qx ro || fail "$1: $mnt is not mounted read-only"
+            if tr '\0' '\n' < "/proc/$app/environ" | grep -q '^APPIMAGE_EXTRACT_AND_RUN='; then
+              fail "$1: APPIMAGE_EXTRACT_AND_RUN is set in the app's environment"
+            fi
+            echo "$1: app environment: $(tr '\0' '\n' < "/proc/$app/environ" | grep -E '^(APPDIR|APPIMAGE)=' | tr '\n' ' ')"
+            if touch "$mnt/usr/bin/.eb341-write-test" 2> "$p/touch.err"; then
+              fail "$1: a write under the mount succeeded; it is not read-only"
+            fi
+            echo "$1: write under the mount refused: $(cat "$p/touch.err")"
+            echo "$1: app signal masks: $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+            mid=$(ps -o ppid= -p "$app" | tr -d ' ')
+            echo "$1: process chain: timeout $tpid -> $mid ($(readlink "/proc/$mid/exe" 2>/dev/null)) -> app $app"
+          }
+
+          # $1 = run label. The app must still be up when its drive is done, i.e. it did not exit on its own inside
+          # the window; then the 30 s timeout ends the run. timeout watches only its DIRECT child, which on the
+          # mounted image is the runtime, not the app. rc 124 = that child exited after SIGTERM. rc 137 = it had
+          # not exited 10 s later, so timeout sent SIGKILL to its whole process group, itself included (bash then
+          # reports the job "Killed"). Either way the timeout ended the run; anything else is an exit of its own.
+          finish() {
+            kill -0 "$app" 2>/dev/null || { tail -n 40 "$p/$1.out"; fail "$1: the app exited on its own inside its 30 s window"; }
+            wait "$tpid"; rc=$?
+            pkill -f '/usr/bin/EverythingBox' || true
+            echo "$1: the 30 s timeout ended the run (rc=$rc)"
+            case "$rc" in
+              124|137) ;;
+              *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of being stopped by the timeout" ;;
+            esac
+          }
+
+          wait_ready() {
+            for _ in $(seq 1 40); do
+              [ "$(uit status 2>/dev/null)" = "ok ready" ] && return 0
+              sleep 0.5
+            done
+            return 1
+          }
+          # "ready" means the window exists; the first screen is presented a tick after show (MainWindow::showEvent's
+          # zero-timer), so wait for it to carry a title rather than racing it.
+          wait_title() {
+            title=""
+            for _ in $(seq 1 40); do
+              title=$(uit state 2>/dev/null | field panelTitle 2>/dev/null)
+              [ -n "$title" ] && return 0
+              sleep 0.5
+            done
+            return 1
+          }
+
+          # Unwritable-directory failures the app would hit if it still wrote beside its binary.
+          write_failures() { grep -n -E 'AccessError|Read-only file system|EROFS' "$log" "$p/$1.out" || true; }
+
+          # ------------------------------------------------------------------ run 1: first launch
+          [ ! -e "$data" ] || fail "the fresh data dir already exists"
+          launch run1 uitest
+          wait_ready || { tail -n 40 "$p/run1.out"; fail "run1: the UI-test channel never reported ready"; }
+          assert_mounted run1
+          wait_title || true
+          state1=$(uit state)
+          title1=$(printf '%s' "$state1" | field panelTitle)
+          echo "run1: first screen panelTitle='$title1' page='$(printf '%s' "$state1" | field page)'"
+          # The first-run choice screen (MainWindow::onboardingChoiceTitle). Seeing it here is the control that
+          # makes run 2's "not shown" mean something.
+          [ "$title1" = "Welcome to EverythingBox" ] || { echo "$state1"; fail "run1: a fresh data dir did not show onboarding"; }
+          # Answer it the way a user does -- row 2, "Set up a new library" -- so the APP writes onboarding/done.
+          focus1=""
+          for _ in 1 2 3; do
+            case "$focus1" in *"new library"*) break ;; esac
+            uit key down >/dev/null
+            sleep 0.5
+            focus1=$(uit state | field panelFocus)
+            echo "run1: onboarding focus='$focus1'"
+          done
+          case "$focus1" in *"new library"*) ;; *) fail "run1: expected 'Set up a new library' focused, got '$focus1'" ;; esac
+          uit key enter >/dev/null
+          for _ in $(seq 1 20); do [ "$(inival onboarding done)" = true ] && break; sleep 0.5; done
+          echo "run1: after choosing a new library panelTitle='$(uit state | field panelTitle)'"
+          finish run1
+
+          echo "--- run 1 wrote into $data ---"
+          ls -la "$data"
+          [ -f "$ini" ] || fail "run1: no everythingbox.ini in \$XDG_DATA_HOME/EverythingBox"
+          [ -f "$log" ] || fail "run1: no stream_debug.log in \$XDG_DATA_HOME/EverythingBox (the app's log handler writes to dataDir)"
+          echo "run1: everythingbox.ini [onboarding] done=$(inival onboarding done)"
+          [ "$(inival onboarding done)" = true ] || fail "run1: the app did not persist onboarding/done=true"
+          stamp="$data/.assets-version"
+          [ -f "$stamp" ] || fail "run1: AssetBootstrap wrote no .assets-version stamp"
+          echo "run1: .assets-version = '$(cat "$stamp")' (app $app_version)"
+          [ "$(cat "$stamp")" = "$app_version" ] || fail "run1: the stamp does not name this build's version"
+          for d in themes2 addons; do
+            want=$(ls squashfs-root/usr/bin/$d | sort | tr '\n' ' ')
+            got=$(ls "$data/$d" 2>/dev/null | sort | tr '\n' ' ')
+            echo "run1: $d in image: $want"
+            echo "run1: $d in XDG:   $got"
+            # Every stock entry must have arrived; the app may add its own beside them (addons/_storage).
+            missing=""
+            for e in $want; do [ -e "$data/$d/$e" ] || missing="$missing $e"; done
+            [ -n "$want" ] && [ -z "$missing" ] || fail "run1: $data/$d lacks the image's stock$missing"
+          done
+          echo "run1: themes2 and addons in XDG hold every stock entry the image ships"
+          extracted=$(grep -c 'AssetBootstrap: extracted assets from /tmp/.mount_' "$log")
+          grep 'AssetBootstrap: extracted assets from' "$log"
+          [ "$extracted" -eq 1 ] || fail "run1: expected one AssetBootstrap extraction from the mount, logged $extracted"
+          wf=$(write_failures run1)
+          [ -z "$wf" ] || { echo "$wf"; fail "run1: the app logged a write failure"; }
+          echo "run1: no AccessError / read-only write failure in stream_debug.log or the app's output"
+          stamp_sig=$(fsig "$stamp")
+          theme_file=$(find "$data/themes2" -name theme.json | sort | head -n1)
+          theme_sig=$(fsig "$theme_file")
+          echo "run1: .assets-version $stamp_sig; $theme_file $theme_sig"
+          sleep 2   # so a rewrite in run 2 could not land in the same second as run 1's copy
+
+          # ------------------------------------------------------------------ between runs
+          for _ in $(seq 1 20); do grep -q '/tmp/.mount_' /proc/mounts || break; sleep 0.5; done
+          # A real key the app reads at startup: Settings::uiTestChannel() == debug/uiTestChannel, consulted by
+          # UiTestServer::ensureListening(IniPhase::Settled) once the ini is settled. Its visible effect is the
+          # control channel listening although run 2 has neither EB_UITEST nor --uitest.
+          python3 - "$ini" <<'PY'
+          import sys
+          path = sys.argv[1]
+          text = open(path, encoding="utf-8").read()
+          if "[debug]" in text.splitlines():
+              lines = text.splitlines()
+              lines.insert(lines.index("[debug]") + 1, "uiTestChannel=true")
+              text = "\n".join(lines) + "\n"
+          else:
+              text = text.rstrip("\n") + "\n\n[debug]\nuiTestChannel=true\n"
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+          echo "between runs: wrote [debug] uiTestChannel=true into $ini"
+
+          # ------------------------------------------------------------------ run 2: second launch
+          launch run2 plain
+          if ! wait_ready; then
+            tail -n 40 "$p/run2.out"
+            fail "run2: the UI-test channel never came up, so the persisted debug/uiTestChannel was not read"
+          fi
+          echo "run2: UI-test channel answered 'ok ready' with EB_UITEST unset -> debug/uiTestChannel was read from the persisted ini"
+          assert_mounted run2
+          wait_title || true
+          state2=$(uit state)
+          title2=$(printf '%s' "$state2" | field panelTitle)
+          echo "run2: first screen panelTitle='$title2' page='$(printf '%s' "$state2" | field page)'"
+          [ "$title2" != "Welcome to EverythingBox" ] || fail "run2: onboarding was shown again"
+          # onboarding/done=true routes showEvent to promptStartupProfile(), whose themed title is this.
+          [ "$title2" = "Who's using EverythingBox?" ] || { echo "$state2"; fail "run2: expected the profile picker, got '$title2'"; }
+          finish run2
+
+          echo "run2: everythingbox.ini [debug] uiTestChannel=$(inival debug uiTestChannel) [onboarding] done=$(inival onboarding done)"
+          [ "$(inival debug uiTestChannel)" = true ] || fail "run2: debug/uiTestChannel did not survive in the ini"
+          [ "$(inival onboarding done)" = true ] || fail "run2: onboarding/done did not survive in the ini"
+          echo "run2: .assets-version $(fsig "$stamp"); $theme_file $(fsig "$theme_file")"
+          [ "$(fsig "$stamp")" = "$stamp_sig" ] || fail "run2: .assets-version was rewritten (first-run extraction ran again)"
+          [ "$(fsig "$theme_file")" = "$theme_sig" ] || fail "run2: $theme_file was re-copied (first-run extraction ran again)"
+          extracted=$(grep -c 'AssetBootstrap: extracted assets from' "$log")
+          [ "$extracted" -eq 1 ] || fail "run2: AssetBootstrap extracted again ($extracted extraction lines in the log)"
+          echo "run2: .assets-version and $(basename "$(dirname "$theme_file")")/theme.json untouched (inode, mtime, ctime), still exactly 1 AssetBootstrap extraction logged"
+          wf=$(write_failures run2)
+          [ -z "$wf" ] || { echo "$wf"; fail "run2: the app logged a write failure"; }
+          [ "$(sha256sum "$image" | cut -d' ' -f1)" = "$image_sha_before" ] || fail "the AppImage file changed across the runs"
+          echo "run2: no write failure logged; the AppImage is byte-identical after both runs"
+          echo "--- $data/perf_trace.log (both runs) ---"
+          grep 'startup.total' "$data/perf_trace.log"
+          [ "$(grep -c 'startup.total' "$data/perf_trace.log")" -eq 2 ] || fail "expected startup.total from exactly two launches in perf_trace.log"
+          echo "AppImage kept its state across two FUSE-mounted launches"
+
       - uses: actions/upload-artifact@v4
         with:
           name: EverythingBox-linux-x86_64
