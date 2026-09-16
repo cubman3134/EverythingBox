@@ -28,6 +28,8 @@ public:
 signals:
     void openItem(const MediaItem& item);
     void homeRequested();
+    // #80: "Configure on website…" on the selected remote add-on; the host opens the page + waiting card.
+    void configureOnWebsiteRequested(const QString& sourceId);
 
 private slots:
     void onSourceChanged();
@@ -40,6 +42,7 @@ private slots:
     void removeSelected(); // remove the selected source (URL for remote, files for local)
     void browseAddons();   // open the add-on registry browser
     void configureAddon();
+    void configureOnWebsite(); // #80: the selected remote add-on's {base}/configure page
     void reloadAddons();
 
 private:

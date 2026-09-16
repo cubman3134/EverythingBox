@@ -2289,9 +2289,22 @@ QVariantList HomeView::browseItems()
     {
         const MediaItem& it = items_[r];
         if (it.type == QStringLiteral("_open")) continue;
-        if (it.type == QStringLiteral("info"))
+        // #80: the "needs to be configured" row is not chrome — it is the way into configuring the add-on, so it
+        // is emitted in place like a real row rather than held back (beside a category's synthetic folders it
+        // would otherwise never reach the themed column, and the add-on would stay a silent dead end there).
+        const bool configureRow = it.type == QStringLiteral("info") && !AddonManager::configureRowSource(it.id).isEmpty();
+        if (it.type == QStringLiteral("info") && !configureRow)
         {
             if (loneInfoRow < 0) loneInfoRow = r;   // the FIRST one; see the flush below
+            continue;
+        }
+        if (configureRow)
+        {
+            browseRowMap_ << r;
+            out << QVariantMap{ { QStringLiteral("title"), it.title },
+                                { QStringLiteral("subtitle"), it.subtitle },
+                                { QStringLiteral("type"), it.type },
+                                { QStringLiteral("accent"), typeColor(it.type).name() } };
             continue;
         }
         if (it.type == QStringLiteral("rechdr")) // a section divider — defer; flush when its first item survives
@@ -8796,7 +8809,15 @@ void HomeView::activateItem(int row)
 {
     if (row < 0 || row >= items_.size()) return;
     const MediaItem& it = items_[row];
-    if (it.type == QStringLiteral("info")) return; // guidance rows aren't actionable
+    if (it.type == QStringLiteral("info"))
+    {
+        // Guidance rows aren't actionable — except the one that says an add-on must be configured first (#80),
+        // which is the way into configuring it. Marked by id (AddonManager::configureRowId), so every other
+        // info row stays inert on both layouts (the themed browse activates through here too).
+        const QString source = AddonManager::configureRowSource(it.id);
+        if (!source.isEmpty()) emit configureAddonRequested(source);
+        return;
+    }
 
     // A local game added to a playlist re-opens by path (recovers its console from the Recent/Downloads store).
     if (it.mime.startsWith(QStringLiteral("localgame:")))
@@ -11123,6 +11144,9 @@ void HomeView::enrichThemedMeta()
         }
     }
 
+    // A guidance row is prose, not media: there is no /meta to ask for. (#80 made the "configure" guidance row a
+    // selectable themed row carrying an id, and hovering it asked the add-on for /meta/info/<that id>.)
+    if (it.type == QStringLiteral("info")) { themedMetaReq_ = -1; return; }
     if (!stack_.last().addon) { themedMetaReq_ = -1; return; }
     themedMetaReqIndex_ = idx;                                   // J09: remember which row this /meta is for
     themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches

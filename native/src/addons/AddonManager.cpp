@@ -1255,14 +1255,16 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     // building one would only spend a round-trip to arrive at the same nothing. Delivered on the next
     // event-loop turn, exactly like the cache hit in requestCatalog, so the caller records this reqId first.
     QString cannot;
+    bool configureRow = false;   // #80: the row opens "Configure on website…"
     if (stremio && src->stremioManifest.configurationRequired)
     {
         const QString name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
         cannot = tr("%1 needs to be configured before it can show anything.").arg(name);
-        // Only when the add-on says it HAS a configuration page. Its base URL is that page (the Stremio
-        // convention), so this points at somewhere real rather than telling the user to go look for it.
-        if (src->stremioManifest.configurable && !base.isEmpty())
-            cannot += QLatin1Char(' ') + tr("Open its configuration page at %1, then re-add it.").arg(base);
+        // Issue #80: no longer a dead end. When the add-on has a web configure page ({base}/configure, the
+        // Stremio convention) the row itself is the way in — selecting it opens "Configure on website…"
+        // (HomeView::activateItem recognises the id below). The URL is not spelled out here: a configured
+        // add-on's base can carry its options, and this row is also what a screenshot of the shelf shows.
+        if (!StremioTranslate::configureUrlFor(base).isEmpty()) configureRow = true;
     }
     else if (stremio && catalogId.isEmpty())
     {
@@ -1290,6 +1292,12 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
         MediaCatalog cat;
         cat.title = tr("Unavailable");
         MediaItem info; info.type = QStringLiteral("info"); info.title = cannot;
+        if (configureRow)
+        {
+            info.id = configureRowId(src->manifest.id);
+            info.subtitle = tr("Configure on website…");
+            info.title += QLatin1Char(' ') + tr("Select this to configure it on the website.");
+        }
         cat.items.push_back(info);
         QMetaObject::invokeMethod(this, [this, reqId, cat] { emit catalogReady(reqId, cat); }, Qt::QueuedConnection);
         return reqId;
@@ -2846,6 +2854,23 @@ bool AddonManager::removeAddon(const QString& id)
 
 // ---- remote sources (URL-only) ---------------------------------------------------------------------
 
+// Issue #80: append / replace-in-place / already present. See the header for the three outcomes.
+AddonManager::RemoteAddPlan AddonManager::planRemoteAdd(const QVector<RemoteEntry>& installed,
+                                                        const QString& newBase, const QString& newId)
+{
+    RemoteAddPlan p;
+    for (int i = 0; i < installed.size(); ++i)
+        if (installed[i].base == newBase) { p.kind = RemoteAddPlan::AlreadyPresent; p.index = i; return p; }
+    if (newId.isEmpty()) return p;   // nothing to match on: a new add-on
+    for (int i = 0; i < installed.size(); ++i)
+    {
+        if (installed[i].id != newId) continue;
+        if (p.index < 0) { p.kind = RemoteAddPlan::Replace; p.index = i; }   // the FIRST keeps its place
+        else p.collapse << i;                                                 // later duplicates go
+    }
+    return p;
+}
+
 void AddonManager::addRemoteSource(const QString& url)
 {
     const QString base = normalizeBase(url);
@@ -2866,9 +2891,30 @@ void AddonManager::addRemoteSource(const QString& url)
         { emit remoteSourceResult(false, tr("That URL isn't a valid addon.")); return; }
         const AddonManifest m = built->manifest;
 
-        // Persist the URL (once) + cache its manifest. We store ONLY the URL + manifest, never any code.
+        // Persist the URL + cache its manifest. We store ONLY the URL + manifest, never any code.
+        // Issue #80: a manifest id that is already installed under another URL is a RE-CONFIGURE — the
+        // entry takes the new URL at its own position (planRemoteAdd), its old manifest cache goes, and the
+        // id-keyed enabled flag carries over untouched.
         QStringList urls = remoteSourceUrls();
-        if (!urls.contains(base)) urls << base;
+        QVector<RemoteEntry> installed;
+        for (const QString& u : urls)
+        {
+            const QByteArray cached = store().value(manifestCacheKey(u)).toByteArray();
+            const auto prior = cached.isEmpty() ? nullptr : buildRemoteAddon(u, cached);
+            installed.push_back({ u, prior ? prior->manifest.id : QString() });
+        }
+        const RemoteAddPlan plan = planRemoteAdd(installed, base, m.id);
+        if (plan.kind == RemoteAddPlan::Append) urls << base;
+        else if (plan.kind == RemoteAddPlan::Replace)
+        {
+            for (int i = plan.collapse.size() - 1; i >= 0; --i)   // descending: earlier indexes stay valid
+            {
+                store().remove(manifestCacheKey(urls[plan.collapse[i]]));
+                urls.removeAt(plan.collapse[i]);
+            }
+            store().remove(manifestCacheKey(urls[plan.index]));
+            urls[plan.index] = base;
+        }
         QJsonArray arr;
         for (const QString& u : urls) arr.append(u);
         store().setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
@@ -2876,7 +2922,13 @@ void AddonManager::addRemoteSource(const QString& url)
         store().sync();
 
         reload();
-        emit remoteSourceResult(true, tr("Added \"%1\".").arg(m.name.isEmpty() ? m.id : m.name));
+        const QString shown = m.name.isEmpty() ? m.id : m.name;
+        if (plan.kind == RemoteAddPlan::Replace)
+            streamLog(QStringLiteral("addon reconfigure: %1 replaced in place at position %2 (%3 duplicate(s) collapsed)")
+                          .arg(m.id).arg(plan.index).arg(plan.collapse.size()));
+        emit remoteSourceResult(true, plan.kind == RemoteAddPlan::Replace
+                                          ? tr("Updated %1's settings.").arg(shown)
+                                          : tr("Added \"%1\".").arg(shown));
         emit sourcesChanged();
     });
 }

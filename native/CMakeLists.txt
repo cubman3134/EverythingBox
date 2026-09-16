@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.289 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.290 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -954,6 +954,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
+        src/ui/AddonConfigurePanel.cpp src/ui/AddonConfigurePanel.h   # #80: the nav-kit waiting card that finishes it
         src/ui/MainWindowWatchTogether.cpp                 # "Watch together" MainWindow members, same rule (#86)
         src/ui/MainWindowTrackers.cpp                      # anime/manga tracker MainWindow members, same rule (#156)
         src/ui/MainWindowCustomCores.cpp                   # custom-core settings surface, same reason (#98)

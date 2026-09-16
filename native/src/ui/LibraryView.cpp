@@ -36,6 +36,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     auto* install = new QPushButton(tr("Install Addon…"), this);
     auto* addUrl = new QPushButton(tr("Add by URL…"), this);
     auto* configure = new QPushButton(tr("Configure…"), this);
+    auto* webConfigure = new QPushButton(tr("Configure on website…"), this); // #80: remote add-ons
     auto* removeBtn = new QPushButton(tr("Remove"), this);
     auto* reload = new QPushButton(tr("Reload"), this);
     search_ = new QLineEdit(this);
@@ -45,6 +46,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     connect(install, &QPushButton::clicked, this, &LibraryView::installAddon);
     connect(addUrl, &QPushButton::clicked, this, &LibraryView::addByUrl);
     connect(configure, &QPushButton::clicked, this, &LibraryView::configureAddon);
+    connect(webConfigure, &QPushButton::clicked, this, &LibraryView::configureOnWebsite);
     connect(removeBtn, &QPushButton::clicked, this, &LibraryView::removeSelected);
     connect(reload, &QPushButton::clicked, this, &LibraryView::reloadAddons);
     connect(searchBtn, &QPushButton::clicked, this, &LibraryView::doSearch);
@@ -58,6 +60,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     tools->addWidget(install);
     tools->addWidget(addUrl);
     tools->addWidget(configure);
+    tools->addWidget(webConfigure);
     tools->addWidget(removeBtn);
     tools->addWidget(reload);
     tools->addWidget(search_, 1);
@@ -395,6 +398,19 @@ void LibraryView::configureAddon()
         if (result == QDialog::Accepted)
             onSourceChanged(); // re-fetch the catalog so changed config (e.g. an API key) takes effect now
     });
+}
+
+// #80: the classic twin of the themed detail panel's "Configure on website…". Offered for every add-on on the
+// toolbar (one button, like Configure… beside it) and refused with a reason for anything that has no website.
+void LibraryView::configureOnWebsite()
+{
+    const int row = sourceList_->currentRow();
+    if (row < 0 || row >= sourceRefs_.size() || !sourceRefs_[row])
+    { status_->setText(tr("Select an add-on to configure.")); return; }
+    const LoadedAddon* s = sourceRefs_[row];
+    if (s->transport != LoadedAddon::RemoteHttp || StremioTranslate::configureUrlFor(s->baseUrl).isEmpty())
+    { status_->setText(tr("Only an add-on added by URL can be configured on its website.")); return; }
+    emit configureOnWebsiteRequested(s->manifest.id);
 }
 
 void LibraryView::reloadAddons()

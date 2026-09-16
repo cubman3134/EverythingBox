@@ -975,6 +975,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::tuneChannelCellRequested, this, &MainWindow::tuneChannelFromGuide);   // #179 inc 2
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
+    connect(home_, &HomeView::configureAddonRequested, this, &MainWindow::openAddonConfigure);   // #80
     // #110: Download on a Jellyfin row. Deferred a turn for the reason every other verb that opens a
     // NavMenu is - this arrives inside a clicked()/QML delivery and the batch verb spins a nested loop,
     // which is the #28/#211 family. Every value is a plain string by the time the work runs.
@@ -2259,6 +2260,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // through the one exit gate. Unlike the themed hub's root Back, "Keep editing" needs no restore here:
     // nothing was torn down, library_ is still the current stack page, so declining simply leaves the user
     // standing on Add-ons. (Its OTHER exit, activating a playable row, commits instead — see openItem above.)
+    connect(library_, &LibraryView::configureOnWebsiteRequested, this, &MainWindow::openAddonConfigure);   // #80
     connect(library_, &LibraryView::homeRequested, this, [this] {
         leaveSettingsArea([this](SettingsReturn) { openHome(); });
     });
@@ -9386,6 +9388,9 @@ void MainWindow::presentAddonDetail(const QString& sourceId)
     else
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.noconfig"); r.label = tr("Configure");
       r.value = tr("No configurable settings."); rows << r; }
+    // #80: a remote add-on with a website can be (re)configured there; the new link replaces this entry in place.
+    if (remote && !StremioTranslate::configureUrlFor(s->baseUrl).isEmpty())
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.webconfigure"); r.label = tr("Configure on website…"); rows << r; }
     { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.remove");
       r.label = remote ? tr("Remove source") : tr("Remove add-on"); r.destructive = true; rows << r; }
     if (!m.version.isEmpty())
@@ -9410,6 +9415,7 @@ void MainWindow::presentAddonDetail(const QString& sourceId)
             themedPanelHost_->updateRow(r.id, r);
         }
         else if (id == QStringLiteral("ad.configure")) presentAddonConfig(m);
+        else if (id == QStringLiteral("ad.webconfigure")) openAddonConfigure(sourceId);   // #80
         else if (id == QStringLiteral("ad.remove"))    confirmRemoveAddon(sourceId);
     };
     themedPanelHost_->present(name, rows, onAct, [this] { openLibrary(); }); // defensive root onBack

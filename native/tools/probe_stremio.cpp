@@ -1816,6 +1816,67 @@ int main(int argc, char** argv)
               "some request that never carried a Range");
     }
 
+    // ------------------------------------------------- issue #80: configure page + install-link classification
+    {
+        const int before = failures;
+        // configureUrlFor — every expected value written out by hand.
+        CHECK(configureUrlFor(QStringLiteral("https://addon.test/manifest.json")) == QStringLiteral("https://addon.test/configure"),
+              "configure: a plain manifest URL -> {base}/configure");
+        CHECK(configureUrlFor(QStringLiteral("https://torrentio.test/providers=yts,eztv%7Csort=qualitysize/manifest.json"))
+                  == QStringLiteral("https://torrentio.test/providers=yts,eztv%7Csort=qualitysize/configure"),
+              "configure: a Torrentio-style options segment is kept, still percent-encoded");
+        CHECK(configureUrlFor(QStringLiteral("https://addon.test/opts/")) == QStringLiteral("https://addon.test/opts/configure"),
+              "configure: a base URL with a trailing slash gets exactly one slash before configure");
+        CHECK(configureUrlFor(QStringLiteral("https://addon.test/opts")) == QStringLiteral("https://addon.test/opts/configure"),
+              "configure: a stored base URL (no manifest.json) -> {base}/configure");
+        CHECK(configureUrlFor(QStringLiteral("https://addon.test/a/manifest.json?lang=en&x=%2F"))
+                  == QStringLiteral("https://addon.test/a/configure?lang=en&x=%2F"),
+              "configure: the query string is carried over verbatim after /configure");
+        CHECK(configureUrlFor(QStringLiteral("HTTP://Addon.test/manifest.json")) == QStringLiteral("HTTP://Addon.test/configure"),
+              "configure: the scheme test is case-insensitive and nothing is re-cased");
+        CHECK(configureUrlFor(QStringLiteral("stremio://addon.test/manifest.json")).isEmpty(),
+              "configure: a stremio:// URL is not http(s) -> no action");
+        CHECK(configureUrlFor(QStringLiteral("file:///C:/addons/manifest.json")).isEmpty(),
+              "configure: a file URL -> no action");
+        CHECK(configureUrlFor(QStringLiteral("ftp://addon.test/manifest.json")).isEmpty(), "configure: ftp -> no action");
+        CHECK(configureUrlFor(QStringLiteral("https:///manifest.json")).isEmpty(), "configure: no host -> no action");
+        CHECK(configureUrlFor(QString()).isEmpty(), "configure: empty -> no action");
+
+        // installLinkFromText — the clipboard pre-check.
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/opts/manifest.json"))
+                  == QStringLiteral("https://addon.test/opts/manifest.json"),
+              "link: an https manifest URL is an install link, returned as given");
+        CHECK(installLinkFromText(QStringLiteral("  http://127.0.0.1:7000/manifest.json\n"))
+                  == QStringLiteral("http://127.0.0.1:7000/manifest.json"),
+              "link: surrounding whitespace (a copied line) is trimmed");
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/a/manifest.json?x=1"))
+                  == QStringLiteral("https://addon.test/a/manifest.json?x=1"),
+              "link: a query string does not hide the manifest.json path");
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/a%2Fmanifest%2Ejson"))
+                  == QStringLiteral("https://addon.test/a%2Fmanifest%2Ejson"),
+              "link: the path is tested AFTER percent-decoding");
+        CHECK(installLinkFromText(QStringLiteral("stremio://torrentio.test/providers=yts%7Csort=size/manifest.json"))
+                  == QStringLiteral("https://torrentio.test/providers=yts%7Csort=size/manifest.json"),
+              "link: a stremio:// install link is converted to https:// with its payload untouched");
+        CHECK(installLinkFromText(QStringLiteral("STREMIO://addon.test/manifest.json")) == QStringLiteral("https://addon.test/manifest.json"),
+              "link: the stremio scheme is matched case-insensitively");
+        CHECK(installLinkFromText(QStringLiteral("stremio://addon.test/configure")).isEmpty(),
+              "link: a stremio:// link whose payload is not a manifest is not an install link");
+        CHECK(installLinkFromText(QStringLiteral("hello, this is not a link")).isEmpty(), "link: junk text");
+        CHECK(installLinkFromText(QString()).isEmpty(), "link: an empty clipboard");
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/manifest-guide.html")).isEmpty(),
+              "link: a URL that merely contains 'manifest' is not an install link");
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/manifest.json.bak")).isEmpty(),
+              "link: manifest.json that is not the END of the path is not an install link");
+        CHECK(installLinkFromText(QStringLiteral("https://addon.test/page?next=/manifest.json")).isEmpty(),
+              "link: manifest.json inside the QUERY string is not an install link");
+        CHECK(installLinkFromText(QStringLiteral("see https://addon.test/manifest.json")).isEmpty(),
+              "link: prose around a link is not a link");
+        CHECK(installLinkFromText(QStringLiteral("ftp://addon.test/manifest.json")).isEmpty(), "link: ftp is not http(s)");
+        CHECK(installLinkFromText(QStringLiteral("https:///manifest.json")).isEmpty(), "link: no host");
+        std::printf("issue80 configure/link checks: %d failed\n", failures - before);
+    }
+
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("STREMIO-OK\n");
     return 0;
