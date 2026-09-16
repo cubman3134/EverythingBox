@@ -42,9 +42,10 @@
 #include "core/PerfTrace.h"
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
+#include "core/QuitSignals.h"  // issue #409: SIGTERM/SIGINT/SIGHUP close the window instead of being dropped
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.286";
+static constexpr const char* kAppVersion = "0.6.287";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -459,6 +460,17 @@ int main(int argc, char** argv)
 
     MainWindow window(chooseProfile);
     window.setWindowTitle(QString::fromLatin1(AppBrand::kDisplayName)); // chrome only — no path meaning
+#if defined(Q_OS_UNIX) && !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // Issue #409: a logout, `systemctl --user stop` or `kill <pid>` sends SIGTERM and SIGKILLs a few seconds later.
+    // Take the same road as the window's close button, so closeEvent flushes the resume position, writes battery
+    // saves and runs the sync push on exit (it defers itself behind an 8 s watchdog). A close that completes now
+    // ends the app here; a deferred one ends it through the last-window-closed quit, exactly like a click. The
+    // handler itself only writes a byte (QuitSignals.h); a second SIGTERM meanwhile takes the default action.
+    QuitSignals::install(&window, [&window](int sig) {
+        qInfo().noquote() << QStringLiteral("quit: signal %1 -> closing the window").arg(sig);
+        if (window.close()) QCoreApplication::quit();
+    });
+#endif
 #ifdef Q_OS_IOS
     // A phone screen is far narrower than the desktop layout's aggregate minimum width, and a fullscreen
     // window can never shrink below its layout minimum — override it so fullscreen clamps to the real
