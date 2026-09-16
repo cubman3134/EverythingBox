@@ -204,7 +204,14 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -S native -B build \n            -DCMAKE_BUILD_TYPE=Release \n            -DEVERYTHINGBOX_BUILD_APP=ON \n            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \n            -DMPV_INCLUDE_DIR="$(brew --prefix mpv)/include" \n            -DMPV_LIBRARY="$(brew --prefix mpv)/lib/libmpv.dylib" \n            -DSDL2_INCLUDE_DIR="$(brew --prefix sdl2)/include/SDL2" \n            -DSDL2_LIBRARY="$(brew --prefix sdl2)/lib/libSDL2.dylib"
+          cmake -S native -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DMPV_INCLUDE_DIR="$(brew --prefix mpv)/include" \
+            -DMPV_LIBRARY="$(brew --prefix mpv)/lib/libmpv.dylib" \
+            -DSDL2_INCLUDE_DIR="$(brew --prefix sdl2)/include/SDL2" \
+            -DSDL2_LIBRARY="$(brew --prefix sdl2)/lib/libSDL2.dylib"
 
       - name: Build
         run: cmake --build build --config Release
@@ -270,7 +277,16 @@ jobs:
       - name: Configure (device arm64, unsigned)
         run: |
           DEV="$HOME/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework"
-          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-ios -G Xcode \n            -DEVERYTHINGBOX_BUILD_APP=ON \n            -DQT_HOST_PATH="$QT_HOST_DIR" \n            -DCMAKE_OSX_SYSROOT=iphoneos \n            -DCMAKE_OSX_ARCHITECTURES=arm64 \n            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \n            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \n            -DMPV_INCLUDE_DIR="$DEV/Headers" \n            -DMPV_LIBRARY="$DEV/Libmpv" \n            -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-ios -G Xcode \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
+            -DQT_HOST_PATH="$QT_HOST_DIR" \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DMPV_INCLUDE_DIR="$DEV/Headers" \
+            -DMPV_LIBRARY="$DEV/Libmpv" \
+            -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
 
       - name: Build
         run: cmake --build build-ios --config Release
@@ -313,7 +329,12 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \n            build-essential ninja-build \n            libmpv-dev libsdl2-dev \n            libgl1-mesa-dev libegl1-mesa-dev libpulse-dev \n            libxkbcommon-dev libfuse2 file \n            libspeechd2
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build \
+            libmpv-dev libsdl2-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libpulse-dev \
+            libxkbcommon-dev libfuse2 file \
+            libspeechd2
 
       - name: Install Qt
         uses: jurplel/install-qt-action@bcb88e3bed2e992f5f9e24c0f9e364a231d278eb # v4.4.0
@@ -329,7 +350,10 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -S native -B build -G Ninja \n            -DCMAKE_BUILD_TYPE=Release \n            -DEVERYTHINGBOX_BUILD_APP=ON \n            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+          cmake -S native -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
 
       - name: Build
         run: cmake --build build --config Release
@@ -366,7 +390,9 @@ jobs:
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export EXTRA_QT_PLUGINS="multimedia;tls;networkinformation;imageformats"
           export OUTPUT=EverythingBox-linux-x86_64.AppImage
-          ./linuxdeploy-x86_64.AppImage --appdir $APPDIR \n            -e build/EverythingBox -i EverythingBox.png -d EverythingBox.desktop \n            --plugin qt --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir $APPDIR \
+            -e build/EverythingBox -i EverythingBox.png -d EverythingBox.desktop \
+            --plugin qt --output appimage
           # $OUTPUT sets the produced name; fall back to whatever AppImage was emitted (excluding the tools).
           if [ ! -f "$OUTPUT" ]; then
             f=$(find . -maxdepth 1 -name '*.AppImage' ! -name 'linuxdeploy*' | head -n1)
@@ -430,7 +456,12 @@ jobs:
           rc=0
           # install-qt-action exported LD_LIBRARY_PATH / QT_PLUGIN_PATH / QML2_IMPORT_PATH at the build Qt; drop
           # them so the image runs on its own bundled Qt, as it would on a user's machine.
-          env -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \n              -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \n              HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" XDG_CONFIG_HOME="$smoke/config" \n              XDG_RUNTIME_DIR="$smoke/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \n              EB_PERF=1 \n              timeout --kill-after=10 30 ./EverythingBox-linux-x86_64.AppImage > smoke.log 2>&1 || rc=$?
+          env -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+              -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+              HOME="$smoke/home" XDG_DATA_HOME="$smoke/data" XDG_CONFIG_HOME="$smoke/config" \
+              XDG_RUNTIME_DIR="$smoke/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+              EB_PERF=1 \
+              timeout --kill-after=10 30 ./EverythingBox-linux-x86_64.AppImage > smoke.log 2>&1 || rc=$?
           pkill -f 'usr/bin/EverythingBox' || true   # the extract-and-run runtime may leave its child behind
           echo "--- AppImage output (tail) ---"
           tail -n 60 smoke.log
@@ -506,7 +537,13 @@ jobs:
           # the runtime mounts the image instead of extracting it.
           launch() {
             extra=""; [ "$2" = uitest ] && extra="EB_UITEST=1"
-            env -u APPIMAGE_EXTRACT_AND_RUN -u EB_UITEST \n                -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \n                -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \n                HOME="$p/home" XDG_DATA_HOME="$p/data" XDG_CONFIG_HOME="$p/config" \n                XDG_RUNTIME_DIR="$p/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \n                EB_PERF=1 EB_UITEST_PIPE="$EB_UITEST_PIPE" $extra \n                timeout --kill-after=10 30 "$image" > "$p/$1.out" 2>&1 &
+            env -u APPIMAGE_EXTRACT_AND_RUN -u EB_UITEST \
+                -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+                -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+                HOME="$p/home" XDG_DATA_HOME="$p/data" XDG_CONFIG_HOME="$p/config" \
+                XDG_RUNTIME_DIR="$p/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+                EB_PERF=1 EB_UITEST_PIPE="$EB_UITEST_PIPE" $extra \
+                timeout --kill-after=10 30 "$image" > "$p/$1.out" 2>&1 &
             tpid=$!
             t_launch=$(date +%s.%N)
             # The runtime execs AppRun in place, so the app is timeout's direct child (the chain is printed below).
@@ -577,10 +614,13 @@ jobs:
               *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of quitting on the timeout's SIGTERM" ;;
             esac
             [ "$alive" = no ] || fail "$1: the app process $app outlived timeout's SIGTERM grace"
-            python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$after_term" \n              || fail "$1: the app took ${after_term} s after SIGTERM, outside the 10 s grace"
+            python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$after_term" \
+              || fail "$1: the app took ${after_term} s after SIGTERM, outside the 10 s grace"
             grep 'quit: signal 15 -> closing the window\|aboutToQuit (clean exit path)' "$log" | tail -n 2 | sed "s/^/$1: log: /"
-            [ "$(grep -c 'quit: signal 15 -> closing the window' "$log")" -eq $((quits_before + 1)) ] \n              || fail "$1: stream_debug.log does not show SIGTERM reaching the app's quit path"
-            [ "$(grep -c 'aboutToQuit (clean exit path)' "$log")" -eq $((clean_before + 1)) ] \n              || fail "$1: stream_debug.log does not show the clean exit path after SIGTERM"
+            [ "$(grep -c 'quit: signal 15 -> closing the window' "$log")" -eq $((quits_before + 1)) ] \
+              || fail "$1: stream_debug.log does not show SIGTERM reaching the app's quit path"
+            [ "$(grep -c 'aboutToQuit (clean exit path)' "$log")" -eq $((clean_before + 1)) ] \
+              || fail "$1: stream_debug.log does not show the clean exit path after SIGTERM"
           }
 
           wait_ready() {
@@ -1038,7 +1078,8 @@ jobs:
           fi
           ls -la mpv-android/libs
           for h in client.h render.h render_gl.h stream_cb.h; do
-            curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/${MPV_HEADERS_TAG}/include/mpv/$h" \n              -o "mpv-android/include/mpv/$h"
+            curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/${MPV_HEADERS_TAG}/include/mpv/$h" \
+              -o "mpv-android/include/mpv/$h"
           done
           echo "MPV_LIBRARY=$(realpath mpv-android/libs/libmpv.so)" >> "$GITHUB_ENV"
           echo "MPV_INCLUDE_DIR=$(realpath mpv-android/include)" >> "$GITHUB_ENV"
@@ -1095,7 +1136,16 @@ jobs:
           # QT_ANDROID_SIGN_APK to sign it; a Debug/unset build would emit a debug-signed APK instead).
           # $QT_ANDROID_SIGN_CMAKE is '-DQT_ANDROID_SIGN_APK=ON' when the signing step ran (secrets present),
           # and empty (expands to no argument) on forks/PRs without the keystore secret -> unsigned release build.
-          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \n            -DCMAKE_BUILD_TYPE=Release \n            $QT_ANDROID_SIGN_CMAKE \n            -DQT_HOST_PATH="$QT_HOST_ROOT" \n            -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \n            -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \n            -DEVERYTHINGBOX_BUILD_APP=ON \n            -DMPV_INCLUDE_DIR="$MPV_INCLUDE_DIR" \n            -DMPV_LIBRARY="$MPV_LIBRARY" \n            -DOPENSSL_ANDROID_LIBS_DIR="$OPENSSL_ANDROID_LIBS_DIR"
+          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \
+            -DCMAKE_BUILD_TYPE=Release \
+            $QT_ANDROID_SIGN_CMAKE \
+            -DQT_HOST_PATH="$QT_HOST_ROOT" \
+            -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+            -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
+            -DMPV_INCLUDE_DIR="$MPV_INCLUDE_DIR" \
+            -DMPV_LIBRARY="$MPV_LIBRARY" \
+            -DOPENSSL_ANDROID_LIBS_DIR="$OPENSSL_ANDROID_LIBS_DIR"
           # SDL2-for-Android (gamepad) is optional; omitted here, so the first APK builds without controller input.
 
       - name: Build APK
