@@ -957,6 +957,9 @@ static EnumeratedPads enumerateConnectedPadsEx()
     if (!alreadyInit)
     {
         SDL_SetMainReady();
+#ifndef _WIN32
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // #409: keep SDL off SIGTERM/SIGINT (see Gamepad::Impl::bringUp)
+#endif
         if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return out;
         if (char* base = SDL_GetBasePath())
         {

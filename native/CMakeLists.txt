@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.285 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.289 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -813,6 +813,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
+        src/core/QuitSignals.cpp  src/core/QuitSignals.h   # SIGTERM/SIGINT/SIGHUP -> the window's close, once (#409)
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
         src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
@@ -3885,6 +3886,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TrickplayIdle.h)
     target_include_directories(probe_trickplay PRIVATE src src/core)
     target_link_libraries(probe_trickplay PRIVATE Qt6::Core)
+
+    # Quit signals (issue #409): SIGTERM/SIGINT/SIGHUP reach the app's quit path through a self-pipe and a
+    # QSocketNotifier, on the event loop, exactly once, with nothing done in the handler, and a second signal
+    # keeps its default action. QtCore only; on non-Unix hosts the unit is a no-op and the probe asserts that.
+    add_executable(probe_quitsignals tools/probe_quitsignals.cpp
+        src/core/QuitSignals.cpp src/core/QuitSignals.h)
+    target_include_directories(probe_quitsignals PRIVATE src src/core)
+    target_link_libraries(probe_quitsignals PRIVATE Qt6::Core)
 
     # The video player's touch gesture recogniser (issue #162): the half-screen split, the thirds, the seek
     # arithmetic and its cancel-by-returning rule, the OS edge band, the double-tap window, the long-press

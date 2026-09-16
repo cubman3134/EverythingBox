@@ -545,8 +545,9 @@ jobs:
                 EB_PERF=1 EB_UITEST_PIPE="$EB_UITEST_PIPE" $extra \
                 timeout --kill-after=10 30 "$image" > "$p/$1.out" 2>&1 &
             tpid=$!
-            # The app need not be timeout's direct child: on the runner an AppImage runtime process sits between
-            # them (the chain is printed below). Take whichever child or grandchild is the EverythingBox binary.
+            t_launch=$(date +%s.%N)
+            # The runtime execs AppRun in place, so the app is timeout's direct child (the chain is printed below).
+            # Still look one level deeper, so a runtime that forks instead is found rather than misreported.
             app=""
             for _ in $(seq 1 40); do
               for c in $(pgrep -P "$tpid") $(for k in $(pgrep -P "$tpid"); do pgrep -P "$k"; done); do
@@ -585,26 +586,41 @@ jobs:
               fail "$1: a write under the mount succeeded; it is not read-only"
             fi
             echo "$1: write under the mount refused: $(cat "$p/touch.err")"
-            echo "$1: app signal masks: $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+            echo "$1: app signal masks: $(grep -E '^Sig(Blk|Ign|Cgt)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
             mid=$(ps -o ppid= -p "$app" | tr -d ' ')
             echo "$1: process chain: timeout $tpid -> $mid ($(readlink "/proc/$mid/exe" 2>/dev/null)) -> app $app"
           }
 
           # $1 = run label. The app must still be up when its drive is done, i.e. it did not exit on its own inside
-          # the window; then the 30 s timeout ends the run. The process chain printed above shows the app is
-          # timeout's DIRECT child (the runtime execs it). rc 124 = the app exited after SIGTERM. rc 137 = it was
-          # still running 10 s after SIGTERM, so timeout sent SIGKILL. Today the Linux app does not quit on SIGTERM,
-          # so 137 is the usual answer; that is a separate app bug, not a smoke failure. Either way the timeout ended
-          # the run; anything else is an exit of its own.
+          # the window; then the 30 s timeout ends the run with SIGTERM. The process chain printed above shows the
+          # app is timeout's DIRECT child (the runtime execs it), so timeout's status is the app's answer to that
+          # SIGTERM: rc 124 = the app quit on it inside the 10 s grace; rc 137 = it was still running 10 s later
+          # and timeout had to SIGKILL it. Before #409 the app always gave 137 (SDL caught SIGTERM and dropped it);
+          # now it closes its window on SIGTERM (core/QuitSignals.h), so ONLY 124 passes, the app must be gone by
+          # the time timeout returns, and its log must show the signal taking the orderly quit path.
           finish() {
             kill -0 "$app" 2>/dev/null || { tail -n 40 "$p/$1.out"; fail "$1: the app exited on its own inside its 30 s window"; }
+            quits_before=$(grep -c 'quit: signal 15 -> closing the window' "$log" 2>/dev/null)
+            clean_before=$(grep -c 'aboutToQuit (clean exit path)' "$log" 2>/dev/null)
             wait "$tpid"; rc=$?
+            t_end=$(date +%s.%N)
+            alive=no; kill -0 "$app" 2>/dev/null && alive=yes
+            after_term=$(python3 -c 'import sys; print("%.1f" % (float(sys.argv[2]) - float(sys.argv[1]) - 30))' "$t_launch" "$t_end")
+            echo "$1: the 30 s timeout ended the run (rc=$rc); timeout returned ${after_term} s after its SIGTERM; app $app still alive: $alive"
             pkill -f '/usr/bin/EverythingBox' || true
-            echo "$1: the 30 s timeout ended the run (rc=$rc)"
             case "$rc" in
-              124|137) ;;
-              *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of being stopped by the timeout" ;;
+              124) ;;
+              137) tail -n 40 "$p/$1.out"; fail "$1: the app was still running 10 s after SIGTERM and had to be SIGKILLed (rc=137)" ;;
+              *) tail -n 40 "$p/$1.out"; fail "$1: the AppImage exited with rc=$rc instead of quitting on the timeout's SIGTERM" ;;
             esac
+            [ "$alive" = no ] || fail "$1: the app process $app outlived timeout's SIGTERM grace"
+            python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$after_term" \
+              || fail "$1: the app took ${after_term} s after SIGTERM, outside the 10 s grace"
+            grep 'quit: signal 15 -> closing the window\|aboutToQuit (clean exit path)' "$log" | tail -n 2 | sed "s/^/$1: log: /"
+            [ "$(grep -c 'quit: signal 15 -> closing the window' "$log")" -eq $((quits_before + 1)) ] \
+              || fail "$1: stream_debug.log does not show SIGTERM reaching the app's quit path"
+            [ "$(grep -c 'aboutToQuit (clean exit path)' "$log")" -eq $((clean_before + 1)) ] \
+              || fail "$1: stream_debug.log does not show the clean exit path after SIGTERM"
           }
 
           wait_ready() {
@@ -742,6 +758,161 @@ jobs:
           grep 'startup.total' "$data/perf_trace.log"
           [ "$(grep -c 'startup.total' "$data/perf_trace.log")" -eq 2 ] || fail "expected startup.total from exactly two launches in perf_trace.log"
           echo "AppImage kept its state across two FUSE-mounted launches"
+
+      # Issue #409: WHICH code holds the app's SIGTERM disposition. An LD_PRELOAD interposer logs every
+      # sigaction()/signal() call for SIGTERM, SIGINT and SIGHUP with the library the handler lives in and the
+      # library that installed it (dladdr). Before the fix this bisected the catcher on the runner: as shipped,
+      # libSDL2 installed the SIGTERM handler, SigCgt had bit 14 set and the app outlived SIGTERM; with
+      # SDL_NO_SIGNAL_HANDLERS=1, or with SDL_Init refused (EB409_SKIP_SDL, still supported below), nothing caught
+      # it and one SIGTERM ended the process within 500 ms. Now it guards the fix: the app's own handler
+      # (core/QuitSignals.h, in the main executable) must be the one, no SDL library may set any of the three
+      # dispositions, and one SIGTERM must end the app through its logged quit path inside 10 s.
+      - name: Prove the app itself, not a library, catches SIGTERM in the FUSE-mounted AppImage (#409)
+        run: |
+          set +e -u
+          fail() { echo "::error::$*"; exit 1; }
+          image="$PWD/EverythingBox-linux-x86_64.AppImage"
+          w=$(mktemp -d)
+          cat > "$w/sigtrace.c" <<'C'
+          #define _GNU_SOURCE
+          #include <dlfcn.h>
+          #include <link.h>
+          #include <signal.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          /* dladdr names the main program after whatever path the loader was handed (for an AppImage, the image
+             file), so decide "main executable" structurally: dl_iterate_phdr lists the main program first. */
+          struct find { void *addr; int index, hit; };
+          static int findobj(struct dl_phdr_info *info, size_t size, void *data) {
+              struct find *f = data;
+              (void)size;
+              for (int k = 0; k < info->dlpi_phnum; ++k) {
+                  const ElfW(Phdr) *ph = &info->dlpi_phdr[k];
+                  ElfW(Addr) lo = info->dlpi_addr + ph->p_vaddr;
+                  if (ph->p_type == PT_LOAD && (ElfW(Addr))f->addr >= lo && (ElfW(Addr))f->addr < lo + ph->p_memsz) {
+                      f->hit = f->index;
+                      return 1;
+                  }
+              }
+              ++f->index;
+              return 0;
+          }
+          static const char *lib(void *a) {
+              Dl_info i;
+              struct find f = { a, 0, -1 };
+              if (!a || a == (void *)SIG_DFL || a == (void *)SIG_IGN) return a == (void *)SIG_IGN ? "SIG_IGN" : "SIG_DFL";
+              dl_iterate_phdr(findobj, &f);
+              if (f.hit == 0) return "(main executable)";
+              if (!dladdr(a, &i)) return "?";
+              return (i.dli_fname && *i.dli_fname) ? i.dli_fname : "?";
+          }
+          static void note(const char *fn, int sig, void *h, void *ret) {
+              if (sig != SIGTERM && sig != SIGINT && sig != SIGHUP) return;
+              const char *path = getenv("EB409_TRACE");
+              if (!path) return;
+              char exe[512]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1); exe[n > 0 ? n : 0] = 0;
+              FILE *f = fopen(path, "a");
+              if (!f) return;
+              fprintf(f, "pid=%d exe=%s %s(%s) handler in [%s] installed from [%s]\n", (int)getpid(), exe, fn,
+                      sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT" : "SIGHUP", lib(h), lib(ret));
+              fclose(f);
+          }
+          int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+              static int (*real)(int, const struct sigaction *, struct sigaction *);
+              if (!real) real = dlsym(RTLD_NEXT, "sigaction");
+              if (act) note("sigaction", sig, (act->sa_flags & SA_SIGINFO) ? (void *)act->sa_sigaction : (void *)act->sa_handler,
+                            __builtin_return_address(0));
+              return real(sig, act, old);
+          }
+          sighandler_t signal(int sig, sighandler_t h) {
+              static sighandler_t (*real)(int, sighandler_t);
+              if (!real) real = dlsym(RTLD_NEXT, "signal");
+              note("signal", sig, (void *)h, __builtin_return_address(0));
+              return real(sig, h);
+          }
+          int SDL_Init(unsigned f) {
+              static int (*real)(unsigned);
+              if (getenv("EB409_SKIP_SDL")) return -1;
+              if (!real) real = dlsym(RTLD_NEXT, "SDL_Init");
+              return real ? real(f) : -1;
+          }
+          int SDL_InitSubSystem(unsigned f) {
+              static int (*real)(unsigned);
+              if (getenv("EB409_SKIP_SDL")) return -1;
+              if (!real) real = dlsym(RTLD_NEXT, "SDL_InitSubSystem");
+              return real ? real(f) : -1;
+          }
+          C
+          gcc -shared -fPIC -O1 -o "$w/sigtrace.so" "$w/sigtrace.c" -ldl || fail "could not build the sigaction interposer"
+          qpa_path=""
+          if [ -z "$(find squashfs-root -name 'libqoffscreen.so' | head -n1)" ]; then
+            qpa_path="$QT_ROOT_DIR/plugins/platforms"
+          fi
+
+          # $1 = label; remaining args = extra env assignments.
+          probe() {
+            label=$1; shift
+            p="$w/$label"; mkdir -p "$p/home" "$p/data" "$p/config" "$p/run"; chmod 700 "$p/run"
+            env -u APPIMAGE_EXTRACT_AND_RUN -u EB_UITEST \
+                -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+                -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+                HOME="$p/home" XDG_DATA_HOME="$p/data" XDG_CONFIG_HOME="$p/config" \
+                XDG_RUNTIME_DIR="$p/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+                EB_PERF=1 LD_PRELOAD="$w/sigtrace.so" EB409_TRACE="$p/sigtrace.log" "$@" \
+                "$image" > "$p/out.log" 2>&1 &
+            top=$!
+            app=""
+            for _ in $(seq 1 60); do
+              for c in $top $(pgrep -P "$top") $(for k in $(pgrep -P "$top"); do pgrep -P "$k"; done); do
+                if readlink "/proc/$c/exe" 2>/dev/null | grep -q '/usr/bin/EverythingBox$'; then app=$c; break; fi
+              done
+              [ -n "$app" ] && break
+              sleep 0.5
+            done
+            [ -n "$app" ] || { tail -n 40 "$p/out.log"; fail "$label: no EverythingBox process appeared"; }
+            exe=$(readlink "/proc/$app/exe")
+            applog="$p/data/EverythingBox/stream_debug.log"
+            for _ in $(seq 1 60); do
+              grep -qs 'startup.total' "$p/data/EverythingBox/perf_trace.log" && break
+              sleep 0.5
+            done
+            sleep 5   # the pad thread's SDL_Init runs after the window is up
+            cgt=$(awk '/^SigCgt:/ {print $2}' "/proc/$app/status")
+            term=$(( (0x$cgt >> 14) & 1 ))
+            echo "$label: app pid $app SigCgt=$cgt (SIGTERM caught bit=$term) $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+            echo "$label: SIGTERM/SIGINT/SIGHUP dispositions set inside the app process:"
+            grep "pid=$app " "$p/sigtrace.log" | sed "s/^/$label:   /"
+            [ "$term" = 1 ] || fail "$label: nothing catches SIGTERM in the app (SigCgt=$cgt), so it would die without closing"
+            if grep "pid=$app " "$p/sigtrace.log" | grep -q 'libSDL2'; then
+              fail "$label: an SDL library set a SIGTERM/SIGINT/SIGHUP disposition; SDL_HINT_NO_SIGNAL_HANDLERS did not hold"
+            fi
+            inforce=$(grep "pid=$app " "$p/sigtrace.log" | grep 'sigaction(SIGTERM)' | tail -n1)   # the disposition in force when SIGTERM is sent
+            case "$inforce" in
+              *"handler in [(main executable)] installed from [(main executable)]"*) ;;
+              *) fail "$label: the SIGTERM handler in force is not the app's own ($inforce)" ;;
+            esac
+            echo "$label: the SIGTERM handler is the app's own, installed from the main executable; no SDL disposition"
+            t0=$(date +%s.%N)
+            kill -TERM "$app"
+            gone=""
+            for i in $(seq 1 40); do
+              kill -0 "$app" 2>/dev/null || { gone=$i; break; }
+              sleep 0.25
+            done
+            if [ -z "$gone" ]; then
+              kill -KILL "$app" 2>/dev/null
+              fail "$label: the app was still running 10 s after SIGTERM"
+            fi
+            wait "$top" 2>/dev/null
+            echo "$label: one SIGTERM ended the app after $(python3 -c 'import sys,time; print("%.2f" % (time.time() - float(sys.argv[1])))' "$t0") s"
+            grep 'quit: signal 15 -> closing the window\|aboutToQuit (clean exit path)' "$applog" | sed "s/^/$label: log: /"
+            grep -q 'quit: signal 15 -> closing the window' "$applog" || fail "$label: SIGTERM did not reach the app's quit path"
+            grep -q 'aboutToQuit (clean exit path)' "$applog" || fail "$label: the app did not leave through its clean exit path"
+            for _ in $(seq 1 20); do grep -q '/tmp/.mount_' /proc/mounts || break; sleep 0.5; done
+          }
+
+          probe as-shipped
 
       - uses: actions/upload-artifact@v4
         with:

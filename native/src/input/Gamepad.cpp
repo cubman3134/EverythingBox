@@ -277,6 +277,12 @@ static void dropRawInputSinks()
 
 bool Gamepad::Impl::bringUp()
 {
+#ifndef _WIN32
+    // Issue #409: SDL's event subsystem otherwise installs SIGINT/SIGTERM handlers that only post SDL_QUIT, which
+    // nothing here reads -- so a logout's SIGTERM was caught and dropped, and the app waited for the SIGKILL. The
+    // app handles those signals itself (core/QuitSignals.h, installed in main.cpp).
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+#endif
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) return false;
     // Load the bundled SDL_GameControllerDB (community mappings) so uncommon / third-party pads map to the
     // standard layout, à la EmulationStation / RetroBat. Best-effort: SDL keeps its built-in defaults if the
