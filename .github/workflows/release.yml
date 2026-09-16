@@ -776,15 +776,36 @@ jobs:
           cat > "$w/sigtrace.c" <<'C'
           #define _GNU_SOURCE
           #include <dlfcn.h>
+          #include <link.h>
           #include <signal.h>
           #include <stdio.h>
           #include <stdlib.h>
           #include <unistd.h>
+          /* dladdr names the main program after whatever path the loader was handed (for an AppImage, the image
+             file), so decide "main executable" structurally: dl_iterate_phdr lists the main program first. */
+          struct find { void *addr; int index, hit; };
+          static int findobj(struct dl_phdr_info *info, size_t size, void *data) {
+              struct find *f = data;
+              (void)size;
+              for (int k = 0; k < info->dlpi_phnum; ++k) {
+                  const ElfW(Phdr) *ph = &info->dlpi_phdr[k];
+                  ElfW(Addr) lo = info->dlpi_addr + ph->p_vaddr;
+                  if (ph->p_type == PT_LOAD && (ElfW(Addr))f->addr >= lo && (ElfW(Addr))f->addr < lo + ph->p_memsz) {
+                      f->hit = f->index;
+                      return 1;
+                  }
+              }
+              ++f->index;
+              return 0;
+          }
           static const char *lib(void *a) {
               Dl_info i;
+              struct find f = { a, 0, -1 };
               if (!a || a == (void *)SIG_DFL || a == (void *)SIG_IGN) return a == (void *)SIG_IGN ? "SIG_IGN" : "SIG_DFL";
+              dl_iterate_phdr(findobj, &f);
+              if (f.hit == 0) return "(main executable)";
               if (!dladdr(a, &i)) return "?";
-              return (i.dli_fname && *i.dli_fname) ? i.dli_fname : "(main executable)";
+              return (i.dli_fname && *i.dli_fname) ? i.dli_fname : "?";
           }
           static void note(const char *fn, int sig, void *h, void *ret) {
               if (sig != SIGTERM && sig != SIGINT && sig != SIGHUP) return;
@@ -868,7 +889,6 @@ jobs:
             fi
             inforce=$(grep "pid=$app " "$p/sigtrace.log" | grep 'sigaction(SIGTERM)' | tail -n1)   # the disposition in force when SIGTERM is sent
             case "$inforce" in
-              *"handler in [$exe] installed from [$exe]"*) ;;
               *"handler in [(main executable)] installed from [(main executable)]"*) ;;
               *) fail "$label: the SIGTERM handler in force is not the app's own ($inforce)" ;;
             esac
