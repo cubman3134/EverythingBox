@@ -591,10 +591,11 @@ jobs:
           }
 
           # $1 = run label. The app must still be up when its drive is done, i.e. it did not exit on its own inside
-          # the window; then the 30 s timeout ends the run. timeout watches only its DIRECT child, which on the
-          # mounted image is the runtime, not the app. rc 124 = that child exited after SIGTERM. rc 137 = it had
-          # not exited 10 s later, so timeout sent SIGKILL to its whole process group, itself included (bash then
-          # reports the job "Killed"). Either way the timeout ended the run; anything else is an exit of its own.
+          # the window; then the 30 s timeout ends the run. The process chain printed above shows the app is
+          # timeout's DIRECT child (the runtime execs it). rc 124 = the app exited after SIGTERM. rc 137 = it was
+          # still running 10 s after SIGTERM, so timeout sent SIGKILL. Today the Linux app does not quit on SIGTERM,
+          # so 137 is the usual answer; that is a separate app bug, not a smoke failure. Either way the timeout ended
+          # the run; anything else is an exit of its own.
           finish() {
             kill -0 "$app" 2>/dev/null || { tail -n 40 "$p/$1.out"; fail "$1: the app exited on its own inside its 30 s window"; }
             wait "$tpid"; rc=$?
