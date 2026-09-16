@@ -743,6 +743,125 @@ jobs:
           [ "$(grep -c 'startup.total' "$data/perf_trace.log")" -eq 2 ] || fail "expected startup.total from exactly two launches in perf_trace.log"
           echo "AppImage kept its state across two FUSE-mounted launches"
 
+      # Issue #409: which code holds the app's SIGTERM disposition. An LD_PRELOAD interposer logs every
+      # sigaction()/signal() call for SIGTERM, SIGINT and SIGHUP with the library that made it (dladdr of the
+      # return address) and the library the handler lives in, and with EB409_SKIP_SDL set it makes SDL_Init and
+      # SDL_InitSubSystem fail without running. Three launches of the FUSE-mounted image bisect the catcher:
+      # as shipped, with SDL's own SDL_NO_SIGNAL_HANDLERS=1, and with SDL never initialised. Each prints
+      # /proc/<pid>/status SigCgt (bit 14 = SIGTERM caught) and whether one SIGTERM ends the app within 10 s.
+      - name: Bisect what catches SIGTERM in the FUSE-mounted AppImage (#409)
+        run: |
+          set +e -u
+          fail() { echo "::error::$*"; exit 1; }
+          image="$PWD/EverythingBox-linux-x86_64.AppImage"
+          w=$(mktemp -d)
+          cat > "$w/sigtrace.c" <<'C'
+          #define _GNU_SOURCE
+          #include <dlfcn.h>
+          #include <signal.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          static const char *lib(void *a) {
+              Dl_info i;
+              if (!a || a == (void *)SIG_DFL || a == (void *)SIG_IGN) return a == (void *)SIG_IGN ? "SIG_IGN" : "SIG_DFL";
+              if (!dladdr(a, &i)) return "?";
+              return (i.dli_fname && *i.dli_fname) ? i.dli_fname : "(main executable)";
+          }
+          static void note(const char *fn, int sig, void *h, void *ret) {
+              if (sig != SIGTERM && sig != SIGINT && sig != SIGHUP) return;
+              const char *path = getenv("EB409_TRACE");
+              if (!path) return;
+              char exe[512]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1); exe[n > 0 ? n : 0] = 0;
+              FILE *f = fopen(path, "a");
+              if (!f) return;
+              fprintf(f, "pid=%d exe=%s %s(%s) handler in [%s] installed from [%s]\n", (int)getpid(), exe, fn,
+                      sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT" : "SIGHUP", lib(h), lib(ret));
+              fclose(f);
+          }
+          int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+              static int (*real)(int, const struct sigaction *, struct sigaction *);
+              if (!real) real = dlsym(RTLD_NEXT, "sigaction");
+              if (act) note("sigaction", sig, (act->sa_flags & SA_SIGINFO) ? (void *)act->sa_sigaction : (void *)act->sa_handler,
+                            __builtin_return_address(0));
+              return real(sig, act, old);
+          }
+          sighandler_t signal(int sig, sighandler_t h) {
+              static sighandler_t (*real)(int, sighandler_t);
+              if (!real) real = dlsym(RTLD_NEXT, "signal");
+              note("signal", sig, (void *)h, __builtin_return_address(0));
+              return real(sig, h);
+          }
+          int SDL_Init(unsigned f) {
+              static int (*real)(unsigned);
+              if (getenv("EB409_SKIP_SDL")) return -1;
+              if (!real) real = dlsym(RTLD_NEXT, "SDL_Init");
+              return real ? real(f) : -1;
+          }
+          int SDL_InitSubSystem(unsigned f) {
+              static int (*real)(unsigned);
+              if (getenv("EB409_SKIP_SDL")) return -1;
+              if (!real) real = dlsym(RTLD_NEXT, "SDL_InitSubSystem");
+              return real ? real(f) : -1;
+          }
+          C
+          gcc -shared -fPIC -O1 -o "$w/sigtrace.so" "$w/sigtrace.c" -ldl || fail "could not build the sigaction interposer"
+          qpa_path=""
+          if [ -z "$(find squashfs-root -name 'libqoffscreen.so' | head -n1)" ]; then
+            qpa_path="$QT_ROOT_DIR/plugins/platforms"
+          fi
+
+          # $1 = label; remaining args = extra env assignments.
+          probe() {
+            label=$1; shift
+            p="$w/$label"; mkdir -p "$p/home" "$p/data" "$p/config" "$p/run"; chmod 700 "$p/run"
+            env -u APPIMAGE_EXTRACT_AND_RUN -u EB_UITEST \
+                -u DBUS_SESSION_BUS_ADDRESS -u DISPLAY -u WAYLAND_DISPLAY \
+                -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+                HOME="$p/home" XDG_DATA_HOME="$p/data" XDG_CONFIG_HOME="$p/config" \
+                XDG_RUNTIME_DIR="$p/run" QT_QPA_PLATFORM=offscreen ${qpa_path:+QT_QPA_PLATFORM_PLUGIN_PATH="$qpa_path"} \
+                EB_PERF=1 LD_PRELOAD="$w/sigtrace.so" EB409_TRACE="$p/sigtrace.log" "$@" \
+                "$image" > "$p/out.log" 2>&1 &
+            top=$!
+            app=""
+            for _ in $(seq 1 60); do
+              for c in $top $(pgrep -P "$top") $(for k in $(pgrep -P "$top"); do pgrep -P "$k"; done); do
+                if readlink "/proc/$c/exe" 2>/dev/null | grep -q '/usr/bin/EverythingBox$'; then app=$c; break; fi
+              done
+              [ -n "$app" ] && break
+              sleep 0.5
+            done
+            [ -n "$app" ] || { tail -n 40 "$p/out.log"; fail "$label: no EverythingBox process appeared"; }
+            for _ in $(seq 1 60); do
+              grep -qs 'startup.total' "$p/data/EverythingBox/perf_trace.log" && break
+              sleep 0.5
+            done
+            sleep 5   # the pad thread's SDL_Init runs after the window is up
+            cgt=$(awk '/^SigCgt:/ {print $2}' "/proc/$app/status")
+            term=$(( (0x$cgt >> 14) & 1 ))
+            echo "$label: app pid $app SigCgt=$cgt (SIGTERM caught bit=$term) $(grep -E '^Sig(Blk|Ign)' "/proc/$app/status" | tr -s '[:space:]' ' ')"
+            echo "$label: SIGTERM/SIGINT/SIGHUP dispositions set inside the app process:"
+            grep "pid=$app " "$p/sigtrace.log" | sed "s/^/$label:   /"
+            kill -TERM "$app"
+            gone=""
+            for i in $(seq 1 40); do
+              kill -0 "$app" 2>/dev/null || { gone=$i; break; }
+              sleep 0.25
+            done
+            if [ -n "$gone" ]; then
+              echo "$label: one SIGTERM ended the app within $(( gone * 250 )) ms"
+            else
+              echo "$label: the app was STILL RUNNING 10 s after SIGTERM; sending SIGKILL"
+              kill -KILL "$app" 2>/dev/null
+            fi
+            wait "$top" 2>/dev/null
+            for _ in $(seq 1 20); do grep -q '/tmp/.mount_' /proc/mounts || break; sleep 0.5; done
+          }
+
+          probe as-shipped
+          probe sdl-no-signal-handlers SDL_NO_SIGNAL_HANDLERS=1
+          probe sdl-never-initialised EB409_SKIP_SDL=1
+
       - uses: actions/upload-artifact@v4
         with:
           name: EverythingBox-linux-x86_64
