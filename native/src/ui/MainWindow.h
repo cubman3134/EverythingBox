@@ -1145,6 +1145,7 @@ private:
     void presentAddonConfig(const AddonManifest& manifest);      // manifest-driven config form (nested on the detail)
     void confirmRemoveAddon(const QString& sourceId);            // nested confirm (Info + destructive Action)
     void presentAddByUrl();                                      // nested TextField + Add -> addRemoteSource (async)
+    void openAddonConfigure(const QString& sourceId);            // #80 "Configure on website…" (MainWindowAddonConfigure.cpp)
     void presentAddonRegistry();                                 // the add-on registry "store" as a nested panel
     void installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId); // registry install
     void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place

@@ -185,4 +185,21 @@ namespace StremioTranslate
     // The automatic choice: a candidate whose bingeGroup matches `preferGroup` (when non-empty), else the
     // first in sorted order. Returns -1 when there is nothing playable.
     int pickAuto(const QVector<StreamCandidate>& all, const QString& preferGroup);
+
+    // ---- issue #80: configuring an add-on on its website -------------------------------------------------
+    // The add-on's configure page, by the Stremio convention: the manifest URL with a trailing
+    // "/manifest.json" (and any trailing slashes) taken off, then "/configure". Accepts a manifest URL or a
+    // base URL alike. Everything else is kept EXACTLY as given — a query string is carried over after the new
+    // path, and an encoded path segment (Torrentio's "…/<options>/manifest.json", whose options are often
+    // percent-encoded) is never decoded or re-encoded, because the site reads its own encoding back. Returns
+    // an empty string for anything that is not an http(s) URL with a host: there is no page to open.
+    QString configureUrlFor(const QString& manifestUrl);
+
+    // What a pasted or copied piece of text installs, or an empty string when it is not an add-on install
+    // link. An install link is either an http(s) URL whose PATH ends in "manifest.json" once percent-decoded
+    // (the query string and fragment are not part of that test), or a stremio:// link whose payload is one —
+    // the link a configure page's Install button hands out — rewritten to https:// ("stremio://host/path" ->
+    // "https://host/path"). A URL that merely CONTAINS "manifest" somewhere is not one, and neither is prose
+    // around a URL: the text must be the link and nothing else. Pure, so the clipboard pre-check can be pinned.
+    QString installLinkFromText(const QString& text);
 }

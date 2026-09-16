@@ -541,6 +541,8 @@ signals:
     // A retro game leaf asking "what hacks exist for this?". MainWindow turns it into the list, the
     // confirm and the install — the same shape as chooseSourceRequested above.
     void romhacksRequested(const MediaItem& item, const QString& systemId);
+    // #80: the "needs to be configured" guidance row was activated — open "Configure on website…" for that add-on.
+    void configureAddonRequested(const QString& sourceId);
     // #110: the Download verb on a Jellyfin row. The view knows WHICH row; only MainWindow can turn a
     // qualified id into a download, for the same reason only it can turn one into a playable link. `kind`
     // is browse::JellyfinDownloadTarget::Kind as an int, so this header does not have to include the

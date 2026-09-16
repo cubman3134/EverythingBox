@@ -390,3 +390,65 @@ int StremioTranslate::pickAuto(const QVector<StreamCandidate>& all, const QStrin
             if (all[i].bingeGroup == preferGroup) return i;   // the release the user already chose
     return 0;   // already sorted best-first
 }
+
+// ---- issue #80 ----------------------------------------------------------------------------------------
+
+namespace {
+
+// Split "scheme://host/path?query#fragment" at its first '?' or '#': the part a path test looks at, and the
+// tail that is carried over byte for byte. String surgery rather than QUrl on purpose — QUrl normalises
+// percent-encoding, and a configure page reads back exactly the encoding it wrote.
+void splitTail(const QString& url, QString* head, QString* tail)
+{
+    int cut = url.size();
+    for (int i = 0; i < url.size(); ++i)
+        if (url[i] == QLatin1Char('?') || url[i] == QLatin1Char('#')) { cut = i; break; }
+    *head = url.left(cut);
+    *tail = url.mid(cut);
+}
+
+// "http://" or "https://" (case-insensitive), followed by a non-empty host. Returns the index where the
+// host starts, or -1.
+int httpHostStart(const QString& head)
+{
+    int start = -1;
+    if (head.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) start = 8;
+    else if (head.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)) start = 7;
+    if (start < 0 || start >= head.size() || head[start] == QLatin1Char('/')) return -1;
+    return start;
+}
+
+} // namespace
+
+QString StremioTranslate::configureUrlFor(const QString& manifestUrl)
+{
+    QString head, tail;
+    splitTail(manifestUrl.trimmed(), &head, &tail);
+    const int hostStart = httpHostStart(head);
+    if (hostStart < 0) return {};
+    while (head.endsWith(QLatin1Char('/')) && head.size() > hostStart) head.chop(1);
+    if (head.endsWith(QStringLiteral("/manifest.json"))) head.chop(QStringLiteral("/manifest.json").size());
+    while (head.endsWith(QLatin1Char('/')) && head.size() > hostStart) head.chop(1);
+    if (head.size() <= hostStart) return {};
+    return head + QStringLiteral("/configure") + tail;
+}
+
+QString StremioTranslate::installLinkFromText(const QString& text)
+{
+    QString link = text.trimmed();
+    if (link.isEmpty()) return {};
+    for (const QChar c : link) if (c.isSpace()) return {};   // the text must BE the link, not mention one
+    // A configure page's Install button hands out stremio://<host>/<path>: the same manifest over https.
+    static const QString kStremio = QStringLiteral("stremio://");
+    if (link.startsWith(kStremio, Qt::CaseInsensitive))
+        link = QStringLiteral("https://") + link.mid(kStremio.size());
+    QString head, tail;
+    splitTail(link, &head, &tail);
+    const int hostStart = httpHostStart(head);
+    if (hostStart < 0) return {};
+    const int pathStart = head.indexOf(QLatin1Char('/'), hostStart);
+    if (pathStart < 0) return {};
+    const QString path = QUrl::fromPercentEncoding(head.mid(pathStart).toUtf8());
+    if (!path.endsWith(QStringLiteral("/manifest.json"))) return {};
+    return link;
+}

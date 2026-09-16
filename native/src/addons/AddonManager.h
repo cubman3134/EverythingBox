@@ -375,6 +375,39 @@ public:
     bool removeRemoteSource(const QString& baseUrl);   // drop the URL (and its cached manifest)
     QStringList remoteSourceUrls() const;
 
+    // ---- issue #80: re-configuring a remote add-on REPLACES it ----
+    // A configure page hands out a NEW manifest URL for the SAME add-on (Torrentio with other options), so
+    // "add this URL" has three outcomes, decided here as a pure function of the persisted list and the fetched
+    // manifest — never of the network, never of the store:
+    //   * AlreadyPresent — that exact base URL is already in the list (`index` names it). Nothing moves.
+    //   * Replace        — an installed entry's cached manifest carries the new manifest's id: the FIRST such
+    //                      entry takes the new URL at its own `index`, so the add-on keeps its place. Any LATER
+    //                      entry with the same id (duplicates left by builds before this rule) is listed in
+    //                      `collapse` and dropped, so the list converges on one entry per add-on.
+    //   * Append         — neither: a new add-on goes on the end.
+    // The enabled flag needs nothing from this: it is keyed by manifest id (addon.enabled.<id>), so it carries
+    // over to the new URL by construction. An entry whose manifest was never cached has no id and never matches.
+    struct RemoteEntry { QString base; QString id; };
+    struct RemoteAddPlan
+    {
+        enum Kind { Append, Replace, AlreadyPresent };
+        Kind kind = Append;
+        int index = -1;          // the entry kept (Replace / AlreadyPresent)
+        QVector<int> collapse;   // Replace only: later same-id entries to drop, ascending
+    };
+    static RemoteAddPlan planRemoteAdd(const QVector<RemoteEntry>& installed, const QString& newBase,
+                                       const QString& newId);
+
+    // Issue #80: the "needs to be configured" guidance row (type "info") is actionable when the add-on has a
+    // web configure page. It is marked by its id, so the one activation path both layouts share
+    // (HomeView::activateItem) can tell it from every other inert guidance row. Empty source = not that row.
+    static QString configureRowId(const QString& sourceId) { return QStringLiteral("addon-configure:") + sourceId; }
+    static QString configureRowSource(const QString& rowId)
+    {
+        static const QString prefix = QStringLiteral("addon-configure:");
+        return rowId.startsWith(prefix) ? rowId.mid(prefix.size()) : QString();
+    }
+
     bool isEnabled(const QString& id) const;
     void setEnabled(const QString& id, bool enabled);
 

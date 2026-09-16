@@ -16,6 +16,12 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHash>
+#include <QSettings>
+#include <QCryptographicHash>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include "../src/core/AppPaths.h"
+#include "../src/core/AppBrand.h"
 #include <functional>
 #include <memory>
 #include <cstdio>
@@ -374,6 +380,159 @@ static bool makeSlowFixture(const QString& root, const QString& id)
 // sources, and the slot-accounting asserts below ("issued exactly one request per job") count only their
 // requests. This probe used to scrub the shared portable ini by hand to get the same guarantee; that
 // belongs in the production gate, not test-side, and the hand-scrub is gone.
+// ---- issue #80: re-configuring a remote add-on replaces it -------------------------------------------------
+// A tiny loopback add-on host on an EPHEMERAL port — never a real add-on server. Two option paths serve the
+// SAME manifest id under different names (a Torrentio-style re-configure), a third serves a different add-on,
+// and anything else answers 404 (the "fetch failed" case).
+namespace {
+struct AddonHost
+{
+    QTcpServer srv;
+    bool start()
+    {
+        if (!srv.listen(QHostAddress::LocalHost, 0)) return false;
+        QObject::connect(&srv, &QTcpServer::newConnection, &srv, [this] {
+            QTcpSocket* c = srv.nextPendingConnection();
+            if (!c) return;
+            auto buf = std::make_shared<QByteArray>();
+            QObject::connect(c, &QTcpSocket::readyRead, c, [c, buf] {
+                buf->append(c->readAll());
+                const int end = buf->indexOf("\r\n\r\n");
+                if (end < 0) return;
+                const QByteArray path = buf->left(end).split('\n').value(0).trimmed().split(' ').value(1);
+                auto manifest = [](const char* id, const char* name) {
+                    return QByteArray("{\"id\":\"") + id + "\",\"name\":\"" + name
+                         + "\",\"version\":\"1.0.0\",\"resources\":[\"stream\"],\"types\":[\"movie\"],\"catalogs\":[]}";
+                };
+                QByteArray body; QByteArray status = "200 OK";
+                if (path == "/opt-a/manifest.json")      body = manifest("probe.reconf", "Reconf A");
+                else if (path == "/opt-b/manifest.json") body = manifest("probe.reconf", "Reconf B");
+                else if (path == "/other/manifest.json") body = manifest("probe.other", "Other Addon");
+                else if (path == "/cfgreq/manifest.json")
+                    body = "{\"id\":\"probe.cfgreq\",\"name\":\"Needs Setup\",\"version\":\"1.0.0\",\"resources\":[\"catalog\"],"
+                           "\"types\":[\"movie\"],\"catalogs\":[{\"type\":\"movie\",\"id\":\"top\",\"name\":\"Top\"}],"
+                           "\"behaviorHints\":{\"configurable\":true,\"configurationRequired\":true}}";
+                else { status = "404 Not Found"; body = "nope"; }
+                c->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                         + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                c->flush();
+                c->disconnectFromHost();
+            });
+            QObject::connect(c, &QTcpSocket::disconnected, c, &QObject::deleteLater);
+        });
+        return true;
+    }
+    QString url(const char* path) const
+    { return QStringLiteral("http://127.0.0.1:%1%2").arg(srv.serverPort()).arg(QLatin1String(path)); }
+};
+} // namespace
+
+static void probeRemoteReplace(const std::function<void(const char*, bool)>& check)
+{
+    using Plan = AddonManager::RemoteAddPlan;
+    using Entry = AddonManager::RemoteEntry;
+
+    // (a) The pure decision. Hand-written fixtures, never computed from the function under test.
+    {
+        const QVector<Entry> inst = { { QStringLiteral("https://x.test/one"), QStringLiteral("id.one") },
+                                      { QStringLiteral("https://t.test/opts1"), QStringLiteral("id.tor") },
+                                      { QStringLiteral("https://z.test/zed"), QStringLiteral("id.zed") } };
+        Plan p = AddonManager::planRemoteAdd(inst, QStringLiteral("https://t.test/opts2"), QStringLiteral("id.tor"));
+        check("plan: same id, new URL -> Replace at that entry's index (1), nothing to collapse",
+              p.kind == Plan::Replace && p.index == 1 && p.collapse.isEmpty());
+        p = AddonManager::planRemoteAdd(inst, QStringLiteral("https://n.test/new"), QStringLiteral("id.new"));
+        check("plan: different id -> Append", p.kind == Plan::Append && p.index == -1 && p.collapse.isEmpty());
+        p = AddonManager::planRemoteAdd(inst, QStringLiteral("https://t.test/opts1"), QStringLiteral("id.tor"));
+        check("plan: the exact URL already in the list -> AlreadyPresent at its index",
+              p.kind == Plan::AlreadyPresent && p.index == 1);
+        const QVector<Entry> dup = { { QStringLiteral("https://t.test/a"), QStringLiteral("id.tor") },
+                                     { QStringLiteral("https://x.test/one"), QStringLiteral("id.one") },
+                                     { QStringLiteral("https://t.test/b"), QStringLiteral("id.tor") } };
+        p = AddonManager::planRemoteAdd(dup, QStringLiteral("https://t.test/c"), QStringLiteral("id.tor"));
+        check("plan: pre-existing same-id duplicates collapse onto the FIRST (replace 0, drop 2)",
+              p.kind == Plan::Replace && p.index == 0 && p.collapse == QVector<int>{ 2 });
+        const QVector<Entry> uncached = { { QStringLiteral("https://t.test/a"), QString() } };
+        p = AddonManager::planRemoteAdd(uncached, QStringLiteral("https://t.test/b"), QString());
+        check("plan: an entry with no cached id never matches an add with no id -> Append", p.kind == Plan::Append);
+    }
+
+    // (b) The same rule through the real addRemoteSource against the loopback host, persisted store included.
+    AddonHost host;
+    if (!host.start()) { check("reconfigure: loopback add-on host listens", false); return; }
+    const QString rootR = QDir::tempPath() + QStringLiteral("/eb-reconf-fixture-")
+                        + QString::number(QCoreApplication::applicationPid());
+    QDir(rootR).removeRecursively(); QDir().mkpath(rootR);
+    qputenv("EB_ADDONS_ROOT", rootR.toUtf8());
+    AddonManager mgr;
+    for (const QString& u : mgr.remoteSourceUrls()) mgr.removeRemoteSource(u); // the probe's own isolated store
+
+    bool got = false, lastOk = false; QString lastMsg;
+    QObject::connect(&mgr, &AddonManager::remoteSourceResult, &mgr, [&](bool ok, const QString& msg) {
+        got = true; lastOk = ok; lastMsg = msg; });
+    auto add = [&](const QString& url) {
+        got = false; mgr.addRemoteSource(url);
+        return spinUntil([&] { return got; }, 8000) && lastOk;
+    };
+    auto countId = [&](const QString& id) {
+        int n = 0; for (LoadedAddon* s : mgr.sources()) if (s->manifest.id == id) ++n; return n; };
+    const QString other = host.url("/other"), a = host.url("/opt-a"), b = host.url("/opt-b");
+    const QString reconf = QStringLiteral("probe.reconf");
+
+    check("reconfigure: install another add-on, then A (different ids append in order)",
+          add(host.url("/other/manifest.json")) && add(host.url("/opt-a/manifest.json"))
+          && mgr.remoteSourceUrls() == QStringList({ other, a }));
+    mgr.setEnabled(reconf, false);   // a user choice that must survive the re-configure
+
+    const bool bOk = add(host.url("/opt-b/manifest.json"));
+    check("reconfigure: re-adding via B (same id) REPLACES A in place — one entry, same position",
+          bOk && mgr.remoteSourceUrls() == QStringList({ other, b }) && countId(reconf) == 1);
+    LoadedAddon* s = mgr.sourceById(reconf);
+    check("reconfigure: the entry now carries B's manifest (name updated) and B's URL",
+          s && s->manifest.name == QStringLiteral("Reconf B") && s->baseUrl == b);
+    check("reconfigure: the enabled flag (off) is preserved across the replace", !mgr.isEnabled(reconf));
+    check("reconfigure: the confirmation says the settings were UPDATED, not added",
+          lastMsg.contains(QStringLiteral("Updated")) && !lastMsg.contains(QStringLiteral("Added")));
+    {
+        QSettings st(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
+        auto key = [](const QString& base) {
+            return QStringLiteral("addon.remote.manifest.")
+                 + QString::fromUtf8(QCryptographicHash::hash(base.toUtf8(), QCryptographicHash::Md5).toHex()); };
+        check("reconfigure: A's manifest cache is dropped, B's is stored",
+              !st.contains(key(a)) && st.contains(key(b)));
+    }
+
+    check("reconfigure: re-adding B's exact URL is already present — list unchanged",
+          add(host.url("/opt-b/manifest.json")) && mgr.remoteSourceUrls() == QStringList({ other, b }));
+
+    got = false;
+    mgr.addRemoteSource(host.url("/missing/manifest.json"));
+    const bool settled = spinUntil([&] { return got; }, 8000);
+    check("reconfigure: a failed fetch reports failure and changes nothing",
+          settled && !lastOk && mgr.remoteSourceUrls() == QStringList({ other, b }) && !mgr.isEnabled(reconf));
+
+    // (c) The configuration-required add-on's guidance row is the way into "Configure on website…": it carries
+    //     the marker id HomeView::activateItem acts on, naming the add-on.
+    {
+        const bool added = add(host.url("/cfgreq/manifest.json"));
+        LoadedAddon* cr = mgr.sourceById(QStringLiteral("probe.cfgreq"));
+        MediaCatalog gotCat; int want = -2;
+        QObject::connect(&mgr, &AddonManager::catalogReady, &mgr, [&](int id, const MediaCatalog& c) {
+            if (id == want) { gotCat = c; want = -3; } });
+        if (cr) want = mgr.requestCatalog(cr, QStringLiteral("movie/top"), QString(), 1, {});
+        spinUntil([&] { return want == -3; }, 5000);
+        const bool row = added && cr && gotCat.items.size() == 1 && gotCat.items[0].type == QStringLiteral("info")
+                      && AddonManager::configureRowSource(gotCat.items[0].id) == QStringLiteral("probe.cfgreq");
+        check("configure row: a configurationRequired add-on's info row carries the configure marker", row);
+        check("configure row: an ordinary id is not mistaken for the marker",
+              AddonManager::configureRowSource(QStringLiteral("tt0111161")).isEmpty()
+              && AddonManager::configureRowSource(AddonManager::configureRowId(QStringLiteral("x.y"))) == QStringLiteral("x.y"));
+    }
+
+    for (const QString& u : mgr.remoteSourceUrls()) mgr.removeRemoteSource(u);
+    mgr.setEnabled(reconf, true);
+    QDir(rootR).removeRecursively();
+}
+
 static int probePrefetch()
 {
     int pass = 0, fail = 0;
@@ -665,6 +824,8 @@ static int probePrefetch()
         check("install guard: a normal third-party id still installs", okInstalled);
         QDir(rootI).removeRecursively();
     }
+
+    probeRemoteReplace(check);
 
     QDir(root).removeRecursively();
     qunsetenv("EB_ADDONS_ROOT");
