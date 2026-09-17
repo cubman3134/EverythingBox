@@ -9,6 +9,22 @@ Your **sign-in never leaves this device**. Signing in gets an access token, and 
 device-local part of the settings — deliberately excluded from the synced settings bundle, so it is never
 uploaded to your cloud storage and never copied to another machine. Sign in again on the second device.
 
+## Signing in with Quick Connect
+
+If your server has **Quick Connect** switched on (Jellyfin 10.8 or later, *Dashboard → General*), adding the
+server shows a six-digit **code** instead of asking for a password. On any Jellyfin app where you are already
+signed in — the web page, your phone — open **Quick Connect**, enter the code, and EverythingBox finishes
+signing in by itself. No password is typed with a remote.
+
+* **Use password instead** is on the code panel the whole time, and takes you to the username and password.
+* A code lasts **five minutes** here. When it runs out, or the server forgets it, the panel says **That code
+  expired** and offers **New code**.
+* **Back** cancels: nothing is added, and EverythingBox stops asking the server about the code.
+* A server with Quick Connect switched off, or one too old to have it, goes straight to the username and
+  password, exactly as before.
+
+Either way the result is the same sign-in, stored the same device-local way.
+
 ## Downloads — taking it on a plane
 
 Any film or episode from a Jellyfin server can be kept on this device and watched with the network off.

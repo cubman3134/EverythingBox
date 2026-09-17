@@ -6880,59 +6880,9 @@ void HomeView::connectJellyfinServerInteractive()
                     return;
                 }
 
-                const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal,
-                                                  self->window()).trimmed();
-                if (user.isEmpty()) return;
-                // NEVER ECHOED, NEVER TRIMMED, NEVER LOGGED. Not trimmed because leading and trailing spaces
-                // are significant in a password and eating them silently produces a sign-in that fails for a
-                // reason nobody can see; entered as QLineEdit::Password so it is not readable over somebody's
-                // shoulder on a television. It goes to the transport and is not held.
-                const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password,
-                                                  self->window());
-                if (pass.isEmpty()) return;
-
-                JellyfinClient::instance().authenticate(url, allowPlainHttp, user, pass, /*budgetMs*/ 20000,
-                    [self, url, allowPlainHttp, info](const Jellyfin::AuthResult& res,
-                                                      const QString& authError) {
-                        if (!self) return;
-                        // Deferred past the reply's emission again, for the same reason.
-                        QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, info, res, authError] {
-                            if (!self) return;
-                            if (!authError.isEmpty() || !res.ok)
-                            {
-                                NavConfirm::ask(tr("Jellyfin"),
-                                                authError.isEmpty() ? tr("That server refused the sign-in.")
-                                                                    : authError,
-                                                { tr("OK") }, 0, 0, self->window());
-                                return;
-                            }
-                            JellyfinServer s;
-                            // THE SERVER'S OWN Id, not a uuid we mint and not the url — see
-                            // JellyfinServerStore.h. It is what every row from this server is qualified with.
-                            s.id             = info.serverId;
-                            // The server's own name by default, which is what the user calls it everywhere
-                            // else; they never have to invent one.
-                            s.name           = info.serverName.trimmed().isEmpty()
-                                                   ? tr("Jellyfin") : info.serverName;
-                            s.url            = url;
-                            s.allowPlainHttp = allowPlainHttp;
-                            s.userId         = res.userId;
-                            s.userName       = res.userName;
-                            s.token          = res.token;   // device-local, under "jellyfin/"; never synced
-                            if (!JellyfinServerStore::add(s))
-                            {
-                                NavConfirm::ask(tr("Jellyfin"),
-                                    tr("That server did not give an identity this app can use, so its "
-                                       "items could not be told apart from another server's."),
-                                    { tr("OK") }, 0, 0, self->window());
-                                return;
-                            }
-                            NavConfirm::ask(tr("Jellyfin"),
-                                tr("“%1” is connected. Its library appears alongside your own, with each "
-                                   "row labelled by the server it came from.").arg(s.name),
-                                { tr("OK") }, 0, 0, self->window());
-                        }, Qt::QueuedConnection);
-                    });
+                // #83: THE IDENTITY IS SETTLED; NOW HOW TO SIGN IN. Quick Connect when the server offers it,
+                // the username and password otherwise - HomeViewJellyfin.cpp has both, and the choice.
+                self->signInToJellyfinServer(url, allowPlainHttp, info.serverId, info.serverName);
             }, Qt::QueuedConnection);
         });
 }

@@ -38,8 +38,9 @@
 // ==================================================================================================
 // 3. WHAT IS DELIBERATELY NOT HERE
 // ==================================================================================================
-// Quick Connect (username and password already work, from #160), SyncPlay, downloads and live TV are named
-// in the issue as later work and none of them is started here. Neither is a Jellyfin MUSIC route: #194 owns
+// Signing in is not here either: username/password (#160) and Quick Connect (#83) both live in the settings
+// flow, HomeViewJellyfin.cpp. SyncPlay and live TV are named in the issue as later work, and downloads (#110)
+// have their own translation unit. Neither is a Jellyfin MUSIC route: #194 owns
 // the music surface and consumes the same client, and two features writing one queue is how the two would
 // come to disagree about what a track is.
 #include "MainWindow.h"

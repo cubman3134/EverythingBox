@@ -45,6 +45,25 @@ void fireChanged() { if (g_changeHook) g_changeHook(); }
 
 } // namespace
 
+JellyfinServer JellyfinServerStore::fromSignIn(const Jellyfin::PublicInfo& info,
+                                              const Jellyfin::AuthResult& auth, const QString& url,
+                                              bool allowPlainHttp)
+{
+    JellyfinServer s;
+    // THE SERVER'S OWN Id, not a uuid we mint and not the url - see the header. It is what every row from
+    // this server is qualified with.
+    s.id             = info.serverId;
+    // The server's own name by default, which is what the user calls it everywhere else; they never have
+    // to invent one.
+    s.name           = info.serverName.trimmed().isEmpty() ? QStringLiteral("Jellyfin") : info.serverName;
+    s.url            = url;
+    s.allowPlainHttp = allowPlainHttp;
+    s.userId         = auth.userId;
+    s.userName       = auth.userName;
+    s.token          = auth.token;   // device-local, under "jellyfin/"; never synced
+    return s;
+}
+
 void JellyfinServerStore::setChangeHook(std::function<void()> hook) { g_changeHook = std::move(hook); }
 
 QList<JellyfinServer> JellyfinServerStore::list()

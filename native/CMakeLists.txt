@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.291 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.292 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -745,6 +745,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
         src/core/JellyfinServerStore.cpp src/core/JellyfinServerStore.h
         src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
+        # #83: QUICK CONNECT. The pure decisions (offer it or the password; what a poll answer means) and the
+        # session that polls - handed its network manager and request headers by JellyfinClient, so
+        # probe_jellyfin drives the real session against a fake server without the client's plumbing.
+        src/core/JellyfinQuickConnect.cpp src/core/JellyfinQuickConnect.h
         # OFFLINE DOWNLOADS (#110, increment 1): JellyfinDownload is the pure half (the download url, the
         # job identity and file naming, the batch expansions and the storage cap's LRU suggestion) plus the
         # two device-local hygiene settings; OfflineProgress is the store-and-forward buffer of playback
@@ -2602,8 +2606,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     #
     # Jellyfin.cpp, JellyfinMigrate.cpp and JellyfinServerStore.cpp are QtCore-only (AppPaths/AppBrand are
     # header-only; ProfileStore.cpp is the one dependency, for the per-profile namespacing), so this links
-    # against Qt6::Core alone and is fast enough to mutate in a loop. NO NETWORK: JellyfinClient is
-    # deliberately absent, and its socket half is driven live against fixture servers instead.
+    # against Qt6::Core alone and is fast enough to mutate in a loop. JellyfinClient is deliberately absent,
+    # and its socket half is driven live against fixture servers instead. The one exception is #83's Quick
+    # Connect session (section 20), which needs Qt6::Network and a loopback fake server - see below.
     add_executable(probe_jellyfin tools/probe_jellyfin.cpp
         src/core/Jellyfin.cpp            src/core/Jellyfin.h
         src/core/JellyfinMigrate.cpp     src/core/JellyfinMigrate.h
@@ -2614,7 +2619,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # go through keeps it out. RecentStore is QtCore-only apart from these two.
         src/core/RecentStore.cpp         src/core/RecentStore.h
         src/core/Tombstones.cpp          src/core/Tombstones.h
-        src/core/ProfileStore.cpp        src/core/ProfileStore.h)
+        src/core/ProfileStore.cpp        src/core/ProfileStore.h
+        # #83 section 20: QUICK CONNECT, the one socket in this probe. The REAL session polls a fake Jellyfin
+        # on 127.0.0.1 (never a real server), because "cancel stops polling" is a claim about requests the
+        # server stops receiving, and only a server can count those. Qt6::Network comes with it.
+        src/core/JellyfinQuickConnect.cpp src/core/JellyfinQuickConnect.h)
     target_include_directories(probe_jellyfin PRIVATE src src/core tools)
     # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
     # setters are not compiled at all, so a production call is a compile error rather than a silent
@@ -2622,7 +2631,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # store it drives holds TOKENS, so a run against the app's real ini would both move a user's data and
     # write a fixture credential into their settings file.
     target_compile_definitions(probe_jellyfin PRIVATE EB_JELLYFIN_TEST_SEAM)
-    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core)
+    target_link_libraries(probe_jellyfin PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for OFFLINE DOWNLOADS FROM A JELLYFIN SERVER (issue #110, increment 1): the download
     # url and its server qualification across two servers, the ref-backed job identity and the file names

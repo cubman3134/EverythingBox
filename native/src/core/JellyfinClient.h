@@ -36,6 +36,7 @@
 // carry the credential to a server the user never configured.
 #pragma once
 #include "Jellyfin.h"
+#include "JellyfinQuickConnect.h"   // #83: the Quick Connect route and session
 
 #include <QObject>
 #include <QString>
@@ -67,6 +68,20 @@ public:
     using AuthDone = std::function<void(const Jellyfin::AuthResult& result, const QString& error)>;
     void authenticate(const QString& url, bool allowPlainHttp, const QString& username,
                       const QString& password, int budgetMs, AuthDone done);
+
+    // ---- Quick Connect (issue #83) ---------------------------------------------------------------------
+    // The step between the two above: once the identity is read, does this server offer Quick Connect?
+    // Calls back exactly once; anything short of a plain "yes" is the password route. JellyfinQuickConnect.h
+    // has the protocol and the rule.
+    using RouteDone = std::function<void(JellyfinQuickConnect::Route route)>;
+    void fetchSignInRoute(const QString& url, bool allowPlainHttp, int budgetMs, QObject* context,
+                          RouteDone done);
+
+    // A Quick Connect attempt against `url`, carrying this install's client/device header. NOT STARTED —
+    // the caller connects its signals first, then start(). Owned by `parent` (the panel showing the code),
+    // so closing the panel ends the polling. Null when the url is not one checkUrl accepts.
+    JellyfinQuickConnectSession* newQuickConnectSession(const QString& url, bool allowPlainHttp,
+                                                        QObject* parent);
 
     // ---- The merged library ----------------------------------------------------------------------------
 

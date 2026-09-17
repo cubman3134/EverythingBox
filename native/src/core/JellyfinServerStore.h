@@ -39,6 +39,8 @@
 // STORED DATA ALONE — the resume positions and marks under `jf:<thatServerId>:…` are harmless (nothing
 // resolves them) and the server may well come back, at which point they are all still there.
 #pragma once
+#include "Jellyfin.h"
+
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -73,6 +75,13 @@ namespace JellyfinServerStore
     // false, and stores nothing, for an empty or malformed id. De-duped by id — re-adding a server the user
     // already has (a friend re-shares it, the url changed) updates in place rather than duplicating.
     bool add(const JellyfinServer& s);
+
+    // THE ONE SHAPE A SIGNED-IN SERVER IS STORED IN, whichever way the sign-in happened (#83). A password
+    // sign-in and a Quick Connect sign-in both end in the same AuthenticationResult, and both go through
+    // here, so the two can never come to disagree about which field the token lands in or what an unnamed
+    // server is called. Pure: it builds the record and stores nothing; add() is still the one write.
+    JellyfinServer fromSignIn(const Jellyfin::PublicInfo& info, const Jellyfin::AuthResult& auth,
+                              const QString& url, bool allowPlainHttp);
 
     void update(const JellyfinServer& s);
     void setEnabled(const QString& id, bool on);
