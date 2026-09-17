@@ -1,4 +1,5 @@
 #include "KitsuTracker.h"
+#include "AppBrand.h"
 #include "TrackerLinks.h"
 #include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with the other two
 
@@ -116,6 +117,17 @@ KitsuTracker::KitsuTracker(QObject* parent) : QObject(parent)
 
 KitsuTracker::~KitsuTracker() = default;
 
+// THE ONE PLACE A KITSU REQUEST IS MADE (#330). Every request this file sends - the sign-in, the refresh,
+// every library read and every write - starts here, so none of them can go out without the User-Agent.
+// Qt sends NO User-Agent by default, and Kitsu's Cloudflare edge challenges a request with none (observed
+// 2026-09-16; see kitsu::defaultApiUrl). probe_tracker §22 records the header on each request kind.
+static QNetworkRequest kitsuRequest(const QString& url)
+{
+    QNetworkRequest req{ QUrl(url) };
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    return req;
+}
+
 // ---- configuration + credentials -------------------------------------------------------------------
 
 QString KitsuTracker::email() { return signInEmail(); }
@@ -163,7 +175,7 @@ void KitsuTracker::connectAccount()
         emit connectError(tr("Enter your Kitsu email and password first."));
         return;
     }
-    QNetworkRequest req{ QUrl(authBase() + QStringLiteral("/token")) };
+    QNetworkRequest req = kitsuRequest(authBase() + QStringLiteral("/token"));
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
     req.setRawHeader("Accept", "application/json");
@@ -174,19 +186,34 @@ void KitsuTracker::connectAccount()
     QNetworkReply* rep = nam_->post(req, body);
     connect(rep, &QNetworkReply::finished, this, [this, rep] {
         rep->deleteLater();
-        const kitsu::TokenReply r = kitsu::parseTokenReply(rep->readAll());
+        const QByteArray replyBody = rep->readAll();
+        const kitsu::TokenReply r = kitsu::parseTokenReply(replyBody);
         if (!r.ok)
         {
             // A SENTENCE OF OUR OWN. rep->errorString() embeds the URL, and this URL is the token
             // endpoint — one edit away from carrying the grant. The HTTP status is the whole of what we
-            // say about it, and 401 is said plainly because "wrong password" is the answer the user needs.
+            // say about it, and a wrong password is said plainly because it is the answer the user needs —
+            // but ONLY when Kitsu itself said so (kitsu::classifyTokenFailure, #330): a Cloudflare
+            // challenge page is the service refusing the request, not a verdict on the password.
             const int status = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            if (status == 400 || status == 401)
+            switch (kitsu::classifyTokenFailure(status,
+                                                rep->header(QNetworkRequest::ContentTypeHeader).toString().toLatin1(),
+                                                rep->rawHeader("Cf-Mitigated"), replyBody))
+            {
+            case kitsu::TokenFailure::BadCredentials:
                 emit connectError(tr("Kitsu did not accept that email and password."));
-            else
-                emit connectError(status > 0
-                    ? tr("Kitsu did not return a token (HTTP %1).").arg(status)
-                    : tr("Kitsu did not return a token; the connection failed."));
+                break;
+            case kitsu::TokenFailure::ServiceRefused:
+                emit connectError(tr("Kitsu's service refused the request (not your password). "
+                                     "Try signing in again later."));
+                break;
+            case kitsu::TokenFailure::HttpError:
+                emit connectError(tr("Kitsu did not return a token (HTTP %1).").arg(status));
+                break;
+            case kitsu::TokenFailure::NoConnection:
+                emit connectError(tr("Kitsu did not return a token; the connection failed."));
+                break;
+            }
             return;
         }
         storeTokenReply(r);
@@ -230,7 +257,7 @@ void KitsuTracker::ensureValidToken(std::function<void(bool ok)> done)
     // overlapping refreshes race to invalidate each other's and can break the link permanently.
     if (!tokenRefresh_.join(std::move(done))) return;
 
-    QNetworkRequest req{ QUrl(authBase() + QStringLiteral("/token")) };
+    QNetworkRequest req = kitsuRequest(authBase() + QStringLiteral("/token"));
     req.setHeader(QNetworkRequest::ContentTypeHeader,
                   QStringLiteral("application/x-www-form-urlencoded"));
     req.setRawHeader("Accept", "application/json");
@@ -278,7 +305,7 @@ void KitsuTracker::get(const QString& url, std::function<void(int, qint64, QByte
     if (url.isEmpty()) { if (cb) cb(0, 0, QByteArray()); return; }
     ensureValidToken([this, url, cb](bool ok) {
         if (!ok) { if (cb) cb(0, 0, QByteArray()); return; }
-        QNetworkRequest req{ QUrl(url) };
+        QNetworkRequest req = kitsuRequest(url);
         // JSON:API's own media type. Kitsu answers a plain application/json Accept, but sending the right
         // one is what keeps a future content negotiation from silently changing the shape we parse.
         req.setRawHeader("Accept", "application/vnd.api+json");
@@ -297,7 +324,7 @@ void KitsuTracker::write(const QString& url, const QByteArray& verb, const QByte
     if (url.isEmpty() || verb.isEmpty()) { if (cb) cb(0, 0, QByteArray()); return; }
     ensureValidToken([this, url, verb, body, cb](bool ok) {
         if (!ok) { if (cb) cb(0, 0, QByteArray()); return; }
-        QNetworkRequest req{ QUrl(url) };
+        QNetworkRequest req = kitsuRequest(url);
         // JSON:API REQUIRES this exact content type on a write; Kitsu answers 415 to anything else.
         req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/vnd.api+json"));
         req.setRawHeader("Accept", "application/vnd.api+json");

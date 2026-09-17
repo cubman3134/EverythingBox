@@ -404,10 +404,18 @@ namespace tracker
         // The API host and the OAuth host, named once. Overridable at RUN TIME through EB_KITSU_ENDPOINT /
         // EB_KITSU_AUTH so a fixture stub can stand in for the real service in a live drive — read in
         // KitsuTracker.cpp, not here, so a probe asserting the DEFAULT cannot be satisfied by an
-        // environment variable. Kitsu's pre-rebrand host was kitsu.io and still redirects here; the
-        // override is the escape hatch if that ever stops being true.
-        inline QString defaultApiUrl()   { return QStringLiteral("https://kitsu.app/api/edge"); }
-        inline QString defaultAuthBase() { return QStringLiteral("https://kitsu.app/api/oauth"); }
+        // environment variable.
+        //
+        // WHY kitsu.io (#330). Observed 2026-09-16 against the real service, signed out and read-only:
+        // NEITHER host redirects to the other (GET /api/edge/anime answers 200 on both). POST
+        // /api/oauth/token with a bogus password grant answered a JSON 400 invalid_grant on kitsu.io for
+        // every User-Agent tried, but on kitsu.app a 403 Cloudflare challenge page (`Cf-Mitigated:
+        // challenge`) for no User-Agent, curl's, or `Mozilla/5.0` - a proper JSON 400 only with a
+        // non-browser one. So kitsu.io is the default, AND every request carries AppBrand::kUserAgent
+        // (KitsuTracker.cpp's kitsuRequest), AND a challenge that still gets through is reported as the
+        // service refusing rather than as a wrong password (classifyTokenFailure below).
+        inline QString defaultApiUrl()   { return QStringLiteral("https://kitsu.io/api/edge"); }
+        inline QString defaultAuthBase() { return QStringLiteral("https://kitsu.io/api/oauth"); }
 
         // ---- auth: the password grant -----------------------------------------------------------------
         // THE WHOLE SIGN-IN, in one POST. There is no authorize URL to open and no code to redeem, so the
@@ -437,6 +445,20 @@ namespace tracker
         // refused grant with {"error":"invalid_grant","error_description":"…"} — a JSON object a caller
         // would otherwise store over the live tokens, permanently unlinking the account.
         TokenReply parseTokenReply(const QByteArray& json);
+
+        // WHY A SIGN-IN FAILED, for the one sentence the user is shown (issue #330). Pure, so the rule is
+        // pinned by probe_tracker rather than by a live service.
+        //
+        // A CLOUDFLARE CHALLENGE IS NOT A WRONG PASSWORD. Kitsu sits behind Cloudflare, and a request the
+        // edge decides to challenge is answered with an HTML page (403, `Cf-Mitigated: challenge`) that
+        // never reached Kitsu's OAuth server at all. Telling the user their password is wrong for that
+        // would send them to reset a password that is fine. So: a `Cf-Mitigated` header, an HTML content
+        // type, or a non-empty body that is not a JSON object is ServiceRefused WHATEVER the status. Only
+        // a JSON 400/401 — Kitsu's own {"error":"invalid_grant",…} — is BadCredentials. Any other HTTP
+        // status is HttpError, and no HTTP answer at all (status 0) is NoConnection.
+        enum class TokenFailure { BadCredentials, ServiceRefused, HttpError, NoConnection };
+        TokenFailure classifyTokenFailure(int httpStatus, const QByteArray& contentType,
+                                          const QByteArray& cfMitigated, const QByteArray& body);
 
         // ---- who the token belongs to -----------------------------------------------------------------
         // GET .../users?filter[self]=true. The signed-in user's id is needed to READ a library entry (it is

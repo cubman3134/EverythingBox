@@ -718,6 +718,22 @@ kitsu::TokenReply kitsu::parseTokenReply(const QByteArray& json)
     return r;
 }
 
+kitsu::TokenFailure kitsu::classifyTokenFailure(int httpStatus, const QByteArray& contentType,
+                                                const QByteArray& cfMitigated, const QByteArray& body)
+{
+    // The challenge header first: Cloudflare stamps it on exactly the reply this rule exists for.
+    if (!cfMitigated.trimmed().isEmpty()) return TokenFailure::ServiceRefused;
+    if (httpStatus <= 0) return TokenFailure::NoConnection;
+    // NOT JSON, so not Kitsu's OAuth server talking. An HTML content type is enough on its own; a body that
+    // is not a JSON object is enough on its own too (a missing or lying content type does not rescue it). An
+    // EMPTY body proves nothing either way, so it falls through to the status, as it always has.
+    if (contentType.toLower().contains("html")) return TokenFailure::ServiceRefused;
+    if (!body.trimmed().isEmpty() && !QJsonDocument::fromJson(body).isObject())
+        return TokenFailure::ServiceRefused;
+    if (httpStatus == 400 || httpStatus == 401) return TokenFailure::BadCredentials;
+    return TokenFailure::HttpError;
+}
+
 QString kitsu::selfUrl(const QString& apiBase)
 {
     return apiBase + QStringLiteral("/users?filter%5Bself%5D=true");
