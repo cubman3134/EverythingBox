@@ -126,6 +126,69 @@
       "replace": "    return UrlVerdict::Ok;",
       "count": 1,
       "expect": "killed"
+    },
+    {
+      "name": "QC-CORRUPTS-a-pending-code-read-as-authorized",
+      "//": "#83 Quick Connect: THE AUTHORIZED CHECK. `Authenticated:false` read as approval would exchange a secret the user never approved - the server refuses it, and the panel reports a failed sign-in two seconds after showing the code. Section 20d counts exactly three Connect calls (two pending, one authorized); this makes it one.",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    return a.toBool() ? State::Authorized : State::Waiting;",
+      "replace": "    return State::Authorized;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-LOSES-an-approved-code-never-noticed",
+      "//": "#83 Quick Connect: the authorized check in the other direction. An approval read as 'still waiting' leaves the user staring at a code they have already entered until it expires five minutes later.",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    return a.toBool() ? State::Authorized : State::Waiting;",
+      "replace": "    return State::Waiting;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-LEAKS-cancel-does-not-stop-polling",
+      "//": "#83 Quick Connect: STOP-ON-CANCEL. Back on the code panel must end the conversation with the server. Section 20i counts the Connect calls the fake server receives after cancel(); with cancel a no-op they keep arriving every interval.",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "void JellyfinQuickConnectSession::cancel()\n{\n    finish();\n}",
+      "replace": "void JellyfinQuickConnectSession::cancel()\n{\n}",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-LEAKS-an-expired-code-polled-for-ever",
+      "//": "#83 Quick Connect: the five-minute lifetime. Without it a code nobody approves is polled until the app closes. Section 20h runs a 400 ms lifetime against a server that never approves.",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    if (JellyfinQuickConnect::timedOut(clock_.elapsed(), lifetimeMs_))",
+      "replace": "    if (false)",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-CORRUPTS-an-unknown-secret-reported-as-an-error",
+      "//": "#83 Quick Connect: a 404 from Connect is the server saying the code expired, and the panel offers New code for exactly that. Reading it as a generic error drops the offer.",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    if (httpStatus == 404)               return State::Expired;",
+      "replace": "    if (httpStatus == 404)               return State::Error;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-LOSES-quick-connect-offered-on-any-200",
+      "//": "#83 Quick Connect: only the literal `true` offers Quick Connect. Offering it on any answer puts a code that can never be approved in front of a user whose server has it switched off (section 20a/20e).",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    return body.trimmed() == \"true\" ? Route::QuickConnect : Route::Password;",
+      "replace": "    return Route::QuickConnect;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "QC-LOSES-a-10.8-server-never-gets-a-code",
+      "//": "#83 Quick Connect: 10.8 spells Initiate as GET. Without the one retry, every 10.8 server that says Quick Connect is enabled fails to start it (section 20j).",
+      "file": "native/src/core/JellyfinQuickConnect.cpp",
+      "find": "    return httpStatus == 404 || httpStatus == 405;",
+      "replace": "    return false;",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

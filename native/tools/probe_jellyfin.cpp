@@ -16,8 +16,10 @@
 // path) rather than by calling the migration's own helpers, so a drift between this file and the stores it
 // mirrors shows up as a failing check instead of as a passing tautology.
 //
-// NO NETWORK. Everything under test is pure or is a QSettings store; the socket half (JellyfinClient) is
-// driven live against fixture servers, and the report says so.
+// NO NETWORK, WITH ONE LOOPBACK EXCEPTION. Everything under test is pure or is a QSettings store; the socket
+// half (JellyfinClient) is driven live against fixture servers. Section 20 (#83, Quick Connect) is the
+// exception: the REAL polling session runs against FakeJellyfin on 127.0.0.1, because "cancel stops polling"
+// is a claim about requests a server stops receiving. No real server is contacted.
 //
 // NO CREDENTIAL IS EVER PRINTED. The fixture token below is compared, hashed and searched for — never
 // written to stdout or stderr, including inside a failing CHECK, which is why the credential sections
@@ -26,6 +28,7 @@
 // Prints JELLYFIN-OK on success; any failure prints JELLYFIN-FAIL <cond> and exits non-zero.
 #include "Jellyfin.h"
 #include "JellyfinMigrate.h"
+#include "JellyfinQuickConnect.h"   // #83 section 20: the Quick Connect session, driven over a socket
 #include "JellyfinServerStore.h"
 #include "RecentStore.h"      // #83: the byte scan below writes a REAL recents row and reads the ini back
 
@@ -34,14 +37,21 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDeadlineTimer>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHostAddress>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
 #include <QSettings>
 #include <QString>
 #include <QStringList>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QVector>
 #include <cstdio>
 #include <functional>
@@ -87,6 +97,144 @@ static QString playStatsLegacyKey(const QString& profile, const QString& id)
 static QString tmpDir()
 {
     return QDir::tempPath() + QStringLiteral("/eb-probe-jellyfin");
+}
+
+// =========================================================================================================
+// A FAKE JELLYFIN FOR QUICK CONNECT (issue #83, section 20). HTTP/1.1, one request per connection, no
+// keep-alive — the SeerrStub shape from probe_requests. It answers the four Quick Connect calls and nothing
+// else, records every request it was sent, and has one knob per server behaviour the flow has to survive.
+// It listens on 127.0.0.1 only. No real server is contacted anywhere in this probe.
+// =========================================================================================================
+class FakeJellyfin : public QTcpServer
+{
+public:
+    struct Seen { QString method; QString path; QByteArray query; bool hasAuthHeader = false; QByteArray body; };
+    QVector<Seen> seen;
+
+    int        enabledStatus = 200;
+    QByteArray enabledBody   = "true";
+    bool       initiateGetOnly = false;   // 10.8: POST answers 405, GET answers the result
+    int        initiateStatus  = 200;
+    int        pendingPolls    = 2;       // Connect answers Authenticated:false this many times first
+    int        connectStatus   = 200;     // anything but 200 is sent as-is (404 = expired secret)
+    QByteArray authBody;                  // /Users/AuthenticateWithQuickConnect's AuthenticationResult
+
+    static constexpr const char* kSecret = "5ec2e7a5ec2e7a5ec2e7a5ec2e7a5ec2";
+    static constexpr const char* kCode   = "482915";
+
+    explicit FakeJellyfin(QObject* parent = nullptr) : QTcpServer(parent) {}
+
+    int countOf(const QString& method, const QString& path) const
+    {
+        int n = 0;
+        for (const Seen& s : seen) if (s.method == method && s.path == path) ++n;
+        return n;
+    }
+    const Seen* lastOf(const QString& method, const QString& path) const
+    {
+        for (int i = int(seen.size()) - 1; i >= 0; --i)
+            if (seen[i].method == method && seen[i].path == path) return &seen[i];
+        return nullptr;
+    }
+    QString root() const { return QStringLiteral("http://127.0.0.1:%1").arg(serverPort()); }
+
+protected:
+    void incomingConnection(qintptr handle) override
+    {
+        auto* sock = new QTcpSocket(this);
+        sock->setSocketDescriptor(handle);
+        connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
+            sock->setProperty("buf", sock->property("buf").toByteArray() + sock->readAll());
+            const QByteArray buf = sock->property("buf").toByteArray();
+            const int headEnd = buf.indexOf("\r\n\r\n");
+            if (headEnd < 0) return;
+            const QList<QByteArray> lines = buf.left(headEnd).split('\n');
+            const QList<QByteArray> reqLine = lines.value(0).trimmed().split(' ');
+            int wantBody = 0;
+            bool auth = false;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const QByteArray l = lines.at(i).trimmed().toLower();   // Qt 6 lower-cases header names
+                if (l.startsWith("content-length:")) wantBody = l.mid(15).trimmed().toInt();
+                if (l.startsWith("authorization: mediabrowser ")) auth = true;
+            }
+            const QByteArray body = buf.mid(headEnd + 4);
+            if (body.size() < wantBody) return;
+            const QByteArray target = reqLine.value(1);
+            const int q = target.indexOf('?');
+            Seen s;
+            s.method = QString::fromLatin1(reqLine.value(0));
+            s.path   = QString::fromLatin1(q < 0 ? target : target.left(q));
+            s.query  = q < 0 ? QByteArray() : target.mid(q + 1);
+            s.hasAuthHeader = auth;
+            s.body   = body.left(wantBody);
+            seen.push_back(s);
+            reply(sock, s);
+        });
+    }
+
+private:
+    void send(QTcpSocket* sock, int status, const QByteArray& body)
+    {
+        sock->write("HTTP/1.1 " + QByteArray::number(status) + (status < 400 ? " OK" : " ERR")
+                    + "\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size())
+                    + "\r\nConnection: close\r\n\r\n" + body);
+        sock->flush();
+        sock->disconnectFromHost();
+    }
+    QByteArray result(bool authenticated) const
+    {
+        return QByteArray("{\"Authenticated\":") + (authenticated ? "true" : "false")
+             + ",\"Secret\":\"" + kSecret + "\",\"Code\":\"" + kCode
+             + "\",\"DeviceId\":\"d\",\"DeviceName\":\"n\",\"AppName\":\"a\",\"AppVersion\":\"1\"}";
+    }
+    void reply(QTcpSocket* sock, const Seen& s)
+    {
+        if (s.path == QLatin1String("/QuickConnect/Enabled"))
+        { send(sock, enabledStatus, enabledBody); return; }
+        if (s.path == QLatin1String("/QuickConnect/Initiate"))
+        {
+            if (initiateGetOnly && s.method != QLatin1String("GET")) { send(sock, 405, ""); return; }
+            if (!initiateGetOnly && s.method != QLatin1String("POST")) { send(sock, 405, ""); return; }
+            if (initiateStatus != 200) { send(sock, initiateStatus, "\"Quick connect is disabled\""); return; }
+            send(sock, 200, result(false));
+            return;
+        }
+        if (s.path == QLatin1String("/QuickConnect/Connect"))
+        {
+            if (connectStatus != 200) { send(sock, connectStatus, "\"Unknown secret\""); return; }
+            const bool known = s.query == QByteArray("secret=") + kSecret;
+            if (!known) { send(sock, 404, "\"Unknown secret\""); return; }
+            if (pendingPolls > 0) { --pendingPolls; send(sock, 200, result(false)); return; }
+            send(sock, 200, result(true));
+            return;
+        }
+        if (s.path == QLatin1String("/Users/AuthenticateWithQuickConnect") && s.method == QLatin1String("POST"))
+        {
+            const bool rightSecret = QJsonDocument::fromJson(s.body).object()
+                                         .value(QStringLiteral("Secret")).toString() == QLatin1String(kSecret);
+            if (!rightSecret) { send(sock, 400, ""); return; }
+            send(sock, 200, authBody);
+            return;
+        }
+        send(sock, 404, "");
+    }
+};
+
+// Spin the event loop until `pred` or the deadline. Every wait here is for a socket or a timer.
+template <typename Pred>
+static bool waitFor(Pred pred, int ms = 8000)
+{
+    QDeadlineTimer dl(ms);
+    while (!pred() && !dl.hasExpired())
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    return pred();
+}
+// Spin for a fixed time regardless — for proving that something does NOT happen.
+static void spinFor(int ms)
+{
+    QDeadlineTimer dl(ms);
+    while (!dl.hasExpired()) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
 }
 
 int main(int argc, char** argv)
@@ -1065,6 +1213,296 @@ int main(int argc, char** argv)
         // EVERY BYTE OF THE FILE, not a key-by-key walk: a token smuggled into a comment, a section name or
         // a value this probe did not think to look at is still a token on disk.
         CHECK(!tokenOnDisk);
+    }
+
+    // =====================================================================================================
+    // 20. QUICK CONNECT (issue #83): offer it or not, the code, the poll, and the stop
+    // =====================================================================================================
+    // The pure decisions first, over a table, then the REAL session against FakeJellyfin on 127.0.0.1.
+    // The fixture token is compared and never printed: every credential check is a boolean computed first.
+    {
+        using namespace JellyfinQuickConnect;
+
+        // ---- 20a. Offer Quick Connect, or the password? Only an exact 200 `true` offers it. ----
+        CHECK(routeFor(true, 200, "true") == Route::QuickConnect);
+        CHECK(routeFor(true, 200, " true\n") == Route::QuickConnect);
+        CHECK(routeFor(true, 200, "false") == Route::Password);
+        CHECK(routeFor(true, 200, "\"true\"") == Route::Password);
+        CHECK(routeFor(true, 200, "<html>true</html>") == Route::Password);
+        CHECK(routeFor(false, 404, "") == Route::Password);        // 10.7: no such route
+        CHECK(routeFor(false, 0, "") == Route::Password);          // unreachable / timed out
+        CHECK(routeFor(true, 503, "true") == Route::Password);
+
+        // ---- 20b. What a poll answer means. ----
+        CHECK(stateFor(true, 200, "{\"Authenticated\":true,\"Secret\":\"s\"}") == State::Authorized);
+        CHECK(stateFor(true, 200, "{\"Authenticated\":false,\"Secret\":\"s\"}") == State::Waiting);
+        CHECK(stateFor(false, 404, "") == State::Expired);         // "Unknown secret"
+        CHECK(stateFor(false, 0, "") == State::Waiting);           // a missed poll is not a verdict
+        CHECK(stateFor(false, 502, "") == State::Waiting);
+        CHECK(stateFor(false, 401, "") == State::Error);           // switched off while we waited
+        CHECK(stateFor(true, 200, "{\"Secret\":\"s\"}") == State::Error);          // not a QuickConnectResult
+        CHECK(stateFor(true, 200, "{\"Authenticated\":\"true\"}") == State::Error); // a string is not a bool
+        CHECK(stateFor(true, 200, "<html>captive portal</html>") == State::Error);
+
+        // ---- 20c. Initiate's reader, the verb fallback, the lifetime, the spellings. ----
+        const Code c = readInitiate("{\"Secret\":\"abc\",\"Code\":\"123456\",\"Authenticated\":false}");
+        CHECK(c.ok && c.secret == QStringLiteral("abc") && c.code == QStringLiteral("123456"));
+        CHECK(!readInitiate("{\"Code\":\"123456\"}").ok);
+        CHECK(!readInitiate("{\"Secret\":\"abc\"}").ok);
+        CHECK(initiateRetryAsGet(405) && initiateRetryAsGet(404));
+        CHECK(!initiateRetryAsGet(401) && !initiateRetryAsGet(200) && !initiateRetryAsGet(500));
+        CHECK(!timedOut(kLifetimeMs - 1) && timedOut(kLifetimeMs));
+        CHECK(kPollIntervalMs == 2000 && kLifetimeMs == 300000);
+        CHECK(connectQuery(QStringLiteral("a&b")) == QStringLiteral("secret=a%26b"));
+        CHECK(QJsonDocument::fromJson(authenticateBody(QStringLiteral("abc"))).object()
+                  .value(QStringLiteral("Secret")).toString() == QStringLiteral("abc"));
+        CHECK(authenticatePath() == QStringLiteral("/Users/AuthenticateWithQuickConnect"));
+
+        // ---- The fixtures the socket half runs against. ----
+        const QString qcToken = QStringLiteral("qc0fixture") + QString::fromLatin1(kItem);
+        const QByteArray authBody = QByteArray("{\"User\":{\"Id\":\"u-qc-1\",\"Name\":\"parker\"},"
+                                               "\"SessionInfo\":{},\"AccessToken\":\"")
+                                  + qcToken.toUtf8() + "\",\"ServerId\":\"" + kSrvA + "\"}";
+        QNetworkAccessManager nam;
+        const JellyfinQuickConnect::Decorate decorate = [](QNetworkRequest& req) {
+            req.setRawHeader("Authorization", Jellyfin::authHeader(QStringLiteral("EverythingBox"),
+                QStringLiteral("probe"), QStringLiteral("probe-device"), QStringLiteral("0"), QString()).toUtf8());
+        };
+        struct Outcome
+        {
+            QStringList codes; int authorized = 0; int expired = 0; int failed = 0;
+            Jellyfin::AuthResult result;
+        };
+        auto wire = [](JellyfinQuickConnectSession* s, Outcome* o) {
+            QObject::connect(s, &JellyfinQuickConnectSession::codeReady, [o](const QString& code) { o->codes << code; });
+            QObject::connect(s, &JellyfinQuickConnectSession::authorized,
+                             [o](const Jellyfin::AuthResult& r) { ++o->authorized; o->result = r; });
+            QObject::connect(s, &JellyfinQuickConnectSession::expired, [o] { ++o->expired; });
+            QObject::connect(s, &JellyfinQuickConnectSession::failed, [o](const QString&) { ++o->failed; });
+        };
+        auto routeOf = [&](FakeJellyfin& srv, bool* called) {
+            Route r = Route::QuickConnect;
+            QObject ctx;
+            *called = false;
+            JellyfinQuickConnect::fetchRoute(&nam, srv.root(), decorate, 3000, &ctx,
+                                             [&](Route got) { r = got; *called = true; });
+            waitFor([&] { return *called; });
+            return r;
+        };
+        auto connects = [](const FakeJellyfin& srv) {
+            return srv.countOf(QStringLiteral("GET"), QStringLiteral("/QuickConnect/Connect"));
+        };
+        auto settled = [](const Outcome& o) { return o.authorized + o.expired + o.failed > 0; };
+
+        // ---- 20d. QC ENABLED: the route, the code, two pending polls, authorized, stored like a password. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.authBody = authBody;
+            bool called = false;
+            CHECK(routeOf(srv, &called) == Route::QuickConnect);
+            CHECK(called);
+            CHECK(srv.countOf(QStringLiteral("GET"), QStringLiteral("/QuickConnect/Enabled")) == 1);
+
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(40);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return settled(o); }));
+            CHECK(o.codes == QStringList{ QString::fromLatin1(FakeJellyfin::kCode) });   // the code is shown
+            CHECK(o.authorized == 1 && o.expired == 0 && o.failed == 0);
+            // Two pending polls, then the authorizing one: exactly three Connect calls, and no fourth.
+            CHECK(connects(srv) == 3);
+            CHECK(s.pollCount() == 3);
+            CHECK(!s.isActive());
+            spinFor(250);
+            CHECK(connects(srv) == 3);
+            // Initiate was a POST, carrying the client/device header (the server keys the request on it).
+            const FakeJellyfin::Seen* init = srv.lastOf(QStringLiteral("POST"), QStringLiteral("/QuickConnect/Initiate"));
+            CHECK(init && init->hasAuthHeader);
+            CHECK(srv.countOf(QStringLiteral("POST"), QStringLiteral("/Users/AuthenticateWithQuickConnect")) == 1);
+
+            // THE SAME STORAGE PATH AS A PASSWORD SIGN-IN. The password route reads AuthenticateByName's
+            // answer with readAuthResult and stores fromSignIn's record; the Quick Connect result must
+            // produce the identical record, field for field, and the stored token must be the fixture's.
+            Jellyfin::PublicInfo info;
+            info.serverId = QString::fromLatin1(kSrvA); info.serverName = QStringLiteral("Attic"); info.ok = true;
+            const QString url = srv.root();
+            const JellyfinServer viaQc = JellyfinServerStore::fromSignIn(info, o.result, url, true);
+            const JellyfinServer viaPw = JellyfinServerStore::fromSignIn(info, Jellyfin::readAuthResult(authBody),
+                                                                         url, true);
+            const bool sameRecord = viaQc.id == viaPw.id && viaQc.name == viaPw.name && viaQc.url == viaPw.url
+                && viaQc.userId == viaPw.userId && viaQc.userName == viaPw.userName
+                && viaQc.token == viaPw.token && viaQc.allowPlainHttp == viaPw.allowPlainHttp
+                && viaQc.enabled == viaPw.enabled;
+            CHECK(sameRecord);
+            const QString qcIni = tmpDir() + QStringLiteral("/qc-servers.ini");
+            QFile::remove(qcIni);
+            JellyfinServerStore::setIniPathForTesting(qcIni);
+            CHECK(JellyfinServerStore::add(viaQc));
+            JellyfinServer back;
+            CHECK(JellyfinServerStore::get(QString::fromLatin1(kSrvA), back));
+            const bool tokenStored = back.token == qcToken;
+            CHECK(tokenStored);
+            CHECK(back.userId == QStringLiteral("u-qc-1") && back.userName == QStringLiteral("parker"));
+            CHECK(back.name == QStringLiteral("Attic") && back.allowPlainHttp);
+            JellyfinServerStore::setIniPathForTesting(srvIni);
+            QFile::remove(qcIni);
+        }
+
+        // ---- 20e. QC DISABLED -> the password flow. Nothing past Enabled is asked. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.enabledBody = "false";
+            bool called = false;
+            CHECK(routeOf(srv, &called) == Route::Password);
+            CHECK(called);
+            CHECK(srv.countOf(QStringLiteral("POST"), QStringLiteral("/QuickConnect/Initiate")) == 0);
+        }
+
+        // ---- 20f. Enabled ERRORS -> the password flow: a 404 from an old server, and nobody listening. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.enabledStatus = 404;
+            srv.enabledBody   = "";
+            bool called = false;
+            CHECK(routeOf(srv, &called) == Route::Password);
+            CHECK(called);
+
+            QString deadRoot;
+            {
+                FakeJellyfin gone;
+                CHECK(gone.listen(QHostAddress::LocalHost, 0));
+                deadRoot = gone.root();
+                gone.close();
+            }
+            Route r = Route::QuickConnect;
+            bool deadCalled = false;
+            QObject ctx;
+            JellyfinQuickConnect::fetchRoute(&nam, deadRoot, decorate, 3000, &ctx,
+                                             [&](Route got) { r = got; deadCalled = true; });
+            CHECK(waitFor([&] { return deadCalled; }));
+            CHECK(r == Route::Password);
+        }
+
+        // ---- 20g. EXPIRED or UNKNOWN secret -> expired, once, and the polling stops. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.connectStatus = 404;
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(40);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return settled(o); }));
+            CHECK(o.expired == 1 && o.authorized == 0 && o.failed == 0);
+            CHECK(connects(srv) == 1);
+            spinFor(250);
+            CHECK(connects(srv) == 1);
+            CHECK(srv.countOf(QStringLiteral("POST"), QStringLiteral("/Users/AuthenticateWithQuickConnect")) == 0);
+        }
+
+        // ---- 20h. TIMEOUT: never approved -> expired after the lifetime, and nothing after it. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.pendingPolls = 1000000;
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(30);
+            s.setLifetimeMs(400);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return settled(o); }, 5000));
+            CHECK(o.expired == 1 && o.authorized == 0 && o.failed == 0);
+            CHECK(s.pollCount() >= 2);                     // it really did poll while it waited
+            const int polls = connects(srv);
+            spinFor(250);
+            CHECK(connects(srv) == polls);
+        }
+
+        // ---- 20i. CANCEL stops polling: the server sees no further Connect calls. And so does closing
+        //           the panel that owns the session, which is how the app cancels on Back. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.pendingPolls = 1000000;
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(30);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return connects(srv) >= 2; }));
+            s.cancel();
+            // A request already on the wire when cancel() ran may still reach the server; nothing after it.
+            spinFor(150);
+            const int polls = connects(srv);
+            spinFor(400);
+            CHECK(connects(srv) == polls);
+            CHECK(!s.isActive());
+            CHECK(o.authorized == 0 && o.expired == 0 && o.failed == 0);   // a cancel says nothing
+
+            FakeJellyfin srv2;
+            CHECK(srv2.listen(QHostAddress::LocalHost, 0));
+            srv2.pendingPolls = 1000000;
+            auto* panel = new QObject;
+            auto* owned = new JellyfinQuickConnectSession(&nam, srv2.root(), decorate, panel);
+            owned->setPollIntervalMs(30);
+            owned->start();
+            CHECK(waitFor([&] { return connects(srv2) >= 2; }));
+            delete panel;                                  // the panel closes
+            spinFor(150);
+            const int after = connects(srv2);
+            spinFor(400);
+            CHECK(connects(srv2) == after);
+        }
+
+        // ---- 20j. A 10.8 server: POST Initiate answers 405, the GET retry gets the code. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.initiateGetOnly = true;
+            srv.authBody = authBody;
+            srv.pendingPolls = 0;
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(30);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return settled(o); }));
+            CHECK(o.codes.size() == 1 && o.authorized == 1);
+            CHECK(srv.countOf(QStringLiteral("POST"), QStringLiteral("/QuickConnect/Initiate")) == 1);
+            CHECK(srv.countOf(QStringLiteral("GET"), QStringLiteral("/QuickConnect/Initiate")) == 1);
+        }
+
+        // ---- 20k. Switched off after Enabled said yes -> failed, never a code that cannot work. ----
+        {
+            FakeJellyfin srv;
+            CHECK(srv.listen(QHostAddress::LocalHost, 0));
+            srv.connectStatus = 401;
+            Outcome o;
+            JellyfinQuickConnectSession s(&nam, srv.root(), decorate);
+            s.setPollIntervalMs(30);
+            wire(&s, &o);
+            s.start();
+            CHECK(waitFor([&] { return settled(o); }));
+            CHECK(o.failed == 1 && o.authorized == 0 && o.expired == 0);
+
+            FakeJellyfin off;
+            CHECK(off.listen(QHostAddress::LocalHost, 0));
+            off.initiateStatus = 401;
+            Outcome o2;
+            JellyfinQuickConnectSession s2(&nam, off.root(), decorate);
+            wire(&s2, &o2);
+            s2.start();
+            CHECK(waitFor([&] { return settled(o2); }));
+            CHECK(o2.failed == 1 && o2.codes.isEmpty());
+            CHECK(connects(off) == 0);
+        }
     }
 
     QFile::remove(ini);

@@ -159,6 +159,29 @@ void JellyfinClient::authenticate(const QString& url, bool allowPlainHttp, const
     });
 }
 
+// ---- Quick Connect (issue #83) --------------------------------------------------------------------------
+// Both calls are the pre-token form of applyCommonHeaders: Quick Connect's Initiate is keyed on exactly the
+// client/device fields that header carries (the server shows them beside the code in its approval screen),
+// and the redirect policy comes with it so a secret is never carried to another host.
+
+void JellyfinClient::fetchSignInRoute(const QString& url, bool allowPlainHttp, int budgetMs, QObject* context,
+                                      RouteDone done)
+{
+    const QString root = Jellyfin::normalizeRoot(url, allowPlainHttp);
+    JellyfinQuickConnect::fetchRoute(root.isEmpty() ? nullptr : nam(), root,
+                                     [](QNetworkRequest& req) { applyCommonHeaders(req, QString()); },
+                                     budgetMs, context, std::move(done));
+}
+
+JellyfinQuickConnectSession* JellyfinClient::newQuickConnectSession(const QString& url, bool allowPlainHttp,
+                                                                    QObject* parent)
+{
+    const QString root = Jellyfin::normalizeRoot(url, allowPlainHttp);
+    if (root.isEmpty()) return nullptr;
+    return new JellyfinQuickConnectSession(nam(), root,
+        [](QNetworkRequest& req) { applyCommonHeaders(req, QString()); }, parent);
+}
+
 // ---- The fan-out ----------------------------------------------------------------------------------------
 
 void JellyfinClient::fetchLibrary(int budgetMs, LibraryDone done)

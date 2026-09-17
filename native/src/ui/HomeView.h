@@ -986,6 +986,17 @@ private:
     // Recents list (renderJellyfinContinue). Held between renders because renderRecents is called on every
     // Back and a fetch per Back would hammer the server.
     void refreshJellyfinContinue();
+    // #83: THE SIGN-IN, once connectJellyfinServerInteractive has settled the address and read the server's
+    // identity. Asks /QuickConnect/Enabled and opens the Quick Connect code panel when the server offers it
+    // (with "Use password instead" one press away), else goes straight to the username/password prompts.
+    // Both routes store through JellyfinServerStore::fromSignIn. Reached a queued turn past any reply
+    // emission, so the nav kit's nested loops are safe here (#28 / #211).
+    void signInToJellyfinServer(const QString& url, bool allowPlainHttp, const QString& serverId,
+                                const QString& serverName);
+    void signInToJellyfinWithPassword(const QString& url, bool allowPlainHttp, const QString& serverId,
+                                      const QString& serverName);
+    void signInToJellyfinWithQuickConnect(const QString& url, bool allowPlainHttp, const QString& serverId,
+                                          const QString& serverName);
     // ---- Live TV EPG (#75 inc 3) -------------------------------------------------------------------------
     void showLiveTvChannels(const IptvSource& src);            // render liveTvEntries_ with now/next + a Guide row
     void fetchLiveTvEpg(const IptvSource& src, const QString& headerTvgUrl); // resolve+fetch(daily-cache)+parse EPG

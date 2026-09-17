@@ -33,10 +33,15 @@
 #include "../core/Jellyfin.h"
 #include "../core/JellyfinClient.h"
 #include "../core/JellyfinServerStore.h"
+#include "nav/NavOverlay.h"          // #83: the Quick Connect code panel is a NavConfirm
+#include "nav/Osk.h"                 // ...and the password route's prompts
 
 #include <QBoxLayout>
+#include <QEventLoop>
 #include <QFrame>
 #include <QLabel>
+#include <QLineEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QStringList>
 #include <QTextBrowser>
@@ -302,5 +307,214 @@ void HomeView::refreshJellyfinContinue()
             if (same) return;
             jellyfinContinue_ = rows;
             if (recentView_) renderRecents();
+        });
+}
+
+// ==========================================================================================================
+// SIGNING IN: QUICK CONNECT, WITH THE PASSWORD ONE PRESS AWAY (issue #83)
+// ==========================================================================================================
+// connectJellyfinServerInteractive (HomeView.cpp) settles the address and reads the server's identity; this
+// is everything after that. It is shared by BOTH settings builders, because both open the same manager.
+//
+//   identity read
+//        |
+//   GET /QuickConnect/Enabled ---- anything but a plain `true` ---------------------------> PASSWORD
+//        | true
+//   CODE PANEL  "Getting a code…" -> the code, large, and one line of instruction
+//        |-- approved on another app -> AuthenticateWithQuickConnect -> STORED (same path as a password)
+//        |-- "Use password instead" ------------------------------------------------------> PASSWORD
+//        |-- Back -----------------------------------------------------------------------> nothing added
+//        |-- the server forgot the code, or five minutes passed -> "That code expired"
+//        |        |-- New code -> a fresh CODE PANEL
+//        |        |-- Use password instead -----------------------------------------------> PASSWORD
+//        |        `-- Back ---------------------------------------------------------------> nothing added
+//        `-- Quick Connect switched off / refused -> the sentence, and "Use password instead"
+//
+// THE POLLING BELONGS TO THE PANEL. The session is the card's QObject child and the card's closed() cancels
+// it, so however the card goes away — approved, Back, "Use password instead", expired — no further request
+// reaches the server. probe_jellyfin section 20 counts the server's Connect calls to prove it.
+//
+// No modal dialog and no window: the card is a NavConfirm, so a pad, a keyboard and a mouse all reach it on
+// both layouts, and it is relabelled in place when the code arrives.
+
+namespace {
+
+// The card's own outcomes, past the button indexes it was built with.
+constexpr int kQcAuthorized = 100;
+constexpr int kQcExpired    = 101;
+constexpr int kQcFailed     = 102;
+
+// The Enabled question's budget. Short: the answer only decides which prompt comes next, and a server slow
+// to say is a server the password prompt serves just as well.
+constexpr int kQcRouteBudgetMs = 8000;
+
+QString jellyfinDisplayName(const QString& serverName)
+{
+    return serverName.trimmed().isEmpty() ? QStringLiteral("Jellyfin") : serverName;
+}
+
+// The one place a signed-in server is stored and announced, whichever way the sign-in went. The record comes
+// from JellyfinServerStore::fromSignIn, so the two routes cannot disagree about it.
+void storeJellyfinSignIn(QWidget* window, const QString& url, bool allowPlainHttp, const QString& serverId,
+                         const QString& serverName, const Jellyfin::AuthResult& res)
+{
+    Jellyfin::PublicInfo info;
+    info.serverId   = serverId;
+    info.serverName = serverName;
+    info.ok         = Jellyfin::isServerId(serverId);
+    const JellyfinServer s = JellyfinServerStore::fromSignIn(info, res, url, allowPlainHttp);
+    if (!JellyfinServerStore::add(s))
+    {
+        NavConfirm::ask(HomeView::tr("Jellyfin"),
+            HomeView::tr("That server did not give an identity this app can use, so its "
+                        "items could not be told apart from another server's."),
+            { HomeView::tr("OK") }, 0, 0, window);
+        return;
+    }
+    NavConfirm::ask(HomeView::tr("Jellyfin"),
+        HomeView::tr("“%1” is connected. Its library appears alongside your own, with each "
+                    "row labelled by the server it came from.").arg(s.name),
+        { HomeView::tr("OK") }, 0, 0, window);
+}
+
+// The code panel's message. Rich text so the code can be LARGE — it is read from across a room — and the
+// code is digits from the server, escaped all the same.
+QString quickConnectMessage(const QString& code)
+{
+    return QStringLiteral("<div align=\"center\" style=\"font-size:44px; font-weight:700;\">%1</div>"
+                          "<div align=\"center\">%2</div>")
+        .arg(code.toHtmlEscaped(),
+             HomeView::tr("On a signed-in Jellyfin app, open Quick Connect and enter this code").toHtmlEscaped());
+}
+
+} // namespace
+
+void HomeView::signInToJellyfinServer(const QString& url, bool allowPlainHttp, const QString& serverId,
+                                      const QString& serverName)
+{
+    QPointer<HomeView> self(this);
+    JellyfinClient::instance().fetchSignInRoute(url, allowPlainHttp, kQcRouteBudgetMs, this,
+        [self, url, allowPlainHttp, serverId, serverName](JellyfinQuickConnect::Route route) {
+            if (!self) return;
+            // Deferred a turn: this can be inside the Enabled reply's finished() emission, and both routes
+            // open the nav kit's nested loops (#28 / #211).
+            QMetaObject::invokeMethod(self.data(), [self, url, allowPlainHttp, serverId, serverName, route] {
+                if (!self) return;
+                if (route == JellyfinQuickConnect::Route::QuickConnect)
+                    self->signInToJellyfinWithQuickConnect(url, allowPlainHttp, serverId, serverName);
+                else
+                    self->signInToJellyfinWithPassword(url, allowPlainHttp, serverId, serverName);
+            }, Qt::QueuedConnection);
+        });
+}
+
+void HomeView::signInToJellyfinWithQuickConnect(const QString& url, bool allowPlainHttp,
+                                                const QString& serverId, const QString& serverName)
+{
+    const QString name = jellyfinDisplayName(serverName);
+    for (;;)
+    {
+        auto* card = new NavConfirm(tr("Quick Connect — %1").arg(name),
+                                    tr("Getting a code from %1…").arg(name),
+                                    { tr("Use password instead") }, /*focusIndex*/ 0, window());
+        // Owned by the card: when the card goes, so does the polling.
+        JellyfinQuickConnectSession* session =
+            JellyfinClient::instance().newQuickConnectSession(url, allowPlainHttp, card);
+        if (!session)
+        {
+            card->dismiss(0);
+            signInToJellyfinWithPassword(url, allowPlainHttp, serverId, serverName);
+            return;
+        }
+
+        QPointer<NavConfirm> cardGuard(card);
+        Jellyfin::AuthResult result;          // THE TOKEN, once approved. Handed to the store and dropped.
+        QString failure;
+        int outcome = -1;
+        bool closed = false;
+        QEventLoop loop;
+        connect(session, &JellyfinQuickConnectSession::codeReady, card,
+                [card](const QString& code) { card->setMessage(quickConnectMessage(code)); });
+        connect(session, &JellyfinQuickConnectSession::authorized, card,
+                [card, &result](const Jellyfin::AuthResult& r) { result = r; card->dismiss(kQcAuthorized); });
+        connect(session, &JellyfinQuickConnectSession::expired, card, [card] { card->dismiss(kQcExpired); });
+        connect(session, &JellyfinQuickConnectSession::failed, card,
+                [card, &failure](const QString& m) { failure = m; card->dismiss(kQcFailed); });
+        connect(card, &NavOverlay::closed, &loop, [session, &outcome, &closed, &loop](int r) {
+            // BACK, "Use password instead", approval, expiry: every way the card closes stops the polling
+            // here, before anything else runs. (The session is the card's child and dies with it a turn
+            // later too; this is the stop that does not wait for the deleteLater.)
+            session->cancel();
+            outcome = r;
+            closed = true;
+            loop.quit();
+        });
+        session->start();
+        if (!closed) loop.exec();   // pad polling and the poll timer both run inside this loop
+
+        if (outcome == kQcAuthorized)
+        {
+            storeJellyfinSignIn(window(), url, allowPlainHttp, serverId, serverName, result);
+            return;
+        }
+        if (outcome == 0)
+        {
+            signInToJellyfinWithPassword(url, allowPlainHttp, serverId, serverName);
+            return;
+        }
+        if (outcome == kQcExpired)
+        {
+            const int next = NavConfirm::ask(tr("Quick Connect — %1").arg(name), tr("That code expired."),
+                                             { tr("New code"), tr("Use password instead") },
+                                             /*focusIndex*/ 0, /*cancelIndex*/ -1, window());
+            if (next == 0) continue;                         // a fresh code, a fresh clock
+            if (next == 1) signInToJellyfinWithPassword(url, allowPlainHttp, serverId, serverName);
+            return;
+        }
+        if (outcome == kQcFailed)
+        {
+            const int next = NavConfirm::ask(tr("Quick Connect — %1").arg(name), failure,
+                                             { tr("Use password instead"), tr("Cancel") },
+                                             /*focusIndex*/ 0, /*cancelIndex*/ 1, window());
+            if (next == 0) signInToJellyfinWithPassword(url, allowPlainHttp, serverId, serverName);
+            return;
+        }
+        return;                                              // Back: nothing is added
+    }
+}
+
+// THE PASSWORD ROUTE — the prompts #160 shipped, unchanged, moved here from connectJellyfinServerInteractive
+// so both routes sit side by side. Only the storing moved: it is storeJellyfinSignIn above, shared.
+void HomeView::signInToJellyfinWithPassword(const QString& url, bool allowPlainHttp, const QString& serverId,
+                                            const QString& serverName)
+{
+    const QString user = Osk::getText(tr("Username:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (user.isEmpty()) return;
+    // NEVER ECHOED, NEVER TRIMMED, NEVER LOGGED. Not trimmed because leading and trailing spaces
+    // are significant in a password and eating them silently produces a sign-in that fails for a
+    // reason nobody can see; entered as QLineEdit::Password so it is not readable over somebody's
+    // shoulder on a television. It goes to the transport and is not held.
+    const QString pass = Osk::getText(tr("Password:"), QString(), QLineEdit::Password, window());
+    if (pass.isEmpty()) return;
+
+    QPointer<HomeView> self(this);
+    JellyfinClient::instance().authenticate(url, allowPlainHttp, user, pass, /*budgetMs*/ 20000,
+        [self, url, allowPlainHttp, serverId, serverName](const Jellyfin::AuthResult& res,
+                                                          const QString& authError) {
+            if (!self) return;
+            // Deferred past the reply's emission, for the #28 / #211 reason above.
+            QMetaObject::invokeMethod(self.data(),
+                [self, url, allowPlainHttp, serverId, serverName, res, authError] {
+                    if (!self) return;
+                    if (!authError.isEmpty() || !res.ok)
+                    {
+                        NavConfirm::ask(tr("Jellyfin"),
+                                        authError.isEmpty() ? tr("That server refused the sign-in.")
+                                                            : authError,
+                                        { tr("OK") }, 0, 0, self->window());
+                        return;
+                    }
+                    storeJellyfinSignIn(self->window(), url, allowPlainHttp, serverId, serverName, res);
+                }, Qt::QueuedConnection);
         });
 }
