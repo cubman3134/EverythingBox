@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.290 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.291 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2714,9 +2714,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TrackerQueue.cpp  src/core/TrackerQueue.h
         src/core/TrackerFanout.cpp src/core/TrackerFanout.h
         src/core/ProfileStore.cpp  src/core/ProfileStore.h
-        src/core/AppPaths.h src/core/AppBrand.h)
+        src/core/AppPaths.h src/core/AppBrand.h
+        # ...except KitsuTracker, since #330: its requests are driven against a loopback stub that records
+        # every header, so "every Kitsu request carries the User-Agent" and "a Cloudflare challenge is not a
+        # wrong password" are asserted on the real transport, not on a transcription of it.
+        src/core/KitsuTracker.cpp src/core/KitsuTracker.h)
     target_include_directories(probe_tracker PRIVATE src src/core)
-    target_link_libraries(probe_tracker PRIVATE Qt6::Core)
+    target_link_libraries(probe_tracker PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for PC-game identity + source selection (the merged PC Games folder), and for the
     # remap that moves the user's per-item records onto the merged id (pc-games T3). PcGameRemap works at

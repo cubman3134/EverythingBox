@@ -55,9 +55,12 @@
 #include "TrackerRules.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "KitsuTracker.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -66,6 +69,8 @@
 #include <QSettings>
 #include <QString>
 #include <QStringList>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QUrl>
 #include <cstdio>
 #include <functional>
@@ -209,7 +214,7 @@ static const char* kKitsuSearchReply = R"({
         "posterImage": { "medium": "https://media.kitsu.test/2-medium.jpg" } } },
     { "type": "anime", "attributes": { "canonicalTitle": "No Id At All", "startDate": "2020" } }
   ],
-  "links": { "next": "https://kitsu.app/api/edge/anime?page%5Boffset%5D=8" }
+  "links": { "next": "https://kitsu.io/api/edge/anime?page%5Boffset%5D=8" }
 })";
 
 // A row Kitsu has no count and no date for — an unreleased series. It is filed under the kind the caller
@@ -232,6 +237,122 @@ static const char* kKitsuEntryReply = R"({
 static const char* kKitsuErrorReply = R"({
   "errors": [ { "title": "Unauthorized", "detail": "invalid token", "status": "401" } ]
 })";
+
+// ---- a loopback stand-in for Kitsu (issue #330) ---------------------------------------------------------
+// NOT KITSU. A deliberately small HTTP/1.1 server on 127.0.0.1: one request per connection, Content-Length
+// bodies only. It answers the five request shapes KitsuTracker makes and RECORDS EVERY HEADER of every
+// request, which is what §22 asserts on. Header names are matched case-insensitively — Qt 6 lower-cases the
+// names it writes, and a stub matching "User-Agent:" exactly would report the header ABSENT from every
+// request, which is a green light for the very mistake being checked.
+//
+// Nothing here is printed: a recorded body can hold the fixture password and a recorded header the token.
+class KitsuStub : public QTcpServer
+{
+public:
+    struct Seen { QByteArray method; QByteArray path; QByteArray userAgent; bool hasUserAgent = false;
+                  QByteArray body; };
+    QVector<Seen> seen;
+
+    // How the token endpoint answers the NEXT POST to it.
+    enum class Token { Ok, CloudflareChallenge, InvalidGrant };
+    Token   token = Token::Ok;
+    qint64  expiresIn = 2592000;
+
+    explicit KitsuStub(QObject* parent = nullptr) : QTcpServer(parent) {}
+
+    int countOf(const QByteArray& method, const QByteArray& pathPrefix) const
+    {
+        int n = 0;
+        for (const Seen& s : seen) if (s.method == method && s.path.startsWith(pathPrefix)) ++n;
+        return n;
+    }
+
+protected:
+    void incomingConnection(qintptr handle) override
+    {
+        auto* sock = new QTcpSocket(this);
+        sock->setSocketDescriptor(handle);
+        connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
+            sock->setProperty("buf", sock->property("buf").toByteArray() + sock->readAll());
+            const QByteArray buf = sock->property("buf").toByteArray();
+            const int headEnd = buf.indexOf("\r\n\r\n");
+            if (headEnd < 0) return;
+            const QList<QByteArray> lines = buf.left(headEnd).split('\n');
+            const QList<QByteArray> reqLine = lines.value(0).trimmed().split(' ');
+            Seen s;
+            s.method = reqLine.value(0);
+            s.path = reqLine.value(1);
+            int wantBody = 0;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const QByteArray l = lines.at(i).trimmed();
+                const QByteArray lower = l.toLower();
+                if (lower.startsWith("user-agent:")) { s.hasUserAgent = true; s.userAgent = l.mid(11).trimmed(); }
+                if (lower.startsWith("content-length:")) wantBody = l.mid(15).trimmed().toInt();
+            }
+            s.body = buf.mid(headEnd + 4);
+            if (s.body.size() < wantBody) return;   // the rest of the body is still on its way
+            sock->setProperty("buf", QByteArray());
+            seen.push_back(s);
+
+            int status = 200;
+            QByteArray type = "application/vnd.api+json";
+            QByteArray extra;
+            QByteArray reply = "{}";
+            if (s.method == "POST" && s.path.startsWith("/api/oauth/token"))
+            {
+                type = "application/json; charset=utf-8";
+                if (token == Token::CloudflareChallenge)
+                {
+                    // The shape observed against the real service on 2026-09-16: an HTML page, a 403, and the
+                    // header Cloudflare stamps on a challenged request.
+                    status = 403;
+                    type = "text/html; charset=UTF-8";
+                    extra = "Cf-Mitigated: challenge\r\n";
+                    reply = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body></body></html>";
+                }
+                else if (token == Token::InvalidGrant)
+                {
+                    status = 400;
+                    reply = R"({"error":"invalid_grant","error_description":"The provided authorization grant is invalid"})";
+                }
+                else
+                {
+                    reply = QByteArray(R"({"access_token":"KITSU-STUB-ACCESS","refresh_token":"KITSU-STUB-REFRESH",)")
+                          + R"("token_type":"Bearer","expires_in":)" + QByteArray::number(expiresIn) + "}";
+                }
+            }
+            else if (s.method == "GET" && s.path.startsWith("/api/edge/users"))
+                reply = kSelfReply;
+            else if (s.method == "GET" && s.path.startsWith("/api/edge/library-entries"))
+                reply = kKitsuEntryReply;
+            else if (s.method == "GET" && (s.path.startsWith("/api/edge/anime") || s.path.startsWith("/api/edge/manga")))
+                reply = kKitsuSearchReply;
+            else if (s.method == "PATCH" || s.method == "POST")
+                reply = R"({"data":{"id":"551","type":"libraryEntries"}})";
+            else
+                status = 404;
+
+            QByteArray out = "HTTP/1.1 " + QByteArray::number(status) + " X\r\nContent-Type: " + type + "\r\n"
+                           + extra + "Content-Length: " + QByteArray::number(reply.size())
+                           + "\r\nConnection: close\r\n\r\n" + reply;
+            sock->write(out);
+            sock->flush();
+            sock->disconnectFromHost();
+        });
+        connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+    }
+};
+
+// Spin the event loop until `done` is true or `ms` elapse. Returns whether it finished.
+static bool waitFor(const std::function<bool()>& done, int ms = 5000)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!done() && t.elapsed() < ms)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return done();
+}
 
 // ---- a tracker that is not a tracker --------------------------------------------------------------------
 // The several-trackers-at-once rule is about what happens when one of them is off, unlinked or refusing,
@@ -2258,9 +2379,9 @@ int main(int argc, char** argv)
         CHECK(kitsu::parseSelfId(QByteArray()).isEmpty());
 
         // ---- search ----------------------------------------------------------------------------------
-        const QString api = QStringLiteral("https://kitsu.app/api/edge");
+        const QString api = QStringLiteral("https://kitsu.io/api/edge");
         const QString su = kitsu::searchUrl(api, QStringLiteral("  My Hero  "), 0, Kind::Anime, 8);
-        CHECK(su.startsWith(QLatin1String("https://kitsu.app/api/edge/anime?")));
+        CHECK(su.startsWith(QLatin1String("https://kitsu.io/api/edge/anime?")));
         CHECK(su.contains(QLatin1String("filter%5Btext%5D=My%20Hero")));   // trimmed, and encoded
         CHECK(su.contains(QLatin1String("page%5Blimit%5D=8")));
         CHECK(su.contains(QLatin1String("episodeCount")));                 // the COMPLETED rule's input
@@ -2271,7 +2392,7 @@ int main(int argc, char** argv)
                   .contains(QLatin1String("filter%5Byear%5D=1989")));
         // The kind reaches the wire in BOTH the path and the field list.
         CHECK(kitsu::searchUrl(api, QStringLiteral("Berserk"), 0, Kind::Manga, 8)
-                  .startsWith(QLatin1String("https://kitsu.app/api/edge/manga?")));
+                  .startsWith(QLatin1String("https://kitsu.io/api/edge/manga?")));
         CHECK(kitsu::searchUrl(api, QStringLiteral("Berserk"), 0, Kind::Manga, 8)
                   .contains(QLatin1String("chapterCount")));
         // Too short to ask about: "we did not ask" and "Kitsu said nothing" are the same empty result.
@@ -2319,18 +2440,18 @@ int main(int argc, char** argv)
         // PAGINATION, and the same-origin rule that keeps the account's bearer token off a host a response
         // body chose. `links.next` is attacker-controlled input by definition.
         CHECK(kitsu::nextPageUrl(kKitsuSearchReply, api)
-                  .startsWith(QLatin1String("https://kitsu.app/api/edge/anime?page%5Boffset%5D=8")));
-        CHECK(kitsu::nextPageUrl(kKitsuSearchReply, QStringLiteral("https://kitsu.app.evil.test/api/edge"))
+                  .startsWith(QLatin1String("https://kitsu.io/api/edge/anime?page%5Boffset%5D=8")));
+        CHECK(kitsu::nextPageUrl(kKitsuSearchReply, QStringLiteral("https://kitsu.io.evil.test/api/edge"))
                   .isEmpty());
-        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"http://kitsu.app/api/edge/anime"}})", api).isEmpty());
-        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"https://kitsu.app:8443/api/edge/anime"}})", api)
+        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"http://kitsu.io/api/edge/anime"}})", api).isEmpty());
+        CHECK(kitsu::nextPageUrl(R"({"links":{"next":"https://kitsu.io:8443/api/edge/anime"}})", api)
                   .isEmpty());
         CHECK(kitsu::nextPageUrl(R"({"data":[]})", api).isEmpty());
         CHECK(kitsu::nextPageUrl("garbage", api).isEmpty());
 
         // ---- the account's entry ---------------------------------------------------------------------
         const QString eu = kitsu::entryUrl(api, QStringLiteral("42"), QStringLiteral("1712"), Kind::Manga);
-        CHECK(eu.startsWith(QLatin1String("https://kitsu.app/api/edge/library-entries?")));
+        CHECK(eu.startsWith(QLatin1String("https://kitsu.io/api/edge/library-entries?")));
         CHECK(eu.contains(QLatin1String("filter%5Buser_id%5D=42")));
         CHECK(eu.contains(QLatin1String("filter%5Bmedia_id%5D=1712")));
         CHECK(eu.contains(QLatin1String("filter%5Bkind%5D=manga")));
@@ -2934,6 +3055,161 @@ int main(int argc, char** argv)
 
         for (Id id : { Id::AniList, Id::MyAnimeList, Id::Kitsu }) TrackerQueue::forgetAccount(id);
         TrackerQueue::clearTokens(Id::Kitsu);
+    }
+
+    // ===== §22  KITSU'S HOST, ITS USER-AGENT, AND A CHALLENGE THAT IS NOT A WRONG PASSWORD (issue #330) ====
+    // Observed against the real service on 2026-09-16, signed out, read-only: neither kitsu.io nor kitsu.app
+    // redirects; kitsu.io's token endpoint answers a bogus grant with a JSON 400 for every User-Agent, while
+    // kitsu.app's answers a 403 Cloudflare challenge unless the request carries a non-browser User-Agent. Qt
+    // sends NO User-Agent by default. So: the defaults are kitsu.io, every request carries AppBrand's
+    // User-Agent, and the challenge page is reported as the service refusing, never as a bad password.
+    //
+    // NOTHING HERE CONTACTS KITSU. The transport half is answered by KitsuStub on 127.0.0.1.
+    {
+        // ---- the defaults -----------------------------------------------------------------------------
+        CHECK(kitsu::defaultApiUrl() == QLatin1String("https://kitsu.io/api/edge"));
+        CHECK(kitsu::defaultAuthBase() == QLatin1String("https://kitsu.io/api/oauth"));
+
+        // ---- the classification, pure -----------------------------------------------------------------
+        using kitsu::TokenFailure;
+        const QByteArray cfPage = "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>";
+        const QByteArray invalidGrant = R"({"error":"invalid_grant","error_description":"bad"})";
+        CHECK(kitsu::classifyTokenFailure(403, "text/html; charset=UTF-8", "challenge", cfPage)
+              == TokenFailure::ServiceRefused);
+        // Each of the three signals is enough on its own.
+        CHECK(kitsu::classifyTokenFailure(403, QByteArray(), "challenge", QByteArray())
+              == TokenFailure::ServiceRefused);
+        CHECK(kitsu::classifyTokenFailure(400, "application/json", "challenge", invalidGrant)
+              == TokenFailure::ServiceRefused);
+        CHECK(kitsu::classifyTokenFailure(400, "text/html", QByteArray(), QByteArray())
+              == TokenFailure::ServiceRefused);
+        CHECK(kitsu::classifyTokenFailure(401, QByteArray(), QByteArray(), cfPage)
+              == TokenFailure::ServiceRefused);
+        CHECK(kitsu::classifyTokenFailure(400, "application/json", QByteArray(), "not json")
+              == TokenFailure::ServiceRefused);
+        CHECK(kitsu::classifyTokenFailure(200, "text/html", QByteArray(), "<html>captive portal</html>")
+              == TokenFailure::ServiceRefused);
+        // Kitsu's own refusal stays a wrong password.
+        CHECK(kitsu::classifyTokenFailure(400, "application/json; charset=utf-8", QByteArray(), invalidGrant)
+              == TokenFailure::BadCredentials);
+        CHECK(kitsu::classifyTokenFailure(401, "application/json", QByteArray(), invalidGrant)
+              == TokenFailure::BadCredentials);
+        CHECK(kitsu::classifyTokenFailure(400, QByteArray(), QByteArray(), QByteArray())
+              == TokenFailure::BadCredentials);
+        // Other statuses, and no answer at all.
+        CHECK(kitsu::classifyTokenFailure(500, "application/json", QByteArray(), "{}") == TokenFailure::HttpError);
+        CHECK(kitsu::classifyTokenFailure(403, "application/vnd.api+json", QByteArray(), kKitsuErrorReply)
+              == TokenFailure::HttpError);
+        CHECK(kitsu::classifyTokenFailure(0, QByteArray(), QByteArray(), QByteArray())
+              == TokenFailure::NoConnection);
+
+        // ---- the transport, against the stub ----------------------------------------------------------
+        KitsuStub stub;
+        CHECK(stub.listen(QHostAddress::LocalHost));
+        const QByteArray base = "http://127.0.0.1:" + QByteArray::number(stub.serverPort());
+        // THE ENV OVERRIDES STILL WIN: every request below reaches the stub, and none of them could have
+        // if the kitsu.io defaults above had been used instead.
+        qputenv("EB_KITSU_ENDPOINT", base + "/api/edge");
+        qputenv("EB_KITSU_AUTH", base + "/api/oauth");
+        TrackerQueue::clearTokens(Id::Kitsu);
+        TrackerQueue::forgetAccount(Id::Kitsu);
+        {
+            KitsuTracker kt;
+            QStringList errors;
+            bool connected = false;
+            int pushedUnit = 0;
+            QObject::connect(&kt, &KitsuTracker::connectError, [&](const QString& m) { errors << m; });
+            QObject::connect(&kt, &KitsuTracker::connectedChanged, [&](bool c) { connected = c; });
+            QObject::connect(&kt, &KitsuTracker::progressPushed, [&](const QString&, int u) { pushedUnit = u; });
+
+            // 1. A Cloudflare challenge on the token endpoint: the service refused, NOT the password.
+            stub.token = KitsuStub::Token::CloudflareChallenge;
+            KitsuTracker::setEmail(QString::fromLatin1(kKitsuEmail));
+            KitsuTracker::setPassword(QString::fromLatin1(kKitsuPassword));
+            kt.connectAccount();
+            CHECK(waitFor([&] { return errors.size() >= 1; }));
+            const QString cfMessage = errors.value(0);
+            CHECK(cfMessage.contains(QLatin1String("not your password")));
+            CHECK(!cfMessage.contains(QLatin1String("did not accept that email and password")));
+            CHECK(!KitsuTracker::isConnected());
+
+            // 2. Kitsu's own JSON invalid_grant: that IS the password.
+            stub.token = KitsuStub::Token::InvalidGrant;
+            KitsuTracker::setEmail(QString::fromLatin1(kKitsuEmail));
+            KitsuTracker::setPassword(QString::fromLatin1(kKitsuPassword));
+            kt.connectAccount();
+            CHECK(waitFor([&] { return errors.size() >= 2; }));
+            CHECK(errors.value(1) == QLatin1String("Kitsu did not accept that email and password."));
+            CHECK(!KitsuTracker::isConnected());
+
+            // 3. A real grant, with a token that expires INSIDE the refresh skew, so the next request has to
+            //    refresh first — which is how the refresh path is made to show its headers.
+            stub.token = KitsuStub::Token::Ok;
+            stub.expiresIn = 30;
+            KitsuTracker::setEmail(QString::fromLatin1(kKitsuEmail));
+            KitsuTracker::setPassword(QString::fromLatin1(kKitsuPassword));
+            kt.connectAccount();
+            CHECK(waitFor([&] { return connected; }));
+            CHECK(KitsuTracker::isConnected());
+            CHECK(errors.size() == 2);
+
+            // 4. A library READ (search), preceded by the refresh.
+            stub.expiresIn = 2592000;
+            bool searched = false;
+            kt.search(QStringLiteral("Berserk"), 0, Kind::Manga, [&](QVector<Match>) { searched = true; });
+            CHECK(waitFor([&] { return searched; }));
+
+            // 5. A library WRITE: the self lookup, the entry read, and the PATCH.
+            Update u;
+            u.itemKey = QStringLiteral("330:berserk");
+            u.mediaId = QStringLiteral("1712");
+            u.kind = Kind::Manga;
+            u.unit = 13;
+            kt.pushProgress(u);
+            CHECK(waitFor([&] { return pushedUnit == 13; }));
+        }
+
+        // EVERY KIND OF REQUEST WAS MADE...
+        int refreshes = 0;
+        int grants = 0;
+        for (const KitsuStub::Seen& s : stub.seen)
+        {
+            if (s.method != "POST" || !s.path.startsWith("/api/oauth/token")) continue;
+            if (s.body.contains("grant_type=refresh_token")) ++refreshes;
+            if (s.body.contains("grant_type=password")) ++grants;
+        }
+        CHECK(grants == 3);
+        CHECK(refreshes == 1);
+        CHECK(stub.countOf("GET", "/api/edge/users") == 1);
+        CHECK(stub.countOf("GET", "/api/edge/manga") == 1);
+        CHECK(stub.countOf("GET", "/api/edge/library-entries") == 1);
+        CHECK(stub.countOf("PATCH", "/api/edge/library-entries/551") == 1);
+        // ...AND EVERY ONE OF THEM CARRIED THE USER-AGENT. Asserted per kind, so a failure names the path
+        // that lost it.
+        const QByteArray ua = QByteArray(AppBrand::kUserAgent);
+        auto allCarryUa = [&](const QByteArray& method, const QByteArray& prefix, const QByteArray& bodyHas) {
+            int n = 0;
+            for (const KitsuStub::Seen& s : stub.seen)
+            {
+                if (s.method != method || !s.path.startsWith(prefix)) continue;
+                if (!bodyHas.isEmpty() && !s.body.contains(bodyHas)) continue;
+                ++n;
+                if (!s.hasUserAgent || s.userAgent != ua) return false;
+            }
+            return n > 0;
+        };
+        CHECK(allCarryUa("POST", "/api/oauth/token", "grant_type=password"));        // sign-in
+        CHECK(allCarryUa("POST", "/api/oauth/token", "grant_type=refresh_token"));   // refresh
+        CHECK(allCarryUa("GET", "/api/edge/users", QByteArray()));                    // self lookup
+        CHECK(allCarryUa("GET", "/api/edge/manga", QByteArray()));                    // search
+        CHECK(allCarryUa("GET", "/api/edge/library-entries", QByteArray()));          // entry read
+        CHECK(allCarryUa("PATCH", "/api/edge/library-entries", QByteArray()));        // write
+        for (const KitsuStub::Seen& s : stub.seen) CHECK(s.hasUserAgent && s.userAgent == ua);
+
+        qunsetenv("EB_KITSU_ENDPOINT");
+        qunsetenv("EB_KITSU_AUTH");
+        TrackerQueue::clearTokens(Id::Kitsu);
+        TrackerQueue::forgetAccount(Id::Kitsu);
     }
 
     if (failures == 0) { std::puts("TRACKER-OK"); return 0; }
