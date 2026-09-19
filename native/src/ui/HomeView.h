@@ -594,6 +594,10 @@ signals:
     // runs, the same shape as chooseSourceRequested above. Also fired right after a fresh follow, so the
     // first (silent) baseline reading is taken while the user is still looking at the thing they followed.
     void followCheckNowRequested();
+    // The Follow menu's own "Check for new items now" row (#420). Separate from the above because it is a
+    // person's press: it runs at the Check-now pace, a second press while it runs is ignored, and its result
+    // is announced. The follow verb's baseline keeps the signal above and its queue-behind contract.
+    void followUserCheckNowRequested();
     // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
     // same identity the override store files against) AND what the providers said about it, because the
     // editor shows each correction over the value it replaces — and the live reply is richer than the cache.

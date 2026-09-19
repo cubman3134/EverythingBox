@@ -7592,7 +7592,7 @@ void HomeView::showFollowMenu(MediaItem it)
         int next = 1;
         if (followed && row == next++) { toggleFollowMute(copy); return; }
         if (followed && unread > 0 && row == next++) { FollowSnapshot::markAllSeen(copy.id); }
-        else if (followed && row == next) { emit followCheckNowRequested(); return; }
+        else if (followed && row == next) { emit followUserCheckNowRequested(); return; }
         else return;
         if (recentView_) renderRecents();
         else             loadTop();

@@ -362,6 +362,20 @@ A skip does not consume the pass: it is deferred to the next tick, so an evening
 day's check rather than losing it. "Check now" is a deliberate press and bypasses the playing/metered gates
 (never the per-source ones).
 
+**Check now, and the status line.** A background pass is paced by the scheduler's one-minute tick, so its
+series on one source go out a minute or more apart. "Check now" does not wait for the tick: somebody pressed
+it and is watching, so its series go **back to back** — still one request in flight per source, still
+sequential, with a two-second gap between two requests to the same source (the pace of opening those series
+by hand). Three followed series on one addon finish in a few seconds rather than three minutes. A second press
+while a Check now is running is ignored, and the status line says so; pressed during a background pass, it
+switches the rest of that pass to the Check-now pace. The background schedule itself is unchanged.
+
+The **Following** line under the button (themed: Settings ▸ General; classic: under **Check for new items now**)
+shows the scheduler's own state: *Checking your followed series…* while a pass runs, then *Checked 3
+series: 2 new items, on the New shelf.*, *Checked 3 series: nothing new.*, or *Couldn't reach the source of
+any series you follow.* — so it never stays on "Checking" after the pass is over. The classic Follow menu's
+**Check for new items now** answers with a notice as it starts and again as it ends.
+
 **What counts as new.** Children that were not in this device's last snapshot of that series. The very first
 check is a silent **baseline** — following a twenty-year-old podcast does not dump a thousand rows on your
 home screen. A child that *disappeared* is not news either (a feed that only publishes its last 60 episodes

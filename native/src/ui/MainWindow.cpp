@@ -1104,7 +1104,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(home_, &HomeView::followCheckNowRequested, this,
             [this] { if (followSched_) followSched_->checkNow(); });
+    // The classic Follow menu's "Check for new items now" row: the user's own press (#420), so it runs back
+    // to back and its result is announced, since that menu has no status line of its own.
+    connect(home_, &HomeView::followUserCheckNowRequested, this, [this] { followUserCheckNow(true); });
     setupFollowNotify();   // increment 2: the grouped notification (ui/MainWindowFollowNotify.cpp)
+    setupFollowStatus();   // #420: the Following status line on both layouts (same TU)
     followSched_->start();
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
@@ -22355,9 +22359,9 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("following.metered"), tr("Check on metered connections"), Settings::followOnMetered());
         toggle(QStringLiteral("following.notify"), tr("Notify me about new episodes"), Settings::followNotify());
         action(QStringLiteral("following.check"), tr("Check for new items now"));
-        info(QStringLiteral("following.hint"), tr("Following"),
-             tr("Series you follow are checked in the background and anything new appears on the New shelf. "
-                "The check is skipped while something is playing, and one source is never asked twice at once."));
+        // The scheduler's own status, not a sentence this builder picks (#420): a panel rebuilt mid-check says
+        // "Checking…", one rebuilt after it says how it went, and before any check it is the old hint.
+        info(QStringLiteral("following.hint"), tr("Following"), followStatusLine());
         // --- Updates ---
         sep(tr("Updates"));
         info(QStringLiteral("update.version"), tr("Version"), AppUpdater::currentVersion());
@@ -23249,9 +23253,8 @@ void MainWindow::openGeneralSettings()
                     setFollowNotifyFromUi(on);
                 }
                 else if (id == QStringLiteral("following.check")) {
-                    if (followSched_) followSched_->checkNow();
-                    setInfo(QStringLiteral("following.hint"), tr("Following"),
-                            tr("Checking your followed series…"));
+                    // The row below follows the scheduler's status (setupFollowStatus) - start, ignore, finish.
+                    followUserCheckNow(false);
                 }
                 else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
                 else if (id == QStringLiteral("remote.enabled")) {
@@ -24248,10 +24251,16 @@ void MainWindow::openGeneralSettings()
         auto* fCheckRow = new QHBoxLayout();
         fCheckRow->addWidget(fCheck); fCheckRow->addStretch(1);
         v->addLayout(fCheckRow);
-        connect(fCheck, &QPushButton::clicked, this, [this] {
-            if (followSched_) followSched_->checkNow();
-            statusBar()->showMessage(tr("Checking your followed series…"), 4000);
-        });
+        // The classic twin of the themed "following.hint" line (#420): the same scheduler status through the
+        // same sentence function. (The status bar this button used to write to is hidden on every layout.)
+        auto* fStatus = new QLabel(followStatusLine());
+        fStatus->setWordWrap(true);
+        fStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        // Before any check the sentence is the section's own hint, which this form already prints above.
+        fStatus->setVisible(!followSched_ || followSched_->status().phase != follow::CheckPhase::Idle);
+        v->addWidget(fStatus);
+        followStatusLabel_ = fStatus;
+        connect(fCheck, &QPushButton::clicked, this, [this] { followUserCheckNow(false); });
         v->addSpacing(10);
 
         // --- Updates: check GitHub Releases and install a newer build in place. ---
