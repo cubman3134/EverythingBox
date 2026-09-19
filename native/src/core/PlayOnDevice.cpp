@@ -504,6 +504,11 @@ bool routeNeedsToken(const QString& path)
     // cannot (it is how a token is obtained) and #76's /state / /player / /input keep that issue's posture.
     // /gamelists (#292) is the same kind of read as /inventory: the names of the ROMs someone has.
     // /gamelists/flush (#401) commits gamelist entries a /bundle already delivered: the same write, the same rule.
+    // #115: every /drop route but the page itself writes onto this device's disk or says what it offers, so the
+    // whole prefix is credentialled -- a route added under it later is covered without being listed here, and
+    // so is any spelling that merely starts with it. GET /drop (the page) is the one exception: it is static,
+    // and it is how a browser gets as far as asking for a code.
+    if (path.startsWith(QLatin1String("/drop")) && path != QLatin1String("/drop")) return true;
     return path == QLatin1String("/open")
         || path == QLatin1String("/inventory")
         || path == QLatin1String("/bundle")

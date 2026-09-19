@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/filedrop">
+        <file alias="drop.html">filedrop/drop.html</file>
+    </qresource>
+</RCC>

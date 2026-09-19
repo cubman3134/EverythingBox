@@ -5291,13 +5291,21 @@ void MainWindow::updateUiTestServer()
 // only from inside RemoteServer::start(), which is only ever called from here, only when the setting is on.
 void MainWindow::updateRemoteServer()
 {
-    if (!Settings::remoteControlEnabled())
+    // #115: the LAN file drop rides this listener too. Either setting keeps it up; with only file drop on, the
+    // control and hand-off routes answer 404 (setControlSurface), so file drop never opens the remote control.
+    if (!Settings::remoteControlEnabled() && !Settings::fileDropEnabled())
     {
         if (remoteServer_) { delete remoteServer_; remoteServer_ = nullptr; mwLog(QStringLiteral("remote: control server stopped")); }
         updatePlayOnAdvert();   // #143: stop advertising too — a device with no surface is not a target
         return;
     }
-    if (remoteServer_) return;   // already running (a port change deletes+recreates via the toggle path)
+    if (remoteServer_)   // already running (a port change deletes+recreates via the toggle path)
+    {
+        remoteServer_->setControlSurface(Settings::remoteControlEnabled());   // #115
+        applyFileDrop();                                                     // #115
+        updatePlayOnAdvert();
+        return;
+    }
 
     remoteServer_ = new RemoteServer(this);
     RemoteServer::Hooks h;
@@ -5418,6 +5426,7 @@ void MainWindow::updateRemoteServer()
     h.gamelistFlush = [gamelistBatches](const QByteArray& body) { return libraryFlushGamelist(*gamelistBatches, body); };
     h.gamelistIdle  = [gamelistBatches] { gamelistBatches->flushAll(); };
     remoteServer_->setHooks(h);
+    remoteServer_->setControlSurface(Settings::remoteControlEnabled());   // #115: 404 the remote when off
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))
         mwLog(QStringLiteral("remote: control server listening on %1").arg(RemoteServer::lanUrl(remoteServer_->port())));
@@ -5428,6 +5437,7 @@ void MainWindow::updateRemoteServer()
     }
     // #143: advertise ONLY if the bind actually succeeded — an advert for a port nothing is listening on is a
     // row in every peer's picker that fails the moment it is pressed.
+    applyFileDrop();   // #115: hand the listener the upload registry when file drop is on
     updatePlayOnAdvert();
 }
 
@@ -22382,6 +22392,11 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("remote.hint"),
              tr("A tiny local web control (play/pause, seek, D-pad). Off by default; no accounts, LAN only."),
              QString());
+        // #115: the LAN file drop. Classic twin in the QWidget builder below (GS_TWINS). Upload only, into fixed
+        // folders, token-gated by pairing; defined in MainWindowFileDrop.cpp.
+        toggle(QStringLiteral("remote.filedrop"), tr("Receive files over the network (file drop)"),
+               Settings::fileDropEnabled());
+        info(QStringLiteral("remote.filedrop.url"), tr("Open in a browser"), fileDropStatusText());
         // --- Play on device (issue #143). Twins in the QWidget builder below (GS_TWINS). The name row is what
         // OTHER boxes show in their picker; the picker row is the way in when nothing is playing (during
         // playback the same targets are on the cast button). ---
@@ -23264,6 +23279,10 @@ void MainWindow::openGeneralSettings()
                     setInfo(QStringLiteral("remote.url"), tr("Open on your phone"),
                             on ? RemoteServer::lanUrl(static_cast<quint16>(Settings::remoteControlPort()))
                                : tr("Turn on to get a URL"));
+                }
+                else if (id == QStringLiteral("remote.filedrop")) {
+                    setFileDropFromUi(on);             // #115: starts the listener if needed, and says so
+                    setInfo(QStringLiteral("remote.filedrop.url"), tr("Open in a browser"), fileDropStatusText());
                 }
                 else if (id == QStringLiteral("update.check")) {
                     if (!updater_) return;
@@ -24333,6 +24352,25 @@ void MainWindow::openGeneralSettings()
             Settings::setRemoteControlEnabled(c);
             updateRemoteServer();                 // start/stop the server right away
             remUrl->setText(remUrlText());        // reflect the reachable URL (or the off hint)
+        });
+        // #115: the classic twin of the themed remote.filedrop row (GS_TWINS) -- same Setting, same setter.
+        auto* dropOn = new QCheckBox(tr("Receive files over the network (file drop)"));
+        dropOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        dropOn->setChecked(Settings::fileDropEnabled());
+        v->addWidget(dropOn);
+        auto* dropUrl = new QLabel();
+        dropUrl->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        dropUrl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto dropUrlText = [this] {
+            return Settings::fileDropEnabled()
+                ? tr("Open in a browser: %1").arg(fileDropStatusText())
+                : tr("Upload ROMs and media from a browser on your network into fixed folders. Off by default; pairing required.");
+        };
+        dropUrl->setText(dropUrlText());
+        v->addWidget(dropUrl);
+        connect(dropOn, &QCheckBox::toggled, this, [this, dropUrl, dropUrlText](bool c) {
+            setFileDropFromUi(c);
+            dropUrl->setText(dropUrlText());
         });
         v->addSpacing(10);
 

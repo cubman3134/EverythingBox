@@ -21,6 +21,7 @@ namespace RemoteApi
         {
             if (raw == QStringLiteral("GET"))  return Method::Get;
             if (raw == QStringLiteral("POST")) return Method::Post;
+            if (raw == QStringLiteral("PUT"))  return Method::Put;
             return Method::Other;
         }
 
@@ -360,6 +361,83 @@ namespace RemoteApi
             return c;
         }
 
+        // ---- #115: the LAN file drop ----
+        // GET /drop is the page and only the page: the query is ignored, and nothing about the request picks
+        // what is served. Every other /drop route is credentialled (PlayOn::routeNeedsToken covers the whole
+        // /drop/ prefix); as everywhere in this file, routing is about shape and FileDrop decides the rest.
+        if (req.path == QStringLiteral("/drop"))
+        {
+            if (req.method != Method::Get)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/drop is GET only");
+                return c;
+            }
+            c.kind = CommandKind::DropPage;
+            return c;
+        }
+        if (req.path == QStringLiteral("/drop/destinations"))
+        {
+            if (req.method != Method::Get)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("/drop/destinations is GET only");
+                return c;
+            }
+            c.kind = CommandKind::DropDestinations;
+            return c;
+        }
+        if (req.path == QStringLiteral("/drop/start") || req.path == QStringLiteral("/drop/finish"))
+        {
+            const bool start = req.path == QStringLiteral("/drop/start");
+            if (req.method != Method::Post)
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = start ? QStringLiteral("/drop/start is POST only") : QStringLiteral("/drop/finish is POST only");
+                return c;
+            }
+            if (req.body.trimmed().isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = start ? QStringLiteral("/drop/start needs a destination, a name and a size")
+                                : QStringLiteral("/drop/finish needs an upload id");
+                return c;
+            }
+            c.kind = start ? CommandKind::DropStart : CommandKind::DropFinish;
+            return c;
+        }
+        if (req.path == QStringLiteral("/drop/status") || req.path == QStringLiteral("/drop/chunk"))
+        {
+            const bool chunk = req.path == QStringLiteral("/drop/chunk");
+            if (req.method != (chunk ? Method::Put : Method::Get))
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = chunk ? QStringLiteral("/drop/chunk is PUT only") : QStringLiteral("/drop/status is GET only");
+                return c;
+            }
+            c.dropId = req.query.value(QStringLiteral("id"));
+            if (c.dropId.isEmpty())
+            {
+                c.kind = CommandKind::BadRequest;
+                c.error = QStringLiteral("an upload id is needed");
+                return c;
+            }
+            if (chunk)
+            {
+                bool ok = false;
+                const qint64 off = req.query.value(QStringLiteral("offset")).toLongLong(&ok);
+                if (!ok || off < 0)
+                {
+                    c.kind = CommandKind::BadRequest;
+                    c.error = QStringLiteral("a piece needs its offset");
+                    return c;
+                }
+                c.dropOffset = off;
+            }
+            c.kind = chunk ? CommandKind::DropChunk : CommandKind::DropStatus;
+            return c;
+        }
+
         if (req.path == QStringLiteral("/input"))
         {
             if (req.method != Method::Post)
@@ -433,11 +511,20 @@ namespace RemoteApi
             case 409: return "Conflict";          // #143: a reference this device cannot resolve
             case 411: return "Length Required";   // #291: a streamed bundle must say where it ends
             case 413: return "Payload Too Large";
+            case 500: return "Internal Server Error";
+            case 503: return "Service Unavailable";
+            case 507: return "Insufficient Storage";   // #115: a file drop larger than the free space
             default:  return "OK";
         }
     }
 
     QByteArray httpResponse(int status, const QByteArray& body, const char* contentType)
+    {
+        return httpResponse(status, body, contentType, {});
+    }
+
+    QByteArray httpResponse(int status, const QByteArray& body, const char* contentType,
+                            const QList<QByteArray>& extraHeaders)
     {
         QByteArray r = "HTTP/1.1 ";
         r += QByteArray::number(status);
@@ -451,6 +538,13 @@ namespace RemoteApi
         r += QByteArray::number(body.size());
         r += "\r\n";
         r += "Connection: close\r\n";
+        for (const QByteArray& h : extraHeaders)
+        {
+            // A header value that carried a line break would split the response; such a line is dropped.
+            if (h.contains('\r') || h.contains('\n')) continue;
+            r += h;
+            r += "\r\n";
+        }
         r += "\r\n";
         r += body;
         return r;
@@ -471,11 +565,23 @@ namespace RemoteApi
         // Only POST /bundle, and only when the body declares itself as the raw-body format. The JSON (v1)
         // bundle, every other route, and a request that names the type anywhere but Content-Type are buffered
         // exactly as they always were.
+        // #115: a file-drop piece is streamed into its upload's part file. Its ceiling is FileDrop's piece size.
+        if (isDropChunk(headers))
+        {
+            if (headers.declaredLength < 0) return BodyPlan::LengthRequired;
+            if (headers.declaredLength > kDropChunkStreamCap) return BodyPlan::TooLarge;
+            return BodyPlan::Stream;
+        }
         if (!headers.valid || headers.method != Method::Post) return BodyPlan::Buffer;
         if (headers.path != QStringLiteral("/bundle")) return BodyPlan::Buffer;
         if (headers.contentType != QByteArray(kBundleStreamContentType)) return BodyPlan::Buffer;
         if (headers.declaredLength < 0) return BodyPlan::LengthRequired;
         if (headers.declaredLength > kBundleStreamCap) return BodyPlan::TooLarge;
         return BodyPlan::Stream;
+    }
+
+    bool isDropChunk(const Request& headers)
+    {
+        return headers.valid && headers.method == Method::Put && headers.path == QStringLiteral("/drop/chunk");
     }
 }

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EverythingBox file drop</title>
+<!--
+  EverythingBox LAN file drop (issue #115). One self-contained page: no external script, style, font or image,
+  so it works on a network with no internet, and the server's Content-Security-Policy forbids loading any.
+
+  The token this page is given by pairing lives in a JavaScript variable and nowhere else: no web storage of
+  any kind and no cookie. Reloading the page forgets it, and pairing again is how it comes back.
+
+  Protocol (every call but this page carries X-EB-Token):
+    POST /pair                         -> the device shows a code on its screen
+    POST /pair {"code"}                -> {"token"}
+    GET  /drop/destinations            -> {"destinations":[{"id","label","kind"}]}
+    POST /drop/start {dest,name,size}  -> {"uploadId","received"}   (same triple again = same upload, resumed)
+    PUT  /drop/chunk?id=&offset=       -> {"received"}              (8 MiB pieces; offset must equal received)
+    GET  /drop/status?id=              -> {"received"}
+    POST /drop/finish {id[,name]}      -> {"landed":true}
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #111418; color: #e8eaed; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; color: #9aa0a6; }
+  section { background: #1b1f24; border: 1px solid #2a2f36; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 14px; color: #9aa0a6; margin-bottom: 6px; }
+  input, select, button { font: inherit; }
+  input[type=text], select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #3a414a; background: #0d1014; color: #e8eaed; }
+  button { padding: 10px 16px; border-radius: 8px; border: 0; background: #3b82f6; color: #fff; cursor: pointer; }
+  button.secondary { background: #2a2f36; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .row input[type=text] { flex: 1; }
+  .msg { margin-top: 10px; font-size: 14px; }
+  .msg.err { color: #f28b82; }
+  .msg.ok { color: #81c995; }
+  #zone { border: 2px dashed #3a414a; border-radius: 10px; padding: 28px 12px; text-align: center; color: #9aa0a6; }
+  #zone.over { border-color: #3b82f6; color: #e8eaed; }
+  .file { border-top: 1px solid #2a2f36; padding: 10px 0; }
+  .file:first-child { border-top: 0; }
+  .fname { word-break: break-all; }
+  .bar { height: 8px; background: #2a2f36; border-radius: 4px; overflow: hidden; margin: 6px 0; }
+  .bar > div { height: 100%; width: 0; background: #3b82f6; }
+  .file.done .bar > div { background: #34a853; }
+  .file.failed .bar > div { background: #ea4335; }
+  .state { font-size: 13px; color: #9aa0a6; }
+  .file.failed .state { color: #f28b82; }
+  .file.done .state { color: #81c995; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Send files to this EverythingBox</h1>
+  <p class="sub">Games and media land straight in the right folder. Upload only: nothing on the device can be read, changed or deleted from here.</p>
+
+  <section id="pairing">
+    <label>1. Pair this browser</label>
+    <div class="row">
+      <button id="pairAsk">Pair</button>
+      <span class="state" id="pairHint">A code will appear on the TV or screen.</span>
+    </div>
+    <div class="row hidden" id="codeRow">
+      <input type="text" id="code" inputmode="numeric" autocomplete="off" placeholder="Code shown on the device">
+      <button id="pairSend">Enter code</button>
+    </div>
+    <div class="msg" id="pairMsg"></div>
+  </section>
+
+  <section id="dropper" class="hidden">
+    <label for="dest">2. Where should the files go?</label>
+    <select id="dest"></select>
+    <div class="row">
+      <div id="zone" style="flex:1">Drop files here, or <button class="secondary" id="pick">choose files</button></div>
+      <input type="file" id="files" multiple class="hidden">
+    </div>
+    <div class="msg" id="dropMsg"></div>
+  </section>
+
+  <section id="list" class="hidden"></section>
+</main>
+<script>
+"use strict";
+(function () {
+  var CHUNK = 8 * 1024 * 1024;           // matches FileDrop::kChunkBytes
+  var MAX_TRIES = 8;                      // per piece, before the file is marked failed
+  var token = null;                       // IN MEMORY ONLY. Never stored, never put in a URL.
+
+  function $(id) { return document.getElementById(id); }
+  function show(el, on) { el.classList.toggle("hidden", !on); }
+  function say(el, text, kind) { el.textContent = text || ""; el.className = "msg" + (kind ? " " + kind : ""); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function human(n) {
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i ? n.toFixed(1) : n) + " " + u[i];
+  }
+
+  // One request. Resolves {status, body} for any HTTP answer; rejects only when the network failed.
+  function call(method, path, body, raw) {
+    var headers = {};
+    if (token) headers["X-EB-Token"] = token;
+    var init = { method: method, headers: headers, cache: "no-store", credentials: "omit" };
+    if (raw !== undefined) { init.body = raw; headers["Content-Type"] = "application/octet-stream"; }
+    else if (body !== undefined) { init.body = JSON.stringify(body); headers["Content-Type"] = "application/json"; }
+    return fetch(path, init).then(function (res) {
+      return res.text().then(function (t) {
+        var j = {};
+        try { j = t ? JSON.parse(t) : {}; } catch (e) { j = {}; }
+        return { status: res.status, body: j };
+      });
+    });
+  }
+
+  function notPaired() {
+    token = null;
+    show($("dropper"), false);
+    show($("pairing"), true);
+    say($("pairMsg"), "This browser is not paired (or the device forgot it). Pair again to continue.", "err");
+  }
+
+  // ---- pairing: the existing /pair flow, exactly as another EverythingBox uses it --------------------------
+  $("pairAsk").onclick = function () {
+    say($("pairMsg"), "");
+    call("POST", "/pair").then(function (r) {
+      if (r.status === 200) {
+        show($("codeRow"), true);
+        $("pairHint").textContent = "Look at the device's screen and type the code it shows.";
+        $("code").focus();
+      } else {
+        say($("pairMsg"), (r.body && r.body.reason) || "The device could not show a code.", "err");
+      }
+    }, function () { say($("pairMsg"), "Could not reach the device.", "err"); });
+  };
+  $("pairSend").onclick = function () {
+    var code = $("code").value.trim();
+    if (!code) return;
+    call("POST", "/pair", { code: code }).then(function (r) {
+      if (r.status === 200 && r.body && r.body.token) {
+        token = r.body.token;
+        $("code").value = "";
+        show($("pairing"), false);
+        loadDestinations();
+      } else {
+        say($("pairMsg"), "That code was not accepted. Press Pair for a new one.", "err");
+      }
+    }, function () { say($("pairMsg"), "Could not reach the device.", "err"); });
+  };
+  $("code").addEventListener("keydown", function (e) { if (e.key === "Enter") $("pairSend").click(); });
+
+  // ---- destinations: opaque ids, friendly names -------------------------------------------------------------
+  function loadDestinations() {
+    call("GET", "/drop/destinations").then(function (r) {
+      if (r.status === 401) return notPaired();
+      if (r.status !== 200) { say($("dropMsg"), (r.body && (r.body.reason || r.body.error)) || "File drop is not available.", "err"); show($("dropper"), true); return; }
+      var sel = $("dest");
+      sel.textContent = "";
+      var groups = { rom: "Games", video: "Media", music: "Media", photo: "Media" }, made = {};
+      (r.body.destinations || []).forEach(function (d) {
+        var g = groups[d.kind] || "Other";
+        if (!made[g]) { made[g] = document.createElement("optgroup"); made[g].label = g; }
+        var o = document.createElement("option");
+        o.value = d.id;
+        o.textContent = d.label;
+        made[g].appendChild(o);
+      });
+      ["Media", "Games", "Other"].forEach(function (g) { if (made[g]) sel.appendChild(made[g]); });
+      show($("dropper"), true);
+      say($("dropMsg"), sel.options.length ? "" : "This device offers no folders to drop into.", sel.options.length ? "" : "err");
+    }, function () { say($("dropMsg"), "Could not reach the device.", "err"); show($("dropper"), true); });
+  }
+
+  // ---- files ------------------------------------------------------------------------------------------------
+  var queue = [], running = false;
+
+  function addFiles(list) {
+    var dest = $("dest").value, destLabel = $("dest").selectedOptions[0] ? $("dest").selectedOptions[0].textContent : "";
+    if (!dest) { say($("dropMsg"), "Choose where the files should go first.", "err"); return; }
+    for (var i = 0; i < list.length; i++) queue.push(makeRow(list[i], dest, destLabel));
+    show($("list"), true);
+    pump();
+  }
+
+  function makeRow(file, dest, destLabel) {
+    var el = document.createElement("div");
+    el.className = "file";
+    var name = document.createElement("div"); name.className = "fname";
+    var bar = document.createElement("div"); bar.className = "bar"; bar.appendChild(document.createElement("div"));
+    var st = document.createElement("div"); st.className = "state";
+    var fix = document.createElement("div"); fix.className = "row hidden";
+    var inp = document.createElement("input"); inp.type = "text";
+    var btn = document.createElement("button"); btn.textContent = "Retry with this name";
+    fix.appendChild(inp); fix.appendChild(btn);
+    el.appendChild(name); el.appendChild(bar); el.appendChild(st); el.appendChild(fix);
+    $("list").appendChild(el);
+    var job = { file: file, dest: dest, name: file.name, el: el, nameEl: name, bar: bar.firstChild, st: st, fix: fix, inp: inp, btn: btn, uploadId: null };
+    name.textContent = file.name + "  →  " + destLabel;
+    setState(job, "Waiting…", 0);
+    btn.onclick = function () {
+      var n = inp.value.trim();
+      if (!n) return;
+      show(fix, false);
+      el.classList.remove("failed");
+      job.name = n;
+      name.textContent = n + "  →  " + destLabel;
+      queue.push(job);
+      pump();
+    };
+    return job;
+  }
+
+  function setState(job, text, received) {
+    job.st.textContent = text;
+    if (received !== undefined && job.file.size > 0) job.bar.style.width = Math.min(100, 100 * received / job.file.size).toFixed(1) + "%";
+    if (received !== undefined && job.file.size === 0) job.bar.style.width = "100%";
+  }
+
+  function fail(job, text, offerRename) {
+    job.el.classList.add("failed");
+    setState(job, text);
+    if (offerRename) { job.inp.value = job.name; show(job.fix, true); }
+  }
+
+  var MESSAGES = {
+    exists: "Already there: a file with that name is in this folder. Rename it below and retry.",
+    nospace: "Not enough space on the device for this file.",
+    toolarge: "Too large: the limit is 64 GB per file.",
+    badname: "That file name can't be used on the device. Rename it below and retry.",
+    nodest: "That folder is no longer offered. Reload the page.",
+    toomany: "Too many uploads are in progress on the device. Try again shortly.",
+    off: "File drop was turned off on the device."
+  };
+
+  function pump() {
+    if (running) return;
+    var job = queue.shift();
+    if (!job) return;
+    running = true;
+    upload(job).then(function () { running = false; pump(); }, function () { running = false; pump(); });
+  }
+
+  // Start (or find again) the upload, send what is missing piece by piece, then finish. A failed piece is
+  // retried with a bounded backoff; each retry first asks the device how much it has, and resumes there.
+  async function upload(job) {
+    job.el.classList.remove("failed", "done");
+    setState(job, "Starting…");
+    var r;
+    try { r = await call("POST", "/drop/start", { dest: job.dest, name: job.name, size: job.file.size }); }
+    catch (e) { return fail(job, "Could not reach the device.", false); }
+    if (r.status === 401) { notPaired(); return fail(job, "Not paired: pair this browser again, then drop the file again.", false); }
+    if (!r.body.ok) return fail(job, MESSAGES[r.body.code] || r.body.reason || "The device refused this file.", r.body.code === "exists" || r.body.code === "badname");
+    job.uploadId = r.body.uploadId;
+    var received = r.body.received || 0;
+    if (received > 0) setState(job, "Resuming at " + human(received) + "…", received);
+
+    var tries = 0;
+    while (received < job.file.size) {
+      var end = Math.min(job.file.size, received + CHUNK);
+      var res = null;
+      try {
+        res = await call("PUT", "/drop/chunk?id=" + encodeURIComponent(job.uploadId) + "&offset=" + received,
+                         undefined, job.file.slice(received, end));
+      } catch (e) { res = null; }
+      if (res && res.status === 401) { notPaired(); return fail(job, "Not paired: pair this browser again, then drop the file again to resume.", false); }
+      if (res && res.status === 200 && res.body.ok) {
+        received = res.body.received;
+        tries = 0;
+        setState(job, human(received) + " of " + human(job.file.size), received);
+        continue;
+      }
+      if (res && res.body && MESSAGES[res.body.code] && res.body.code !== "busy") return fail(job, MESSAGES[res.body.code], false);
+      if (res && res.status === 404 && res.body && res.body.code === "unknown") {
+        // The device forgot the upload (restarted, or swept it): starting the same file again finds its part.
+        return upload(job);
+      }
+      if (++tries > MAX_TRIES) return fail(job, "Gave up after repeated network errors. Drop the file again to resume where it stopped.", false);
+      var wait = Math.min(30000, 1000 * Math.pow(2, tries - 1));
+      setState(job, "Connection trouble; retrying in " + Math.round(wait / 1000) + " s (" + human(received) + " sent)", received);
+      await sleep(wait);
+      try {
+        var s = await call("GET", "/drop/status?id=" + encodeURIComponent(job.uploadId));
+        if (s.status === 401) { notPaired(); return fail(job, "Not paired: pair again, then drop the file again to resume.", false); }
+        if (s.status === 200 && s.body.ok) received = s.body.received;
+        else if (s.status === 404) return upload(job);
+      } catch (e) { /* still offline: the next attempt waits longer */ }
+    }
+
+    setState(job, "Finishing…", received);
+    var f;
+    try { f = await call("POST", "/drop/finish", { id: job.uploadId, name: job.name }); }
+    catch (e) { return fail(job, "Could not reach the device to finish. Drop the file again to retry.", false); }
+    if (f.status === 401) { notPaired(); return fail(job, "Not paired: pair again, then drop the file again.", false); }
+    if (!f.body.ok) {
+      if (f.body.code === "exists" || f.body.code === "badname") {
+        // Everything has arrived; only the name is in the way. Retrying under another name re-sends nothing.
+        job.renameOnly = true;
+        return failRename(job, MESSAGES[f.body.code]);
+      }
+      return fail(job, MESSAGES[f.body.code] || f.body.reason || "The device could not put the file in place.", false);
+    }
+    job.el.classList.add("done");
+    setState(job, "Done — " + human(job.file.size) + " landed.", job.file.size);
+  }
+
+  function failRename(job, text) {
+    fail(job, text, true);
+    job.btn.onclick = async function () {
+      var n = job.inp.value.trim();
+      if (!n) return;
+      show(job.fix, false);
+      job.el.classList.remove("failed");
+      job.name = n;
+      setState(job, "Finishing…");
+      var f;
+      try { f = await call("POST", "/drop/finish", { id: job.uploadId, name: n }); }
+      catch (e) { return fail(job, "Could not reach the device.", false); }
+      if (f.status === 401) { notPaired(); return fail(job, "Not paired.", false); }
+      if (!f.body.ok) return failRename(job, MESSAGES[f.body.code] || f.body.reason || "The device refused that name.");
+      job.el.classList.add("done");
+      job.nameEl.textContent = n;
+      setState(job, "Done — " + human(job.file.size) + " landed.", job.file.size);
+    };
+  }
+
+  var zone = $("zone");
+  zone.addEventListener("dragover", function (e) { e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", function () { zone.classList.remove("over"); });
+  zone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    zone.classList.remove("over");
+    if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files);
+  });
+  $("pick").onclick = function (e) { e.preventDefault(); $("files").click(); };
+  $("files").onchange = function () { addFiles($("files").files); $("files").value = ""; };
+})();
+</script>
+</body>
+</html>

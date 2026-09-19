@@ -4,6 +4,7 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QNetworkInterface>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -12,6 +13,9 @@
 // #291: the stream cap is a wire figure, and it has to admit the largest body LibraryBundle will accept.
 static_assert(RemoteApi::kBundleStreamCap >= LibraryBundle::kMaxV2BodyBytes,
               "RemoteApi::kBundleStreamCap must cover LibraryBundle::kMaxV2BodyBytes");
+// #115: the same for a file-drop piece -- the page's 8 MiB must stream, and nothing larger may.
+static_assert(RemoteApi::kDropChunkStreamCap == FileDrop::kMaxChunkBytes,
+              "RemoteApi::kDropChunkStreamCap must equal FileDrop::kMaxChunkBytes");
 
 namespace
 {
@@ -35,12 +39,32 @@ namespace
     {
         return RemoteApi::httpResponse(r.httpStatus, LibraryBundle::receiptJson(r), "application/json");
     }
+
+    QByteArray dropResponse(const FileDrop::Answer& a)
+    {
+        return RemoteApi::httpResponse(a.http, FileDrop::answerJson(a), "application/json",
+                                       { QByteArray("Cache-Control: no-store") });
+    }
+
+    const char* const kDropOffJson = "{\"ok\":false,\"code\":\"off\",\"error\":\"file drop is off on this device\"}";
+    const char* const kNotFoundJson = "{\"ok\":false,\"error\":\"not found\"}";
+
+    // #115: the routes that exist for #76's remote and #143 / #127 / #292's peers. Answered 404 while the
+    // listener is up for file drop alone.
+    bool controlRoute(RemoteApi::CommandKind k)
+    {
+        using K = RemoteApi::CommandKind;
+        return k == K::State || k == K::Player || k == K::Input || k == K::Open || k == K::Inventory
+            || k == K::Bundle || k == K::Gamelists || k == K::GamelistFlush;
+    }
 }
 
-// One v2 body on its way to disk.
+// One v2 body on its way to disk -- or (#115) one file-drop piece on its way into its upload's part file, in
+// which case `dropId` names the upload and `file` is unused: FileDrop::Uploads owns that write.
 struct RemoteServer::Spool
 {
     QFile   file;
+    QString dropId;
     qint64  remaining = 0;     // body bytes still to come
     QTimer* idle = nullptr;    // owned by the socket; restarted on every chunk
 };
@@ -197,8 +221,28 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
         }
     }
 
+    // #115: a listener that is up only for file drop has no remote control and no hand-off surface.
+    if (!controlSurface_ && controlRoute(c.kind))
+    {
+        finish(sock, RemoteApi::httpResponse(404, kNotFoundJson, "application/json"));
+        return;
+    }
+
     switch (c.kind)
     {
+        case RemoteApi::CommandKind::DropPage:
+        case RemoteApi::CommandKind::DropDestinations:
+        case RemoteApi::CommandKind::DropStart:
+        case RemoteApi::CommandKind::DropStatus:
+        case RemoteApi::CommandKind::DropChunk:
+        case RemoteApi::CommandKind::DropFinish:
+        {
+            QList<QByteArray> extra;
+            QByteArray type = "application/json";
+            const QByteArray b = dropRoute(c, req, status, extra, type);
+            finish(sock, RemoteApi::httpResponse(status, b, type.constData(), extra));
+            return;
+        }
         case RemoteApi::CommandKind::State:
         {
             const RemoteApi::PlayerStateView view = hooks_.state ? hooks_.state() : RemoteApi::PlayerStateView{};
@@ -370,6 +414,17 @@ void RemoteServer::beginStream(QTcpSocket* sock, const RemoteApi::Request& head,
             return;
         }
     }
+    // #115: a file-drop piece goes to its own sink; the check above it (the token) is shared.
+    if (RemoteApi::isDropChunk(head))
+    {
+        beginDropChunk(sock, head, plan);
+        return;
+    }
+    if (!controlSurface_)
+    {
+        finish(sock, RemoteApi::httpResponse(404, kNotFoundJson, "application/json"));
+        return;
+    }
     // THEN THE DECLARED LENGTH, still with no body read: a 413 up front, not after buffering.
     if (plan == RemoteApi::BodyPlan::TooLarge)
     {
@@ -420,6 +475,42 @@ void RemoteServer::pumpStream(QTcpSocket* sock)
 {
     const std::shared_ptr<Spool> spool = spools_.value(sock);
     if (!spool) return;
+
+    // #115: a file-drop piece. Its bytes are appended to the upload's part file as they arrive; the answer is
+    // the new received size. A write the upload refuses (past the piece's declared length) or cannot make ends
+    // the piece, keeping what already landed.
+    if (!spool->dropId.isEmpty())
+    {
+        const std::shared_ptr<FileDrop::Uploads> up = drop_.uploads;
+        while (spool->remaining > 0 && sock->bytesAvailable() > 0)
+        {
+            const QByteArray chunk = sock->read(qMin(spool->remaining, kStreamChunk));
+            if (chunk.isEmpty()) break;
+            if (!up || !up->writeChunk(spool->dropId, chunk.constData(), chunk.size()))
+            {
+                const QString id = spool->dropId;
+                dropStream(sock);
+                FileDrop::Answer a = up ? up->status(id) : FileDrop::Answer();
+                a.http = 500;
+                a.code = QStringLiteral("writefailed");
+                a.reason = QStringLiteral("this device could not write that piece");
+                finish(sock, dropResponse(a));
+                return;
+            }
+            spool->remaining -= chunk.size();
+        }
+        if (spool->remaining > 0)
+        {
+            spool->idle->start();
+            return;
+        }
+        spool->idle->stop();
+        const QString id = spool->dropId;
+        const FileDrop::Answer a = up ? up->endChunk(id) : FileDrop::Answer();
+        dropStream(sock);
+        finish(sock, dropResponse(a));
+        return;
+    }
 
     while (spool->remaining > 0 && sock->bytesAvailable() > 0)
     {
@@ -494,7 +585,153 @@ void RemoteServer::dropStream(QTcpSocket* sock)
         spool->idle->deleteLater();
         spool->idle = nullptr;
     }
+    // #115: a piece that stops half way keeps what arrived (it is in order, and the page resumes from it);
+    // the upload is simply no longer busy. There is no spool file to discard.
+    if (!spool->dropId.isEmpty())
+    {
+        if (drop_.uploads) drop_.uploads->abortChunk(spool->dropId);
+        return;
+    }
     LibraryBundle::discardSpool(spool->file);
+}
+
+void RemoteServer::beginDropChunk(QTcpSocket* sock, const RemoteApi::Request& head, RemoteApi::BodyPlan plan)
+{
+    // The token has been checked. Everything below is still decided on the HEADERS: no body byte has been read.
+    if (!drop_.uploads)
+    {
+        finish(sock, RemoteApi::httpResponse(404, kDropOffJson, "application/json"));
+        return;
+    }
+    FileDrop::Answer refusal;
+    refusal.code = QStringLiteral("badrequest");
+    if (plan == RemoteApi::BodyPlan::TooLarge)
+    {
+        refusal.http = 413;
+        refusal.code = QStringLiteral("toolarge");
+        refusal.reason = QStringLiteral("that piece is larger than 8 MiB");
+        finish(sock, dropResponse(refusal));
+        return;
+    }
+    if (plan == RemoteApi::BodyPlan::LengthRequired)
+    {
+        refusal.http = 411;
+        refusal.reason = QStringLiteral("a piece must say how long it is");
+        finish(sock, dropResponse(refusal));
+        return;
+    }
+    const RemoteApi::Command c = RemoteApi::route(head);
+    if (c.kind != RemoteApi::CommandKind::DropChunk)
+    {
+        refusal.http = 400;
+        refusal.reason = c.error.isEmpty() ? QStringLiteral("that piece was not understood") : c.error;
+        finish(sock, dropResponse(refusal));
+        return;
+    }
+    // THE OFFSET RULE, before a byte: FileDrop refuses a gap, an overlap, a piece past the end, a second piece
+    // in flight, and an unknown upload.
+    const FileDrop::Answer a = drop_.uploads->beginChunk(c.dropId, c.dropOffset, head.declaredLength);
+    if (!a.ok())
+    {
+        finish(sock, dropResponse(a));
+        return;
+    }
+    auto spool = std::make_shared<Spool>();
+    spool->dropId = c.dropId;
+    spool->remaining = head.declaredLength;
+    sock->setReadBufferSize(kStreamChunk);
+    spool->idle = new QTimer(sock);
+    spool->idle->setSingleShot(true);
+    spool->idle->setInterval(bodyIdleTimeoutMs_);
+    connect(spool->idle, &QTimer::timeout, this, [this, sock] {
+        dropStream(sock);
+        answered_.insert(sock);
+        sock->abort();
+    });
+    spools_.insert(sock, spool);
+    pumpStream(sock);
+}
+
+QByteArray RemoteServer::dropRoute(const RemoteApi::Command& c, const RemoteApi::Request& req, int& status,
+                                   QList<QByteArray>& extraHeaders, QByteArray& contentType)
+{
+    using K = RemoteApi::CommandKind;
+    contentType = "application/json";
+    if (!drop_.uploads)
+    {
+        status = 404;
+        return kDropOffJson;
+    }
+    extraHeaders << QByteArray("Cache-Control: no-store");
+    auto answer = [&](const FileDrop::Answer& a) { status = a.http; return FileDrop::answerJson(a); };
+    auto bad = [&](const QString& why) {
+        FileDrop::Answer a;
+        a.http = 400;
+        a.code = QStringLiteral("badrequest");
+        a.reason = why;
+        return answer(a);
+    };
+    const QList<FileDrop::Destination> none;
+    switch (c.kind)
+    {
+        case K::DropPage:
+        {
+            // The embedded page and nothing else. Its policy forbids every external load, so the page works on
+            // a LAN with no internet and cannot be made to pull a script from anywhere.
+            const QByteArray page = FileDrop::pageHtml();
+            if (page.isEmpty())
+            {
+                status = 500;
+                return "{\"ok\":false,\"error\":\"the file drop page is missing from this build\"}";
+            }
+            status = 200;
+            contentType = "text/html; charset=utf-8";
+            extraHeaders << QByteArray("Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; "
+                                       "style-src 'unsafe-inline'; connect-src 'self'; img-src data:; "
+                                       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+                         << QByteArray("X-Content-Type-Options: nosniff")
+                         << QByteArray("Referrer-Policy: no-referrer");
+            return page;
+        }
+        case K::DropDestinations:
+            status = 200;
+            return FileDrop::destinationsJson(drop_.destinations ? drop_.destinations() : none);
+        case K::DropStart:
+        {
+            const QJsonObject o = QJsonDocument::fromJson(req.body).object();
+            const QJsonValue dest = o.value(QStringLiteral("dest"));
+            const QJsonValue name = o.value(QStringLiteral("name"));
+            const QJsonValue size = o.value(QStringLiteral("size"));
+            if (!dest.isString() || !name.isString() || !size.isDouble())
+                return bad(QStringLiteral("a start needs a destination, a name and a size"));
+            const double sz = size.toDouble();
+            // A size must be a whole number a double holds exactly; anything else is refused, never rounded.
+            if (!(sz >= 0) || sz > 9007199254740992.0 || sz != double(qint64(sz)))
+                return bad(QStringLiteral("the file size is not a whole number of bytes"));
+            return answer(drop_.uploads->start(drop_.destinations ? drop_.destinations() : none,
+                                               dest.toString(), name.toString(), qint64(sz)));
+        }
+        case K::DropStatus:
+            return answer(drop_.uploads->status(c.dropId));
+        case K::DropFinish:
+        {
+            const QJsonObject o = QJsonDocument::fromJson(req.body).object();
+            const QJsonValue id = o.value(QStringLiteral("id"));
+            const QJsonValue name = o.value(QStringLiteral("name"));
+            if (!id.isString() || (!name.isUndefined() && !name.isString()))
+                return bad(QStringLiteral("a finish needs the upload id"));
+            const FileDrop::Answer a = drop_.uploads->finish(id.toString(), name.toString());
+            if (a.landed && drop_.landed) drop_.landed(a);
+            return answer(a);
+        }
+        case K::DropChunk:
+            // Never buffered: bodyPlanFor streams every PUT /drop/chunk. Reaching here means it was not a PUT.
+            return bad(QStringLiteral("a piece is a PUT"));
+        default:
+            break;
+    }
+    status = 404;
+    return kNotFoundJson;
 }
 
 QString RemoteServer::lanUrl(quint16 port)

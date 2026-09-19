@@ -15,6 +15,7 @@
 //
 // Prints REMOTEAPI-OK on success; any failure prints REMOTEAPI-FAIL <cond> (line) and exits non-zero.
 #include "RemoteApi.h"
+#include "PlayOnDevice.h"
 
 #include <QByteArray>
 #include <QJsonDocument>
@@ -271,6 +272,81 @@ int main()
         CHECK(resp.contains("Content-Length: 0\r\n"));   // empty body -> length 0
     }
     CHECK(QByteArray(reasonPhrase(405)) == "Method Not Allowed");
+
+    // ---- #115: the LAN file drop's routes ------------------------------------------------------------------
+    {
+        auto req = [](const QByteArray& raw) { return parseRequest(raw); };
+
+        // GET /drop is the page, whatever the query; nothing about the request selects anything else.
+        CHECK(route(req("GET /drop HTTP/1.1\r\n\r\n")).kind == CommandKind::DropPage);
+        CHECK(route(req("GET /drop?file=../../etc/passwd HTTP/1.1\r\n\r\n")).kind == CommandKind::DropPage);
+        CHECK(route(req("GET /drop?path=C:%5CWindows HTTP/1.1\r\n\r\n")).kind == CommandKind::DropPage);
+        CHECK(route(req("POST /drop HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")).kind == CommandKind::BadRequest);
+        CHECK(route(req("PUT /drop HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+        // A near-miss is not the page.
+        CHECK(route(req("GET /drop/ HTTP/1.1\r\n\r\n")).kind == CommandKind::NotFound);
+        CHECK(route(req("GET /drop/../state HTTP/1.1\r\n\r\n")).kind == CommandKind::NotFound);
+        CHECK(route(req("GET /dropx HTTP/1.1\r\n\r\n")).kind == CommandKind::NotFound);
+        CHECK(route(req("GET /drop/drop.html HTTP/1.1\r\n\r\n")).kind == CommandKind::NotFound);
+
+        CHECK(route(req("GET /drop/destinations HTTP/1.1\r\n\r\n")).kind == CommandKind::DropDestinations);
+        CHECK(route(req("POST /drop/destinations HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+
+        const QByteArray startBody = "{\"dest\":\"d\",\"name\":\"A.sfc\",\"size\":10}";
+        CHECK(route(req("POST /drop/start HTTP/1.1\r\nContent-Length: " + QByteArray::number(startBody.size())
+                        + "\r\n\r\n" + startBody)).kind == CommandKind::DropStart);
+        CHECK(route(req("POST /drop/start HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);   // no body
+        CHECK(route(req("GET /drop/start HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+        CHECK(route(req("POST /drop/finish HTTP/1.1\r\nContent-Length: 8\r\n\r\n{\"id\":1}")).kind == CommandKind::DropFinish);
+        CHECK(route(req("GET /drop/finish HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+
+        const Command st = route(req("GET /drop/status?id=abc HTTP/1.1\r\n\r\n"));
+        CHECK(st.kind == CommandKind::DropStatus);
+        CHECK(st.dropId == QLatin1String("abc"));
+        CHECK(route(req("GET /drop/status HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);   // no id
+        CHECK(route(req("POST /drop/status?id=abc HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+
+        const Request put = req("PUT /drop/chunk?id=abc&offset=8388608 HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
+        CHECK(put.method == Method::Put);
+        const Command ch = route(put);
+        CHECK(ch.kind == CommandKind::DropChunk);
+        CHECK(ch.dropId == QLatin1String("abc"));
+        CHECK(ch.dropOffset == 8388608);
+        CHECK(route(req("PUT /drop/chunk?id=abc HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);          // no offset
+        CHECK(route(req("PUT /drop/chunk?id=abc&offset=-1 HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+        CHECK(route(req("PUT /drop/chunk?id=abc&offset=x HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+        CHECK(route(req("PUT /drop/chunk?offset=0 HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);        // no id
+        CHECK(route(req("POST /drop/chunk?id=abc&offset=0 HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+        // PUT means nothing to the older routes.
+        CHECK(route(req("PUT /state HTTP/1.1\r\n\r\n")).kind == CommandKind::BadRequest);
+
+        // Streaming: every PUT /drop/chunk streams, within the 8 MiB cap; nothing else changed plan.
+        CHECK(bodyPlanFor(req("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\nContent-Length: 8388608\r\n\r\n")) == BodyPlan::Stream);
+        CHECK(bodyPlanFor(req("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\nContent-Length: 1\r\n\r\n")) == BodyPlan::Stream);
+        CHECK(bodyPlanFor(req("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\nContent-Length: 8388609\r\n\r\n")) == BodyPlan::TooLarge);
+        CHECK(bodyPlanFor(req("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\n\r\n")) == BodyPlan::LengthRequired);
+        CHECK(bodyPlanFor(req("POST /drop/start HTTP/1.1\r\nContent-Length: 10\r\n\r\n")) == BodyPlan::Buffer);
+        CHECK(bodyPlanFor(req("POST /drop/chunk HTTP/1.1\r\nContent-Length: 10\r\n\r\n")) == BodyPlan::Buffer);
+        CHECK(bodyPlanFor(req("GET /drop HTTP/1.1\r\n\r\n")) == BodyPlan::Buffer);
+        CHECK(isDropChunk(req("PUT /drop/chunk?id=a HTTP/1.1\r\n\r\n")));
+        CHECK(!isDropChunk(req("PUT /drop/chunks HTTP/1.1\r\n\r\n")));
+        CHECK(kDropChunkStreamCap == 8LL * 1024 * 1024);
+        CHECK(requestCapBytes("POST /drop/start HTTP/1.1\r\n") == kDefaultRequestCap);   // small bodies stay small
+
+        // The token rule: every /drop route but the page.
+        for (const char* r : { "/drop/destinations", "/drop/start", "/drop/status", "/drop/chunk", "/drop/finish",
+                               "/drop/", "/drop/anything" })
+            CHECK(PlayOn::routeNeedsToken(QString::fromLatin1(r)));
+        CHECK(!PlayOn::routeNeedsToken(QStringLiteral("/drop")));
+
+        // The page's extra headers, and a header value that would split the response is dropped.
+        const QByteArray resp = httpResponse(200, "x", "text/html; charset=utf-8",
+                                             { QByteArray("X-A: 1"), QByteArray("X-B: 2\r\nSet-Cookie: t=1") });
+        CHECK(resp.contains("\r\nX-A: 1\r\n"));
+        CHECK(!resp.contains("Set-Cookie"));
+        CHECK(resp.endsWith("\r\n\r\nx"));
+        CHECK(QByteArray(reasonPhrase(507)) == "Insufficient Storage");
+    }
 
     if (failures == 0) std::printf("REMOTEAPI-OK\n");
     else               std::fprintf(stderr, "REMOTEAPI had %d failure(s)\n", failures);
