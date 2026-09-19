@@ -48,6 +48,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QHash>
+#include <QPair>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -962,6 +963,239 @@ int main(int argc, char** argv)
         FollowStore::setMuted(QStringLiteral("m2"), false);
         CHECK(!FollowStore::isMuted(QStringLiteral("m2")));
         FollowStore::setChangeHook({});
+        useProfile(QStringLiteral("fA"));
+    }
+
+    // ==== Issue #420: the Following row, and "Check now" ====================================================
+    // The themed Following row was set to "Checking your followed series…" by the button and never set back.
+    // The row now renders the SCHEDULER's own status (status() + statusChanged), and the button runs its pass
+    // back to back at kManualGapSecs per source instead of one series per 60-second pump tick.
+
+    // ---- 17. The row's sentences, pinned (follow::checkStatusText) --------------------------------------
+    {
+        using follow::CheckPhase;
+        follow::CheckStatus s;
+        const QString idle = follow::checkStatusText(s);
+        CHECK(idle.contains(QStringLiteral("checked in the background")));   // the hint the row always had
+        s.phase = CheckPhase::Checking; s.manual = true; s.seriesTotal = 3;
+        CHECK(follow::checkStatusText(s) == QStringLiteral("Checking your followed series…"));
+        s.repeatIgnored = true;
+        CHECK(follow::checkStatusText(s)
+              == QStringLiteral("Already checking your followed series. The result will appear here when it finishes."));
+        s = follow::CheckStatus();
+        s.phase = CheckPhase::Done; s.seriesTotal = 3;
+        CHECK(follow::checkStatusText(s) == QStringLiteral("Checked 3 series: nothing new."));
+        s.newItems = 1;
+        CHECK(follow::checkStatusText(s) == QStringLiteral("Checked 3 series: 1 new item, on the New shelf."));
+        s.newItems = 4;
+        CHECK(follow::checkStatusText(s) == QStringLiteral("Checked 3 series: 4 new items, on the New shelf."));
+        s.seriesFailed = 1;
+        CHECK(follow::checkStatusText(s)
+              == QStringLiteral("Checked 2 series: 4 new items, on the New shelf. "
+                                "1 more couldn't be reached and will be tried on the next check."));
+        s = follow::CheckStatus(); s.phase = CheckPhase::Done; s.seriesTotal = 0;
+        CHECK(follow::checkStatusText(s) == QStringLiteral("You aren't following any series yet."));
+        s = follow::CheckStatus(); s.phase = CheckPhase::Failed; s.seriesTotal = 3; s.seriesFailed = 3;
+        CHECK(follow::checkStatusText(s)
+              == QStringLiteral("Couldn't reach the source of any series you follow. "
+                                "They will be tried on the next check."));
+        // Every phase says SOMETHING: an empty row is the other way a status line lies.
+        for (CheckPhase p : { CheckPhase::Idle, CheckPhase::Checking, CheckPhase::Done, CheckPhase::Failed })
+        {
+            follow::CheckStatus q; q.phase = p; q.seriesTotal = 2;
+            CHECK(!follow::checkStatusText(q).isEmpty());
+        }
+        // The Check-now spacing is a real gap, and a shorter one than the background's.
+        CHECK(follow::kManualGapSecs >= 1 && follow::kManualGapSecs < follow::kSourceGapSecs);
+    }
+
+    // ---- 18. The scheduler's status sequence, and Check now against one source ---------------------------
+    {
+        using follow::CheckPhase;
+        useProfile(QStringLiteral("f420"));
+        qint64 clock = 5'000'000;
+        QHash<QString, QVector<follow::Child>> world;
+        world.insert(QStringLiteral("S1"), { mkChild(QStringLiteral("s1-e1")) });
+        world.insert(QStringLiteral("S2"), { mkChild(QStringLiteral("s2-e1")) });
+        world.insert(QStringLiteral("S3"), { mkChild(QStringLiteral("s3-e1")) });
+        QSet<QString> dead;
+        bool holdReplies = false;
+        QVector<QPair<QString, FollowScheduler::FetchDone>> held;
+        QVector<qint64> sentAt;
+        QVector<QString> asked;
+        QVector<FollowItem> follows{ mkFollow(QStringLiteral("S1"), QStringLiteral("srcX")),
+                                     mkFollow(QStringLiteral("S2"), QStringLiteral("srcX")),
+                                     mkFollow(QStringLiteral("S3"), QStringLiteral("srcX")) };
+
+        FollowScheduler sched;
+        sched.setPeriodic(false);
+        sched.setClock([&clock] { return clock; });
+        sched.setListSource([&follows] { return follows; });
+        sched.setIntervalHours(0);              // manual: nothing but Check now runs a pass
+        sched.setJitterSeed(0);
+        sched.setFetcher([&](const FollowItem& it, FollowScheduler::FetchDone done) {
+            asked << it.itemId;
+            sentAt << clock;
+            if (dead.contains(it.addonId)) { done(false, {}); return; }
+            if (holdReplies) { held << qMakePair(it.itemId, done); return; }
+            done(true, world.value(it.itemId));
+        });
+        QVector<CheckPhase> phases;
+        QObject::connect(&sched, &FollowScheduler::statusChanged, [&] { phases << sched.status().phase; });
+
+        // Stands in for production's two timers: the 60-second pump tick, and the one-shot the scheduler
+        // arms for wakeAt(). Whichever is due first runs; the clock jumps straight to it.
+        auto drive = [&](int maxSecs) {
+            const qint64 end = clock + maxSecs;
+            qint64 nextTick = clock + 60;
+            for (int guard = 0; sched.cycleActive() && clock < end && guard < 1000; ++guard)
+            {
+                const qint64 w = sched.wakeAt();
+                if (w >= 0 && w < nextTick) clock = qMax(clock, w);
+                else { clock = nextTick; nextTick += 60; }
+                sched.tick();
+            }
+        };
+
+        // 18a. Before any pass the row is idle.
+        CHECK(sched.status().phase == CheckPhase::Idle);
+
+        // 18b. CHECK NOW, THREE SERIES ON ONE SOURCE: three requests, one at a time, kManualGapSecs apart --
+        // done in seconds, NOT over three pump ticks (the #420 minute-per-series). This first pass is the
+        // silent baseline, so it finishes with nothing new.
+        const qint64 t0 = clock;
+        CHECK(sched.userCheckNow());
+        CHECK(sched.status().phase == CheckPhase::Checking);
+        CHECK(sched.status().manual);
+        drive(600);
+        CHECK(!sched.cycleActive());
+        CHECK(asked.size() == 3);
+        CHECK(sentAt.size() == 3);
+        if (sentAt.size() == 3)
+        {
+            CHECK(sentAt[0] == t0);
+            CHECK(sentAt[1] - sentAt[0] == follow::kManualGapSecs);   // spaced...
+            CHECK(sentAt[2] - sentAt[1] == follow::kManualGapSecs);
+            CHECK(sentAt[2] - t0 < 60);                                // ...and inside one tick, not three
+        }
+        CHECK(clock - t0 < 60);
+        CHECK(sched.wakeAt() == -1);                                   // nothing left to wake for
+        CHECK(phases == QVector<CheckPhase>({ CheckPhase::Checking, CheckPhase::Done }));
+        CHECK(sched.status().phase == CheckPhase::Done);
+        CHECK(sched.status().seriesTotal == 3);
+        CHECK(sched.status().seriesFailed == 0);
+        CHECK(sched.status().newItems == 0);
+        CHECK(follow::checkStatusText(sched.status()) == QStringLiteral("Checked 3 series: nothing new."));
+
+        // 18c. The same, with news: the row lands on "N new", not on "Checking…".
+        world[QStringLiteral("S2")] << mkChild(QStringLiteral("s2-e2"));
+        world[QStringLiteral("S3")] << mkChild(QStringLiteral("s3-e2"));
+        phases.clear(); asked.clear(); sentAt.clear();
+        clock += 10;
+        CHECK(sched.userCheckNow());
+        drive(600);
+        CHECK(asked.size() == 3);
+        CHECK(phases == QVector<CheckPhase>({ CheckPhase::Checking, CheckPhase::Done }));
+        CHECK(sched.status().newItems == 2);
+        CHECK(follow::checkStatusText(sched.status())
+              == QStringLiteral("Checked 3 series: 2 new items, on the New shelf."));
+
+        // 18d. A SECOND CHECK NOW WHILE ONE RUNS IS IGNORED -- no second request, no second pass queued
+        // behind it -- and the row says so.
+        phases.clear(); asked.clear(); sentAt.clear();
+        clock += 10;
+        holdReplies = true;
+        CHECK(sched.userCheckNow());
+        CHECK(asked.size() == 1);
+        const int issuedBefore = sched.issued();
+        CHECK(!sched.userCheckNow());
+        CHECK(sched.issued() == issuedBefore);
+        CHECK(sched.status().repeatIgnored);
+        CHECK(sched.status().phase == CheckPhase::Checking);
+        CHECK(phases.size() == 2);                                     // the ignore was announced
+        CHECK(follow::checkStatusText(sched.status()).startsWith(QStringLiteral("Already checking")));
+        holdReplies = false;
+        while (!held.isEmpty())
+        {
+            const auto h = held.takeFirst();
+            h.second(true, world.value(h.first));
+        }
+        drive(600);
+        CHECK(!sched.cycleActive());
+        CHECK(asked.size() == 3);
+        CHECK(!sched.status().repeatIgnored);                          // cleared with the pass it was about
+        const int afterIgnored = sched.issued();
+        clock += 180;
+        sched.tick(); sched.tick();
+        CHECK(sched.issued() == afterIgnored);                         // nothing was queued behind it
+        CHECK(!sched.cycleActive());
+
+        // 18e. A FAILED PASS: the source is down, costs it one request, and the row says it failed rather
+        // than "nothing new" (which would be a lie) or "Checking…" (which is #420).
+        dead.insert(QStringLiteral("srcX"));
+        phases.clear(); asked.clear(); sentAt.clear();
+        clock += 10;
+        CHECK(sched.userCheckNow());
+        drive(600);
+        CHECK(asked.size() == 1);                                      // politeness unchanged
+        CHECK(sched.status().phase == CheckPhase::Failed);
+        CHECK(sched.status().seriesFailed == 3);
+        CHECK(!phases.isEmpty() && phases.last() == CheckPhase::Failed);
+        dead.clear();
+
+        // 18f. THE BACKGROUND SCHEDULE IS UNCHANGED: its gap is still kSourceGapSecs, it asks for no wake-up
+        // (so it is still paced by the tick), and its row still ends on a finished sentence.
+        sched.setIntervalHours(24);
+        clock += 25 * follow::kHourSecs;
+        phases.clear(); asked.clear(); sentAt.clear();
+        sched.tick();
+        CHECK(asked.size() == 1);
+        CHECK(sched.cycleActive());
+        CHECK(!sched.status().manual);
+        CHECK(sched.wakeAt() == -1);
+        clock += follow::kManualGapSecs;
+        sched.tick();
+        CHECK(asked.size() == 1);                                      // the Check-now gap does not apply
+        clock += follow::kSourceGapSecs - follow::kManualGapSecs;
+        sched.tick();
+        CHECK(asked.size() == 2);                                      // the background gap does
+        CHECK(sched.wakeAt() == -1);
+
+        // 18g. ...and a Check now pressed DURING that background pass is not ignored: nobody was waiting on
+        // the background pass, so the rest of it takes the Check-now pace.
+        CHECK(sched.userCheckNow());
+        CHECK(sched.status().manual);
+        CHECK(sched.wakeAt() == clock + follow::kManualGapSecs);
+        drive(600);
+        CHECK(asked.size() == 3);
+        CHECK(!sched.cycleActive());
+        CHECK(!phases.isEmpty() && phases.first() == CheckPhase::Checking);
+        CHECK(!phases.isEmpty() && phases.last() == CheckPhase::Done);
+
+        // 18h. The Follow verb's baseline check (checkNow) keeps its old contract: pressed while a pass runs,
+        // one more pass follows it, so a series followed mid-pass still gets its baseline.
+        sched.setIntervalHours(0);
+        holdReplies = true;
+        asked.clear();
+        clock += 10;
+        sched.userCheckNow();
+        CHECK(asked.size() == 1);
+        sched.checkNow();
+        CHECK(asked.size() == 1);
+        holdReplies = false;
+        while (!held.isEmpty())
+        {
+            const auto h = held.takeFirst();
+            h.second(true, world.value(h.first));
+        }
+        drive(600);
+        CHECK(!sched.cycleActive());
+        const int afterFirst = int(asked.size());
+        CHECK(afterFirst == 3);
+        clock += 60;
+        sched.tick();
+        drive(600);
+        CHECK(int(asked.size()) == afterFirst + 3);                    // the queued pass ran
         useProfile(QStringLiteral("fA"));
     }
 

@@ -1613,6 +1613,14 @@ private:
     void showFollowNotifyPrompt();
     void onFollowNoticeClicked();               // lands on the home screen, where the New shelf is
     void setFollowNotifyFromUi(bool on);        // the ONE write path: both settings builders and the prompt
+    // The Following status line (issue #420). Both layouts render FollowScheduler::status() through
+    // follow::checkStatusText, re-read on the scheduler's statusChanged. Also in ui/MainWindowFollowNotify.cpp.
+    void setupFollowStatus();                   // once, right after followSched_ exists
+    void onFollowStatusChanged();
+    void followUserCheckNow(bool announce);     // the Check now button (both layouts) or the classic menu row
+    QString followStatusLine() const;
+    QPointer<class QLabel> followStatusLabel_;  // the classic settings line, while that page exists
+    bool followAnnounce_ = false;               // the classic menu asked: say the result as a window notice
     std::unique_ptr<follownotify::Outbox> followOutbox_;
     QHash<QString, QStringList> followCycleFound_;   // series -> the child ids this cycle announced
     class QSystemTrayIcon* followTray_ = nullptr;   // created lazily, shown only while a message is up

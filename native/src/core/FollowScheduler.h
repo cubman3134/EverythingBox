@@ -75,7 +75,13 @@ public:
     void setPeriodic(bool on)                    { periodic_ = on; }
 
     void start();        // arm the periodic tick (no-op when periodic is off)
-    void checkNow();     // the manual verb: run a pass now, bypassing the playing/metered skips
+    void checkNow();     // run a pass now, bypassing the playing/metered skips (the Follow verb's baseline;
+                         // pressed while a pass runs, it queues one more pass after it, as before)
+    // The "Check now" BUTTON (issue #420), on both layouts. Starts a Check-now pass: its series go back to back
+    // at kManualGapSecs per source instead of one per pump tick. Pressed while a Check-now pass runs, it is
+    // IGNORED (returns false and marks the status so the row can say so); pressed while a BACKGROUND pass
+    // runs, the rest of that pass takes the Check-now pace, since somebody is now waiting on it.
+    bool userCheckNow();
     void tick();         // the pump. Idempotent; safe to call as often as you like.
 
     // ---- introspection, for probe_follow -------------------------------------------------------------
@@ -89,6 +95,10 @@ public:
     int  queued()        const { return int(queue_.size()); }
     int  inFlight()      const { return int(busy_.size()); }
     qint64 nextDueAt()   const;                             // -1 while manual
+    // When a Check-now pass next wants the pump run (the moment its next source's gap ends), or -1. Production
+    // arms a one-shot timer for it; probe_follow, with periodic off, reads it and advances its fake clock.
+    qint64 wakeAt()      const { return wakeAt_; }
+    const follow::CheckStatus& status() const { return status_; }   // what the Following row renders
 
 signals:
     // One emission per series that grew, carrying how many children it grew by AND which ones (issue #155
@@ -98,6 +108,8 @@ signals:
     void newItemsFound(const QString& seriesId, int count, const QStringList& childIds);
     // INCREMENT 2/3 SEAM. The pass finished: how many series were asked, and how many new children in total.
     void cycleFinished(int seriesChecked, int newItems);
+    // status() changed: a pass started, a pass ended, or a Check-now press was ignored (issue #420).
+    void statusChanged();
 
 private:
     struct Job { FollowItem item; QString sourceId; };
@@ -107,6 +119,7 @@ private:
     void  dispatch(const Job& job);
     void  onFetched(const Job& job, bool ok, const QVector<follow::Child>& children);
     void  endCycle();
+    void  armWake();     // a Check now: arm the one-shot for wakeAt_ (issue #420)
     void  reapStalled();
     qint64 now() const;
     // A source's identity for throttling. The addon id where there is one; a series with no source addon is
@@ -128,6 +141,11 @@ private:
 
     bool    cycleActive_ = false;
     bool    manualPending_ = false;   // a "Check now" waiting to start (bypasses the playing/metered gates)
+    bool    manualCycle_ = false;     // the running pass is a Check now: kManualGapSecs + a wake-up, no tick wait
+    qint64  wakeAt_ = -1;
+    QTimer* wake_ = nullptr;
+    follow::CheckStatus status_;
+    int cycleOk_ = 0;                 // series in this pass whose source answered
     bool    inPump_ = false;
     bool    pumpAgain_ = false;
     QVector<Job>            queue_;

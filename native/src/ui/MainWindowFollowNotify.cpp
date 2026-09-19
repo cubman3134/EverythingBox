@@ -23,6 +23,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QIcon>
+#include <QLabel>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTimer>
@@ -38,6 +39,7 @@
 #include "../core/ItemMarks.h"
 #include "../core/Settings.h"
 #include "../emu/RetroParkView.h"
+#include "../theme2/ThemedPanelHost.h"
 #include "../emu/RetroView.h"
 #include "HomeView.h"
 #include "Notifier.h"
@@ -233,4 +235,56 @@ void MainWindow::setFollowNotifyFromUi(bool on)
     if (!Settings::followNotifyPrompted()) Settings::setFollowNotifyPrompted(true);
     if (followOutbox_) followOutbox_->setPrompted(true);
     fnLog(QStringLiteral("setting -> %1").arg(on ? QStringLiteral("on") : QStringLiteral("off")));
+}
+
+// ---- The Following status line (issue #420) ---------------------------------------------------------------
+// The themed "following.hint" row used to be set to "Checking your followed series…" by the Check now
+// handler, and nothing ever set it back: the scheduler's cycleFinished was wired to the New shelf reload and
+// the notifier, never to the row. Now neither layout writes a sentence of its own. Both render the scheduler's
+// status() through follow::checkStatusText, and statusChanged (start of a pass, a press ignored, end of a
+// pass) is the only thing that moves them - so the row cannot be left behind by a pass it did not start.
+
+QString MainWindow::followStatusLine() const
+{
+    return follow::checkStatusText(followSched_ ? followSched_->status() : follow::CheckStatus());
+}
+
+void MainWindow::setupFollowStatus()
+{
+    if (!followSched_) return;
+    connect(followSched_, &FollowScheduler::statusChanged, this, &MainWindow::onFollowStatusChanged);
+}
+
+void MainWindow::onFollowStatusChanged()
+{
+    const QString line = followStatusLine();
+    // Themed: patch the row in place. updateRow is a no-op when no live panel holds this id, and the panel's
+    // builder reads followStatusLine() when it is next built, so a closed panel misses nothing.
+    if (themedPanelHost_)
+    {
+        PanelRow r;
+        r.kind = PanelRow::Info;
+        r.id = QStringLiteral("following.hint");
+        r.label = tr("Following");
+        r.value = line;
+        themedPanelHost_->updateRow(r.id, r);
+    }
+    // Classic: the settings line, while its page exists (QPointer: the page is rebuilt and freed freely).
+    if (followStatusLabel_) followStatusLabel_->setText(line);
+    fnLog(QStringLiteral("status: %1").arg(line));   // the row text, timestamped: live evidence for #420
+    // The classic Follow menu has no status line, so a press from there is answered with a notice: once as it
+    // starts (or is ignored), once as it ends.
+    if (followAnnounce_ && followSched_)
+    {
+        const follow::CheckPhase ph = followSched_->status().phase;
+        notify(line);
+        if (ph == follow::CheckPhase::Done || ph == follow::CheckPhase::Failed) followAnnounce_ = false;
+    }
+}
+
+void MainWindow::followUserCheckNow(bool announce)
+{
+    if (!followSched_) return;
+    if (announce) followAnnounce_ = true;
+    followSched_->userCheckNow();   // start / ignore / pace-up all announce themselves through statusChanged
 }

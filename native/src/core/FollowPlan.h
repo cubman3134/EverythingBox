@@ -141,6 +141,16 @@ namespace follow
         return Admit::Send;
     }
 
+    // The gap inside a "Check now" pass (issue #420). A person pressed a button and is watching a row that says
+    // "Checking…", so the pass runs its series BACK TO BACK instead of one per 60-second pump tick — but it is
+    // still one request in flight per source, still sequential, and still spaced. Two seconds is the pace of a
+    // person opening those series by hand on the browse surface, which asks the same source for the same
+    // detail with no spacing at all; so a Check now costs a source no more than the user clicking through
+    // their follows, and never a burst. On the scheduler's one-second clock it means at least one full second
+    // between two requests to one source, two in the usual case. The background pass does not use this: its
+    // gap stays kSourceGapSecs and its pace stays the tick.
+    constexpr qint64 kManualGapSecs = 2;
+
     // ---- 4. What counts as new ----------------------------------------------------------------------
 
     // One child of a followed series as the source reported it. `id` is the source's own stable item id;
@@ -331,4 +341,31 @@ namespace follow
         if (cap > 0 && all.size() > cap) all.resize(cap);
         return all;
     }
+
+    // ---- 6. What the Following row says (issue #420) ------------------------------------------------
+
+    // The scheduler's own account of its last pass, which both layouts' Following status line render through
+    // checkStatusText. It is the SCHEDULER's state (FollowScheduler::status, re-announced by statusChanged at
+    // the start and at the end of every pass), not a string a button wrote — a row that the button set to
+    // "Checking…" had nothing to set it back, which is #420.
+    enum class CheckPhase
+    {
+        Idle,       // no pass has run since the app started
+        Checking,   // a pass is running
+        Done,       // the last pass finished and at least one series was checked (or none are followed)
+        Failed,     // the last pass finished and NOT ONE of its series could be checked
+    };
+
+    struct CheckStatus
+    {
+        CheckPhase phase = CheckPhase::Idle;
+        bool manual = false;          // the pass is a "Check now" (paced by kManualGapSecs, not the tick)
+        bool repeatIgnored = false;   // a second "Check now" arrived while this pass ran, and was ignored
+        int  seriesTotal = 0;         // series in the pass
+        int  seriesFailed = 0;        // of those, how many could not be checked (source failed, stalled, skipped)
+        int  newItems = 0;            // children the pass announced
+    };
+
+    // State -> sentence. Pure, so probe_follow pins every sentence and both layouts say the same thing.
+    QString checkStatusText(const CheckStatus& s);
 }
