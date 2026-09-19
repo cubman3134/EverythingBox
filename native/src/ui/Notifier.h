@@ -30,6 +30,13 @@ public:
     // restore would resurrect that stale phase text seconds later.
     void notifyOverSticky(const QString& text, int ms = 4500);
 
+    // A notice that does something when clicked or tapped (issue #155's one-time "turn notifications on?"
+    // offer). The label is click-through for every other message; it takes the pointer only while an action
+    // is attached, and any newer notify()/hideNotice() — or the expiry — detaches it, so a later plain notice
+    // can never fire an older one's action. The action runs on the next event-loop turn, never inside the
+    // mouse event's own delivery (the #28/#211 rule).
+    void notifyWithAction(const QString& text, int ms, std::function<void()> onClick);
+
     void hideNotice();
     void reposition();                               // re-anchor both overlays (resize / move)
 
@@ -40,7 +47,11 @@ public:
     void hidePlayerNotice();
     bool playerNoticeVisible() const;
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
+    void setAction(std::function<void()> onClick);
     void sizeNotice();                 // width/height for the current text: one line if it fits, else wrapped
     void positionNotice();
     QWidget* host_ = nullptr;          // the window's central area the notice floats over
@@ -48,6 +59,7 @@ private:
     QTimer* noticeTimer_ = nullptr;
     QString stickyRestore_;            // the sticky note notifyOverSticky covered, put back when its timer fires
     bool restoreSticky_ = false;       // cleared by notify()/hideNotice(): a newer message owns the label now
+    std::function<void()> action_;     // notifyWithAction's click handler; empty = the label is click-through
     QWidget* player_ = nullptr;
     std::function<int()> playerTop_;
     QLabel* playerNotice_ = nullptr;   // objectName "mmvPlayerNotice"

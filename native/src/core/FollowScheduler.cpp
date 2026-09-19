@@ -201,7 +201,9 @@ void FollowScheduler::onFetched(const Job& job, bool ok, const QVector<follow::C
     {
         newFound_ += int(found.size());
         cycleNew_ += int(found.size());
-        emit newItemsFound(job.item.itemId, int(found.size()));
+        QStringList ids;
+        for (const FollowSnapshot::Pending& p : found) ids << p.id;
+        emit newItemsFound(job.item.itemId, int(found.size()), ids);
     }
     pump();
 }

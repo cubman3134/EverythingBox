@@ -1104,6 +1104,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(home_, &HomeView::followCheckNowRequested, this,
             [this] { if (followSched_) followSched_->checkNow(); });
+    setupFollowNotify();   // increment 2: the grouped notification (ui/MainWindowFollowNotify.cpp)
     followSched_->start();
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
@@ -11265,7 +11266,8 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // "Follow" / "Mark all seen" (issue #155). Both act through HomeView, which owns the stores and the
     // refresh, and both re-push `detailData` so the pill flips in place — the favourite branch's idiom, for
     // the same reason: the detail page stays open on the item you just followed.
-    else if (verb == QStringLiteral("follow") || verb == QStringLiteral("markseen"))
+    else if (verb == QStringLiteral("follow") || verb == QStringLiteral("markseen")
+             || verb == QStringLiteral("notifymute"))
     {
         home_->runThemedFollowVerb(idx, verb);
         QWidget* cur = stack_->currentWidget();
@@ -11274,6 +11276,10 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             QVariantMap d = r->property("detailData").toMap();
             d.insert(QStringLiteral("followed"), home_->isThemedLeafFollowed(idx));
             d.insert(QStringLiteral("newCount"), home_->themedLeafNewCount(idx));
+            d.insert(QStringLiteral("muted"), home_->isThemedLeafMuted(idx));
+            // The pill SET depends on the follow state too ("Mute notifications" and "Mark all seen" exist only
+            // on a followed series), so re-read it from the one builder rather than leave a stale row up.
+            d.insert(QStringLiteral("actions"), home_->themedDetailData(idx).value(QStringLiteral("actions")));
             r->setProperty("detailData", d);
         }
     }
@@ -22347,6 +22353,7 @@ void MainWindow::openGeneralSettings()
         sep(tr("Following"));
         choice(QStringLiteral("following.interval"), tr("Check followed series"), followIntervalOpts, curFollowDisp);
         toggle(QStringLiteral("following.metered"), tr("Check on metered connections"), Settings::followOnMetered());
+        toggle(QStringLiteral("following.notify"), tr("Notify me about new episodes"), Settings::followNotify());
         action(QStringLiteral("following.check"), tr("Check for new items now"));
         info(QStringLiteral("following.hint"), tr("Following"),
              tr("Series you follow are checked in the background and anything new appears on the New shelf. "
@@ -23237,6 +23244,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("following.metered")) {
                     Settings::setFollowOnMetered(on);
                     if (followSched_) followSched_->setAllowMetered(on);
+                }
+                else if (id == QStringLiteral("following.notify")) {
+                    setFollowNotifyFromUi(on);
                 }
                 else if (id == QStringLiteral("following.check")) {
                     if (followSched_) followSched_->checkNow();
@@ -24228,6 +24238,12 @@ void MainWindow::openGeneralSettings()
             Settings::setFollowOnMetered(c);
             if (followSched_) followSched_->setAllowMetered(c);
         });
+        // Grouped notifications (#155 increment 2), off by default; twin of the themed "following.notify".
+        auto* fNotify = new QCheckBox(tr("Notify me about new episodes"));
+        fNotify->setStyleSheet(QStringLiteral("font-size:15px;"));
+        fNotify->setChecked(Settings::followNotify());
+        v->addWidget(fNotify);
+        connect(fNotify, &QCheckBox::toggled, this, [this](bool c) { setFollowNotifyFromUi(c); });
         auto* fCheck = new QPushButton(tr("Check for new items now"));
         auto* fCheckRow = new QHBoxLayout();
         fCheckRow->addWidget(fCheck); fCheckRow->addStretch(1);

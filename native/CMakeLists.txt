@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.295 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.296 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -847,6 +847,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FollowStore.cpp src/core/FollowStore.h       # followed series, per-item-synced (issue #155)
         src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h # ...and the device-local seen/pending snapshots
         src/core/FollowScheduler.cpp src/core/FollowScheduler.h # ...and the polite background refresh
+        src/core/FollowNotify.cpp src/core/FollowNotify.h     # ...and the grouped new-item notification (#155 inc 2)
         src/core/FollowPlan.h                                 # ...and the pure rules both layouts share
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h  # per-book reading bookmarks, per-item-synced (issue #136)
         src/core/HighlightStore.cpp src/core/HighlightStore.h  # per-book highlights: the same anchor with its range end (issue #136)
@@ -959,6 +960,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
         src/ui/AddonConfigurePanel.cpp src/ui/AddonConfigurePanel.h   # #80: the nav-kit waiting card that finishes it
         src/ui/MainWindowWatchTogether.cpp                 # "Watch together" MainWindow members, same rule (#86)
@@ -1273,6 +1275,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/FollowStore.cpp src/core/FollowStore.h
         src/core/FollowSnapshot.cpp src/core/FollowSnapshot.h
         src/core/FollowScheduler.cpp src/core/FollowScheduler.h
+        src/core/FollowNotify.cpp src/core/FollowNotify.h    # increment 2: grouping, mute, prompt, the hold
         src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records the unfollow tombstone
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_follow PRIVATE src src/core)
