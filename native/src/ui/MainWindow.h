@@ -1894,6 +1894,13 @@ private:
     // the other side of an aeroplane window. See MainWindowJellyfinDownload.cpp.
     bool jellyfinPlayingOffline_ = false;
 
+    // ---- SUBSONIC: OFFLINE DOWNLOADS (issue #193) -------------------------------------------------
+    // DEFINED IN MainWindowSubsonicDownload.cpp. Jellyfin's shape (SubsonicDownload.h): a qualified TRACK id
+    // queues one ref-backed job; an ALBUM or PLAYLIST key queues one job per track, in disc-then-track order,
+    // skipping what this device already has. The signed download.view url is minted by initJellyfinDownloads'
+    // minter at each start() and never stored.
+    void downloadSubsonic(const QString& ref, const QString& title, const QString& thumb);
+
     // ---- JELLYFIN: OFFLINE DOWNLOADS (issue #110, increment 1) ------------------------------------
     // ALL DEFINED IN MainWindowJellyfinDownload.cpp, the feature-TU rule (#186) again.
     //

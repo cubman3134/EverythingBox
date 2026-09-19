@@ -908,6 +908,11 @@ int main(int argc, char** argv)
         // OPDS catalog's is, and a synced bundle is a zip in somebody's Drive folder.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subsonic/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("subsonic/profileA/servers")) == false);
+        // ...and the SERVER STREAMING QUALITY cap (#193): per device, never synced - a phone on a data plan and a
+        // desktop on a LAN want different answers for one account. Asked through the setting's own accessor, so
+        // a rename that moved the key out of the carved prefix fails here rather than syncing quietly.
+        CHECK(CloudSync::isDeviceLocalKey(Settings::subsonicStreamMaxBitRateKey()) == true);
+        CHECK(CloudSync::isPerItemStoreKey(Settings::subsonicStreamMaxBitRateKey()) == false);
         // jellyfin/* (issue #160): the connected Jellyfin servers, each carrying an ACCESS TOKEN — a bearer
         // credential for a whole account, usable from anywhere until it is revoked. The strongest of the four
         // secrets in this family, and the reason #160's per-server tokens are stated as device-local in the

@@ -536,6 +536,21 @@ namespace Settings
     QString musicPreferredSource();                      // key "music/preferredSource"; unset => "local"
     void setMusicPreferredSource(const QString& v);
 
+    // SERVER STREAMING QUALITY (issue #193): the most a Subsonic music server is asked to stream at, in kbps.
+    // 0 is "Original" — the default, and exactly the behaviour before this existed: no maxBitRate is sent and
+    // the server streams the file it holds. 320 / 192 / 128 add maxBitRate=<n> to every stream url and leave
+    // the codec to the server (Subsonic::buildStreamUrl). A DOWNLOAD IS NEVER CAPPED: download.view is the
+    // original by definition. Any stored value that is not one of those four reads as 0.
+    //
+    // PER DEVICE, NOT SYNCED. A phone on a data plan and a desktop on a LAN want different answers for the
+    // same account, so the key lives under "subsonic/", the prefix CloudSync::isDeviceLocalKey already
+    // carves out of the synced bundle for the saved servers themselves. probe_cloudmerge pins the key through
+    // the accessor below, so a rename that left the carve-out cannot pass quietly. There is no mobile-data
+    // detection: the user picks the cap for the device they are on.
+    QString subsonicStreamMaxBitRateKey();               // "subsonic/streamMaxBitRate"
+    int  subsonicStreamMaxBitRate();                     // 0 (Original) | 320 | 192 | 128
+    void setSubsonicStreamMaxBitRate(int kbps);
+
     // Root of the local PHOTO library (issue #102), scanned by PhotoLibrary. Empty stored value =>
     // the default (<data>/photos). Device-local (never synced): each machine points at its own disk.
     QString photosFolder();        // resolved path (never empty)

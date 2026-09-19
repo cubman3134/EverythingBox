@@ -208,6 +208,9 @@ namespace browse
     // with no add-on or for a script add-on's track. So Download is offered for exactly the last kind: a verb
     // that can only say "nothing here" is not copied onto a second surface. The themed chooser offering it on
     // every leaf is #372.
+    // #193 LATER GAVE A SUBSONIC TRACK A REAL DOWNLOAD (download.view, through MainWindow's url minter). That is
+    // NOT this table's answer — this stays the pure add-on rule — but HomeView::trackMenuForRow and
+    // downloadOfferedFor add it on top, from SubsonicDownload::targetFor, so both surfaces offer it.
     enum class TrackAddon { None, Script, Remote };   // the add-on the row's download crawl would walk
     struct TrackMenuVerbs
     {

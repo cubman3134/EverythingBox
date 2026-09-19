@@ -7,6 +7,7 @@
 #include "LanguageCodes.h"          // preferredLanguage() canonicalizes + migrates from the legacy 3-letter key
 #include "Scrobble.h"               // the scrobble keys (#192) are built off the prefix the carve-out excludes
 #include "FollowPlan.h"             // followIntervalHours() clamps through the pure layer's own choice list (#155)
+#include "Subsonic.h"               // the streaming-quality cap (#193) normalises through the one choice list
 #include <QSettings>
 #include <QCoreApplication>
 #include <QJsonDocument>   // #152: the per-series comic direction overrides are one JSON value
@@ -1459,3 +1460,13 @@ void Settings::setTurboHalfPeriod(int frames)
     store().setValue(QStringLiteral("turbo/halfPeriod"), qBound(1, frames, 30));
     store().sync();
 }
+
+// ---- SERVER STREAMING QUALITY (#193) -------------------------------------------------------------------
+// Under "subsonic/", which CloudSync::isDeviceLocalKey carves out of the synced bundle: a cap is a fact about
+// the connection THIS device is on. Normalised on both read and write through the one list of choices, so an
+// ini edited by hand cannot ask a server for a rate the setting never offered.
+QString Settings::subsonicStreamMaxBitRateKey() { return QStringLiteral("subsonic/streamMaxBitRate"); }
+int Settings::subsonicStreamMaxBitRate()
+{ return Subsonic::normalizeMaxBitRate(store().value(subsonicStreamMaxBitRateKey(), 0).toInt()); }
+void Settings::setSubsonicStreamMaxBitRate(int kbps)
+{ store().setValue(subsonicStreamMaxBitRateKey(), Subsonic::normalizeMaxBitRate(kbps)); store().sync(); }

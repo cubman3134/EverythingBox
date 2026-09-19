@@ -2451,6 +2451,7 @@ else
     'music.addserver|muSrvAdd = new QPushButton(tr("Add a music server'
     'music.separators|muSeps = new QLineEdit(Settings::musicTagSeparators())'
     'music.prefsource|muPref = new QComboBox()'
+    'music.streamquality|ssQuality = new QComboBox()'
     'music.clearmatches|muClear = new QPushButton(tr("Reset my music match corrections'
     'audiobooks.change|abBrowse = new QPushButton(tr("Change…"))'
     'audiobooks.rescan|abRescan = new QPushButton(tr("Rescan"))'

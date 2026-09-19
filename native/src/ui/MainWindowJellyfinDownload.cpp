@@ -53,6 +53,8 @@
 #include "../core/JellyfinClient.h"
 #include "../core/JellyfinDownload.h"
 #include "../core/OfflineProgress.h"
+#include "../core/Subsonic.h"          // #193: the minter routes a Subsonic ref to its own client
+#include "../core/SubsonicClient.h"
 #include "../media/PlaybackSession.h"
 
 #include <QDateTime>
@@ -104,7 +106,10 @@ void MainWindow::initJellyfinDownloads()
     if (!dm_) return;
     // THE MINTER. A std::function, so DownloadManager never learns what a media server is and can never
     // reach a token store itself. See DownloadManager::setUrlMinter.
+    // ONE minter, routed by the ref's own family: a Subsonic track (#193) is signed by SubsonicClient, and every
+    // other ref-backed job is a Jellyfin one. Both mint at request time and neither result is kept.
     dm_->setUrlMinter([](const QString& sourceRef) {
+        if (Subsonic::isQualified(sourceRef)) return SubsonicClient::instance().downloadUrlFor(sourceRef);
         return JellyfinClient::instance().downloadUrlFor(sourceRef);
     });
     // Anything the last session queued and could not deliver. Deferred a turn: the constructor is not a

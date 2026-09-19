@@ -38,7 +38,46 @@ are the server's own answers rather than a walk of the tree:
 | **Recently added** | The newest records on the server. |
 
 Playlists are **read-only** here for now: you can play one and queue from it, but creating and editing
-them happens on the server. Downloading a record for offline listening is not part of this either.
+them happens on the server.
+
+## Downloading for offline listening
+
+A track, an album or a playlist from a music server can be kept on this device and played with the
+server switched off — on a plane, or anywhere the server cannot be reached.
+
+* **A track:** choose **Download** on it — from the action chooser on the themed layout, or from the
+  Start menu or right-click menu on the classic one.
+* **An album or a playlist:** press **Start** (or right-click it on the classic layout) and choose
+  **Download for offline**. Every track is queued as its own download, in the order the record plays, and
+  tracks already on this device (or already downloading) are skipped.
+
+Downloads use the server's own **download** endpoint, so you get the **original file** exactly as the
+server holds it — the streaming quality setting below never applies to a download. Progress, pausing,
+cancelling and resuming are the ordinary **Settings → Downloads** list, and a finished track appears under
+**Downloaded** with its title, artist and album cover.
+
+**A downloaded track plays from the file.** Wherever that track is played from — the server's album, a
+queue, a favourite — the copy on this device is used instead of a stream, so it keeps working with the
+server off. Delete the file and it streams from the server again.
+
+**The download link is never stored.** A signed download address carries a token derived from your
+password, so a queued download remembers only *which* track it is; a fresh signed address is made at the
+moment each download starts or resumes, including after a restart. Nothing written to the download queue,
+the Downloaded list or the logs contains it.
+
+## Streaming quality
+
+**Settings → Music → "Server streaming quality"** caps how much data a music server is asked to stream:
+
+| Setting | What happens |
+|---|---|
+| **Original** (default) | The file the server holds is streamed unchanged. |
+| **320 / 192 / 128 kbps** | The server is asked to convert on the fly to at most that bitrate. It picks the audio format it is set up to convert to. |
+
+The setting is **per device** and is not synced, so a laptop on a metered connection can use a lower
+quality than the machine on your home network. It is not switched automatically when you are on mobile
+data — choose the cap for the device you are on. The server has to have transcoding available for a cap to
+make a difference; Navidrome does by default. Downloads are always the original file.
 
 ## Starring, and your favourites
 

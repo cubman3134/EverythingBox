@@ -2451,6 +2451,368 @@ static void testCoverAnswers370()
     testServerMusicColdAlbum368(stub);   // last: it re-lists the shelf, which the cover cases above read as cold
 }
 
+// ==================================================================================================
+// #193 — OFFLINE DOWNLOADS AND THE STREAMING BITRATE CAP
+// ==================================================================================================
+// Five questions, each of which fails on its own:
+//   1. THE URLS. download.view carries the same u/t/s (or p) auth stream.view does; the stream url carries
+//      maxBitRate=<n> for each capped setting and NOTHING for Original; no `format` is ever forced; and a
+//      download url is uncapped whatever the setting says — asserted through the REAL client, with the REAL
+//      setting written, so "downloads ignore the cap" is measured rather than read off a signature.
+//   2. THE JOBS. A row downloads what it names and nothing else; an album is one job per track, in disc-then-
+//      track order, skipping what this device already has; a job carries the qualified id and no url.
+//   3. THE CREDENTIAL. The REAL DownloadManager, with the REAL minter MainWindow installs, persists a job;
+//      every byte of every file this process wrote is then scanned for the token, the salt and the password,
+//      and queue.json for any t= / s= / p= at all. A restarted manager RESUMES by minting a FRESH url.
+//   4. THE LOCAL COPY. MusicSupply::playUrl — the one door a track id goes through to mpv — hands back the
+//      downloaded file for its qualified id, and falls back to the stream the moment the file is gone.
+//   5. THE SETTING is device-local: its key is under the carved-out prefix (probe_cloudmerge asserts the
+//      classification itself through the same accessor).
+// Nothing here reaches a real server. The download server's root is under .invalid, which no resolver
+// answers; the minted urls are compared and scanned, never printed.
+#include "DownloadManager.h"
+#include "DownloadsStore.h"
+#include "Settings.h"
+#include "SubsonicDownload.h"
+
+static QUrlQuery queryOf(const QString& url) { return QUrlQuery(QUrl(url)); }
+
+static void testDownloadAndStreamUrls193()
+{
+    const QString root = QStringLiteral("https://music.invalid/navi");
+    const QString salt = Subsonic::saltFrom(Q_UINT64_C(0x1122334455667788));
+    const Subsonic::Credential cred{ QLatin1String(kUser), QLatin1String(kPassword), false, QStringLiteral("EB") };
+    const QString token = Subsonic::tokenFor(QLatin1String(kPassword), salt);
+
+    // ---- download.view, with the auth stream.view uses ----
+    CHECK(Subsonic::downloadPath() == QStringLiteral("/rest/download.view"));
+    const QString dl = Subsonic::buildDownloadUrl(root, cred, salt, QStringLiteral("tr 7/x"));
+    CHECK(QUrl(dl).path() == QStringLiteral("/navi/rest/download.view"));
+    const QUrlQuery dq = queryOf(dl);
+    CHECK(dq.queryItemValue(QStringLiteral("u")) == QLatin1String(kUser));
+    const bool dlToken = dq.queryItemValue(QStringLiteral("t")) == token;   // compared, never printed
+    CHECK(dlToken);
+    CHECK(dq.queryItemValue(QStringLiteral("s")) == salt);
+    CHECK(!dq.hasQueryItem(QStringLiteral("p")));
+    CHECK(dq.queryItemValue(QStringLiteral("id"), QUrl::FullyDecoded) == QStringLiteral("tr 7/x"));
+    CHECK(!dq.hasQueryItem(QStringLiteral("maxBitRate")));
+    CHECK(!dq.hasQueryItem(QStringLiteral("format")));
+    // ...legacy auth is the per-server opt-in it is for streams: p=enc:<hex>, and no t/s.
+    Subsonic::Credential legacy = cred; legacy.legacy = true;
+    const QUrlQuery lq = queryOf(Subsonic::buildDownloadUrl(root, legacy, salt, QStringLiteral("tr-7")));
+    CHECK(lq.queryItemValue(QStringLiteral("p")).startsWith(QStringLiteral("enc:")));
+    CHECK(!lq.hasQueryItem(QStringLiteral("t")) && !lq.hasQueryItem(QStringLiteral("s")));
+    // ...and nothing half-built.
+    CHECK(Subsonic::buildDownloadUrl(QString(), cred, salt, QStringLiteral("tr-7")).isEmpty());
+    CHECK(Subsonic::buildDownloadUrl(root, cred, salt, QString()).isEmpty());
+
+    // ---- the cap: the four options, and a stream url for each ----
+    CHECK(Subsonic::streamBitRateChoices() == (QVector<int>{ 0, 320, 192, 128 }));
+    CHECK(Subsonic::normalizeMaxBitRate(320) == 320);
+    CHECK(Subsonic::normalizeMaxBitRate(128) == 128);
+    CHECK(Subsonic::normalizeMaxBitRate(7) == 0);      // a hand-edited ini does not ask a server for 7 kbps
+    CHECK(Subsonic::normalizeMaxBitRate(-1) == 0);
+    const QString A = QStringLiteral("00000000-0000-4000-8000-00000000a193");
+    for (int kbps : { 0, 320, 192, 128, 7 })
+    {
+        const QString su = Subsonic::buildStreamUrl(root, cred, salt, QStringLiteral("tr-7"), kbps);
+        CHECK(QUrl(su).path() == QStringLiteral("/navi/rest/stream.view"));
+        const QUrlQuery sq = queryOf(su);
+        const bool sToken = sq.queryItemValue(QStringLiteral("t")) == token;
+        CHECK(sToken);
+        CHECK(sq.queryItemValue(QStringLiteral("id")) == QStringLiteral("tr-7"));
+        CHECK(!sq.hasQueryItem(QStringLiteral("format")));   // the server picks its transcode codec
+        const int want = Subsonic::normalizeMaxBitRate(kbps);
+        if (want == 0) CHECK(!sq.hasQueryItem(QStringLiteral("maxBitRate")));
+        else           CHECK(sq.queryItemValue(QStringLiteral("maxBitRate")) == QString::number(want));
+        // #203's reader still names the track under a cap: the extra parameter is not part of what it reads.
+        CHECK(Subsonic::trackIdFromStreamUrl(su, { { A, root } })
+              == Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("tr-7")));
+    }
+}
+
+// Through the REAL client and the REAL setting: what a queue and a download actually get.
+static void testClientCapAndDownloadMint193(const QString& serverId)
+{
+    const QString track = Subsonic::qualify(serverId, Subsonic::Kind::Track, QStringLiteral("song-1"));
+    SubsonicClient& cl = SubsonicClient::instance();
+
+    // The setting: default Original, a listed value round-trips, anything else reads Original.
+    CHECK(Settings::subsonicStreamMaxBitRateKey().startsWith(QStringLiteral("subsonic/")));
+    CHECK(Settings::subsonicStreamMaxBitRate() == 0);
+    Settings::setSubsonicStreamMaxBitRate(192);
+    CHECK(Settings::subsonicStreamMaxBitRate() == 192);
+    Settings::setSubsonicStreamMaxBitRate(55);
+    CHECK(Settings::subsonicStreamMaxBitRate() == 0);
+
+    for (int kbps : { 0, 320, 192, 128 })
+    {
+        Settings::setSubsonicStreamMaxBitRate(kbps);
+        const QUrlQuery sq = queryOf(cl.streamUrl(track));
+        if (kbps == 0) CHECK(!sq.hasQueryItem(QStringLiteral("maxBitRate")));
+        else           CHECK(sq.queryItemValue(QStringLiteral("maxBitRate")) == QString::number(kbps));
+        CHECK(!sq.hasQueryItem(QStringLiteral("format")));
+        // THE DOWNLOAD IS UNCAPPED at every setting: download.view, the original, no maxBitRate.
+        const QString du = cl.downloadUrlFor(track);
+        CHECK(QUrl(du).path().endsWith(QStringLiteral("/rest/download.view")));
+        const QUrlQuery dq = queryOf(du);
+        CHECK(!dq.hasQueryItem(QStringLiteral("maxBitRate")));
+        CHECK(!dq.hasQueryItem(QStringLiteral("format")));
+        CHECK(dq.queryItemValue(QStringLiteral("id")) == QStringLiteral("song-1"));
+        CHECK(dq.hasQueryItem(QStringLiteral("t")) && dq.hasQueryItem(QStringLiteral("s")));
+    }
+    Settings::setSubsonicStreamMaxBitRate(0);
+    // Only a TRACK is minted for; an album, a local path and an unknown server's id mint nothing.
+    CHECK(cl.downloadUrlFor(Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-1"))).isEmpty());
+    CHECK(cl.downloadUrlFor(QStringLiteral("C:/music/a.flac")).isEmpty());
+    CHECK(cl.downloadUrlFor(Subsonic::qualify(mkServerId(), Subsonic::Kind::Track, QStringLiteral("song-1"))).isEmpty());
+}
+
+static MusicLibrary::IndexTrack mkTrack193(const QString& serverId, const QString& id, int disc, int no,
+                                           const QString& title)
+{
+    MusicLibrary::IndexTrack t;
+    t.path = t.sourcePath = Subsonic::qualify(serverId, Subsonic::Kind::Track, id);
+    t.title = title; t.artist = QStringLiteral("Amber"); t.disc = disc; t.track = no;
+    t.albumKey = Subsonic::qualify(serverId, Subsonic::Kind::Album, QStringLiteral("al-1"));
+    return t;
+}
+
+static void testDownloadJobs193()
+{
+    const QString A = mkServerId();
+    const QString trackId = Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("song-1"));
+    const QString albumKey = Subsonic::qualify(A, Subsonic::Kind::Album, QStringLiteral("al-1"));
+    const QString playlistKey = Subsonic::qualify(A, Subsonic::Kind::Playlist, QStringLiteral("pl-1"));
+    const QString localAlbumKey = QStringLiteral("amber") + QChar(0x1F) + QStringLiteral("t") + QChar(0x1F)
+                                + QStringLiteral("glass");
+    using K = SubsonicDownload::Kind;
+
+    // ---- which rows download what ----
+    CHECK(SubsonicDownload::targetFor(true, false, albumKey, trackId).kind == K::Track);
+    CHECK(SubsonicDownload::targetFor(true, false, albumKey, trackId).ref == trackId);
+    CHECK(SubsonicDownload::targetFor(false, true, albumKey, QString()).kind == K::Album);
+    CHECK(SubsonicDownload::targetFor(false, true, albumKey, QString()).ref == albumKey);
+    CHECK(SubsonicDownload::targetFor(false, true, playlistKey, QString()).kind == K::Album);
+    // ...and nothing that is not a Subsonic track or record: a local file, a local album key, the starred
+    // container the server never minted, an artist, a "track" that names an album, a row that is neither.
+    CHECK(!SubsonicDownload::targetFor(true, false, localAlbumKey, QStringLiteral("C:/m/a.flac")).ok());
+    CHECK(!SubsonicDownload::targetFor(false, true, localAlbumKey, QString()).ok());
+    CHECK(!SubsonicDownload::targetFor(false, true, Subsonic::starredTracksKey(A), QString()).ok());
+    CHECK(!SubsonicDownload::targetFor(false, true,
+                                       Subsonic::qualify(A, Subsonic::Kind::Artist, QStringLiteral("ar")),
+                                       QString()).ok());
+    CHECK(!SubsonicDownload::targetFor(true, false, albumKey, albumKey).ok());
+    CHECK(!SubsonicDownload::targetFor(false, false, albumKey, trackId).ok());
+
+    // ---- an album is one job per track, in disc-then-track order, skipping what is already here ----
+    QVector<MusicLibrary::IndexTrack> tracks = {
+        mkTrack193(A, QStringLiteral("s-2-1"), 2, 1, QStringLiteral("Second disc opener")),
+        mkTrack193(A, QStringLiteral("s-1-3"), 1, 3, QStringLiteral("Three")),
+        mkTrack193(A, QStringLiteral("s-1-1"), 1, 1, QStringLiteral("One")),
+        mkTrack193(A, QStringLiteral("s-1-2"), 1, 2, QStringLiteral("Two")),
+    };
+    MusicLibrary::IndexTrack local = tracks.first();
+    local.path = local.sourcePath = QStringLiteral("C:/m/x.flac");
+    tracks.push_back(local);                                   // not a Subsonic track: never a job
+    const QVector<MusicLibrary::IndexTrack> all = SubsonicDownload::albumBatch(tracks, {});
+    CHECK(all.size() == 4);
+    if (all.size() == 4)
+    {
+        CHECK(all[0].title == QStringLiteral("One") && all[1].title == QStringLiteral("Two")
+              && all[2].title == QStringLiteral("Three") && all[3].title == QStringLiteral("Second disc opener"));
+    }
+    const QVector<MusicLibrary::IndexTrack> rest = SubsonicDownload::albumBatch(
+        tracks, { Subsonic::qualify(A, Subsonic::Kind::Track, QStringLiteral("s-1-2")) });
+    CHECK(rest.size() == 3);
+    if (rest.size() == 3) CHECK(rest[1].title == QStringLiteral("Three"));
+
+    // ---- the job: the qualified id, no url, audio, under the downloads folder ----
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads");
+    const MusicLibrary::IndexTrack one = all.isEmpty() ? mkTrack193(A, QStringLiteral("s-1-1"), 1, 1, QStringLiteral("One"))
+                                                       : all.first();
+    const DownloadJob j = SubsonicDownload::jobFor(one, QStringLiteral("Glass: Live"), 2, QStringLiteral("flac"),
+                                                   QStringLiteral("C:/covers/cover.jpg"), dir);
+    CHECK(j.sourceRef == one.path && j.key == one.path);
+    CHECK(j.url.isEmpty());
+    CHECK(j.kind == QStringLiteral("audio"));
+    CHECK(j.thumb == QStringLiteral("C:/covers/cover.jpg"));
+    CHECK(j.title == QString::fromUtf8("One \xE2\x80\x94 Amber"));
+    CHECK(j.dest.startsWith(dir + QLatin1Char('/')));
+    const QString name = QFileInfo(j.dest).fileName();
+    CHECK(name.endsWith(QStringLiteral(".flac")));
+    CHECK(name.contains(QStringLiteral("Amber")) && name.contains(QStringLiteral("Glass_ Live"))
+          && name.contains(QStringLiteral("1-01 One")));
+    CHECK(name.contains(QStringLiteral(" [") + A.left(8) + QLatin1Char('-')));
+    CHECK(!name.contains(QLatin1Char(':')) && !name.contains(QLatin1Char('/')));
+    // A suffix that is not a plain extension is refused, not edited into one; one disc has no disc prefix.
+    CHECK(SubsonicDownload::fileNameFor(one, QStringLiteral("x"), 1, QStringLiteral("../../etc"))
+              .endsWith(QStringLiteral(".mp3")));
+    CHECK(!SubsonicDownload::fileNameFor(one, QStringLiteral("x"), 1, QStringLiteral("flac"))
+               .contains(QStringLiteral("1-01")));
+    CHECK(SubsonicDownload::jobFor(local, QString(), 1, QString(), QString(), dir).sourceRef.isEmpty());
+    // Two servers' same song are two files.
+    const QString B = mkServerId();
+    MusicLibrary::IndexTrack onB = one;
+    onB.path = onB.sourcePath = Subsonic::qualify(B, Subsonic::Kind::Track, QStringLiteral("s-1-1"));
+    CHECK(SubsonicDownload::fileNameFor(one, QStringLiteral("x"), 1, QStringLiteral("mp3"))
+          != SubsonicDownload::fileNameFor(onB, QStringLiteral("x"), 1, QStringLiteral("mp3")));
+
+    // ---- the local copy, as a pure rule ----
+    DownloadedItem d;
+    d.path = QStringLiteral("C:/dl/one.flac"); d.kind = QStringLiteral("audio"); d.key = one.path;
+    const auto yes = [](const QString&) { return true; };
+    const auto no  = [](const QString&) { return false; };
+    CHECK(SubsonicDownload::localCopy(one.path, { d }, yes) == d.path);
+    CHECK(SubsonicDownload::localCopy(one.path, { d }, no).isEmpty());          // deleted outside the app
+    CHECK(SubsonicDownload::localCopy(onB.path, { d }, yes).isEmpty());          // the other server's song
+    CHECK(SubsonicDownload::localCopy(QStringLiteral("C:/dl/one.flac"), { d }, yes).isEmpty());
+    DownloadJob queued; queued.sourceRef = onB.path;
+    const QSet<QString> have = SubsonicDownload::downloadedIds({ d }, { queued }, yes);
+    CHECK(have.contains(one.path) && have.contains(onB.path) && have.size() == 2);
+}
+
+static void testLocalCopyPreferred193(const QString& serverId)
+{
+    const QString trackId = Subsonic::qualify(serverId, Subsonic::Kind::Track, QStringLiteral("song-local"));
+    const QString path = AppPaths::dataDir() + QStringLiteral("/downloads/probe-local-copy.mp3");
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    { QFile f(path); CHECK(f.open(QIODevice::WriteOnly)); f.write("ID3"); }
+    DownloadsStore::add({ path, QStringLiteral("Local"), QStringLiteral("audio"), QString(), trackId });
+
+    // THE ONE DOOR: a downloaded track plays its file, not a stream.
+    CHECK(MusicSupply::playUrl(trackId) == path);
+    // Another server's track with the same remote id is NOT this file.
+    const QString other = Subsonic::qualify(mkServerId(), Subsonic::Kind::Track, QStringLiteral("song-local"));
+    CHECK(MusicSupply::playUrl(other) != path);
+    // The file is gone: back to the signed stream, never a dead path.
+    QFile::remove(path);
+    const QString after = MusicSupply::playUrl(trackId);
+    CHECK(after != path);
+    CHECK(QUrl(after).path().endsWith(QStringLiteral("/rest/stream.view")));
+    DownloadsStore::remove(trackId);
+}
+
+static void testDownloadCredentialAndResume193(const QString& serverId)
+{
+    const QString ref = Subsonic::qualify(serverId, Subsonic::Kind::Track, QStringLiteral("song-9"));
+    // Every url the minter hands out, kept only to learn which token and salt to scan for.
+    auto minted = std::make_shared<QStringList>();
+    const DownloadManager::UrlMinter minter = [minted](const QString& r) {
+        const QString u = SubsonicClient::instance().downloadUrlFor(r);   // THE minter MainWindow installs
+        minted->push_back(u);
+        return u;
+    };
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads");
+    const MusicLibrary::IndexTrack t = mkTrack193(serverId, QStringLiteral("song-9"), 1, 9, QStringLiteral("Nine"));
+    const DownloadJob job = SubsonicDownload::jobFor(t, QStringLiteral("Album"), 1, QStringLiteral("mp3"),
+                                                     QString(), dir);
+    CHECK(job.sourceRef == ref);
+    QString jobId;
+    {
+        DownloadManager dm;
+        dm.setUrlMinter(minter);
+        dm.enqueue(job);
+        CHECK(minted->size() == 1);                     // minted at start(), once
+        CHECK(!dm.jobs().isEmpty());
+        if (!dm.jobs().isEmpty())
+        {
+            jobId = dm.jobs().first().id;
+            CHECK(dm.jobs().first().url.isEmpty());     // never assigned to the job
+            CHECK(dm.jobs().first().sourceRef == ref);
+        }
+        // What the jobCompleted handler records: exactly the job's own fields.
+        DownloadsStore::add({ job.dest, job.title, job.kind, job.thumb, job.key, job.sysId, job.form });
+    }
+    // ---- a restart: the job comes back with its ref, and resuming MINTS AGAIN ----
+    {
+        DownloadManager dm2;
+        dm2.setUrlMinter(minter);
+        const int before = int(minted->size());
+        CHECK(!dm2.jobs().isEmpty());
+        if (!dm2.jobs().isEmpty())
+        {
+            CHECK(dm2.jobs().first().sourceRef == ref && dm2.jobs().first().url.isEmpty());
+            dm2.pauseJob(jobId);
+            dm2.retry(jobId);
+        }
+        CHECK(int(minted->size()) > before);           // a fresh url, not a replayed one
+        if (minted->size() >= 2)
+        {
+            const bool fresh = !minted->last().isEmpty()
+                && QUrlQuery(QUrl(minted->first())).queryItemValue(QStringLiteral("s"))
+                   != QUrlQuery(QUrl(minted->last())).queryItemValue(QStringLiteral("s"));
+            CHECK(fresh);
+        }
+    }
+
+    // ---- THE SCAN: every byte of every file this process wrote ----
+    QList<QByteArray> needles;
+    for (const QString& u : *minted)
+    {
+        const QUrlQuery q{ QUrl(u) };
+        if (!q.queryItemValue(QStringLiteral("t")).isEmpty()) needles << q.queryItemValue(QStringLiteral("t")).toUtf8();
+        if (!q.queryItemValue(QStringLiteral("s")).isEmpty()) needles << q.queryItemValue(QStringLiteral("s")).toUtf8();
+    }
+    CHECK(needles.size() >= 4);
+    needles << QByteArray(kPassword);
+    QStringList offenders;
+    for (QDirIterator it(AppPaths::dataDir(), QDir::Files, QDirIterator::Subdirectories); it.hasNext();)
+    {
+        const QString path = it.next();
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray body = f.readAll();
+        const bool isIni = path.endsWith(QStringLiteral(".ini"));
+        for (const QByteArray& n : needles)
+        {
+            // The ini legitimately holds the PASSWORD under subsonic/<profile>/servers, the device-local home
+            // the server store has always had. A token or a salt belongs in no file at all.
+            if (isIni && n == QByteArray(kPassword)) continue;
+            if (body.contains(n)) { offenders << QFileInfo(path).fileName(); break; }
+        }
+    }
+    offenders.removeDuplicates();
+    if (!offenders.isEmpty())
+        std::fprintf(stderr, "SUBSONIC: a download credential reached %s\n",
+                     offenders.join(QLatin1Char(' ')).toUtf8().constData());
+    CHECK(offenders.isEmpty());
+
+    QFile qf(AppPaths::dataDir() + QStringLiteral("/downloads/queue.json"));
+    CHECK(qf.open(QIODevice::ReadOnly));
+    const QByteArray qbody = qf.readAll();
+    CHECK(qbody.contains("song-9"));                   // the durable half — the id — is there
+    CHECK(!qbody.contains("t=") && !qbody.contains("s=") && !qbody.contains("p="));
+    CHECK(!qbody.contains("download.view") && !qbody.contains("http"));
+
+    // The Downloads store row names the file and the id — never a url.
+    bool rowFound = false, rowClean = true;
+    for (const DownloadedItem& r : DownloadsStore::list())
+    {
+        if (r.key == ref) rowFound = true;
+        for (const QString& f : { r.path, r.thumb, r.key, r.title })
+            if (f.contains(QStringLiteral("t=")) || f.contains(QStringLiteral("s=")) || f.contains(QStringLiteral("http")))
+                rowClean = false;
+    }
+    CHECK(rowFound);
+    CHECK(rowClean);
+}
+
+static void test193()
+{
+    testDownloadAndStreamUrls193();
+    SubsonicServer srv;
+    srv.name = QStringLiteral("Downloads fixture");
+    srv.url = QStringLiteral("https://music.invalid");
+    srv.username = QLatin1String(kUser); srv.password = QLatin1String(kPassword);
+    const QString serverId = SubsonicServerStore::add(srv);
+    CHECK(!serverId.isEmpty());
+    testClientCapAndDownloadMint193(serverId);
+    testDownloadJobs193();
+    testLocalCopyPreferred193(serverId);
+    testDownloadCredentialAndResume193(serverId);   // last: it scans everything the sections above wrote
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
@@ -2499,6 +2861,8 @@ int main(int argc, char** argv)
     testNoCredentialAnywhere();
     // ---- #370: what an empty or failed cover answer does to the level that asked --------------------
     testCoverAnswers370();
+    // ---- #193: offline downloads and the streaming bitrate cap ----------------------------------------
+    test193();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");
