@@ -3971,7 +3971,7 @@ else
   # ...and it must sit ABOVE the player_->play call it stands in for, or the token is played first and the
   # mint happens over the top of it.
   rb_guard="$(grep -n -F 'RemoteAudiobook::isPartToken(p)' "$rb_mwt" | head -1 | cut -d: -f1)"
-  rb_play="$(grep -n -F 'player_->play(p, trackHeaders, session_->titles().value(session_->currentIndex()));' "$rb_mwt" | head -1 | cut -d: -f1)"
+  rb_play="$(grep -n -F 'player_->play(MusicSupply::openQueueEntry(p, session_->identityFor(p)), trackHeaders,' "$rb_mwt" | head -1 | cut -d: -f1)"
   if [ -z "$rb_guard" ] || [ -z "$rb_play" ]; then
     rb_note "could not locate the part-token guard and the queue-driven play call to compare their order (guard=$rb_guard play=$rb_play)."
   else

@@ -274,6 +274,13 @@ namespace MusicSupply
     // track id becomes a signed stream url. The ONE place a credential enters a queue.
     QString playUrl(const QString& path);
 
+    // What to hand the player for one QUEUE ENTRY, at the moment it is opened (#417): `entry` is what the
+    // queue holds and `identity` what it is filed under (PlaybackSession::identityFor). A Subsonic track
+    // plays its downloaded copy if one has landed since the queue was built, and a stream again if the
+    // download it was built from has gone; anything else comes back verbatim. SubsonicDownload::openEntry
+    // has the rule; the queue itself (and so every identity keyed on it) is never changed.
+    QString openQueueEntry(const QString& entry, const QString& identity);
+
     // This album's artwork as a local file: the extracted/sibling cover for a local record, MetaCache's
     // fetched cover for a remote one. Empty when there is none (yet).
     QString albumArt(const MusicLibrary::Album& album);

@@ -147,6 +147,32 @@ QString SubsonicDownload::localCopy(const QString& qualifiedTrackId, const QVect
     return QString();
 }
 
+QString SubsonicDownload::preferLocal(const QString& qualifiedTrackId, const QVector<DownloadedItem>& downloads,
+                                      const std::function<bool(const QString&)>& exists,
+                                      const std::function<QString()>& otherwise)
+{
+    const QString local = localCopy(qualifiedTrackId, downloads, exists);
+    if (!local.isEmpty()) return local;
+    return otherwise ? otherwise() : QString();
+}
+
+QString SubsonicDownload::openEntry(const QString& entry, const QString& identity,
+                                    const QVector<DownloadedItem>& downloads,
+                                    const std::function<bool(const QString&)>& exists,
+                                    const std::function<QString(const QString&)>& mintStream)
+{
+    if (entry.isEmpty() || !isSubsonicTrack(identity)) return entry;
+    return preferLocal(identity, downloads, exists, [&]() -> QString {
+        // A stream url stays what it was: no re-mint, no changed query, for a track with no download.
+        const bool stream = entry.startsWith(QLatin1String("http://"), Qt::CaseInsensitive)
+                         || entry.startsWith(QLatin1String("https://"), Qt::CaseInsensitive);
+        if (stream || (exists ? exists(entry) : QFileInfo::exists(entry))) return entry;
+        // The queue was built from a download that is no longer on disk: back to the server.
+        const QString url = mintStream ? mintStream(identity) : QString();
+        return url.isEmpty() ? entry : url;
+    });
+}
+
 QSet<QString> SubsonicDownload::downloadedIds(const QVector<DownloadedItem>& downloads,
                                               const QVector<DownloadJob>& jobs,
                                               const std::function<bool(const QString&)>& exists)

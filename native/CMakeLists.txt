@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.294 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.295 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2523,8 +2523,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ServerMusicClient.cpp   src/core/ServerMusicClient.h
         src/core/ServerMusic.cpp         src/core/ServerMusic.h
         src/core/MetaCache.cpp           src/core/MetaOverrides.cpp
-        src/core/MetaCache.h             src/core/MetaOverrides.h)
+        src/core/MetaCache.h             src/core/MetaOverrides.h
+        # #417: the REAL queue, so the open-time rule is driven through PlaybackSession's own replace-load
+        # and gapless pre-load signals, and its re-seat when a pre-loaded track finishes downloading.
+        src/media/PlaybackSession.cpp    src/media/PlaybackSession.h
+        src/core/ResumeStore.cpp         src/core/ResumeStore.h
+        src/core/Tombstones.cpp          src/core/Tombstones.h
+        src/core/ConsumptionStats.cpp    src/core/ConsumptionStats.h)
     target_include_directories(probe_subsonic PRIVATE src src/core src/media src/browse src/addons src/theme2 tools)
+    # #417: reads src/ui/MainWindow.cpp to pin every door a queue entry reaches mpv by to the open-time rule.
+    target_compile_definitions(probe_subsonic PRIVATE EB_SUBSONIC_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(probe_subsonic PRIVATE Qt6::Core Qt6::Gui Qt6::Network tag)
 
     # Headless test for CROSS-SOURCE MUSIC IDENTITY (issue #194): the artist/album normalisers and every trap

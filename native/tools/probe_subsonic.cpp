@@ -35,6 +35,7 @@
 #include "ServerMusicClient.h"
 #include "SubsonicClient.h"
 #include "SubsonicServerStore.h"
+#include "PlaybackSession.h"   // #417: the real queue, driven through its gapless pre-load
 
 #include <QBuffer>
 #include <QCoreApplication>
@@ -2813,6 +2814,200 @@ static void test193()
     testDownloadCredentialAndResume193(serverId);   // last: it scans everything the sections above wrote
 }
 
+// ================= #417: a queue entry is resolved when it is OPENED, not when the queue was built ========
+//
+// The queue freezes each entry's location at build time. What must happen at every door an entry reaches the
+// player by (the replace-load, the gapless pre-load, the crossfade's second deck) is the SAME prefer-local
+// rule Play album applies (SubsonicDownload::preferLocal), asked at that moment.
+
+static QString writeDownload417(const QString& name)
+{
+    const QString path = AppPaths::dataDir() + QStringLiteral("/downloads/") + name;
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) f.write("RIFF");
+    return path;
+}
+
+// The pure rule, with a fake disk and a counting minter.
+static void testOpenEntryRule417()
+{
+    const QString sid = mkServerId();
+    const QString id  = Subsonic::qualify(sid, Subsonic::Kind::Track, QStringLiteral("t-1"));
+    const QString url = QStringLiteral("https://music.invalid/rest/stream.view?id=t-1&u=x");
+    const QString dl  = QStringLiteral("C:/probe/downloads/t-1.flac");
+    int mints = 0;
+    const auto mint = [&](const QString& q) {
+        ++mints;
+        return QStringLiteral("https://music.invalid/fresh?id=") + q.right(3);
+    };
+    QSet<QString> disk;
+    const auto exists = [&](const QString& p) { return disk.contains(p); };
+    const QVector<DownloadedItem> none;
+    QVector<DownloadedItem> held;
+    { DownloadedItem d; d.path = dl; d.title = QStringLiteral("T1"); d.kind = QStringLiteral("audio"); d.key = id;
+      held.push_back(d); }
+
+    // No download anywhere: the entry comes back byte-for-byte, and nothing is minted.
+    CHECK(SubsonicDownload::openEntry(url, id, none, exists, mint) == url);
+    CHECK(mints == 0);
+    // Built as a stream, the download completes: the open plays the file.
+    disk.insert(dl);
+    CHECK(SubsonicDownload::openEntry(url, id, held, exists, mint) == dl);
+    CHECK(mints == 0);
+    // The download is removed (file gone, row still there): back to the stream the queue holds.
+    disk.remove(dl);
+    CHECK(SubsonicDownload::openEntry(url, id, held, exists, mint) == url);
+    CHECK(mints == 0);
+    // Built from the download (it existed then), which is now gone: a freshly minted stream, never a dead path.
+    const QString fresh = SubsonicDownload::openEntry(dl, id, held, exists, mint);
+    CHECK(fresh.startsWith(QStringLiteral("https://music.invalid/fresh")));
+    CHECK(mints == 1);
+    // ...and a server that can no longer mint leaves the entry as it was rather than handing mpv "".
+    CHECK(SubsonicDownload::openEntry(dl, id, held, exists, [](const QString&) { return QString(); }) == dl);
+    // Built from the download, still there: the file.
+    disk.insert(dl);
+    CHECK(SubsonicDownload::openEntry(dl, id, held, exists, mint) == dl);
+    // Anything that is not a Subsonic TRACK is untouched: a local-library file, a Jellyfin track, an album key.
+    const int before = mints;
+    const QString lib = QStringLiteral("C:/Music/a.flac");
+    CHECK(SubsonicDownload::openEntry(lib, lib, held, exists, mint) == lib);
+    const QString jf = QStringLiteral("https://jf.invalid/Audio/x/stream");
+    CHECK(SubsonicDownload::openEntry(jf, Jellyfin::qualify(sid, QStringLiteral("x")), held, exists, mint) == jf);
+    CHECK(SubsonicDownload::openEntry(url, Subsonic::qualify(sid, Subsonic::Kind::Album, QStringLiteral("t-1")),
+                                      held, exists, mint) == url);
+    CHECK(mints == before);
+    // Another server's same remote id is not this file.
+    const QString other = Subsonic::qualify(mkServerId(), Subsonic::Kind::Track, QStringLiteral("t-1"));
+    CHECK(SubsonicDownload::openEntry(url, other, held, exists, mint) == url);
+    // ONE RULE: preferLocal is what both doors answer through.
+    CHECK(SubsonicDownload::preferLocal(id, held, exists, [] { return QStringLiteral("S"); }) == dl);
+    CHECK(SubsonicDownload::preferLocal(id, none, exists, [] { return QStringLiteral("S"); }) == QStringLiteral("S"));
+}
+
+// The real door (MusicSupply, the real DownloadsStore, the real client's minter) and the real queue
+// (PlaybackSession, gapless armed): what the host hands mpv on each signal, and what the queue still holds.
+static void testQueueOpensAtOpenTime417(const QString& serverId)
+{
+    const auto trk = [&](const char* n) {
+        return Subsonic::qualify(serverId, Subsonic::Kind::Track, QString::fromLatin1(n));
+    };
+    const QString id1 = trk("q417-1"), id2 = trk("q417-2"), id3 = trk("q417-3");
+    DownloadsStore::remove(id1); DownloadsStore::remove(id2); DownloadsStore::remove(id3);
+
+    // BUILT as Play album builds it: every entry through MusicSupply::playUrl, nothing downloaded yet.
+    QStringList queue;
+    QHash<QString, QString> idents;
+    for (const QString& id : { id1, id2, id3 })
+    {
+        const QString u = MusicSupply::playUrl(id);
+        CHECK(QUrl(u).path().endsWith(QStringLiteral("/rest/stream.view")));
+        queue << u;
+        idents.insert(u, id);
+    }
+    // One rule, two doors: with nothing downloaded, the open answers exactly what the build did.
+    for (const QString& u : queue) CHECK(MusicSupply::openQueueEntry(u, idents.value(u)) == u);
+
+    QTemporaryDir tmp;
+    PlaybackSession s(tmp.path() + QStringLiteral("/probe417.ini"));
+    QStringList played, appended;
+    int invalidated = 0;
+    // EXACTLY the host's expression (MainWindow's playRequested / appendRequested sinks; pinned below).
+    QObject::connect(&s, &PlaybackSession::playRequested, [&](const QString& p, const StreamHeaders::Headers&) {
+        played << MusicSupply::openQueueEntry(p, s.identityFor(p));
+    });
+    QObject::connect(&s, &PlaybackSession::appendRequested, [&](const QString& p, const StreamHeaders::Headers&) {
+        appended << MusicSupply::openQueueEntry(p, s.identityFor(p));
+    });
+    // The host's reseatQueueFeed ends in feedNextTrack(); the mpv half of it is not under test here.
+    QObject::connect(&s, &PlaybackSession::queueFeedInvalidated, [&] { ++invalidated; s.feedNextTrack(); });
+    s.setTrackIdentities(idents);
+    s.setGapless(true);
+    s.setQueue(queue, 0, { QStringLiteral("One"), QStringLiteral("Two"), QStringLiteral("Three") });
+    // Track 1 streams; track 2 is pre-loaded as the stream it was built as.
+    CHECK(played == QStringList{ queue.at(0) });
+    CHECK(appended == QStringList{ queue.at(1) });
+
+    // A track mpv was NOT handed finishing its download re-seats nothing.
+    CHECK(!s.refeedPreloaded(id3));
+    CHECK(!s.refeedPreloaded(id1));   // the playing track is not a pre-load either
+    CHECK(invalidated == 0);
+
+    // Track 2's download completes while track 1 plays: the pre-load is re-seated, and re-fed as the FILE.
+    const QString f2 = writeDownload417(QStringLiteral("q417-2.wav"));
+    { DownloadedItem d; d.path = f2; d.title = QStringLiteral("Two"); d.kind = QStringLiteral("audio"); d.key = id2;
+      DownloadsStore::add(d); }
+    CHECK(s.refeedPreloaded(id2));
+    CHECK(invalidated == 1);
+    CHECK(appended.size() == 2 && appended.value(1) == f2);
+
+    // IDENTITY UNCHANGED: the queue holds what it was built with, filed under the same qualified id.
+    CHECK(s.tracks() == queue);
+    CHECK(s.identityFor(s.trackAt(1)) == id2);
+
+    // A manual jump onto track 2 (the replace-load door) opens the file as well.
+    s.next();
+    CHECK(played.size() == 2 && played.value(1) == f2);
+    CHECK(s.currentIndex() == 1 && s.trackAt(1) == queue.at(1));
+    CHECK(s.identityFor(s.trackAt(s.currentIndex())) == id2);
+    // ...and track 3 is pre-loaded as its stream (no download).
+    CHECK(appended.last() == queue.at(2));
+
+    // Track 3 downloads, then the download is REMOVED before it is reached: it falls back to the stream.
+    const QString f3 = writeDownload417(QStringLiteral("q417-3.wav"));
+    { DownloadedItem d; d.path = f3; d.title = QStringLiteral("Three"); d.kind = QStringLiteral("audio"); d.key = id3;
+      DownloadsStore::add(d); }
+    CHECK(MusicSupply::openQueueEntry(queue.at(2), id3) == f3);
+    QFile::remove(f3);
+    s.next();
+    CHECK(played.last() == queue.at(2));
+
+    // The gapless-off queue: nothing is pre-loaded, so there is nothing to re-seat.
+    PlaybackSession off(tmp.path() + QStringLiteral("/probe417b.ini"));
+    off.setTrackIdentities(idents);
+    off.setQueue(queue, 0, {});
+    CHECK(!off.refeedPreloaded(id2));
+
+    DownloadsStore::remove(id2); DownloadsStore::remove(id3);
+    QFile::remove(f2);
+}
+
+// THE HOST'S DOORS, read from the source: every place a queue entry becomes something mpv is handed goes
+// through the open-time rule, and a completed download re-seats the pre-load. CR stripped, so this reads the
+// same on a Windows checkout and a Linux one.
+static void testHostDoorsWired417()
+{
+    QFile mw(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/ui/MainWindow.cpp"));
+    CHECK(mw.open(QIODevice::ReadOnly));
+    const QString src = QString::fromUtf8(mw.readAll()).remove(QLatin1Char('\r'));
+    CHECK(src.contains(QStringLiteral(
+        "player_->play(MusicSupply::openQueueEntry(p, session_->identityFor(p)), trackHeaders,")));
+    CHECK(src.contains(QStringLiteral(
+        "player_->appendFile(MusicSupply::openQueueEntry(p, session_->identityFor(p)), trackHeaders);")));
+    CHECK(src.contains(QStringLiteral(
+        "const QString nextPath = MusicSupply::openQueueEntry(nextEntry, session_->identityFor(nextEntry));")));
+    CHECK(src.contains(QStringLiteral("player_->beginCrossfade(nextPath, crossfadeSecs_);")));
+    CHECK(src.contains(QStringLiteral(
+        "crossfadeTrackFacts(MusicSupply::openQueueEntry(inPath, session_->identityFor(inPath)))")));
+    CHECK(src.contains(QStringLiteral("session_->refeedPreloaded(j.key);")));
+    // ...and no door left handing over the frozen entry.
+    CHECK(!src.contains(QStringLiteral("player_->play(p, trackHeaders")));
+    CHECK(!src.contains(QStringLiteral("player_->appendFile(p, trackHeaders")));
+}
+
+static void test417()
+{
+    testOpenEntryRule417();
+    SubsonicServer srv;
+    srv.name = QStringLiteral("Queue fixture 417");
+    srv.url = QStringLiteral("https://music.invalid");
+    srv.username = QLatin1String(kUser); srv.password = QLatin1String(kPassword);
+    const QString serverId = SubsonicServerStore::add(srv);
+    CHECK(!serverId.isEmpty());
+    testQueueOpensAtOpenTime417(serverId);
+    testHostDoorsWired417();
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
@@ -2863,6 +3058,8 @@ int main(int argc, char** argv)
     testCoverAnswers370();
     // ---- #193: offline downloads and the streaming bitrate cap ----------------------------------------
     test193();
+    // ---- #417: a queue entry prefers its downloaded copy when it is OPENED, not when it was built ------
+    test417();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");
