@@ -24256,6 +24256,8 @@ void MainWindow::openGeneralSettings()
         auto* fStatus = new QLabel(followStatusLine());
         fStatus->setWordWrap(true);
         fStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        // Before any check the sentence is the section's own hint, which this form already prints above.
+        fStatus->setVisible(!followSched_ || followSched_->status().phase != follow::CheckPhase::Idle);
         v->addWidget(fStatus);
         followStatusLabel_ = fStatus;
         connect(fCheck, &QPushButton::clicked, this, [this] { followUserCheckNow(false); });

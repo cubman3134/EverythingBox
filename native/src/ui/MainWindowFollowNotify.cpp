@@ -270,7 +270,11 @@ void MainWindow::onFollowStatusChanged()
         themedPanelHost_->updateRow(r.id, r);
     }
     // Classic: the settings line, while its page exists (QPointer: the page is rebuilt and freed freely).
-    if (followStatusLabel_) followStatusLabel_->setText(line);
+    if (followStatusLabel_)
+    {
+        followStatusLabel_->setText(line);
+        followStatusLabel_->setVisible(true);   // hidden only while idle (the form prints the hint above it)
+    }
     fnLog(QStringLiteral("status: %1").arg(line));   // the row text, timestamped: live evidence for #420
     // The classic Follow menu has no status line, so a press from there is answered with a notice: once as it
     // starts (or is ignored), once as it ends.
