@@ -53,6 +53,7 @@ QVector<FollowItem> FollowStore::list()
         it.type         = o.value(QStringLiteral("type")).toString();
         it.thumbnailUrl = o.value(QStringLiteral("thumbnailUrl")).toString();
         it.ts           = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+        it.muted        = o.value(QStringLiteral("muted")).toBool();
         if (!it.itemId.isEmpty()) out.push_back(it);
     }
     return out;
@@ -73,6 +74,9 @@ static void save(const QVector<FollowItem>& items)
         o.insert(QStringLiteral("type"), it.type);
         o.insert(QStringLiteral("thumbnailUrl"), it.thumbnailUrl);
         o.insert(QStringLiteral("ts"), static_cast<double>(it.ts));
+        // Only when set, so a row nobody muted is byte-for-byte the row increment 1 wrote (and a peer running
+        // that build merges it unchanged; it passes the unknown key through, since rows travel whole).
+        if (it.muted) o.insert(QStringLiteral("muted"), true);
         arr.append(o);
     }
     store().setValue(followKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
@@ -83,9 +87,11 @@ void FollowStore::add(const FollowItem& item)
 {
     if (item.itemId.isEmpty()) return;
     QVector<FollowItem> items = list();
+    bool wasMuted = false;
     for (int i = items.size() - 1; i >= 0; --i)
-        if (items[i].itemId == item.itemId) items.remove(i);   // de-dup / re-follow
+        if (items[i].itemId == item.itemId) { wasMuted = wasMuted || items[i].muted; items.remove(i); }   // de-dup
     FollowItem stamped = item;
+    stamped.muted = stamped.muted || wasMuted;   // refreshing a row that is still followed keeps its mute
     stamped.ts = QDateTime::currentSecsSinceEpoch();
     items.prepend(stamped);                                    // newest first
     save(items);
@@ -119,3 +125,29 @@ bool FollowStore::isFollowed(const QString& itemId)
 }
 
 int FollowStore::count() { return int(list().size()); }
+
+void FollowStore::setMuted(const QString& itemId, bool muted)
+{
+    if (itemId.isEmpty()) return;
+    QVector<FollowItem> items = list();
+    for (FollowItem& it : items)
+    {
+        if (it.itemId != itemId) continue;
+        if (it.muted == muted) return;
+        it.muted = muted;
+        // Strictly newer than what we held, so the merge's newest-ts rule carries the edit to every peer even
+        // when the follow and the mute land in the same second.
+        it.ts = qMax(QDateTime::currentSecsSinceEpoch(), it.ts + 1);
+        save(items);
+        fireChanged();
+        return;
+    }
+}
+
+bool FollowStore::isMuted(const QString& itemId)
+{
+    if (itemId.isEmpty()) return false;
+    for (const FollowItem& it : list())
+        if (it.itemId == itemId) return it.muted;
+    return false;
+}

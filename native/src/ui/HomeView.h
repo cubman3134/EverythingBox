@@ -330,7 +330,8 @@ public:
     // same toggleFollow / markAllSeen the classic menu calls, so the two layouts cannot disagree.
     bool isThemedLeafFollowed(int browseIndex) const;
     int  themedLeafNewCount(int browseIndex) const;
-    void runThemedFollowVerb(int browseIndex, const QString& verb);   // "follow" | "markseen"
+    bool isThemedLeafMuted(int browseIndex) const;   // the per-series notification mute (#155 increment 2)
+    void runThemedFollowVerb(int browseIndex, const QString& verb);   // "follow" | "markseen" | "notifymute"
     void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)
     // The themed DETAIL view's data for the browse-item at `browseIndex`: the rich MediaDetail (title/subtitle/
     // overview/facts + art via MediaArt::writeInto) resolved from the same local sources requestThemedMeta uses
@@ -1118,6 +1119,7 @@ private:
     // other, which is the class of defect the two-layouts rule exists for.
     void showFollowMenu(MediaItem it);       // long-press/right-click on a series row
     void toggleFollow(const MediaItem& it);  // the verb itself, called from both layouts
+    void toggleFollowMute(const MediaItem& it);   // the per-series notification mute, from both layouts
     // Activating a New-shelf row opens a menu rather than playing, for the "You Missed" row's reason: the
     // row needs verbs beyond "open it" (mark this seen / mark the series seen / stop following), and a
     // NavMenu is the only control every one of this app's four layouts reaches with a D-pad.

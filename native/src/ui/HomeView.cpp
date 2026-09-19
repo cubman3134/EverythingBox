@@ -7575,7 +7575,11 @@ void HomeView::showFollowMenu(MediaItem it)
     const bool followed = FollowStore::isFollowed(it.id);
     const int unread = followUnreadCount(it.id);
     QStringList rows;
+    const bool muted = followed && FollowStore::isMuted(it.id);
     rows << (followed ? tr("✓   Following — stop") : tr("＋   Follow this series"));
+    // The per-series notification mute (#155 increment 2), right under the Follow verb it belongs to — the
+    // twin of the themed "notifymute" pill. Only on a followed series: the mute is stored ON the follow row.
+    if (followed) rows << (muted ? tr("🔔  Unmute notifications") : tr("🔕  Mute notifications"));
     if (followed && unread > 0) rows << tr("✓✓  Mark all %1 new as seen").arg(unread);
     if (followed) rows << tr("⟳   Check for new items now");
     const MediaItem copy = it;
@@ -7586,6 +7590,7 @@ void HomeView::showFollowMenu(MediaItem it)
             return;
         }
         int next = 1;
+        if (followed && row == next++) { toggleFollowMute(copy); return; }
         if (followed && unread > 0 && row == next++) { FollowSnapshot::markAllSeen(copy.id); }
         else if (followed && row == next) { emit followCheckNowRequested(); return; }
         else return;
@@ -7624,6 +7629,18 @@ void HomeView::toggleFollow(const MediaItem& it)
     else             loadTop();
     emit browseItemsChanged(false);
     browseSelectKey_.clear();
+}
+
+// Mute / unmute notifications for one followed series, from either layout. The mute is a field of the synced
+// follow row (FollowStore::setMuted), so it travels to every device the follow does.
+void HomeView::toggleFollowMute(const MediaItem& it)
+{
+    if (it.id.isEmpty() || !FollowStore::isFollowed(it.id)) return;
+    const bool nowMuted = !FollowStore::isMuted(it.id);
+    FollowStore::setMuted(it.id, nowMuted);
+    showToast(nowMuted ? tr("No notifications for “%1”. New items still appear on the New shelf.").arg(it.title)
+                       : tr("Notifications for “%1” are on again.").arg(it.title),
+              kFeedbackShort);
 }
 
 // How many unseen children a followed series is carrying, counted through the SAME dealt-with filter the New
@@ -11179,11 +11196,22 @@ int HomeView::themedLeafNewCount(int idx) const
     return followUnreadCount(items_[browseRowMap_[idx]].id);
 }
 
+bool HomeView::isThemedLeafMuted(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    return FollowStore::isMuted(items_[browseRowMap_[idx]].id);
+}
+
 void HomeView::runThemedFollowVerb(int idx, const QString& verb)
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return;
     const MediaItem it = items_[browseRowMap_[idx]];   // copy: both arms below repopulate items_
     if (!follow::isFollowable(it.type, it.expandable) || it.id.isEmpty()) return;
+    if (verb == QStringLiteral("notifymute"))
+    {
+        toggleFollowMute(it);
+        return;
+    }
     if (verb == QStringLiteral("markseen"))
     {
         FollowSnapshot::markAllSeen(it.id);
@@ -11537,6 +11565,13 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
         const int unread = followUnreadCount(it.id);
         out.insert(QStringLiteral("followed"), followed);
         out.insert(QStringLiteral("newCount"), unread);
+        // The per-series notification mute (#155 increment 2), beside the Follow pill; the classic twin is the
+        // mute row of showFollowMenu. Only on a followed series — it is stored on the follow row.
+        if (followed)
+        {
+            verbs << QStringLiteral("notifymute");
+            out.insert(QStringLiteral("muted"), FollowStore::isMuted(it.id));
+        }
         if (followed && unread > 0) verbs << QStringLiteral("markseen");
     }
     // #372: Download is downloadOfferedFor's answer — the ONE the XMB chooser's Download row reads too (MainWindow

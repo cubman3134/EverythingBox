@@ -35,6 +35,7 @@
 // Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
 // it reads and writes starts empty, is never shared with a sibling probe or a previous run, and is removed at
 // exit. Profile ids are seeded explicitly because currentId() otherwise resolves to the store's default.
+#include "FollowNotify.h"
 #include "FollowPlan.h"
 #include "FollowScheduler.h"
 #include "FollowSnapshot.h"
@@ -620,6 +621,348 @@ int main(int argc, char** argv)
         // A row with no id cannot be deduplicated and is not a row.
         follow::NewRow anon;
         CHECK(follow::mergeNewShelf({ anon }, {}).isEmpty());
+    }
+
+    // ==== Increment 2: grouped notifications (FollowNotify) ==================================================
+    // What one refresh cycle found becomes AT MOST ONE notification, with exact, plural-correct text; muted
+    // series never reach the grouping; a child already seen does not count; nothing is delivered while the
+    // global setting is off; the one-time prompt fires once; a notification held behind full-screen playback
+    // is merged with the next cycle and delivered as one; and the mute lives on the synced follow row.
+    using namespace follownotify;
+    auto mkNews = [](const QString& id, const QString& title, int n, qint64 at) {
+        SeriesNews s; s.seriesId = id; s.seriesTitle = title;
+        for (int i = 1; i <= n; ++i)
+            s.children.push_back({ id + QStringLiteral("-e") + QString::number(i),
+                                   title + QStringLiteral(" ep ") + QString::number(i), at + i });
+        return s;
+    };
+    const auto noneMuted = [](const QString&) { return false; };
+
+    // ---- 11. The text, for one, two, three and five series -------------------------------------------------
+    {
+        Notice n1 = summarize({ mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 1, 100) });
+        CHECK(n1.title == QStringLiteral("Alpha: 1 new episode"));          // singular
+        CHECK(n1.body == QStringLiteral("Alpha ep 1"));
+        CHECK(n1.seriesCount == 1 && n1.itemCount == 1);
+
+        Notice n3 = summarize({ mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 3, 100) });
+        CHECK(n3.title == QStringLiteral("Alpha: 3 new episodes"));         // plural, exact count
+        CHECK(n3.body == QStringLiteral("Alpha ep 3"));                     // the NEWEST child's title
+        CHECK(n3.itemCount == 3);
+
+        // Two series: names newest-first. Beta's newest (200+2) beats Alpha's (100+3).
+        Notice t2 = summarize({ mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 3, 100),
+                                mkNews(QStringLiteral("b"), QStringLiteral("Beta"), 2, 200) });
+        CHECK(t2.title == QStringLiteral("New in 2 series you follow"));
+        CHECK(t2.body == QStringLiteral("Beta and Alpha"));
+        CHECK(t2.seriesCount == 2 && t2.itemCount == 5);
+
+        Notice t3 = summarize({ mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 1, 100),
+                                mkNews(QStringLiteral("b"), QStringLiteral("Beta"), 1, 300),
+                                mkNews(QStringLiteral("c"), QStringLiteral("Gamma"), 1, 200) });
+        CHECK(t3.title == QStringLiteral("New in 3 series you follow"));
+        CHECK(t3.body == QStringLiteral("Beta, Gamma and Alpha"));          // three named, no "more"
+
+        Notice t5 = summarize({ mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 1, 500),
+                                mkNews(QStringLiteral("b"), QStringLiteral("Beta"), 2, 400),
+                                mkNews(QStringLiteral("c"), QStringLiteral("Gamma"), 1, 300),
+                                mkNews(QStringLiteral("d"), QStringLiteral("Delta"), 4, 200),
+                                mkNews(QStringLiteral("e"), QStringLiteral("Epsilon"), 1, 100) });
+        CHECK(t5.title == QStringLiteral("New in 5 series you follow"));
+        CHECK(t5.body == QStringLiteral("Alpha, Beta, Gamma and 2 more"));
+        CHECK(t5.seriesCount == 5 && t5.itemCount == 9);
+
+        CHECK(nameList({ QStringLiteral("A"), QStringLiteral("B"), QStringLiteral("C"), QStringLiteral("D") })
+              == QStringLiteral("A, B, C and 1 more"));
+        // A title carrying a placeholder is text, not a format string.
+        Notice pct = summarize({ mkNews(QStringLiteral("p"), QStringLiteral("100%1 Real"), 2, 1) });
+        CHECK(pct.title == QStringLiteral("100%1 Real: 2 new episodes"));
+    }
+
+    // ---- 12. At most one per cycle, and the mute filter ------------------------------------------------------
+    {
+        Outbox box;
+        const QVector<SeriesNews> five = { mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 1, 500),
+                                           mkNews(QStringLiteral("b"), QStringLiteral("Beta"), 2, 400),
+                                           mkNews(QStringLiteral("c"), QStringLiteral("Gamma"), 1, 300),
+                                           mkNews(QStringLiteral("d"), QStringLiteral("Delta"), 4, 200),
+                                           mkNews(QStringLiteral("e"), QStringLiteral("Epsilon"), 1, 100) };
+        Decision d = box.onCycle(five, Consent::On, false, noneMuted);
+        CHECK(d.notices.size() == 1);                                      // ONE notification for five series
+        CHECK(!d.notices.isEmpty() && d.notices.first().seriesCount == 5);
+        CHECK(!d.prompt && !d.held && !box.hasPending());
+
+        // Muted series are dropped BEFORE grouping: the count and the names are of what is left.
+        const QSet<QString> muted = { QStringLiteral("a"), QStringLiteral("d") };
+        const auto isMuted = [&muted](const QString& id) { return muted.contains(id); };
+        d = box.onCycle(five, Consent::On, false, isMuted);
+        CHECK(d.notices.size() == 1);
+        CHECK(!d.notices.isEmpty() && d.notices.first().title == QStringLiteral("New in 3 series you follow"));
+        CHECK(!d.notices.isEmpty() && d.notices.first().body == QStringLiteral("Beta, Gamma and Epsilon"));
+        CHECK(!d.notices.isEmpty() && d.notices.first().itemCount == 4);
+
+        // One series left after the mute reads as a one-series notification, not "New in 1 series".
+        const auto allButB = [](const QString& id) { return id != QStringLiteral("b"); };
+        d = box.onCycle(five, Consent::On, false, allButB);
+        CHECK(!d.notices.isEmpty() && d.notices.first().title == QStringLiteral("Beta: 2 new episodes"));
+
+        // EVERYTHING muted: nothing at all -- no notice, no prompt, nothing held.
+        const auto allMuted = [](const QString&) { return true; };
+        d = box.onCycle(five, Consent::On, false, allMuted);
+        CHECK(d.notices.isEmpty() && !d.prompt && !d.held);
+        Outbox fresh;
+        d = fresh.onCycle(five, Consent::Unset, false, allMuted);
+        CHECK(!d.prompt && !fresh.prompted());                           // a muted cycle does not spend the prompt
+        CHECK(dropMuted(five, allMuted).isEmpty());
+        CHECK(dropMuted(five, isMuted).size() == 3);
+
+        // A cycle that found nothing produces nothing.
+        d = box.onCycle({}, Consent::On, false, noneMuted);
+        CHECK(d.notices.isEmpty());
+        d = box.onCycle({ mkNews(QStringLiteral("z"), QStringLiteral("Zed"), 0, 1) }, Consent::On, false, noneMuted);
+        CHECK(d.notices.isEmpty());
+    }
+
+    // ---- 13. Seen items never count -------------------------------------------------------------------------
+    {
+        QVector<FollowSnapshot::Pending> pend;
+        auto p = [](const QString& id, qint64 at) {
+            FollowSnapshot::Pending x; x.id = id; x.title = id + QStringLiteral(" title"); x.foundAt = at; return x;
+        };
+        pend << p(QStringLiteral("old"), 10) << p(QStringLiteral("n1"), 50) << p(QStringLiteral("n2"), 50)
+             << p(QStringLiteral("watched"), 50);
+        const QSet<QString> dealt = { QStringLiteral("watched") };
+        // "gone" was announced this cycle but marked seen before the cycle ended, so it is no longer pending.
+        const QStringList found = { QStringLiteral("n1"), QStringLiteral("n2"), QStringLiteral("watched"),
+                                    QStringLiteral("gone") };
+        const SeriesNews s = newsFor(QStringLiteral("S"), QStringLiteral("Show"), pend, found,
+                                     [&dealt](const QString& c) { return dealt.contains(c); });
+        CHECK(s.count() == 2);                                   // n1 + n2; not "old", "watched" or "gone"
+        CHECK(s.seriesTitle == QStringLiteral("Show"));
+        Notice n = summarize({ s });
+        CHECK(n.title == QStringLiteral("Show: 2 new episodes"));
+        CHECK(n.body == QStringLiteral("n2 title"));
+
+        // Nothing new left -> the series drops out before grouping.
+        const SeriesNews none = newsFor(QStringLiteral("S"), QStringLiteral("Show"), pend, { QStringLiteral("watched") },
+                                        [&dealt](const QString& c) { return dealt.contains(c); });
+        CHECK(none.count() == 0);
+        CHECK(dropMuted({ none }, noneMuted).isEmpty());
+
+        // END TO END through the real scheduler and the real snapshot: the ids the signal carries are the ones
+        // the cycle found, so a child still pending from an EARLIER cycle is not re-announced.
+        useProfile(QStringLiteral("fN"));
+        qint64 clock = 1700000000;
+        QHash<QString, QVector<follow::Child>> world;
+        world.insert(QStringLiteral("N1"), { mkChild(QStringLiteral("n-e1"), QStringLiteral("One")) });
+        QVector<FollowItem> follows{ mkFollow(QStringLiteral("N1"), QStringLiteral("srcN")) };
+        FollowScheduler sched;
+        sched.setPeriodic(false);
+        sched.setClock([&clock] { return clock; });
+        sched.setListSource([&follows] { return follows; });
+        sched.setJitterSeed(0);
+        QHash<QString, QStringList> cycleFound;
+        sched.setFetcher([&](const FollowItem& it, FollowScheduler::FetchDone done) {
+            done(true, world.value(it.itemId));
+        });
+        QObject::connect(&sched, &FollowScheduler::newItemsFound,
+                         [&](const QString& id, int n, const QStringList& ids) {
+            CHECK(n == ids.size());
+            cycleFound[id] << ids;
+        });
+        QVector<SeriesNews> lastCycle;
+        QObject::connect(&sched, &FollowScheduler::cycleFinished, [&](int, int) {
+            lastCycle.clear();
+            for (auto it = cycleFound.cbegin(); it != cycleFound.cend(); ++it)
+                lastCycle << newsFor(it.key(), QStringLiteral("Show N"), FollowSnapshot::get(it.key()).pending,
+                                     it.value(), [](const QString&) { return false; });
+            cycleFound.clear();
+        });
+        sched.checkNow();                                         // baseline: silent
+        CHECK(lastCycle.isEmpty());
+        world[QStringLiteral("N1")] << mkChild(QStringLiteral("n-e2"), QStringLiteral("Two"))
+                                    << mkChild(QStringLiteral("n-e3"), QStringLiteral("Three"));
+        clock += 60;
+        sched.checkNow();
+        CHECK(lastCycle.size() == 1);
+        CHECK(!lastCycle.isEmpty() && lastCycle.first().count() == 2);
+        world[QStringLiteral("N1")] << mkChild(QStringLiteral("n-e4"), QStringLiteral("Four"));
+        clock += 60;
+        sched.checkNow();                                          // n-e2/n-e3 are still pending from before...
+        CHECK(!lastCycle.isEmpty() && lastCycle.first().count() == 1);   // ...but only n-e4 is THIS cycle's news
+        CHECK(!lastCycle.isEmpty() && summarize(lastCycle).body == QStringLiteral("Four"));
+        FollowSnapshot::forget(QStringLiteral("N1"));
+        useProfile(QStringLiteral("fA"));
+    }
+
+    // ---- 14. The global setting, and the one-time prompt ----------------------------------------------------
+    {
+        const QVector<SeriesNews> one = { mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 2, 100) };
+        // Off: nothing, ever, and no prompt (the user has answered).
+        Outbox off;
+        Decision d = off.onCycle(one, Consent::Off, false, noneMuted);
+        CHECK(d.notices.isEmpty() && !d.prompt && !d.held);
+        d = off.onCycle(one, Consent::Off, true, noneMuted);
+        CHECK(d.notices.isEmpty() && !d.held && !off.hasPending());
+
+        // Unset (the default): nothing delivered; the FIRST cycle with news offers to turn it on, once.
+        Outbox box;
+        CHECK(!box.prompted());
+        d = box.onCycle({}, Consent::Unset, false, noneMuted);
+        CHECK(!d.prompt && !box.prompted());                       // an empty cycle does not spend it
+        d = box.onCycle(one, Consent::Unset, false, noneMuted);
+        CHECK(d.prompt && d.notices.isEmpty());
+        CHECK(box.prompted());
+        d = box.onCycle(one, Consent::Unset, false, noneMuted);
+        CHECK(!d.prompt && d.notices.isEmpty());                  // never again
+        // ...including across a restart (the caller persists prompted()).
+        Outbox restarted; restarted.setPrompted(true);
+        d = restarted.onCycle(one, Consent::Unset, false, noneMuted);
+        CHECK(!d.prompt && d.notices.isEmpty());
+        // Answered "on": notifications flow and there is no prompt.
+        d = box.onCycle(one, Consent::On, false, noneMuted);
+        CHECK(!d.prompt && d.notices.size() == 1);
+
+        // The prompt is HELD behind playback like a notification, then shown on release...
+        Outbox heldPrompt;
+        d = heldPrompt.onCycle(one, Consent::Unset, true, noneMuted);
+        CHECK(!d.prompt && d.held && heldPrompt.prompted() && heldPrompt.hasPending());
+        d = heldPrompt.release(Consent::Unset, noneMuted, {});
+        CHECK(d.prompt && d.notices.isEmpty() && !heldPrompt.hasPending());
+        // ...unless the user answered in the meantime.
+        Outbox answered;
+        answered.onCycle(one, Consent::Unset, true, noneMuted);
+        d = answered.release(Consent::On, noneMuted, {});
+        CHECK(!d.prompt && d.notices.isEmpty());
+    }
+
+    // ---- 15. Held during full-screen playback, then merged with the next cycle -------------------------------
+    {
+        Outbox box;
+        SeriesNews a1 = mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 2, 100);   // a-e1, a-e2
+        Decision d = box.onCycle({ a1 }, Consent::On, true, noneMuted);
+        CHECK(d.notices.isEmpty() && d.held && box.hasPending());
+
+        // The next cycle, still playing: Alpha grew again (a-e2 repeated + a-e3) and Beta appeared. ONE pending
+        // summary, merged -- a-e2 is not counted twice.
+        SeriesNews a2 = mkNews(QStringLiteral("a"), QStringLiteral("Alpha"), 3, 100);   // a-e1..a-e3
+        a2.children.remove(0);                                                         // a-e2, a-e3
+        SeriesNews b1 = mkNews(QStringLiteral("b"), QStringLiteral("Beta"), 1, 900);
+        d = box.onCycle({ a2, b1 }, Consent::On, true, noneMuted);
+        CHECK(d.notices.isEmpty() && d.held);
+        CHECK(box.pending().size() == 2);
+        CHECK(!box.pending().isEmpty() && box.pending().first().count() == 3);
+
+        // Playback stops: exactly one notification for everything held.
+        d = box.release(Consent::On, noneMuted, {});
+        CHECK(d.notices.size() == 1);
+        CHECK(!d.notices.isEmpty() && d.notices.first().title == QStringLiteral("New in 2 series you follow"));
+        CHECK(!d.notices.isEmpty() && d.notices.first().body == QStringLiteral("Beta and Alpha"));
+        CHECK(!d.notices.isEmpty() && d.notices.first().itemCount == 4);
+        CHECK(!box.hasPending());
+        d = box.release(Consent::On, noneMuted, {});
+        CHECK(d.notices.isEmpty());                                // released once, not twice
+
+        // Held, then not holding any more when the next cycle ends: the held one rides along in that cycle's
+        // single notification rather than arriving as a second one.
+        d = box.onCycle({ a1 }, Consent::On, true, noneMuted);
+        d = box.onCycle({ b1 }, Consent::On, false, noneMuted);
+        CHECK(d.notices.size() == 1);
+        CHECK(!d.notices.isEmpty() && d.notices.first().seriesCount == 2);
+        CHECK(!box.hasPending());
+
+        // What the user watched (or muted) while it was held drops out on release.
+        box.onCycle({ a1, b1 }, Consent::On, true, noneMuted);
+        d = box.release(Consent::On, [](const QString& s) { return s == QStringLiteral("b"); },
+                        [](const QString&, const QString& c) { return c != QStringLiteral("a-e1"); });
+        CHECK(!d.notices.isEmpty() && d.notices.first().title == QStringLiteral("Alpha: 1 new episode"));
+        // Everything watched meanwhile: nothing.
+        box.onCycle({ a1 }, Consent::On, true, noneMuted);
+        d = box.release(Consent::On, noneMuted, [](const QString&, const QString&) { return false; });
+        CHECK(d.notices.isEmpty());
+        // Switched off while held: dropped, not delivered later.
+        box.onCycle({ a1 }, Consent::On, true, noneMuted);
+        d = box.release(Consent::Off, noneMuted, {});
+        CHECK(d.notices.isEmpty() && !box.hasPending());
+    }
+
+    // ---- 16. The mute lives on the follow row, and travels with it -------------------------------------------
+    {
+        useProfile(QStringLiteral("fM"));
+        int hooked = 0;
+        FollowStore::setChangeHook([&hooked] { ++hooked; });
+        FollowStore::add(mkFollow(QStringLiteral("m1"), QStringLiteral("srcM")));
+        FollowStore::add(mkFollow(QStringLiteral("m2"), QStringLiteral("srcM")));
+        CHECK(!FollowStore::isMuted(QStringLiteral("m1")));
+        // Backdate both rows so the re-stamp is observable without waiting a second.
+        const QString key = QStringLiteral("follow/fM/items");
+        {
+            QJsonArray arr = QJsonDocument::fromJson(raw().value(key).toString().toUtf8()).array();
+            for (int i = 0; i < arr.size(); ++i)
+            {
+                QJsonObject o = arr[i].toObject();
+                o.insert(QStringLiteral("ts"), 1000.0);
+                arr[i] = o;
+            }
+            raw().setValue(key, QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+            raw().sync();
+        }
+        const int before = hooked;
+        FollowStore::setMuted(QStringLiteral("m1"), true);
+        CHECK(FollowStore::isMuted(QStringLiteral("m1")));
+        CHECK(!FollowStore::isMuted(QStringLiteral("m2")));
+        CHECK(hooked == before + 1);                               // a mute arms the sync push like a follow does
+
+        // THE SYNC PAYLOAD. The per-item follow document IS this row list (CloudMerge sends the rows whole; its
+        // own probe pins the round trip), so the mute is in the payload exactly when it is in the row -- and
+        // its ts moved, so it wins the newest-ts merge on a peer.
+        raw().sync();
+        const QJsonArray rows = QJsonDocument::fromJson(raw().value(key).toString().toUtf8()).array();
+        bool sawM1 = false, sawM2 = false;
+        for (const QJsonValue& v : rows)
+        {
+            const QJsonObject o = v.toObject();
+            if (o.value(QStringLiteral("itemId")).toString() == QStringLiteral("m1"))
+            {
+                sawM1 = true;
+                CHECK(o.value(QStringLiteral("muted")).toBool());
+                CHECK(o.value(QStringLiteral("ts")).toDouble() > 1000.0);
+            }
+            if (o.value(QStringLiteral("itemId")).toString() == QStringLiteral("m2"))
+            {
+                sawM2 = true;
+                CHECK(!o.contains(QStringLiteral("muted")));        // unmuted rows are increment 1's rows
+                CHECK(o.value(QStringLiteral("ts")).toDouble() == 1000.0);   // and nobody else was re-dated
+            }
+        }
+        CHECK(sawM1 && sawM2);
+
+        // Same state again: no rewrite, no sync churn.
+        const int again = hooked;
+        FollowStore::setMuted(QStringLiteral("m1"), true);
+        CHECK(hooked == again);
+        // A series that is not followed cannot be muted (no orphan row).
+        FollowStore::setMuted(QStringLiteral("nope"), true);
+        CHECK(!FollowStore::isFollowed(QStringLiteral("nope")) && !FollowStore::isMuted(QStringLiteral("nope")));
+
+        // A refresh of the same row keeps it.
+        FollowStore::add(mkFollow(QStringLiteral("m1"), QStringLiteral("srcM")));
+        CHECK(FollowStore::isMuted(QStringLiteral("m1")));
+        // Per profile, like the mark.
+        useProfile(QStringLiteral("fM2"));
+        FollowStore::add(mkFollow(QStringLiteral("m1"), QStringLiteral("srcM")));
+        CHECK(!FollowStore::isMuted(QStringLiteral("m1")));
+        useProfile(QStringLiteral("fM"));
+        // Unfollow takes the mute with it; a later re-follow starts unmuted.
+        FollowStore::remove(QStringLiteral("m1"));
+        FollowStore::add(mkFollow(QStringLiteral("m1"), QStringLiteral("srcM")));
+        CHECK(!FollowStore::isMuted(QStringLiteral("m1")));
+        // Unmute clears it.
+        FollowStore::setMuted(QStringLiteral("m2"), true);
+        FollowStore::setMuted(QStringLiteral("m2"), false);
+        CHECK(!FollowStore::isMuted(QStringLiteral("m2")));
+        FollowStore::setChangeHook({});
+        useProfile(QStringLiteral("fA"));
     }
 
     if (failures == 0) { std::puts("FOLLOW-OK"); return 0; }

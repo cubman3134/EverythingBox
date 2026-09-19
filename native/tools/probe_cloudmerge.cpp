@@ -5724,6 +5724,44 @@ int main(int argc, char** argv)
         CHECK(followTs(QStringLiteral("f39"), QStringLiteral("B")) == bTsAB);
         CHECK(bTsAB == T - 50);   // the newer of the two stamps for the same series
 
+        // 39c2. The per-series notification MUTE (#155 increment 2) is a field of the follow row, so it rides the
+        // same document and the same newest-ts rule: it is in the payload, a newer mute beats an older unmuted
+        // copy, and a newer UNmute beats an older mute. FollowStore::setMuted re-stamps the row (probe_follow
+        // pins that), which is what makes "newer" true of the device that pressed it.
+        auto injMute = [&](const QString& p, const QString& id, qint64 ts, bool muted) {
+            QJsonObject o; o["itemId"] = id; o["title"] = id;
+            o["addonId"] = QStringLiteral("srcA"); o["type"] = QStringLiteral("series");
+            o["ts"] = double(ts);
+            if (muted) o["muted"] = true;
+            setRaw(QStringLiteral("follow/") + p + QStringLiteral("/items"), compact(QJsonArray{ o }));
+        };
+        auto followMuted = [&](const QString& p, const QString& id) -> int {
+            QSettings rawS(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(
+                     rawS.value(QStringLiteral("follow/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+                if (v.toObject().value(QStringLiteral("itemId")).toString() == id)
+                    return v.toObject().value(QStringLiteral("muted")).toBool() ? 1 : 0;
+            return -1;
+        };
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 100, true);
+        const QJsonObject remMuted = serializeNow();
+        {
+            const QJsonArray sent = remMuted.value(QStringLiteral("follow")).toObject().value(QStringLiteral("f39"))
+                                        .toObject().value(QStringLiteral("items")).toArray();
+            CHECK(sent.size() == 1);
+            CHECK(!sent.isEmpty() && sent.first().toObject().value(QStringLiteral("muted")).toBool());
+        }
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 500, false); mergeDoc(remMuted);
+        CHECK(followMuted(QStringLiteral("f39"), QStringLiteral("S")) == 1);     // the newer mute arrives
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 50, false);
+        const QJsonObject remUnmuted = serializeNow();
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 100, true); mergeDoc(remUnmuted);
+        CHECK(followMuted(QStringLiteral("f39"), QStringLiteral("S")) == 0);     // ...and a newer unmute wins it back
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 900, false);
+        const QJsonObject remOld = serializeNow();
+        wipeStores(); injMute(QStringLiteral("f39"), QStringLiteral("S"), T - 100, true); mergeDoc(remOld);
+        CHECK(followMuted(QStringLiteral("f39"), QStringLiteral("S")) == 1);     // an OLDER unmuted copy does not
+
         // 39d. THE CARVE-OUT, both ways, and the "following/" near-miss.
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("follow/default/items")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("follow/default/items"))  == false);

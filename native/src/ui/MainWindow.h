@@ -17,6 +17,7 @@
 #include "../addons/AddonModels.h"
 #include "../core/BookTimeline.h"     // BookTimeline::Timeline is a value member (issue #218)
 #include "../core/FollowPlan.h"      // follow::Child is a value in the in-flight fetch map (#155)
+#include "../core/FollowNotify.h"    // follownotify::Outbox/Decision: the notifier's state (#155 inc 2)
 #include "../core/EmulationScope.h"   // emuscope::Scope — scope-aware editCoreOptions (Task 3)
 #include "../core/Jellyfin.h"        // #110: Jellyfin::UnionItem / ProgressEvent in the download decls
 #include "../core/LifecyclePolicy.h"
@@ -1601,6 +1602,22 @@ private:
     static QString followIntervalLabel(int hours);
     FollowScheduler* followSched_ = nullptr;
     QHash<int, std::function<void(bool, const QVector<follow::Child>&)>> followFetches_;
+    // Grouped new-item notifications (issue #155, increment 2). Defined in ui/MainWindowFollowNotify.cpp; the
+    // rules (grouping, mute, consent, the one-time prompt, the hold) are FollowNotify's, headless-tested.
+    void setupFollowNotify();                   // once, right after followSched_ exists
+    void onFollowCycleFinished();               // one cycle -> at most one notification
+    bool followNoticeHeld() const;              // full-screen playback owns the screen: queue, don't show
+    void releaseFollowNotice();                 // playback ended: deliver what was held
+    void applyFollowDecision(const follownotify::Decision& d);
+    void showFollowSystemNotice(const QString& title, const QString& body);
+    void showFollowNotifyPrompt();
+    void onFollowNoticeClicked();               // lands on the home screen, where the New shelf is
+    void setFollowNotifyFromUi(bool on);        // the ONE write path: both settings builders and the prompt
+    std::unique_ptr<follownotify::Outbox> followOutbox_;
+    QHash<QString, QStringList> followCycleFound_;   // series -> the child ids this cycle announced
+    class QSystemTrayIcon* followTray_ = nullptr;   // created lazily, shown only while a message is up
+    QTimer* followTrayHide_ = nullptr;
+    QTimer* followHoldPoll_ = nullptr;
     std::unique_ptr<CloudSync> cloud_;
     // Per-file sync of emulator saves and save states (save-sync T5). Declared AFTER cloud_ on purpose: it
     // holds a raw CloudSync* and members are destroyed in reverse declaration order, so this one goes first.

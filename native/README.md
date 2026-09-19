@@ -339,8 +339,10 @@ and not the other.
 **Where the verb is.**
 
 - *Themed layout*: the **Follow** pill on a series' detail page, beside Favorite. It shows the unread count
-  once there is one, and grows a **Mark all seen** pill while there is something to clear.
-- *Classic layout*: long-press / right-click a series row — Follow, Mark all seen, Check for new items now.
+  once there is one, and grows a **Mark all seen** pill while there is something to clear. A followed series
+  also carries a **Mute notifications** pill (see *Notifications* below).
+- *Classic layout*: long-press / right-click a series row — Follow, Mute notifications, Mark all seen, Check
+  for new items now.
 
 **The schedule.** A background pass asks each followed series' source what children it has now. Settings ▸
 General ▸ Following offers **every 6 hours / every 12 hours / once a day (default) / once a week / only when
@@ -379,11 +381,39 @@ about you, merged exactly as a favourite is (newest wins, with a deletion tombst
 What each device has already *seen* does **not** sync: that is a claim about a fetch this box performed, and
 a peer re-derives its own snapshot silently on its first check.
 
-**Not here yet.** This is increment 1. Still to come: **notifications** (a grouped system notification per
-refresh cycle, off by default, with a per-series mute — the `FollowScheduler::newItemsFound` /
-`cycleFinished` signals are the seam it will consume) and **optional auto-download** with a keep-last-N
-retention rule (per series, off by default, non-metered only). Following individual *authors* rather than
-series remains out of scope, as does any server-side push — this is local polling only.
+**Notifications** (increment 2). Settings ▸ General ▸ Following ▸ **Notify me about new episodes**, on
+both layouts, **off by default**. With it on, one refresh cycle raises **at most one** system notification,
+grouped — the rules are `src/core/FollowNotify.{h,cpp}`, pinned by `probe_follow`:
+
+| What the cycle found | Title | Body |
+|---|---|---|
+| one series, one new item | *Series*: 1 new episode | the item's title |
+| one series, several | *Series*: 3 new episodes | the newest item's title |
+| two or three series | New in 3 series you follow | A, B and C |
+| four or more | New in 5 series you follow | A, B, C and 2 more |
+
+Series are named newest first. Only children *this cycle* announced count, and not one you had already
+marked watched/read (or hidden) by the time the cycle ended. A series can be **muted** from its Follow verb
+(the *Mute notifications* pill / menu row); a muted series never reaches the grouping, and still fills the
+New shelf as usual. The mute is stored **on the follow row**, so it syncs, merges and is deleted with the
+follow itself — unfollowing and re-following starts unmuted.
+
+- **The one-time offer.** The first cycle that finds something while the setting has never been touched shows
+  a notice on the window offering to turn it on (click it to accept; the settings row answers either way).
+  It is never shown again. There is no dialog.
+- **Desktop delivery** is a system-tray message (`QSystemTrayIcon::showMessage`). The tray icon is created
+  only when there is a message to show and is hidden again about 30 seconds later, so the app never keeps a
+  permanent tray icon. Clicking the message brings the window forward on the home screen, where the New shelf
+  is (it does not pull you out of something you are playing).
+- **Held during full-screen playback.** While the window is full screen on the video player or a game, the
+  summary is queued, not dropped; a later cycle merges into the same single pending summary, and it is shown
+  once playback ends — minus anything you watched or muted in the meantime.
+- **Android and iOS**: no notification is raised yet (there is no notification-channel plumbing); the skip is
+  logged. The New shelf is unaffected.
+
+**Not here yet.** Still to come (increment 3): **optional auto-download** with a keep-last-N retention rule
+(per series, off by default, non-metered only). Following individual *authors* rather than series remains
+out of scope, as does any server-side push — this is local polling only.
 
 ## Roadmap
 1. **libretro frontend** — ✅ load/init/run/video/audio/input, ✅ core options, ✅ save states. Verify a ROM

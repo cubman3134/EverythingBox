@@ -35,7 +35,11 @@ struct FollowItem
     QString subtitle;
     QString type;          // media type (series/podcast/manga/...) — drives the icon and the detail route
     QString thumbnailUrl;
-    qint64  ts = 0;        // epoch seconds this follow was added (multi-device merge: newest-ts wins)
+    qint64  ts = 0;        // epoch seconds this follow was last changed (multi-device merge: newest-ts wins)
+    // Per-series "Mute notifications" (issue #155, increment 2). Stored ON the follow row, so it syncs, merges
+    // and is deleted with the mark itself: there is no second store to keep in step, and unfollowing cannot
+    // leave an orphaned mute behind for a later re-follow to inherit. Written into the row only when true.
+    bool    muted = false;
 };
 
 namespace FollowStore
@@ -44,6 +48,12 @@ namespace FollowStore
     void add(const FollowItem& item);            // de-duped by itemId; stamps ts at the mutation site
     void remove(const QString& itemId);          // + a deletion tombstone, so a peer cannot resurrect it
     bool isFollowed(const QString& itemId);
+
+    // The per-series notification mute. setMuted RE-STAMPS the row's ts — a mute is an edit of the synced row,
+    // and the merge keeps the newest row, so without the stamp a peer's older copy would win it back. No-op
+    // (no rewrite, no sync) for a series that is not followed or already in that state.
+    void setMuted(const QString& itemId, bool muted);
+    bool isMuted(const QString& itemId);
     int  count();                                // how many series this profile follows
 
     // Multi-device sync trigger (mdsync T2): a change-callback fired after add/remove to (re)arm the debounced

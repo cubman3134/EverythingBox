@@ -54,6 +54,8 @@ Item {
     readonly property string requestState: (sel && sel.requestState) ? sel.requestState : ""
     readonly property bool followed: !!(sel && sel.followed)
     readonly property int  newCount: (sel && sel.newCount) ? sel.newCount : 0
+    // The per-series notification mute (#155 increment 2); the pill exists only on a followed series.
+    readonly property bool muted: !!(sel && sel.muted)
     readonly property bool zoneFocused: !!(host && host.detailZone === "actions")
     readonly property int focusIdx: (host ? host.detailActionIndex : 0)
 
@@ -96,6 +98,9 @@ Item {
                                                            : "\uff0b  Follow"),
                                           color: (followed ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         if (verb === "markseen") return { label: "\u2713\u2713  Mark all seen", color: "#E7EBF2", textColor: "#33405A" }
+        // Same convention as the two above: it says what IS - "muted" once muted, the verb until then.
+        if (verb === "notifymute") return { label: (muted ? "\ud83d\udd15  Notifications muted" : "\ud83d\udd14  Mute notifications"),
+                                            color: (muted ? "#F3E3C2" : "#E7EBF2"), textColor: "#33405A" }
         // Asking an acquisition pipeline for something this library does not have (issue #109). Three
         // looks, one per outcome: green once it is in the library (this pill then OPENS it and can never
         // create a duplicate), grey while it is somebody else's to approve or fetch, amber when pressing

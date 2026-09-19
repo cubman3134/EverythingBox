@@ -816,6 +816,20 @@ void Settings::setFollowOnMetered(bool on)
 {
     store().setValue(QStringLiteral("following/metered"), on); store().sync();
 }
+bool Settings::followNotify() { return store().value(QStringLiteral("following/notify"), false).toBool(); }
+bool Settings::followNotifyAnswered() { return store().contains(QStringLiteral("following/notify")); }
+void Settings::setFollowNotify(bool on)
+{
+    store().setValue(QStringLiteral("following/notify"), on); store().sync();
+}
+bool Settings::followNotifyPrompted()
+{
+    return store().value(QStringLiteral("following/notifyPrompted"), false).toBool();
+}
+void Settings::setFollowNotifyPrompted(bool shown)
+{
+    store().setValue(QStringLiteral("following/notifyPrompted"), shown); store().sync();
+}
 bool Settings::uiTestChannel() { return store().value(QStringLiteral("debug/uiTestChannel"), false).toBool(); }
 void Settings::setUiTestChannel(bool on)
 {

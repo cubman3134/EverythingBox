@@ -1,5 +1,6 @@
 #include "Notifier.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QTimer>
 #include <QWidget>
@@ -39,7 +40,38 @@ Notifier::Notifier(QWidget* windowHost, QObject* parent)
             return;
         }
         notice_->hide();
+        setAction({});
     });
+    notice_->installEventFilter(this);
+}
+
+void Notifier::setAction(std::function<void()> onClick)
+{
+    action_ = std::move(onClick);
+    if (!notice_) return;
+    notice_->setAttribute(Qt::WA_TransparentForMouseEvents, !action_);
+    if (action_) notice_->setCursor(Qt::PointingHandCursor);
+    else         notice_->unsetCursor();
+}
+
+void Notifier::notifyWithAction(const QString& text, int ms, std::function<void()> onClick)
+{
+    notify(text, ms);
+    setAction(std::move(onClick));
+}
+
+bool Notifier::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == notice_ && action_ && event->type() == QEvent::MouseButtonRelease)
+    {
+        const std::function<void()> a = action_;
+        setAction({});
+        notice_->hide();
+        if (noticeTimer_) noticeTimer_->stop();
+        QTimer::singleShot(0, this, [a] { a(); });
+        return true;
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void Notifier::notify(const QString& text, int ms)
@@ -50,6 +82,7 @@ void Notifier::notify(const QString& text, int ms)
     // timed error would see the dead phase note reappear when the older restore fell due.
     restoreSticky_ = false;
     stickyRestore_.clear();
+    setAction({});   // a newer message owns the label: an older notice's click action must not survive it
     notice_->setText(text);
     sizeNotice();
     notice_->show();
@@ -77,6 +110,7 @@ void Notifier::hideNotice()
 {
     if (notice_) notice_->hide();
     if (noticeTimer_) noticeTimer_->stop();
+    setAction({});
     // An explicit hide is an explicit hide: a pending restore must not undo it seconds later.
     restoreSticky_ = false;
     stickyRestore_.clear();

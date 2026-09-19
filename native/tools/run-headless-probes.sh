@@ -2411,6 +2411,7 @@ else
     'update.install|new QPushButton(tr("Install update"))'
     'following.interval|followInterval = new QComboBox()'
     'following.metered|new QCheckBox(tr("Check on metered connections"))'
+    'following.notify|new QCheckBox(tr("Notify me about new episodes"))'
     'following.check|new QPushButton(tr("Check for new items now"))'
     'playon.rename|poRename = panelRow(tr("Rename This Device'
     'playon.pick|poPick = panelRow(tr("Play on Another Device'

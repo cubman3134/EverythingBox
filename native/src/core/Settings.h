@@ -394,6 +394,18 @@ namespace Settings
     bool followOnMetered();
     void setFollowOnMetered(bool on);
 
+    // "Notify me about new episodes" (issue #155, increment 2): a system notification when a refresh cycle
+    // finds something new in a followed series. OFF BY DEFAULT, and its UNSET state is distinct from an
+    // explicit off — followNotifyAnswered() is false until the user has chosen, which is the only time the
+    // one-time prompt may appear. A synced preference under "following/" like the two above.
+    bool followNotify();                       // true only when explicitly turned on
+    bool followNotifyAnswered();               // the user has set it, either way
+    void setFollowNotify(bool on);
+    // Whether the one-time "turn notifications on?" toast has been shown. Set the moment it is shown: it is an
+    // offer, not a nag, so it never comes back — the settings row is where the answer lives after that.
+    bool followNotifyPrompted();
+    void setFollowNotifyPrompted(bool shown);
+
     // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
     // screenshots without the window needing focus (see core/UiTestServer). Default off.
     bool uiTestChannel();

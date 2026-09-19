@@ -28,7 +28,7 @@
 // addon. The failure set is cleared at the cycle boundary and nowhere else.
 //
 // SEAMS LEFT FOR THE LATER INCREMENTS, named here so they are not re-invented:
-//   * newItemsFound(seriesId, count) — the signal increment 2's notifier consumes. Emitted once per series
+//   * newItemsFound(seriesId, count, childIds) — the signal increment 2's notifier consumes. Once per series
 //     per cycle, with the count, so a grouped notification ("4 new items across 2 series") is a matter of
 //     collecting them until cycleFinished rather than of re-reading the store.
 //   * cycleFinished(seriesChecked, newItems) — the end-of-pass hook the same notifier groups on, and where
@@ -41,6 +41,7 @@
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <functional>
 
@@ -90,8 +91,11 @@ public:
     qint64 nextDueAt()   const;                             // -1 while manual
 
 signals:
-    // INCREMENT 2 SEAM. One emission per series that grew, carrying how many children it grew by.
-    void newItemsFound(const QString& seriesId, int count);
+    // One emission per series that grew, carrying how many children it grew by AND which ones (issue #155
+    // increment 2: the notifier needs the ids, so that a child already announced by an earlier cycle, or
+    // marked seen before this one ended, is never counted — FollowNotify::newsFor). For the degraded
+    // "something changed" row the one id is the series' own.
+    void newItemsFound(const QString& seriesId, int count, const QStringList& childIds);
     // INCREMENT 2/3 SEAM. The pass finished: how many series were asked, and how many new children in total.
     void cycleFinished(int seriesChecked, int newItems);
 
