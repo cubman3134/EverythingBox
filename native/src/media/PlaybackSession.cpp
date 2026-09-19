@@ -159,6 +159,17 @@ void PlaybackSession::feedNextTrack()
     if (gapless_) maybeAppendNext();
 }
 
+bool PlaybackSession::refeedPreloaded(const QString& identity)
+{
+    if (!gapless_ || identity.isEmpty() || trackIndex_ < 0) return false;
+    // Exactly one ahead is the only state in which mpv holds an unplayed entry (the one-ahead invariant).
+    if (appendedThrough_ != trackIndex_ + 1 || appendedThrough_ >= tracks_.size()) return false;
+    if (identityFor(tracks_.at(appendedThrough_)) != identity) return false;
+    appendedThrough_ = trackIndex_;   // unspent again: feedNextTrack() will hand it over afresh
+    emit queueFeedInvalidated();
+    return true;
+}
+
 void PlaybackSession::maybeAppendNext()
 {
     // Keep mpv's own playlist exactly one entry ahead of what it is playing: append the single queue index past

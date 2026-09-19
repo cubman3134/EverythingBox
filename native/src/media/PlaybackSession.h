@@ -92,6 +92,13 @@ public:
     // Feed mpv the ONE entry past the current track, if it does not already have it. Idempotent by the
     // one-ahead invariant (see maybeAppendNext), so a second call at the same boundary appends nothing.
     void feedNextTrack();
+    // #417: the entry mpv was ALREADY handed as the gapless pre-load is the track filed under `identity`,
+    // and that track has just finished downloading. Pull the frontier back onto the playing entry and emit
+    // queueFeedInvalidated, so the host drops what mpv holds and re-feeds it - through the same open-time
+    // rule, which now finds the local copy. Returns false and changes nothing when gapless is off, when
+    // nothing past the current track has been handed over, or when what was handed over is another track.
+    // The queue, its identities and the resume key are untouched: only what mpv holds is re-seated.
+    bool refeedPreloaded(const QString& identity);
     // The crossfade handover happened: the player is already several seconds into the NEXT entry on its other
     // deck. Advance the app's notion of current by exactly one WITHOUT a reload - the same per-item work the
     // gapless playlist-pos boundary does (flush the finished track's accrual, drop its resume mark, re-key and

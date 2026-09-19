@@ -941,6 +941,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // #110: the storage cap is checked when the disk has just grown, which is the only moment the answer
         // can have changed. It SUGGESTS and never deletes - see checkJellyfinDownloadCap.
         if (Jellyfin::isQualified(j.key)) checkJellyfinDownloadCap();
+        // #417: this track may be the one mpv was already handed as the gapless pre-load, as a stream. Re-seat
+        // it so it plays from disk - unless a crossfade window is already decoding it, which stays a stream.
+        if (session_ && !crossfadeSpent_ && Subsonic::isQualified(j.key)) session_->refeedPreloaded(j.key);
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
     connect(dm_, &DownloadManager::jobProgress, this, &MainWindow::updateDownloadRow);
@@ -1874,13 +1877,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // titles() is safe to read straight: PlaybackSession builds that list through the same DisplayTitle
         // rule, so a queue installed with no titles at all already holds location-derived labels here rather
         // than blanks. And if it somehow is blank, play() still has `p` to derive from.
-        player_->play(p, trackHeaders, session_->titles().value(session_->currentIndex()));
+        // #417: what mpv is handed is decided NOW, not when the queue was built - a track that finished
+        // downloading since plays from disk. `p` itself (and so syncKey_ above and the resume key) is unchanged.
+        player_->play(MusicSupply::openQueueEntry(p, session_->identityFor(p)), trackHeaders,
+                      session_->titles().value(session_->currentIndex()));
     });
     // #141 gapless one-ahead feed: append the next queue entry to mpv's OWN playlist (no stop-start), so the
     // decoder crosses the boundary with no gap. Emitted by PlaybackSession only while gapless is armed.
     connect(session_, &PlaybackSession::appendRequested, this,
             [this](const QString& p, const StreamHeaders::Headers& trackHeaders) {
-        player_->appendFile(p, trackHeaders);
+        // #417: the pre-load asks the same open-time rule the replace-load does (see refeedPreloaded for a
+        // download that lands after this ran).
+        player_->appendFile(MusicSupply::openQueueEntry(p, session_->identityFor(p)), trackHeaders);
     });
     // #193: a queue edit landed on an entry mpv had already been handed under gapless. Re-seat what mpv holds
     // (see reseatQueueFeed) — the model is already correct by the time this fires; only the player is behind.
@@ -17477,7 +17485,8 @@ void MainWindow::decideCrossfadeBoundary()
     if (!inPath.isEmpty())
     {
         Crossfade::Track out = crossfadeTrackFacts(session_->trackAt(cur));
-        Crossfade::Track in  = crossfadeTrackFacts(inPath);
+        // #417: judged as the file that will actually open (a downloaded copy has tags; its stream has none).
+        Crossfade::Track in  = crossfadeTrackFacts(MusicSupply::openQueueEntry(inPath, session_->identityFor(inPath)));
         // The outgoing length mpv actually reports beats the tagged one: it is the file as decoded, and a
         // container whose tag block lies (or carries none) still gets the too-short-track cap applied.
         if (duration_ > 0.0) out.durationSec = duration_;
@@ -17523,13 +17532,15 @@ void MainWindow::maybeStartCrossfade(double positionSec)
     // The same one expression the decision used, so the file that opens is the file that was judged. At the
     // end of a queue this is the channel's pre-resolved pick, and empty (no window) when there is none.
     const int cur = session_->currentIndex();
-    const QString nextPath = Crossfade::incomingTrack(cur, session_->count(),
-                                                      session_->trackAt(cur + 1), channelNextPath_);
-    if (nextPath.isEmpty()) return;
+    const QString nextEntry = Crossfade::incomingTrack(cur, session_->count(),
+                                                       session_->trackAt(cur + 1), channelNextPath_);
+    if (nextEntry.isEmpty()) return;
+    // #417: the second deck opens what the entry resolves to NOW - the crossfade is this boundary's pre-load.
+    const QString nextPath = MusicSupply::openQueueEntry(nextEntry, session_->identityFor(nextEntry));
     crossfadeSpent_ = true;
     player_->beginCrossfade(nextPath, crossfadeSecs_);
     mwLog(QStringLiteral("crossfade: started at %1s of %2s into '%3'")
-              .arg(positionSec, 0, 'f', 1).arg(duration_, 0, 'f', 1).arg(nextPath));
+              .arg(positionSec, 0, 'f', 1).arg(duration_, 0, 'f', 1).arg(logSafeUrl(nextPath)));   // #417: a stream here is signed
 }
 
 // The transport's Next. Inside a crossfade window this is NOT a queue skip: #141 says a skip during a

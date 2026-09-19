@@ -726,14 +726,26 @@ QString MusicSupply::playUrl(const QString& path)
         // A DOWNLOADED COPY WINS (#193), asked before any url is minted — the offline story, and the same
         // prefer-local rule MainWindow::openJellyfinItem applies. The caller still files the local path under
         // the qualified id (the queue's url -> identity map), so the track keeps its identity.
-        const QString local = SubsonicDownload::localCopy(path, DownloadsStore::list(),
-                                                          [](const QString& p) { return QFileInfo::exists(p); });
-        if (!local.isEmpty()) return local;
-        return SubsonicClient::instance().streamUrl(path);
+        //
+        // #417: the rule itself is SubsonicDownload::preferLocal, shared with openQueueEntry below, which asks
+        // it again when a queue entry is OPENED - so one built as a stream still plays a download that landed
+        // after the queue was built.
+        return SubsonicDownload::preferLocal(path, DownloadsStore::list(),
+                                             [](const QString& p) { return QFileInfo::exists(p); },
+                                             [&path] { return SubsonicClient::instance().streamUrl(path); });
     }
     if (Jellyfin::isQualified(path))  return JellyfinMusicClient::instance().streamUrl(path);
     if (ServerMusic::isQualified(path)) return ServerMusicClient::instance().streamUrl(path);
     return path;
+}
+
+QString MusicSupply::openQueueEntry(const QString& entry, const QString& identity)
+{
+    // Cheap for everything that is not a Subsonic track: no store read, the entry back verbatim.
+    if (!Subsonic::isQualified(identity)) return entry;
+    return SubsonicDownload::openEntry(entry, identity, DownloadsStore::list(),
+                                       [](const QString& p) { return QFileInfo::exists(p); },
+                                       [](const QString& id) { return SubsonicClient::instance().streamUrl(id); });
 }
 
 QString MusicSupply::albumArt(const MusicLibrary::Album& album)

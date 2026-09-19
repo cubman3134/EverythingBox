@@ -82,6 +82,33 @@ namespace SubsonicDownload
     QString localCopy(const QString& qualifiedTrackId, const QVector<DownloadedItem>& downloads,
                       const std::function<bool(const QString&)>& exists);
 
+    // THE ONE PREFER-LOCAL RULE (#193, #417). The local copy for this qualified track id when there is one,
+    // otherwise whatever `otherwise` answers — asked lazily, so no url is minted for a track that is on disk.
+    // MusicSupply::playUrl (a queue being BUILT) and openEntry below (an entry being OPENED) both answer
+    // through this, so "which file does this track play from" has one answer and not two.
+    QString preferLocal(const QString& qualifiedTrackId, const QVector<DownloadedItem>& downloads,
+                        const std::function<bool(const QString&)>& exists,
+                        const std::function<QString()>& otherwise);
+
+    // WHAT A QUEUE ENTRY OPENS AS, AT THE MOMENT IT IS OPENED (#417). A queue freezes each entry's location
+    // when it is built — a signed stream url, or the downloaded file that existed then — and a track that
+    // finishes downloading after that would otherwise go on streaming until the queue is rebuilt (and fail
+    // with the server gone). So every door a queue entry reaches the player by (the replace-load, the
+    // gapless pre-load, the crossfade's second deck) asks this instead of handing the entry over verbatim.
+    //
+    //   `entry`     what the queue holds (PlaybackSession::trackAt) — never changed by this, so the resume
+    //               key, the scrobble identity and the host's syncKey_ all still read the same string;
+    //   `identity`  what it is filed under (PlaybackSession::identityFor(entry)), the qualified track id.
+    //
+    // An entry whose identity is not a Subsonic TRACK is returned untouched (a local-library file, an IPTV
+    // channel, a Jellyfin track — none of which has a download this rule could prefer). Otherwise the local
+    // copy wins; failing that, the entry itself — unless the entry is a downloaded file that has since been
+    // removed, which falls back to a freshly minted stream (`mintStream`, asked only then; an empty answer
+    // leaves the entry as it was). A queue with no downloads in it opens byte-for-byte what it holds.
+    QString openEntry(const QString& entry, const QString& identity, const QVector<DownloadedItem>& downloads,
+                      const std::function<bool(const QString&)>& exists,
+                      const std::function<QString(const QString&)>& mintStream);
+
     // The qualified track ids this device already has or has queued — what albumBatch skips.
     QSet<QString> downloadedIds(const QVector<DownloadedItem>& downloads, const QVector<DownloadJob>& jobs,
                                 const std::function<bool(const QString&)>& exists);
