@@ -1,4 +1,5 @@
 #include "HomeView.h"
+#include "../core/SubsonicDownload.h"   // #193: which Subsonic rows download (HomeViewSubsonicDownload.cpp)
 #include "../core/AppBrand.h"
 #include "../theme2/FormFactor.h"
 #ifdef EB_HAVE_QML
@@ -11806,6 +11807,9 @@ void HomeView::downloadBrowseItem(const MediaItem& row)
     // #110: the themed twin of startDownload's arm — same table, same reason. See there.
     if (const browse::JellyfinDownloadTarget t = browse::jellyfinDownloadTargetFor(it); t.ok())
     { emit jellyfinDownloadRequested(int(t.kind), t.ref, t.seasonRef, it.title, it.thumbnailUrl); return; }
+    // #193: a Subsonic server's track, album or playlist has no add-on to crawl either — hand it over whole.
+    { QString ssRef; if (subsonicDownloadTargetOf(it, nullptr, &ssRef))
+      { emit subsonicDownloadRequested(ssRef, it.title, it.thumbnailUrl); return; } }
     if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
 
     DlNode node;
@@ -11905,6 +11909,8 @@ LoadedAddon* HomeView::crawlAddonFor(const MediaItem& it) const
 bool HomeView::downloadOfferedFor(const MediaItem& it) const
 {
     if (stack_.isEmpty()) return false;   // downloadBrowseItem refuses outright
+    // #193: a Subsonic track / album / playlist downloads through its own arm of downloadBrowseItem.
+    if (subsonicDownloadTargetOf(it, nullptr, nullptr)) return true;
     browse::DownloadOfferFacts f;
     f.addon          = crawlAddonKind(crawlAddonFor(it));
     f.alreadyLocal   = isLocalGameLeaf(it) || atRecentsLevel() || atDownloadsLevel();
@@ -12142,7 +12148,10 @@ bool HomeView::trackMenuForRow(int itemsRow, browse::TrackMenuVerbs* verbsOut, M
     // (addItemToPlaylistInteractive, downloadBrowseItem), and a menu row that only toasts is not offered.
     if (recentView_ || atRecentsLevel() || atDownloadsLevel()) return false;
     const MediaItem& it = items_[itemsRow];
-    const browse::TrackMenuVerbs v = browse::trackMenuVerbsFor(it, crawlAddonKind(crawlAddonFor(it)));
+    browse::TrackMenuVerbs v = browse::trackMenuVerbsFor(it, crawlAddonKind(crawlAddonFor(it)));
+    // #193: a Subsonic server's track now DOES download (download.view, through MainWindow's minter), so the
+    // #365 "a library track never downloads" rule has exactly this exception. Albums take the Start menu.
+    { int k = 0; if (subsonicDownloadTargetOf(it, &k, nullptr) && k == int(SubsonicDownload::Kind::Track)) v.download = true; }
     if (!v.any()) return false;
     if (verbsOut) *verbsOut = v;
     if (rowOut) *rowOut = it;   // a COPY, taken before any menu opens over it

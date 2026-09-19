@@ -970,3 +970,48 @@ void Subsonic::adoptArtist(MusicLibrary::Index& idx, const QString& serverId, co
     if (!artist.musicBrainzId.isEmpty()) target->mbid = artist.musicBrainzId;
     fillArtistAlbums(idx, serverId, artistKey, albums);
 }
+
+// ==================================================================================================
+// THE TWO PLAYBACK-SHAPED URLS (#193: offline downloads and the streaming bitrate cap)
+// ==================================================================================================
+QString Subsonic::downloadPath() { return QStringLiteral("/rest/download.view"); }
+
+namespace {
+// The ONE assembly of a signed request url for a track: root + endpoint, the auth parameters, the id. Both
+// builders below go through it so a download can never be signed differently from the stream beside it.
+QUrl signedTrackUrl(const QString& root, const QString& path, const Subsonic::Credential& cred,
+                    const QString& salt, const QString& remoteId, QUrlQuery& q)
+{
+    QUrl u(root + path);
+    for (const auto& p : Subsonic::authParams(cred.user, cred.password, salt, cred.legacy, cred.client))
+        q.addQueryItem(p.first, p.second);
+    q.addQueryItem(QStringLiteral("id"), remoteId);
+    return u;
+}
+} // namespace
+
+QString Subsonic::buildStreamUrl(const QString& root, const Credential& cred, const QString& salt,
+                                 const QString& remoteId, int maxBitRateKbps)
+{
+    if (root.isEmpty() || remoteId.isEmpty()) return QString();
+    QUrlQuery q;
+    QUrl u = signedTrackUrl(root, streamPath(), cred, salt, remoteId, q);
+    // THE CAP, and only the cap: no `format`. Forcing one would ask a server for a codec it may not have a
+    // transcoder for, and the spec lets the server choose. Original (0) adds nothing at all, which keeps the
+    // url byte-identical to what every earlier build minted for the same track.
+    const int cap = normalizeMaxBitRate(maxBitRateKbps);
+    if (cap > 0) q.addQueryItem(QStringLiteral("maxBitRate"), QString::number(cap));
+    u.setQuery(q);
+    return u.toString();
+}
+
+QString Subsonic::buildDownloadUrl(const QString& root, const Credential& cred, const QString& salt,
+                                   const QString& remoteId)
+{
+    if (root.isEmpty() || remoteId.isEmpty()) return QString();
+    QUrlQuery q;
+    QUrl u = signedTrackUrl(root, downloadPath(), cred, salt, remoteId, q);
+    // No bitrate parameter exists to add: download.view is the original file, whatever streaming is capped at.
+    u.setQuery(q);
+    return u.toString();
+}

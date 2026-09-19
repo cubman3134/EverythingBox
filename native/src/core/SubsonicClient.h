@@ -160,7 +160,23 @@ public:
     // ---- Playback and art -----------------------------------------------------------------------------
     // The signed stream url for a qualified TRACK id. Empty for anything else, including a local file path —
     // so a caller can hand it every queue entry and let it decide. A fresh salt per call, per the scheme.
+    //
+    // CAPPED BY THE SETTING (#193): Settings::subsonicStreamMaxBitRate() is read here, at the one moment a url
+    // is minted, and handed to the pure builder — so every queue built after the setting changes streams at
+    // the new cap and nothing that was already minted needs rewriting. 0 (Original) sends no maxBitRate.
     QString streamUrl(const QString& qualifiedTrackId) const;
+
+    // THE DOWNLOAD MINTER (#193 offline downloads). download.view — the ORIGINAL file, never capped — for a
+    // qualified TRACK id, signed with a fresh random salt. Empty for anything else, and for a server no longer
+    // in the store. DownloadManager asks this through its url minter at the top of every start(), so the
+    // signed url is never assigned to a DownloadJob and a resumed job re-mints rather than replaying a stored
+    // link. See SubsonicDownload.h.
+    QString downloadUrlFor(const QString& qualifiedTrackId) const;
+
+    // The server's own file suffix for a track this session has read ("flac", "mp3"), or "" — what a
+    // download's file name ends in. Learned from the same getAlbum / getPlaylist replies the browse levels
+    // already fetch; nothing is requested for it.
+    QString trackSuffix(const QString& qualifiedTrackId) const;
 
     // Fetch this album's cover into MetaCache (keyed on the qualified ALBUM id) if it is not already there.
     // No-op when the album has no cover art, when it is already cached, when a fetch is in flight, or when
@@ -195,6 +211,7 @@ private:
         QSet<QString>          loadedAlbums;     // qualified album keys whose tracks have been fetched
         QSet<QString>          loadedArtists;    // qualified artist keys whose albums have been fetched
         bool                   artistsLoaded = false;
+        QHash<QString, QString> trackSuffix;     // qualified track id -> the server's suffix (#193 downloads)
         // The three flat levels (#193 increment 6). Rows, not a second Index - see the header.
         //
         // ...and `sections`, which IS a second Index and has to be: it holds the containers this app

@@ -136,6 +136,39 @@ namespace Subsonic
     // url READER below cannot drift apart. Nothing else in the tree writes this string.
     QString streamPath();
 
+    // ---- The two playback-shaped urls, as PURE builders (issue #193: downloads and the bitrate cap) ------
+    //
+    // Both take everything as parameters — the normalised root, the credential, the salt and the server's own
+    // track id — so probe_subsonic pins every byte of them with no store, no settings and no socket. The
+    // client's two thin wrappers (SubsonicClient::streamUrl / downloadUrlFor) only look the inputs up.
+    //
+    // THE CAP BELONGS TO STREAMING AND TO NOTHING ELSE. `maxBitRateKbps` is 0 for "Original" (the default,
+    // and the behaviour before the cap existed: no parameter at all, so the bytes mpv gets are the bytes the
+    // server holds). Any other value adds `maxBitRate=<n>` and NO `format`: the server chooses the transcode
+    // codec it is configured for, which is the one it can actually produce. A value that is not one of
+    // streamBitRateChoices() is treated as Original rather than sent, so a hand-edited ini cannot ask a
+    // server for 7 kbps.
+    //
+    // A DOWNLOAD HAS NO CAP PARAMETER TO GET WRONG. download.view serves the original file by definition, and
+    // buildDownloadUrl does not take a bitrate at all — so "downloads are unaffected by the cap" is a fact
+    // about this signature rather than a branch somebody could invert.
+    //
+    // Both results carry `t`/`s` (or `p`) and are therefore CREDENTIALS: a caller hands one to a network
+    // request or to mpv and keeps it nowhere. See the auth note above.
+    struct Credential { QString user, password; bool legacy = false; QString client; };
+
+    QString downloadPath();   // "/rest/download.view" — the one spelling, as streamPath() is for stream
+
+    // The setting's options, and the one normaliser. INLINE, because Settings.cpp reads and writes the value
+    // through it and Settings.cpp is linked into dozens of targets that do not link this file's .cpp.
+    inline QVector<int> streamBitRateChoices() { return { 0, 320, 192, 128 }; }   // 0 = Original
+    inline int normalizeMaxBitRate(int kbps) { return streamBitRateChoices().contains(kbps) ? kbps : 0; }
+
+    QString buildStreamUrl(const QString& root, const Credential& cred, const QString& salt,
+                           const QString& remoteId, int maxBitRateKbps);
+    QString buildDownloadUrl(const QString& root, const Credential& cred, const QString& salt,
+                             const QString& remoteId);
+
     // ---- The reverse reader (issue #203) ---------------------------------------------------------------
     //
     // THE ONE PLACE A SIGNED STREAM URL IS TURNED BACK INTO THE TRACK IT NAMES. qualify() mints an id,

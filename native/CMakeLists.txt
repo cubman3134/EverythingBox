@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.292 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.293 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -721,6 +721,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Subsonic.cpp            src/core/Subsonic.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h  # saved servers, device-local
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h       # the fetches, the cache, MusicSupply
+        src/core/SubsonicDownload.cpp    src/core/SubsonicDownload.h     # #193: offline downloads, Jellyfin's shape
         src/core/SubsonicTransport.h     # the ONE sentence table a failed request may produce (no url, ever)
         src/core/CoverFetch.h            # (#370) what a cover answer means: landed, "no art" this session, or retry
         # ...and increment 6: the server as a SCROBBLE DESTINATION - #192's seam, one provider per server.
@@ -978,11 +979,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         # one above it: nothing here is about how an item is played FROM a server, and #83's file is already
         # a complete thought.
         src/ui/MainWindowJellyfinDownload.cpp
+        src/ui/MainWindowSubsonicDownload.cpp   # #193: Subsonic offline downloads, Jellyfin's shape
         # #109: the Request action, the Requests shelf and the request-service settings. Its OWN TU (the
         # #186 direction) - and every submission in this feature happens at exactly one call site in it.
         src/ui/MainWindowRequests.cpp
         # ...and the browse levels' half of the same feature, out of HomeView.cpp for the same reason.
         src/ui/HomeViewJellyfin.cpp
+        src/ui/HomeViewSubsonicDownload.cpp     # #193: which Subsonic rows offer Download
         src/ui/MainWindowOpdsPse.cpp   # #153: OPDS-PSE page streaming (MainWindow members, own TU)
         # #248 (b): the self-compiled tier's card. A MainWindow member in its OWN TU (the #186
         # direction) - MainWindow.cpp is one giant object that a dozen branches edit at once.
@@ -2504,6 +2507,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         # routes to the Jellyfin and EverythingBox-server music clients, so those link too - and they are
         # asked the same question, because they had the same shape.
         src/core/SubsonicClient.cpp      src/core/SubsonicClient.h
+        # #193 offline downloads: the pure job/batch/local-copy rules, and the REAL DownloadManager + Downloads
+        # store, so the credential scan reads the queue file the manager actually writes and MusicSupply's
+        # prefer-the-local-copy branch runs against the real store.
+        src/core/SubsonicDownload.cpp    src/core/SubsonicDownload.h
+        src/core/DownloadManager.cpp     src/core/DownloadManager.h
+        src/core/DownloadsStore.cpp      src/core/DownloadsStore.h
         src/core/SubsonicServerStore.cpp src/core/SubsonicServerStore.h
         src/core/SubsonicTransport.h
         src/core/ProfileStore.cpp        src/core/ProfileStore.h

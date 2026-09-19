@@ -130,6 +130,17 @@ public:
     // browse::jellyfinDownloadTargetFor, so no surface re-reads the mime for itself.
     bool browseJellyfinDownload(int themedIndex, int* kindOut, QString* refOut, QString* seasonRefOut,
                                 QString* titleOut, QString* thumbOut) const;
+    // #193: the Subsonic download target of a row — a server TRACK, or a server ALBUM / PLAYLIST (one job per
+    // track). `kindOut` is SubsonicDownload::Kind as an int so this header need not include it. Asked through
+    // browse::queueTargetFor, the one reading of what a music row names. False on a Recent / Downloaded list
+    // (already saved) and on anything that is not a Subsonic server's. HomeViewSubsonicDownload.cpp.
+    bool subsonicDownloadTargetOf(const MediaItem& it, int* kindOut, QString* refOut) const;
+    // ...and for the row a cursor is on, surface-gated like browseJellyfinDownload: -1 = the classic grid.
+    bool browseSubsonicDownload(int themedIndex, int* kindOut, QString* refOut, QString* titleOut,
+                                QString* thumbOut) const;
+    // ...and for an items_ row the caller already holds (the classic right-click menu).
+    bool subsonicDownloadForItemsRow(int itemsRow, int* kindOut, QString* refOut, QString* titleOut,
+                                     QString* thumbOut) const;
     // The same question about an item the caller already holds (a Recents/Downloads row). "" = no port.
     QString nativePortIdFor(const MediaItem& it) const;
     // #193 increment 2 — the music row the "Add to queue" / "Play next" verbs act on.
@@ -549,6 +560,9 @@ signals:
     // catalogs one; the two container kinds take the batch verbs and the leaf takes the single one.
     void jellyfinDownloadRequested(int kind, const QString& ref, const QString& seasonRef,
                                    const QString& title, const QString& thumb);
+    // #193: Download on a Subsonic track, album or playlist row — the same hand-off, for the same reason: only
+    // MainWindow owns the DownloadManager and the url minter. `ref` is the qualified track / album / playlist id.
+    void subsonicDownloadRequested(const QString& ref, const QString& title, const QString& thumb);
     // #109: a detail page has appeared for an item that CAN be requested — fetch its status. READ-ONLY on
     // the other end, and emitted on view rather than polled: the issue asks for exactly that. It is not a
     // request for anything and MainWindow's handler cannot submit.

@@ -988,6 +988,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             else                         downloadJellyfinBatch(ref, seasonRef, title);
         });
     });
+    // #193: Download on a Subsonic track / album / playlist row. Deferred a turn for the same reason.
+    connect(home_, &HomeView::subsonicDownloadRequested, this,
+            [this](const QString& ref, const QString& title, const QString& thumb) {
+        deferPastQmlEmission([this, ref, title, thumb] { downloadSubsonic(ref, title, thumb); });
+    });
     // #109: the Requests trio. The STATUS fetch is read-only and runs inline — it opens no overlay, so it
     // needs no deferral and must not cost a turn on every detail draw. The PRESS and the library deep-link
     // are deferred a turn for the reason every other verb that opens a NavMenu is: both arrive inside a
@@ -3159,6 +3164,23 @@ static QList<QPair<QString, QString>> musicSourcePrefPairs()
     for (const ServerMusicClient::Shelf& sh : ServerMusicClient::instance().shelves())
         out << qMakePair(sh.name.trimmed().isEmpty() ? sh.id : sh.name, sh.id);
     return out;
+}
+
+// SERVER STREAMING QUALITY (#193). ONE list, from the protocol's own choices, read by BOTH settings builders
+// and by the themed handler that writes the value back — so the two surfaces cannot offer different options.
+static QList<QPair<QString, int>> subsonicStreamQualityPairs()
+{
+    QList<QPair<QString, int>> out;
+    for (int kbps : Subsonic::streamBitRateChoices())
+        out << qMakePair(kbps == 0 ? QObject::tr("Original") : QObject::tr("%1 kbps").arg(kbps), kbps);
+    return out;
+}
+static QString subsonicStreamQualityHint()
+{
+    return QObject::tr("The most a music server is asked to stream at, on this device only. Original plays the "
+                       "file the server holds; a cap asks the server to convert on the fly, which saves data "
+                       "on a slow or metered connection. Downloads are always the original file. This is not "
+                       "switched automatically on mobile data.");
 }
 
 // The display string for what is stored right now. Falls back to the FIRST row rather than to nothing: an
@@ -5651,6 +5673,14 @@ void MainWindow::openBrowseContextMenu()
     const bool jfSurfaceOk = home_ && (jfThemedIdx >= 0 || stack_->currentWidget() == home_);
     const bool hasJfDownload = jfSurfaceOk
         && home_->browseJellyfinDownload(jfThemedIdx, &jfKind, &jfRef, &jfSeasonRef, &jfTitle, &jfThumb);
+    // #193: a Subsonic ALBUM or PLAYLIST row downloads from here on both layouts, surface-gated and resolved
+    // before the menu opens exactly like the Jellyfin verb. A TRACK row already carries Download in the track
+    // verbs (classic) and the chooser (themed), so it is not offered twice.
+    int ssKind = 0;
+    QString ssRef, ssTitle, ssThumb;
+    const bool hasSsAlbumDownload = jfSurfaceOk
+        && home_->browseSubsonicDownload(jfThemedIdx, &ssKind, &ssRef, &ssTitle, &ssThumb)
+        && ssKind == 2 /* SubsonicDownload::Kind::Album */;
 
     // #308: the channel guide's jump-to-now, offered ONLY while standing in the guide. Start is the spare
     // button the issue asks about: it already means "the menu for what I am looking at" on both layouts, it
@@ -5691,7 +5721,7 @@ void MainWindow::openBrowseContextMenu()
                                && home_->trackMenuForRow(-1, &trackVerbs, &trackRow);
 
     enum Verb { NowPlaying, StopMusic, EmuSettings, AddToQueue, PlayNext, NativePort, JellyfinDl, GuideNow,
-                RemoveMusicServer, TrackFavorite, TrackPlaylist, TrackDownload };
+                RemoveMusicServer, TrackFavorite, TrackPlaylist, TrackDownload, SubsonicAlbumDl };
     QVector<int> verbs;
     QStringList items;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); items << label; };
@@ -5721,6 +5751,7 @@ void MainWindow::openBrowseContextMenu()
         offer(JellyfinDl, jfKind == int(browse::JellyfinDownloadTarget::Kind::Item)
                               ? tr("Download for offline")
                               : tr("Download episodes…"));
+    if (hasSsAlbumDownload) offer(SubsonicAlbumDl, tr("Download for offline"));
     // LAST, and named for what it is. It is the destructive one on this menu, so it does not sit where a
     // hurried press lands, and the confirmation behind it says what is lost before anything goes.
     if (hasMusicServer) offer(RemoveMusicServer, tr("Remove this music server…"));
@@ -5755,6 +5786,7 @@ void MainWindow::openBrowseContextMenu()
             else
                 downloadJellyfinBatch(jfRef, jfSeasonRef, jfTitle);
             break;
+        case SubsonicAlbumDl: downloadSubsonic(ssRef, ssTitle, ssThumb); break;   // resolved before the menu
         // The server was resolved before the menu opened, for the same reason. Deferred a turn: NavMenu::pick
         // has returned, but the removal opens its own nav-kit cards (and, on the send path, a network round
         // trip), and stacking those on the frame this menu unwound is the #28 / #211 discipline.
@@ -13118,9 +13150,15 @@ void MainWindow::showBrowseQueueMenu(int itemsRow)
     browse::TrackMenuVerbs trackVerbs;
     MediaItem trackRow;
     const bool hasTrackVerbs = home_->trackMenuForRow(itemsRow, &trackVerbs, &trackRow);
+    // #193: a Subsonic album / playlist row downloads from its right-click menu too — resolved now, like the rest.
+    int ssKind = 0;
+    QString ssRef, ssTitle, ssThumb;
+    const bool hasSsAlbum = hasQueue && t.what == browse::QueueAdd::Album
+        && home_->subsonicDownloadForItemsRow(itemsRow, &ssKind, &ssRef, &ssTitle, &ssThumb)
+        && ssKind == 2 /* SubsonicDownload::Kind::Album */;
     if (!hasQueue && !hasTrackVerbs) return;
 
-    enum Verb { AddToQueue, PlayNext, TrackFavorite, TrackPlaylist, TrackDownload };
+    enum Verb { AddToQueue, PlayNext, TrackFavorite, TrackPlaylist, TrackDownload, SubsonicAlbumDl };
     QVector<int> verbs;
     QStringList labels;
     auto offer = [&](int v, const QString& label) { verbs.push_back(v); labels << label; };
@@ -13128,6 +13166,7 @@ void MainWindow::showBrowseQueueMenu(int itemsRow)
     if (favVerb != browse::TrackFavVerb::None) offer(TrackFavorite, trackFavoriteVerbLabel(favVerb));
     if (hasTrackVerbs && trackVerbs.playlist) offer(TrackPlaylist, trackPlaylistVerbLabel());
     if (hasTrackVerbs && trackVerbs.download) offer(TrackDownload, trackDownloadVerbLabel());
+    if (hasSsAlbum) offer(SubsonicAlbumDl, tr("Download for offline"));
     const bool isTrack = favVerb != browse::TrackFavVerb::None || hasTrackVerbs;
     const int pick = NavMenu::pick(isTrack ? tr("Track") : tr("Queue"), labels, this);
     if (pick < 0 || pick >= verbs.size()) return;
@@ -13139,6 +13178,7 @@ void MainWindow::showBrowseQueueMenu(int itemsRow)
         // #365: the P key's picker on the copied row, a turn later; the themed Download's crawl on the same copy.
         case TrackPlaylist: home_->queueAddToPlaylist(trackRow); break;
         case TrackDownload: home_->downloadBrowseItem(trackRow); break;
+        case SubsonicAlbumDl: downloadSubsonic(ssRef, ssTitle, ssThumb); break;
     }
 }
 
@@ -22522,6 +22562,19 @@ void MainWindow::openGeneralSettings()
         // a setting in one builder only is unreachable in the other mode.
         choice(QStringLiteral("music.prefsource"), tr("Play music from"), musicSourcePrefOpts,
                musicSourcePrefCur);
+        // SERVER STREAMING QUALITY (#193). Per device, never synced (Settings.h). Classic twin below (GS_TWINS).
+        {
+            QStringList ssqOpts;
+            QString ssqCur;
+            for (const auto& pr : subsonicStreamQualityPairs())
+            {
+                ssqOpts << pr.first;
+                if (pr.second == Settings::subsonicStreamMaxBitRate()) ssqCur = pr.first;
+            }
+            choice(QStringLiteral("music.streamquality"), tr("Server streaming quality"), ssqOpts,
+                   ssqCur.isEmpty() ? ssqOpts.value(0) : ssqCur);
+            info(QStringLiteral("music.streamqualityhint"), subsonicStreamQualityHint(), QString());
+        }
         info(QStringLiteral("music.prefsourcehint"),
              tr("When the same album is on this device and on a music server, this is the copy that plays. "
                 "The others stay one press away on the album itself. Matching is deliberately cautious: two "
@@ -23389,6 +23442,12 @@ void MainWindow::openGeneralSettings()
                         setInfo(QStringLiteral("music.serverstatus"), tr("Music servers"),
                                 musicServerStatusLine());
                     }, Qt::QueuedConnection);
+                }
+                else if (id == QStringLiteral("music.streamquality")) {
+                    // Mapped back through the same list, so only a listed rate is ever written. Nothing already
+                    // playing is re-minted; the next queue streams at the new cap.
+                    for (const auto& pr : subsonicStreamQualityPairs())
+                        if (pr.first == val) { Settings::setSubsonicStreamMaxBitRate(pr.second); break; }
                 }
                 else if (id == QStringLiteral("music.prefsource")) {
                     // Map the picked DISPLAY back through the same list, so only a listed value is written.
@@ -24916,6 +24975,23 @@ void MainWindow::openGeneralSettings()
         });
         muPrefRow->addWidget(muPrefLbl); muPrefRow->addWidget(muPref); muPrefRow->addStretch(1);
         v->addLayout(muPrefRow);
+
+        // SERVER STREAMING QUALITY (#193) — the classic twin of the themed music.streamquality row. Same option
+        // list, same setter (GS_TWINS).
+        auto* ssqNote = new QLabel(subsonicStreamQualityHint());
+        ssqNote->setWordWrap(true); ssqNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(ssqNote);
+        auto* ssqRow = new QHBoxLayout();
+        auto* ssqLbl = new QLabel(tr("Server streaming quality"));
+        ssqLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+        auto* ssQuality = new QComboBox();
+        for (const auto& pr : subsonicStreamQualityPairs()) ssQuality->addItem(pr.first, pr.second);
+        ssQuality->setCurrentIndex(qMax(0, ssQuality->findData(Settings::subsonicStreamMaxBitRate())));
+        connect(ssQuality, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [ssQuality](int) {
+            Settings::setSubsonicStreamMaxBitRate(ssQuality->currentData().toInt());
+        });
+        ssqRow->addWidget(ssqLbl); ssqRow->addWidget(ssQuality); ssqRow->addStretch(1);
+        v->addLayout(ssqRow);
 
         auto* muClear = new QPushButton(tr("Reset my music match corrections (%1)").arg(musicMatchOverrideCount()));
         v->addWidget(muClear);

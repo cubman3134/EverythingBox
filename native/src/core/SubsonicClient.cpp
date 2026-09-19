@@ -6,6 +6,10 @@
 #include "MusicArt.h"
 #include "ServerMusicClient.h"
 #include "SubsonicTransport.h"
+#include "Settings.h"          // #193: the streaming-quality cap, read at the moment a stream url is minted
+#include "SubsonicDownload.h"  // #193: a downloaded copy wins over a stream in MusicSupply::playUrl
+#include "DownloadsStore.h"
+#include <QFileInfo>
 
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -289,7 +293,11 @@ void SubsonicClient::fetchAlbumTracks(const QString& albumKey, Done done)
                 const QVector<Subsonic::RemotePlaylist> info = Subsonic::readPlaylists(root);
                 Subsonic::RemotePlaylist p = info.isEmpty() ? Subsonic::RemotePlaylist{} : info.first();
                 if (p.id.isEmpty()) p.id = Subsonic::parse(albumKey).remoteId;
-                Subsonic::adoptPlaylist(c.sections, serverId, p, Subsonic::readSongs(root));
+                const QVector<Subsonic::RemoteSong> songs = Subsonic::readSongs(root);
+                Subsonic::adoptPlaylist(c.sections, serverId, p, songs);
+                for (const Subsonic::RemoteSong& s : songs)
+                    if (!s.suffix.isEmpty())
+                        c.trackSuffix.insert(Subsonic::qualify(serverId, Subsonic::Kind::Track, s.id), s.suffix);
                 c.loadedAlbums.insert(albumKey);
                 if (!p.coverArt.isEmpty() && !c.albumCoverId.contains(albumKey))
                     c.albumCoverId.insert(albumKey, p.coverArt);
@@ -310,8 +318,12 @@ void SubsonicClient::fetchAlbumTracks(const QString& albumKey, Done done)
             // favourite, a resumed queue) the index has never heard of this album, and filling an album that
             // is not there is a silent no-op. See Subsonic.h.
             const QVector<Subsonic::RemoteAlbum> info = Subsonic::readAlbums(root);
-            if (!info.isEmpty()) Subsonic::adoptAlbum(c.idx, serverId, info.first(), Subsonic::readSongs(root));
-            else                 Subsonic::fillAlbumTracks(c.idx, serverId, albumKey, Subsonic::readSongs(root));
+            const QVector<Subsonic::RemoteSong>  songs = Subsonic::readSongs(root);
+            if (!info.isEmpty()) Subsonic::adoptAlbum(c.idx, serverId, info.first(), songs);
+            else                 Subsonic::fillAlbumTracks(c.idx, serverId, albumKey, songs);
+            for (const Subsonic::RemoteSong& s : songs)
+                if (!s.suffix.isEmpty())
+                    c.trackSuffix.insert(Subsonic::qualify(serverId, Subsonic::Kind::Track, s.id), s.suffix);
             c.loadedAlbums.insert(albumKey);
             if (!c.albumCoverId.contains(albumKey))
             {
@@ -565,18 +577,38 @@ QString SubsonicClient::streamUrl(const QString& qualifiedTrackId) const
     // stats store and the queue-to-album map, so it must not change between plays — Subsonic.h sets out the
     // whole argument, including why it costs nothing.
     const QString salt = Subsonic::stableSalt(ref.serverId + QLatin1Char('|') + ref.remoteId);
-    // Subsonic::streamPath(), not a literal: #203's reader has to recognise this url again to name the track
-    // it came from, and two spellings of the endpoint is exactly how that stops working.
-    QUrl u(root + Subsonic::streamPath());
-    QUrlQuery q;
-    for (const auto& p : Subsonic::authParams(srv.username, srv.password, salt, srv.legacyAuth, clientName()))
-        q.addQueryItem(p.first, p.second);
-    q.addQueryItem(QStringLiteral("id"), ref.remoteId);
-    // No maxBitRate and no format: this increment streams whatever the server holds, so the bytes mpv gets
-    // are the bytes on the server and gapless/ReplayGain behave as they do for a local file. The mobile
-    // bitrate cap is deliberately a later increment (see the report).
-    u.setQuery(q);
-    return u.toString();
+    // The pure builder spells the endpoint through Subsonic::streamPath(), not a literal: #203's reader has to
+    // recognise this url again to name the track it came from, and two spellings of the endpoint is exactly
+    // how that stops working.
+    //
+    // THE CAP (#193). Original (0, the default) sends no maxBitRate and no format, so the bytes mpv gets are
+    // the bytes on the server and gapless/ReplayGain behave as they do for a local file. A cap adds
+    // maxBitRate only and lets the server pick its transcode codec. Note what changing it costs: the url is
+    // this track's identity to the resume store, so a track resumes under the cap it was last played at.
+    const Subsonic::Credential cred{ srv.username, srv.password, srv.legacyAuth, clientName() };
+    return Subsonic::buildStreamUrl(root, cred, salt, ref.remoteId, Settings::subsonicStreamMaxBitRate());
+}
+
+QString SubsonicClient::downloadUrlFor(const QString& qualifiedTrackId) const
+{
+    const Subsonic::Ref ref = Subsonic::parse(qualifiedTrackId);
+    if (!ref.ok || ref.kind != Subsonic::Kind::Track) return QString();
+    SubsonicServer srv;
+    if (!SubsonicServerStore::get(ref.serverId, srv)) return QString();
+    const QString root = Subsonic::normalizeRoot(srv.url, srv.allowPlainHttp);
+    if (root.isEmpty()) return QString();
+    // A RANDOM salt, unlike streamUrl's stable one: a download url is a request and never an identity (the
+    // job's identity is the qualified id it was minted from), so there is nothing for a varying salt to break.
+    const QString salt = Subsonic::saltFrom(QRandomGenerator::global()->generate64());
+    const Subsonic::Credential cred{ srv.username, srv.password, srv.legacyAuth, clientName() };
+    return Subsonic::buildDownloadUrl(root, cred, salt, ref.remoteId);
+}
+
+QString SubsonicClient::trackSuffix(const QString& qualifiedTrackId) const
+{
+    const QString serverId = Subsonic::serverOf(qualifiedTrackId);
+    const auto it = caches_.constFind(serverId);
+    return it == caches_.constEnd() ? QString() : it->trackSuffix.value(qualifiedTrackId);
 }
 
 void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<void()> then)
@@ -689,7 +721,16 @@ QString MusicSupply::playUrl(const QString& path)
 {
     // THE ONE PLACE A CREDENTIAL ENTERS A QUEUE, for every supplier that has one. A local file passes
     // straight through; each remote id becomes a url minted at this moment and stored nowhere.
-    if (Subsonic::isQualified(path)) return SubsonicClient::instance().streamUrl(path);
+    if (Subsonic::isQualified(path))
+    {
+        // A DOWNLOADED COPY WINS (#193), asked before any url is minted — the offline story, and the same
+        // prefer-local rule MainWindow::openJellyfinItem applies. The caller still files the local path under
+        // the qualified id (the queue's url -> identity map), so the track keeps its identity.
+        const QString local = SubsonicDownload::localCopy(path, DownloadsStore::list(),
+                                                          [](const QString& p) { return QFileInfo::exists(p); });
+        if (!local.isEmpty()) return local;
+        return SubsonicClient::instance().streamUrl(path);
+    }
     if (Jellyfin::isQualified(path))  return JellyfinMusicClient::instance().streamUrl(path);
     if (ServerMusic::isQualified(path)) return ServerMusicClient::instance().streamUrl(path);
     return path;
