@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.293 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.294 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -3893,6 +3893,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/PlayerBarNav.h)
     target_include_directories(probe_playerbar PRIVATE src src/ui)
     target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
+
+    # The classic queue list's confirm key (issue #415): Enter/OK on a row activates it and is CLAIMED, so
+    # the press no longer also reaches the player page's play/pause fallback (which paused the row it had
+    # just started). Drives the real QApplication key propagation under the offscreen QPA, and reads
+    # MainWindow.cpp to pin that the queue list's event filter actually calls the helper. Header-only
+    # unit, so there is no .cpp to also add to the app's source list (the issue-#182 trap).
+    add_executable(probe_queuekeys tools/probe_queuekeys.cpp
+        src/ui/QueueListKeys.h)
+    target_include_directories(probe_queuekeys PRIVATE src src/ui)
+    target_link_libraries(probe_queuekeys PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+    target_compile_definitions(probe_queuekeys PRIVATE
+        EB_QUEUEKEYS_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
     # Seek previews (issue #85): the trickplay arithmetic -- which sprite-sheet grid, row and column a
     # given second of a film lives in (the last grid is SHORT, and a time past the end clamps rather than
