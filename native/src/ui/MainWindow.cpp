@@ -30,6 +30,7 @@
 #include "MediaPane.h"
 #include "SeekSlider.h"            // transport bar: a click on the groove seeks there (not a page step)
 #include "PlayerBarNav.h"
+#include "QueueListKeys.h"         // #415: Enter/OK on a queue row chooses it, and only that
 #include "PlayerIcons.h"           // transport bar: drawn monochrome glyphs (a colour emoji font ignores `color:`)
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
@@ -3542,6 +3543,11 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         const int k = static_cast<QKeyEvent*>(event)->key();
         if (k == Qt::Key_M || k == Qt::Key_Menu) { showQueueMenu(); return true; }
     }
+    // #415: ...and its confirm key. A QListWidget emits itemActivated for Enter and then IGNORES the key, so
+    // the same press used to carry on up to keyPressEvent, whose player-page branch toggles pause when no
+    // button holds focus. The row was chosen and then paused at 0:00. The helper activates the row itself
+    // and claims the key; see QueueListKeys.h.
+    if (obj == playlist_ && eb::claimQueueConfirm(playlist_, event)) return true;
 
     // The transport BARS' two-state arrow contract (the seek and volume sliders). Claimed HERE and not in the
     // player's key switch for the same reason the subtitle panel's buttons are claimed below: a focused
