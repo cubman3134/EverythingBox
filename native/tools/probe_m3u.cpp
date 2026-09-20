@@ -133,6 +133,42 @@ int main(int argc, char** argv)
         CHECK(a[0].url == DISC_DIR "/Game (Disc 1).chd", "bare-path url resolved against the .m3u dir");
     }
 
+    // ---- a COMPUTER multi-disk playlist (#190, item 4) --------------------------------------------------
+    // #49 generates the same .m3u for an Amiga/C64/Apple II set as it does for a PlayStation one, and the
+    // library entry opens through StreamResolver — so if the floppy formats are not recognised here, the
+    // playlist is classified as an IPTV/media list and handed to the video player instead of the emulator.
+    // That is the difference between "one entry that launches" and "one entry that plays nothing".
+    {
+        const auto amiga = StreamResolver::parseM3u(
+            "Game (Disk 1 of 2).adf\nGame (Disk 2 of 2).adf\n", DISC_DIR "/Game.m3u");
+        CHECK(amiga.size() == 2, "an Amiga two-disk list parses");
+        CHECK(StreamResolver::looksLikeDiscPlaylist(amiga), "an all-.adf list is a disc set -> emulator");
+
+        const auto c64 = StreamResolver::parseM3u(
+            "Game (Side A).d64\nGame (Side B).d64\n", DISC_DIR "/Game.m3u");
+        CHECK(StreamResolver::looksLikeDiscPlaylist(c64), "an all-.d64 list is a disc set -> emulator");
+
+        const auto apple2 = StreamResolver::parseM3u(
+            "Game (Disk 1 of 2).dsk\nGame (Disk 2 of 2).dsk\n", DISC_DIR "/Game.m3u");
+        CHECK(StreamResolver::looksLikeDiscPlaylist(apple2), "an all-.dsk list is a disc set -> emulator");
+
+        const auto atarist = StreamResolver::parseM3u(
+            "Game (Disk 1 of 2).st\nGame (Disk 2 of 2).msa\n", DISC_DIR "/Game.m3u");
+        CHECK(StreamResolver::looksLikeDiscPlaylist(atarist), "a mixed .st/.msa list is still a disc set");
+
+        // The gate on the other side: a genuine media/IPTV list must NOT become a disc set because one of
+        // these extensions appears in it. A list mixing a floppy image with an http stream is not a disc set.
+        const auto mixed = StreamResolver::parseM3u(
+            "#EXTM3U\n#EXTINF:-1,Disk\nGame (Disk 1 of 2).adf\n#EXTINF:-1,Channel\nhttp://srv/live.ts\n",
+            DISC_DIR "/Game.m3u");
+        CHECK(mixed.size() == 2 && !StreamResolver::looksLikeDiscPlaylist(mixed),
+              "a list mixing a floppy image with a stream is not a disc set");
+        // And the ordinary video playlist is untouched.
+        const auto video = StreamResolver::parseM3u(
+            "Episode 1.mkv\nEpisode 2.mkv\n", DISC_DIR "/Show.m3u");
+        CHECK(!StreamResolver::looksLikeDiscPlaylist(video), "a list of video files is still not a disc set");
+    }
+
     if (fails == 0) printf("M3U-OK\n");
     return fails == 0 ? 0 : 1;
 }

@@ -140,11 +140,32 @@ QString StreamResolver::m3uHeaderTvgUrl(const QString& text)
     return QString();
 }
 
-// A PlayStation multi-disc list: every entry is a disc image the libretro core can swap between.
+// A multi-disc/multi-disk list: every entry is an image the libretro core can swap between, so the playlist
+// belongs to the emulator and not to the video player.
+//
+// The first list is the console/CD one #49 shipped. The second is the retro-COMPUTER floppy formats (#190
+// item 4): #49 generates exactly the same .m3u for an Amiga or C64 set as it does for a PlayStation one, and
+// the entry opens through this classification — so without them a grouped Amiga set was handed to libmpv as
+// an IPTV-style media queue, which is the difference between "one entry that launches" and "one entry that
+// plays nothing". Listed by system so a reader can see why each is here:
+//   Amiga        adf adz dms ipf hdf        Atari ST    st msa stx dim
+//   C64/VIC-20   d64 d71 d81 g64 x64 t64    Spectrum    tzx tap trd scl
+//   Apple II     dsk po do nib woz 2mg      Amstrad CPC dsk cdt      MSX cas
+//   PC-98        d88 d98 fdi hdi hdm xdf
+// The rule itself is unchanged and is what keeps a real media playlist out: EVERY entry must be an image, so
+// a list mixing a floppy image with a stream is still a media queue.
 bool StreamResolver::looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
 {
     if (entries.isEmpty()) return false;
-    static const QStringList disc = { "cue", "chd", "bin", "iso", "pbp", "img", "ccd" };
+    static const QStringList disc = {
+        "cue", "chd", "bin", "iso", "pbp", "img", "ccd",
+        "adf", "adz", "dms", "ipf", "hdf",
+        "d64", "d71", "d81", "g64", "x64", "t64",
+        "dsk", "po", "do", "nib", "woz", "2mg",
+        "st", "msa", "stx", "dim",
+        "tzx", "tap", "trd", "scl", "cdt", "cas",
+        "d88", "d98", "fdi", "hdi", "hdm", "xdf",
+    };
     for (const M3uEntry& e : entries)
     {
         const QString path = QUrl(e.url).path().isEmpty() ? e.url : QUrl(e.url).path();

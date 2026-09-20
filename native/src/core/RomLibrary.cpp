@@ -4,6 +4,7 @@
 #include "DownloadsStore.h"
 #include "AppPaths.h"
 #include "DiscGroup.h"
+#include "FormatCollapse.h"
 #include "RegionCollapse.h"
 #include "RomRouting.h"
 #include "LaunchRecipe.h"   // #190: a recipe may declare that a sub-folder here is ONE game
@@ -165,8 +166,15 @@ void collapseMultiDiscSets(RomLibrary::SystemGroup& g)
             candidatePaths.push_back(r.path);
     }
 
+    // #190 item 4: which naming dialect this system's sets are read in. Console by default — the TOSEC forms
+    // ("Disk 1 of 2", "Side A") group only for a system whose recipe opts in, so console naming is unchanged
+    // by construction rather than by a heuristic.
+    const DiscGroup::Dialect dialect = LaunchRecipes::forSystem(g.systemId).tosecDiskTags
+                                           ? DiscGroup::Dialect::Computer
+                                           : DiscGroup::Dialect::Console;
+
     QVector<RomLibrary::Rom> rebuilt = userPlaylists; // user playlists survive verbatim
-    for (const DiscGroup::DiscSet& s : DiscGroup::groupDiscs(candidatePaths))
+    for (const DiscGroup::DiscSet& s : DiscGroup::groupDiscs(candidatePaths, dialect))
     {
         if (s.isMultiDisc)
         {
@@ -183,6 +191,41 @@ void collapseMultiDiscSets(RomLibrary::SystemGroup& g)
             rebuilt.push_back(byPath.value(s.members.front())); // lone game — unchanged
         }
     }
+    g.roms = rebuilt;
+}
+
+// #190 item 2 glue: collapse same-title siblings in different CONTENT FORMATS into one Rom each, on the
+// format the system's recipe ranks highest. The pure rule is FormatCollapse.h; here is the I/O-free but
+// app-stateful half — reading the ranking out of the system's recipe and keeping the winner's original Rom
+// verbatim (its title/systemId/systemName survive, so scraping and launching behave exactly as for an
+// un-collapsed file, the discipline the region pass follows).
+//
+// Runs FIRST, before the disc pass, and that order is load-bearing: a WHDLoad "Game.lha" and the same
+// title's two-disk "Game (Disk 1 of 2).adf" set are the SAME game, and the .lha is the answer — collapsing
+// formats first lets it win outright, where running the disc pass first would build a playlist for a disk
+// set the user is never going to be shown. With no .lha present the two .adf files are the same format, this
+// pass leaves both alone, and the disc pass below groups them into the one .m3u entry.
+//
+// A system whose recipe ranks no formats (every console) gets an empty ranking, which FormatCollapse passes
+// through unchanged — so this call costs a recipe lookup and changes nothing.
+void collapseFormatSiblings(RomLibrary::SystemGroup& g)
+{
+    if (g.roms.isEmpty()) return;
+    const QStringList ranking = LaunchRecipes::forSystem(g.systemId).formats;
+    if (ranking.isEmpty()) return;
+
+    QVector<QString>                candidatePaths;
+    QHash<QString, RomLibrary::Rom> byPath;
+    for (const RomLibrary::Rom& r : g.roms)
+    {
+        candidatePaths.push_back(r.path);
+        byPath.insert(r.path, r);
+    }
+
+    QVector<RomLibrary::Rom> rebuilt;
+    rebuilt.reserve(g.roms.size());
+    for (const FormatCollapse::FormatGroup& fg : FormatCollapse::collapseByFormat(candidatePaths, ranking))
+        rebuilt.push_back(byPath.value(fg.chosenPath)); // the winner as-is; the alternates are simply hidden
     g.roms = rebuilt;
 }
 
@@ -359,6 +402,12 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         }
         if (g.roms.isEmpty()) continue; // only surface systems that actually have games
 
+        // #190: collapse the same title in several content formats onto the best-ranked one first — a
+        // WHDLoad .lha is the whole game, and the .adf disk set it beats must not become a playlist nobody
+        // sees. No-op for every system whose recipe ranks no formats, which is every console.
+        collapseFormatSiblings(g);
+        if (g.roms.isEmpty()) continue;
+
         // #49: group disc siblings ("Game (Disc 1/2/3)") into one .m3u entry each, hiding the members.
         collapseMultiDiscSets(g);
         if (g.roms.isEmpty()) continue;
@@ -466,4 +515,76 @@ QVector<QString> RomLibrary::otherRegionVersions(const QString& gamePath)
         break;
     }
     return others;
+}
+
+// The format ranking that applies to a file, found the way the scan found it: the file's own folder names
+// the system (RomLibrary's whole layout rule, #53), and the system's recipe carries the ranking (#190).
+// Empty for anything that is not under a system folder we recognise, and for every system with no opinion.
+static QStringList formatRankingForPath(const QString& gamePath)
+{
+    const QFileInfo fi(gamePath);
+    const GameSystem* sys = RomLibrary::systemForFolder(fi.absoluteDir().dirName());
+    if (!sys) return {};
+    return LaunchRecipes::forSystem(sys->id).formats;
+}
+
+QVector<QString> RomLibrary::otherFormatVersions(const QString& gamePath)
+{
+    const QFileInfo fi(gamePath);
+    if (!fi.exists()) return {};                       // a metadata-only / non-file entry has no siblings
+    const QStringList ranking = formatRankingForPath(gamePath);
+    if (ranking.isEmpty()) return {};
+    if (FormatCollapse::formatRank(gamePath, ranking) < 0) return {};  // this file's format is not ranked
+    const QString key = DiscGroup::normalizedKey(gamePath);
+    if (key.isEmpty()) return {};
+
+    // The candidates: ROM files in the SAME folder whose normalised title matches and whose format IS
+    // ranked. Non-recursive, like the region twin — format variants sit side by side.
+    QVector<QString> siblings;
+    const QFileInfoList entries = fi.absoluteDir().entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const QFileInfo& e : entries)
+    {
+        if (!RomRouting::acceptUnderSystemFolder(e.suffix().toLower())) continue;
+        if (FormatCollapse::formatRank(e.fileName(), ranking) < 0) continue;
+        if (DiscGroup::normalizedKey(e.fileName()) != key) continue;
+        siblings.push_back(e.absoluteFilePath());
+    }
+    if (siblings.size() <= 1) return {};
+
+    const QString self = QDir::cleanPath(fi.absoluteFilePath());
+    const QString selfFormat = FormatCollapse::formatOf(gamePath);
+    QVector<QString> others;
+    for (const FormatCollapse::FormatGroup& fg : FormatCollapse::collapseByFormat(siblings, ranking))
+    {
+        // The one group this game belongs to. Whether it is the winner (the normal case) or, defensively, an
+        // alternate, the answer is "every other FORMAT in the group" — a same-format sibling is a region
+        // variant and belongs to otherRegionVersions, not here.
+        QVector<QString> all;
+        all.push_back(fg.chosenPath);
+        for (const QString& a : fg.alternates) all.push_back(a);
+        bool contains = false;
+        for (const QString& p : all) if (QDir::cleanPath(p) == self) { contains = true; break; }
+        if (!contains) continue;
+        for (const QString& p : all)
+            if (QDir::cleanPath(p) != self && FormatCollapse::formatOf(p) != selfFormat) others.push_back(p);
+        break;
+    }
+    return others;
+}
+
+QString RomLibrary::formatSummary(const QString& gamePath)
+{
+    const QStringList ranking = formatRankingForPath(gamePath);
+    if (ranking.isEmpty()) return QString();
+    const QString self = FormatCollapse::formatOf(gamePath);
+    if (!ranking.contains(self)) return QString();
+
+    QStringList alts;
+    for (const QString& p : otherFormatVersions(gamePath))
+    {
+        const QString f = FormatCollapse::formatOf(p).toUpper();
+        if (!alts.contains(f)) alts.push_back(f);
+    }
+    if (alts.isEmpty()) return self.toUpper();
+    return QStringLiteral("%1 (also present: %2)").arg(self.toUpper(), alts.join(QStringLiteral(", ")));
 }

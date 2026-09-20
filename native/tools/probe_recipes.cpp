@@ -815,6 +815,79 @@ int main(int argc, char** argv)
         CHECK(numberParsed == QSet<QString>{ QStringLiteral("dosbox_pure/dosbox_pure_cycles") });
     }
 
+    // ---- #190 item 2/4: the format ranking and the TOSEC opt-in, as DATA ---------------------------------
+    // Both are parsed from the recipe and both are checked against the SHIPPED files, because the whole point
+    // of the decision is that the ranking a user sees is the ranking the scan applies. Expected orders are
+    // hand-authored here from the documented rationale (native/docs/retro-computers.md), never read back out
+    // of the file under test.
+    {
+        // Parsing, against a literal: the list is lowercased, de-dotted and kept IN ORDER, and an unlisted
+        // spelling is simply absent rather than silently appended.
+        LaunchRecipe r; QString err;
+        CHECK(LaunchRecipes::parse(
+            QByteArray("{\"system\":\"demo\",\"formats\":[\"LHA\",\" adf \",\"\"],\"tosecDiskTags\":true}"),
+            &r, &err));
+        CHECK(r.formats == QStringList({ QStringLiteral("lha"), QStringLiteral("adf") }));
+        CHECK(r.tosecDiskTags);
+
+        // Silence is today's behaviour: no "formats" key means no ranking, and no opt-in means the console
+        // dialect. A recipe that says nothing can never change how a library scans.
+        LaunchRecipe q;
+        CHECK(LaunchRecipes::parse(QByteArray("{\"system\":\"demo\"}"), &q, &err));
+        CHECK(q.formats.isEmpty());
+        CHECK(!q.tosecDiskTags);
+
+        // The SHIPPED rankings. Amiga: a WHDLoad .lha installs to a virtual hard disk and boots with no model
+        // choice and no disk swapping; an .hdf is the same idea the user built by hand; .adf is the raw
+        // floppy every puae reads; .adz is that same floppy gzipped; .dms is DiskMasher, which needs the
+        // core's own decompressor and does not survive every copy protection.
+        const LaunchRecipe amigaF = LaunchRecipes::load(QStringLiteral("amiga"), QString());
+        CHECK(amigaF.formats == QStringList({ QStringLiteral("lha"), QStringLiteral("hdf"),
+                                              QStringLiteral("adf"), QStringLiteral("adz"),
+                                              QStringLiteral("dms") }));
+        CHECK(amigaF.tosecDiskTags);
+
+        // C64: the .d64 disk image is the whole title (a multi-load game needs it); a .prg is one program
+        // VICE autostarts instantly; a .t64 is a tape ARCHIVE of the same program; a .tap is the real tape
+        // signal and loads in real time. .crt (a cartridge is a different product) and .g64 (a GCR
+        // preservation dump whose entire purpose is to not be a .d64) are deliberately NOT ranked.
+        const LaunchRecipe c64F = LaunchRecipes::load(QStringLiteral("c64"), QString());
+        CHECK(c64F.formats == QStringList({ QStringLiteral("d64"), QStringLiteral("prg"),
+                                            QStringLiteral("t64"), QStringLiteral("tap") }));
+        CHECK(c64F.tosecDiskTags);
+        CHECK(!c64F.formats.contains(QStringLiteral("crt")));
+        CHECK(!c64F.formats.contains(QStringLiteral("g64")));
+
+        // ZX Spectrum: a snapshot starts AT the game (.szx is the lossless modern one, .z80 the classic,
+        // .sna the 48K-limited lossy one); a .tzx carries the loader's own timing so speedloaders work; a
+        // .tap is the simplified tape that some of those loaders will not survive. The disk formats (+3
+        // .dsk, TR-DOS .trd/.scl) are different MACHINES, not different formats of one title, so they are
+        // not ranked.
+        const LaunchRecipe zxF = LaunchRecipes::load(QStringLiteral("zxspectrum"), QString());
+        CHECK(zxF.formats == QStringList({ QStringLiteral("szx"), QStringLiteral("z80"),
+                                           QStringLiteral("sna"), QStringLiteral("tzx"),
+                                           QStringLiteral("tap") }));
+        CHECK(!zxF.formats.contains(QStringLiteral("dsk")));
+        // The Spectrum is a TAPE system: its sets are not disk sets, so it does not opt into TOSEC grouping.
+        CHECK(!zxF.tosecDiskTags);
+
+        // THE CONSOLE GATE, against what actually ships: no console recipe exists at all, and no shipped
+        // recipe outside the disk-based computers opts in. If a console ever gains a recipe, this is the
+        // assertion that stops it silently inheriting computer disk grouping.
+        for (const QString& id : { QStringLiteral("snes"), QStringLiteral("psx"), QStringLiteral("megadrive") })
+        {
+            const LaunchRecipe none = LaunchRecipes::load(id, QString());
+            CHECK(none.isNull());
+        }
+        const QSet<QString> optedIn = { QStringLiteral("amiga"), QStringLiteral("c64"),
+                                        QStringLiteral("apple2"), QStringLiteral("atarist"),
+                                        QStringLiteral("amstradcpc") };
+        QSet<QString> actuallyOptedIn;
+        for (const QString& id : shipped)
+            if (LaunchRecipes::load(id, QString()).tosecDiskTags) actuallyOptedIn.insert(id);
+        CHECK(actuallyOptedIn == optedIn);
+    }
+
     if (failures == 0) std::printf("RECIPES-OK\n");
     else               std::fprintf(stderr, "RECIPES had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

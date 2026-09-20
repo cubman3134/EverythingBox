@@ -124,6 +124,21 @@ struct LaunchRecipe
     QString summary;                    // one line, shown in the docs + the system folder README
     QString firmwareFolder;             // where firmware goes, as the USER reads it: "system"
     bool    folderIsGame = false;       // a sub-folder holding a program is ONE library entry, not N files
+
+    // #190 item 2 — the CONTENT-FORMAT preference, in the order the user would choose them. Lowercase
+    // extensions, no dot: amiga is ["lha","hdf","adf","adz","dms"]. At scan time the same title present in
+    // several of these is ONE library entry on the best-ranked format, with the rest carried as its
+    // alternates (FormatCollapse.h). It is DATA and not a C++ table for the same reason the core options
+    // are: "a WHDLoad .lha beats a raw .adf" is folklore about one system, it differs per system, and a user
+    // who disagrees re-orders the list in their own <data>/systems/recipes override instead of filing a bug.
+    // EMPTY on every system that has no opinion — which is every console — and an empty list collapses
+    // nothing at all, so silence is exactly today's behaviour.
+    QStringList formats;
+
+    // #190 item 4 — does this system's content use the TOSEC disk-set naming ("(Disk 1 of 3)", "(Side A)")?
+    // Opting in PER SYSTEM, in data, is the gate that keeps console naming unchanged: #49's four console
+    // forms are all a console will ever be read for, because no console ships a recipe that sets this.
+    bool tosecDiskTags = false;
     QList<RecipeCore>  cores;
     RecipeExecutables  executables;
 
@@ -205,6 +220,10 @@ namespace LaunchRecipes
         r.summary        = o.value(QStringLiteral("summary")).toString().trimmed();
         r.firmwareFolder = o.value(QStringLiteral("firmwareFolder")).toString().trimmed();
         r.folderIsGame   = o.value(QStringLiteral("folderIsGame")).toBool(false);
+        // #190 item 2/4. Both default to "no opinion", which is the pre-#190 scan exactly: strList drops
+        // blanks and lowercases, so " ADF " and "adf" are the same entry and a stray "" is not one.
+        r.formats        = strList(o.value(QStringLiteral("formats")), true);
+        r.tosecDiskTags  = o.value(QStringLiteral("tosecDiskTags")).toBool(false);
 
         const QJsonObject ex = o.value(QStringLiteral("executables")).toObject();
         r.executables.extensions = strList(ex.value(QStringLiteral("extensions")), true);

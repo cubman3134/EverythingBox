@@ -12155,7 +12155,12 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
 void MainWindow::showOtherVersions(QString gamePath)
 {
     if (gamePath.isEmpty()) return;
-    const QVector<QString> others = RomLibrary::otherRegionVersions(gamePath);
+    // #190 item 2: the FORMAT alternates the scan hid come first — they are the same game in a different
+    // shape (the .adf behind the listed .lha), which is the nearer neighbour than another region's dump —
+    // then #50's region/revision variants. De-duplicated, because a sibling could qualify as both.
+    QVector<QString> others = RomLibrary::otherFormatVersions(gamePath);
+    for (const QString& p : RomLibrary::otherRegionVersions(gamePath))
+        if (!others.contains(p)) others.push_back(p);
     if (others.isEmpty())
     {
         statusBar()->showMessage(tr("No other versions of this game were found."), 4000);

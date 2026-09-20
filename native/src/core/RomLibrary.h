@@ -54,4 +54,15 @@ namespace RomLibrary
     // versions" menu uses this to keep the hidden losers reachable. Uses the current app-language default
     // region priority.
     QVector<QString> otherRegionVersions(const QString& gamePath);
+
+    // The same game in the OTHER content formats the format collapse hid at scan time (issue #190, item 2),
+    // re-derived on demand from the game's own folder exactly as otherRegionVersions is — stateless, no
+    // store and no Rom-struct field — and ordered by the system recipe's ranking (best first). Empty when
+    // the system ranks no formats, when the file's own format is not ranked, or when no sibling is present.
+    QVector<QString> otherFormatVersions(const QString& gamePath);
+
+    // A one-line readable answer to "which format is this entry, and what else is on disk for it" — e.g.
+    // "LHA" or "LHA (also present: ADF, DMS)". Empty for a system with no format ranking and for a file in
+    // an unranked format, so the detail surfaces that show it gain a row only where it means something.
+    QString formatSummary(const QString& gamePath);
 }

@@ -184,6 +184,74 @@ every CPC disk, so a disk that boots the wrong thing can be diagnosed rather tha
 If you want a *specific* command on a disk cap32 gets wrong, cap32 reads one from an `.m3u` playlist: put
 the disk's file name on one line and `#COMMAND:RUN"THEGAME` on another, and open the `.m3u`.
 
+## One entry per game
+
+A retro-computer collection does not hold one file per game. The same title arrives as a WHDLoad `.lha` *and*
+as a raw `.adf`; a big game arrives as four floppies, each its own file, each with its own name. Left alone
+that is four tiles for one game, and two more for the game you already had. Two rules fix it, both driven by
+the system's recipe, both applied while the library is scanned — nothing is moved, renamed or deleted.
+
+### Format preference
+
+A recipe can rank the formats its system's titles come in, best first:
+
+```json
+"formats": ["lha", "hdf", "adf", "adz", "dms"]
+```
+
+Files that are the **same title** in different listed formats become **one** library entry, on the
+best-ranked format. The rest are not lost: they are that entry's **alternates**, reachable from its
+"Other versions…" list, and the entry's details name the format it chose (`Format: LHA (also present: ADF)`).
+"Same title" is the normalisation the rest of the library already uses — every `(…)`/`[…]` tag is stripped,
+then punctuation and case — so `Lemmings (1991) (Psygnosis).lha` and `Lemmings (1991) (Psygnosis).adf` are
+one game.
+
+Three deliberate limits:
+
+* a format **not** in the list keeps today's behaviour exactly: it is its own entry, never hidden. That is
+  why `.ipf` is absent from the Amiga list — an IPF is a preservation dump whose whole point is to *not* be
+  an `.adf`, and it needs `capsimg` to read at all;
+* two files of the **same** listed format differ by region or revision, not by format. That is
+  [1G1R region collapsing](#per-system)'s decision, which is off by default;
+* a system with no `formats` list — which is every console — collapses nothing.
+
+What ships, and why each order is what it is:
+
+| System | Ranking | Why |
+|---|---|---|
+| **Amiga** | `lha` → `hdf` → `adf` → `adz` → `dms` | A WHDLoad `.lha` is installed-to-hard-disk: no model to choose, no disks to swap, and PUAE builds the image itself. An `.hdf` is the same idea you built by hand. `.adf` is the raw floppy every PUAE reads; `.adz` is that floppy gzipped; `.dms` is DiskMasher, which needs the core's own decompressor and does not survive every copy protection. |
+| **Commodore 64** | `d64` → `prg` → `t64` → `tap` | The `.d64` disk image is the whole title — a multi-load game needs it. A `.prg` is one program VICE autostarts instantly. A `.t64` is a tape *archive* of the same program. A `.tap` is the real tape signal and loads in real time. `.crt` (a cartridge is a different product) and `.g64` (a GCR preservation dump) are deliberately unranked. |
+| **ZX Spectrum** | `szx` → `z80` → `sna` → `tzx` → `tap` | A snapshot starts *at* the game instead of loading for three minutes: `.szx` is the lossless modern one, `.z80` the classic, `.sna` the 48K-limited lossy one. A `.tzx` carries the loader's own timing, so speedloaders work; a `.tap` is the simplified tape some of those loaders will not survive. The disk formats (+3 `.dsk`, TR-DOS `.trd`/`.scl`) are different *machines*, not different formats of one title, so they are not ranked. |
+
+Every other system ships no ranking. Add one in your own recipe override if your collection wants it.
+
+### Multi-disk sets
+
+A multi-disk set is **one** entry that swaps disks itself, through the same generated `.m3u` playlist a
+PlayStation set uses (issue #49). EverythingBox writes the playlist into its own cache — your ROM folder is
+never written to — and the entry opens it; the core takes the disk list from there.
+
+Console sets are named `(Disc 1)`, `(Disk 2)`, `(CD 3)`. Computer collections are named the way TOSEC names
+them, which is different enough that it used to group nothing:
+
+```
+Monkey Island (1990) (Lucasfilm) (Disk 1 of 2).adf
+Monkey Island (1990) (Lucasfilm) (Disk 2 of 2).adf
+Maniac Mansion (1987) (Lucasfilm) (Side A).d64
+Maniac Mansion (1987) (Lucasfilm) (Side B).d64
+```
+
+`(Disk N of M)` and `(Side A/B)` are read **only** for a system whose recipe sets `"tosecDiskTags": true`.
+That is the gate: a console set that happens to be named `Game (Disk 1 of 2).bin` groups exactly as it did
+before, because no console ships a recipe at all. Today the opted-in systems are **Amiga, Commodore 64,
+Apple II, Atari ST and Amstrad CPC** — the disk-based ones, whose cores take a disk list and swap between
+them. The **ZX Spectrum and MSX are not** opted in: their sets are tapes, and a tape is not a disk a core can
+swap. Sides are ordered A then B, and a set with both orders disk 1 side A, disk 1 side B, disk 2 side A…
+
+The two rules compose in that order — format first. A title present both as one `.lha` and as a two-disk
+`.adf` set is a single entry on the `.lha`, with both disks as its alternates; with no `.lha` present, the
+two disks become the one playlist entry.
+
 ## Changing any of this
 
 Copy the shipped recipe out of the source tree (`native/systems/recipes/<id>.json`) into
@@ -194,6 +262,8 @@ Copy the shipped recipe out of the source tree (`native/systems/recipes/<id>.jso
 | `system` | the system id it applies to (must match the file name) |
 | `summary` | one line, printed in the ROM folder's `README.txt` next to that system's folder |
 | `folderIsGame` | a sub-folder holding a program is ONE library entry, not a tile per file |
+| `formats` | the content formats this system's titles come in, **best first** — the same title in several of them is listed once, on the best (see below) |
+| `tosecDiskTags` | read TOSEC disk-set names (`(Disk 1 of 2)`, `(Side A)`) as one multi-disk entry |
 | `executables` | `extensions` that count as a program, plus `prefer` / `avoid` base names |
 | `cores[]` | per core: `options` to seed, `firmware` to check, `content` presentation, `bootCommand` |
 
