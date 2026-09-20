@@ -910,6 +910,11 @@ int main(int argc, char** argv)
             CHECK(httpRequest(port, get(QStringLiteral("/state"), QString())).status == 404);
             CHECK(httpRequest(port, post(QStringLiteral("/player"), "{\"action\":\"pause\"}", QString())).status == 404);
             CHECK(httpRequest(port, get(QStringLiteral("/inventory"), token)).status == 404);
+            // A MALFORMED control request is 404 too: a 400 would say the route is there after all.
+            CHECK(httpRequest(port, post(QStringLiteral("/player"), "{}", QString())).status == 404);
+            CHECK(httpRequest(port, post(QStringLiteral("/input"), "{\"dir\":\"sideways\"}", QString())).status == 404);
+            CHECK(httpRequest(port, post(QStringLiteral("/state"), QByteArray(), QString())).status == 404);
+            CHECK(httpRequest(port, post(QStringLiteral("/bundle"), QByteArray(), token)).status == 404);
             const int before = pairBegins;
             CHECK(httpRequest(port, post(QStringLiteral("/pair"), QByteArray(), QString())).status == 200);
             CHECK(pairBegins == before + 1);

@@ -50,12 +50,20 @@ namespace
     const char* const kNotFoundJson = "{\"ok\":false,\"error\":\"not found\"}";
 
     // #115: the routes that exist for #76's remote and #143 / #127 / #292's peers. Answered 404 while the
-    // listener is up for file drop alone.
+    // listener is up for file drop alone. Both spellings are checked, by KIND and by PATH: a malformed request
+    // to one of them routes to BadRequest, and answering that 400 would say the route is there after all.
     bool controlRoute(RemoteApi::CommandKind k)
     {
         using K = RemoteApi::CommandKind;
         return k == K::State || k == K::Player || k == K::Input || k == K::Open || k == K::Inventory
             || k == K::Bundle || k == K::Gamelists || k == K::GamelistFlush;
+    }
+
+    bool controlPath(const QString& p)
+    {
+        return p == QLatin1String("/state") || p == QLatin1String("/player") || p == QLatin1String("/input")
+            || p == QLatin1String("/open") || p == QLatin1String("/inventory") || p == QLatin1String("/bundle")
+            || p == QLatin1String("/gamelists") || p == QLatin1String("/gamelists/flush");
     }
 }
 
@@ -222,7 +230,7 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
     }
 
     // #115: a listener that is up only for file drop has no remote control and no hand-off surface.
-    if (!controlSurface_ && controlRoute(c.kind))
+    if (!controlSurface_ && (controlRoute(c.kind) || controlPath(req.path)))
     {
         finish(sock, RemoteApi::httpResponse(404, kNotFoundJson, "application/json"));
         return;
