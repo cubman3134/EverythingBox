@@ -18,6 +18,8 @@
 #include <QBuffer>
 #include <QColor>
 #include <QCoreApplication>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
@@ -44,6 +46,27 @@ namespace
     const QColor kPageBg(0x15, 0x17, 0x1c);
     const QColor kPlaceholderBg(0x26, 0x2B, 0x33);    // #286: a page still being decoded — visibly not the gutter
     const QColor kPlaceholderText(0x7A, 0x86, 0x94);
+    // #154 increment 2: preparing a page is the place the scan-quality corrections cost anything, and the
+    // brief's budget (about 80 ms per filter on a 1600x2400 page) is only checkable if the app says what it
+    // measured. So a page prepared WITH any of them on is timed into stream_debug.log, one line, naming the
+    // filters and the page size; with all three off - the default for every series that has not asked - this
+    // is ComicRead::preparePage and nothing else, and the log stays silent.
+    QImage preparePageTimed(const QImage& src, const ComicRead::PageOptions& o)
+    {
+        if (o.scan.isIdentity()) return ComicRead::preparePage(src, o);
+        QElapsedTimer t;
+        t.start();
+        const QImage out = ComicRead::preparePage(src, o);
+        QStringList on;
+        if (o.scan.demoire) on << QStringLiteral("de-moire");
+        if (o.scan.denoise) on << QStringLiteral("denoise");
+        if (o.scan.sharpen) on << QStringLiteral("sharpen");
+        qInfo().noquote() << QStringLiteral("comic: scan fixes [%1] on %2x%3 took %4 ms")
+                                 .arg(on.join(QLatin1Char('+')))
+                                 .arg(src.width()).arg(src.height()).arg(t.elapsed());
+        return out;
+    }
+
     const QColor kRailBg(0x0E, 0x12, 0x18);
     const QColor kRailEdge(0x22, 0x30, 0x3C);
     const QColor kRailSel(0x3B, 0x71, 0xB0);
@@ -242,6 +265,8 @@ void ComicView::installModeControls()
     add(cropBtn_,   &ComicView::toggleBorderCrop);
     add(filterBtn_, &ComicView::cycleColorFilter);
     add(railBtn_,   &ComicView::toggleThumbnailRail);
+    add(scanBtn_,      &ComicView::cycleScanFixes);
+    add(zoomStartBtn_, &ComicView::cycleZoomStart);
     updateBarButtons();
 }
 
@@ -301,6 +326,12 @@ void ComicView::readDisplayOptions()
     filter_ = (fl >= 1 && fl <= 4) ? ComicRead::Filter(fl) : ComicRead::Filter::None;
     crop_   = opt(ComicRead::Opt::kCrop) == 1;
     railOn_ = opt(ComicRead::Opt::kRail) == 1;
+    // Increment 2. The three corrections are stored as three flags even though one control cycles them, so
+    // the store holds the STATE and not a ladder position (ReadingModes.h); zoomStart reads forgivingly.
+    scan_.demoire = opt(ComicRead::Opt::kDemoire) == 1;
+    scan_.denoise = opt(ComicRead::Opt::kDenoise) == 1;
+    scan_.sharpen = opt(ComicRead::Opt::kSharpen) == 1;
+    zoomStart_ = ComicRead::zoomStartFor(opt(ComicRead::Opt::kZoomStart));
 }
 
 void ComicView::writeOption(const char* option, int value)
@@ -344,6 +375,29 @@ void ComicView::applyMode()
     }
     if (railWidget_) railWidget_->setVisible(ComicRead::railShown(webtoon, railOn_));
     updateBarButtons();
+}
+
+// #154 increment 2: aim the scroll bars where this series says a page should open. The DECISION is
+// ComicRead::zoomStartOffset, which the probe drives; this reads the two sizes off the live widgets and
+// writes the two bars. The content size is the label's, which rescale() has just set to the drawn pixmap
+// (widened to at least the viewport), so it is the same number the scroll area computed its ranges from.
+//
+// A WEBTOON NEVER ASKS. zoomStartApplies says so, and the strip is not even the scroll area's widget in that
+// mode - showPage's webtoon branch scrolls to a position of its own and never reaches here. Photo mode is
+// excluded for the same reason it is excluded from every other per-series option: a folder of photographs
+// has no series and nothing stored, so the only value it could use is the default one.
+void ComicView::applyZoomStart()
+{
+    if (!scroll_) return;
+    QScrollBar* const vb = scroll_->verticalScrollBar();
+    QScrollBar* const hb = scroll_->horizontalScrollBar();
+    const ComicRead::ZoomStart z = (!photoMode_ && ComicRead::zoomStartApplies(mode_))
+                                       ? zoomStart_ : ComicRead::ZoomStart::Top;
+    const QPoint at = ComicRead::zoomStartOffset(imageLabel_ ? imageLabel_->size() : QSize(),
+                                                 scroll_->viewport()->size(), z, rtl_,
+                                                 QPoint(hb ? hb->value() : 0, vb ? vb->value() : 0));
+    if (hb) hb->setValue(at.x());
+    if (vb) vb->setValue(at.y());
 }
 
 // #397: which of this reader's pixels are its own controls, for the themed host's pointer filter. The geometry
@@ -509,7 +563,7 @@ void ComicView::requestStripPages()
                 if (shared->wanted(page, gen))      // the decode is the long half: look again before scaling
                 {
                     skipped = false;
-                    if (!img.isNull()) img = ComicRead::preparePage(img, opts);
+                    if (!img.isNull()) img = preparePageTimed(img, opts);
                     if (!img.isNull())
                     {
                         out = img.scaledToWidth(width, Qt::SmoothTransformation);
@@ -585,6 +639,10 @@ ComicRead::PageOptions ComicView::optionsFor(int half) const
     o.crop = crop_ && !photoMode_ && ComicRead::isPaged(mode_);
     o.half = half;
     o.rtl  = rtl_;
+    // The scan-quality corrections change no GEOMETRY, so unlike the crop they apply in every mode - a
+    // webtoon page scanned from a printed book needs de-moire exactly as much as a paged one does, and the
+    // strip's layout (which is computed from image HEADERS) is unaffected by any of them.
+    o.scan = photoMode_ ? ComicRead::ScanFixes() : scan_;
     o.adjust = ComicRead::adjustFor(filter_);
     return o;
 }
@@ -593,7 +651,7 @@ QImage ComicView::preparedPage(int index, int half) const
 {
     const QImage src = decodeAt(index);
     if (src.isNull()) return src;
-    return ComicRead::preparePage(src, optionsFor(half));
+    return preparePageTimed(src, optionsFor(half));
 }
 
 // #286: a cache read and nothing else. The paint path calls this for every page on screen, so it must never be
@@ -707,6 +765,42 @@ void ComicView::toggleThumbnailRail()
     emit pageInfoChanged();
 }
 
+// The scan-quality ladder, as one press. Everything it changes is a PIXEL decision made while a page is
+// prepared, so the response is exactly cycleColorFilter's: drop the strip's cache (a page still being
+// prepared the old way is now wrong) and re-enter the page. The rail is deliberately NOT invalidated - its
+// thumbnails are 120 px wide, where a 3x3 correction is below the resolution of the picture.
+void ComicView::cycleScanFixes()
+{
+    if (photoMode_) return;
+    scan_ = ComicRead::nextScanPreset(scan_);
+    writeOption(ComicRead::Opt::kDemoire, scan_.demoire ? 1 : 0);
+    writeOption(ComicRead::Opt::kDenoise, scan_.denoise ? 1 : 0);
+    writeOption(ComicRead::Opt::kSharpen, scan_.sharpen ? 1 : 0);
+    clearStripCache();
+    if (mode_ == ComicRead::Mode::Webtoon)
+    {
+        requestStripPages();
+        if (stripWidget_) stripWidget_->update();
+    }
+    else showPage(current_);
+    updateBarButtons();
+    emit pageInfoChanged();
+}
+
+// Where a zoomed page opens. Applied to the page ALREADY on screen rather than only to the next one, because
+// this is a setting you judge by looking: the press moves the view to what it is promising.
+void ComicView::cycleZoomStart()
+{
+    if (photoMode_) return;
+    zoomStart_ = zoomStart_ == ComicRead::ZoomStart::Top         ? ComicRead::ZoomStart::Centre
+               : zoomStart_ == ComicRead::ZoomStart::Centre      ? ComicRead::ZoomStart::ReadingSide
+                                                                 : ComicRead::ZoomStart::Top;
+    writeOption(ComicRead::Opt::kZoomStart, int(zoomStart_));
+    applyZoomStart();
+    updateBarButtons();
+    emit pageInfoChanged();
+}
+
 void ComicView::setRailFocus(bool on)
 {
     railFocus_ = on;
@@ -732,11 +826,37 @@ QStringList ComicView::comicControlLabels() const
     const QString splitText = split_ == ComicRead::Split::Always ? tr("Split: on")
                             : split_ == ComicRead::Split::Never  ? tr("Split: off")
                                                                  : tr("Split: auto");
+    // The scan-fix label NAMES WHAT IS ON, which is the whole reason three corrections can live behind one
+    // control: the four ladder rungs have names, and a combination only a hand-edited store can produce is
+    // spelled out rather than shown as some nearest rung.
+    QString scanText;
+    switch (ComicRead::scanPresetIndex(scan_))
+    {
+    case 0:  scanText = tr("Scan: off");       break;
+    case 1:  scanText = tr("Scan: de-moiré");  break;
+    case 2:  scanText = tr("Scan: denoise");   break;
+    case 3:  scanText = tr("Scan: sharpen");   break;
+    case 4:  scanText = tr("Scan: print");     break;
+    default:
+    {
+        QStringList on;
+        if (scan_.demoire) on << tr("de-moiré");
+        if (scan_.denoise) on << tr("denoise");
+        if (scan_.sharpen) on << tr("sharpen");
+        scanText = tr("Scan: %1").arg(on.join(QStringLiteral(" + ")));
+        break;
+    }
+    }
+    const QString startText = zoomStart_ == ComicRead::ZoomStart::Centre      ? tr("Start: centre")
+                            : zoomStart_ == ComicRead::ZoomStart::ReadingSide ? tr("Start: reading side")
+                                                                              : tr("Start: top");
     return QStringList{ modeText,
                         splitText,
                         tr("Crop"),
                         tr("Filter: %1").arg(filterNames[qBound(0, int(filter_), 4)]),
-                        tr("Rail") };
+                        tr("Rail"),
+                        scanText,
+                        startText };
 }
 
 QVector<bool> ComicView::comicControlActive() const
@@ -746,7 +866,9 @@ QVector<bool> ComicView::comicControlActive() const
                           split_ != ComicRead::Split::Auto,
                           crop_,
                           filter_ != ComicRead::Filter::None,
-                          railOn_ };
+                          railOn_,
+                          !scan_.isIdentity(),
+                          zoomStart_ != ComicRead::ZoomStart::Top };
 }
 
 // The half of the page label the number cannot carry. The classic bar builds its own sentence around the
@@ -769,6 +891,8 @@ void ComicView::comicActivateControl(int index)
     case 2: toggleBorderCrop();   break;
     case 3: cycleColorFilter();   break;
     case 4: toggleThumbnailRail(); break;
+    case 5: cycleScanFixes();     break;
+    case 6: cycleZoomStart();     break;
     default: break;
     }
 }
@@ -777,9 +901,11 @@ void ComicView::updateBarButtons()
 {
     if (!modeBtn_) return;
     const QStringList labels = comicControlLabels();
-    QPushButton* const btns[5] = { modeBtn_, splitBtn_, cropBtn_, filterBtn_, railBtn_ };
+    QPushButton* const btns[] = { modeBtn_, splitBtn_, cropBtn_, filterBtn_, railBtn_,
+                                  scanBtn_, zoomStartBtn_ };
+    const int count = int(sizeof(btns) / sizeof(btns[0]));
     const QVector<bool> active = comicControlActive();
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < count; ++i)
     {
         if (!btns[i]) continue;
         const bool have = i < labels.size();

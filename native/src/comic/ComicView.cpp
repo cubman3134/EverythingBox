@@ -499,7 +499,10 @@ void ComicView::showPage(int index, int dir)
         half_ = ComicRead::resumeHalf(resumeHalf_, pageSplits(index), dir);
         image_ = preparedPage(index, half_);
         rescale();
-        scroll_->verticalScrollBar()->setValue(0); // start each page at the top
+        // #154 increment 2: where the page OPENS is a per-series choice now. Top - the default, and what a
+        // series with no opinion reads as - is still "the top, horizontal position untouched", which is
+        // exactly what the single setValue(0) this replaced did.
+        applyZoomStart();
     }
     updateLabel();
     // Consumption stats: high-water page read (revisits/backward turns don't accrue). Path-derived key + title,

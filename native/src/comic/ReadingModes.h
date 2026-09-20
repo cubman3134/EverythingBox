@@ -18,17 +18,22 @@
 // knows which supplier a page came from, and nothing here may — a reading mode that worked only for local
 // CBZs would be the fourth supplier this project deliberately does not have.
 //
-// ---- WHAT IS DELIBERATELY NOT HERE (increment 2) ----------------------------------------------------------
+// ---- INCREMENT 2, AND WHAT IS STILL NOT HERE --------------------------------------------------------------
 //
-// De-moire, noise reduction and sharpen (the scan-quality set) and the zoom-start position. Their stored
-// option names are RESERVED below and nothing writes them, so increment 2 adds a value and a transform and
-// changes no shape. Also not here, and not increment 2 either: JOINING two consecutive single pages into one
-// landscape spread (the inverse of the split), panel-by-panel navigation, and OCR.
+// De-moire, denoise and sharpen (the scan-quality set) and the zoom-start position, under the option names
+// increment 1 reserved. They are free functions over a QImage exactly as the colour filters are, they run
+// where a page is already being prepared (ComicView::preparedPage, or the webtoon strip's decode worker) and
+// NEVER on the paint path, and each is off by default.
+//
+// STILL NOT HERE AND NOT PLANNED: JOINING two consecutive single pages into one landscape spread (the inverse
+// of the split). Increment 1 declared it not planned and this increment does not reopen it - whether the
+// reader should ever do it is the issue owner's call. Also not here: panel-by-panel navigation, and OCR.
 #pragma once
 #include "ComicInfo.h"
 
 #include <QHash>
 #include <QImage>
+#include <QPoint>
 #include <QRect>
 #include <QSet>
 #include <QSize>
@@ -182,10 +187,124 @@ namespace ComicRead
     QRgb adjustPixel(QRgb p, const ColorAdjust& a);
     QImage applyAdjust(const QImage& src, const ColorAdjust& a);   // identity adjust returns src unchanged
 
+    // ---- SCAN-QUALITY CORRECTIONS (increment 2) ------------------------------------------------------------
+    // Three corrections for a page that was SCANNED rather than drawn. Each is off / on - not a slider - and
+    // each is a 3x3 neighbourhood pass with REPLICATE padding at the border (the edge pixel is repeated), so
+    // every one of them is total: a 1x1 page and a 2x2 page go through unharmed rather than being special
+    // cases nobody tests.
+    //
+    //   * DE-MOIRE is the 3x3 BINOMIAL low-pass [1 2 1; 2 4 2; 1 2 1]/16, computed separably (a [1 2 1] pass
+    //     along each row, then [1 2 1] down the accumulated rows) with the division done ONCE at the end, so
+    //     the integer result is the exact 2D kernel's and not two roundings of it. That kernel is exactly a
+    //     halftone killer: a screen alternating between two tones every pixel is the highest frequency an
+    //     image can carry, and this kernel's response to it is their weighted mean everywhere - a black and
+    //     white checkerboard comes out a flat 128. It is the mildest kernel that does that, which is why text
+    //     a few pixels wide survives it; anything wider would be the mush the brief refuses.
+    //   * DENOISE is a 3x3 CROSS MEDIAN - the median of the five pixels {left, centre, right, above, below}.
+    //     A median is edge preserving by construction (at a step edge the majority side wins outright, so the
+    //     edge stays exactly where it was), and it removes impulse noise exactly rather than smearing it: an
+    //     isolated white or black speck is outvoted 4-to-1 and disappears. The CROSS rather than the full 3x3
+    //     box is what makes it light - it reads five pixels instead of nine, costs six compare-exchanges
+    //     instead of nineteen, and leaves a one-pixel diagonal (which a full median erases) standing.
+    //   * SHARPEN is an UNSHARP MASK at kSharpenPercent: out = centre + (centre - blur) / 2, with `blur` the
+    //     SAME binomial kernel de-moire uses - one low-pass, stated once, used in both directions. Computed
+    //     as (3*centre - blur + 1) / 2 so the halving rounds rather than truncates, then clamped to 0..255.
+    //
+    // ORDER, WHERE THEY COMPOSE AND WHY (preparePage below states it again in code):
+    //
+    //     crop -> split -> DE-MOIRE -> DENOISE -> SHARPEN -> colour filter
+    //
+    // De-moire first, because it is the only one that removes a frequency and the other two should work on a
+    // page that no longer has a halftone screen in it (a median over a screen preserves the screen - that is
+    // what edge preserving means - and sharpening one puts it back louder). Denoise before sharpen, for the
+    // one reason that matters: sharpening amplifies exactly what a denoise removes, so the other order ships
+    // a page with its specks doubled. And all three BEFORE the colour filter, so the filter still sees a
+    // finished page - the same reason increment 1 put the filter last.
+    struct ScanFixes
+    {
+        bool demoire = false;
+        bool denoise = false;
+        bool sharpen = false;
+
+        bool isIdentity() const { return !demoire && !denoise && !sharpen; }
+        bool operator==(const ScanFixes& o) const
+        { return demoire == o.demoire && denoise == o.denoise && sharpen == o.sharpen; }
+        bool operator!=(const ScanFixes& o) const { return !(*this == o); }
+    };
+
+    inline constexpr int kSharpenPercent = 50;
+
+    QImage demoire(const QImage& src);   // the binomial low-pass
+    QImage denoise(const QImage& src);   // the cross median
+    QImage sharpen(const QImage& src);   // the unsharp mask, at kSharpenPercent
+
+    // All three in their stated order. An identity set returns `src` ITSELF - not a copy, not a converted
+    // copy - so "off" is byte-identical to no scan fixes at all and costs nothing to have the option of.
+    QImage applyScanFixes(const QImage& src, const ScanFixes& f);
+
+    // ---- THE SCAN-FIX CONTROL: ONE LADDER, NOT THREE BUTTONS -----------------------------------------------
+    // The three corrections are ONE control on both layouts, cycling a ladder of named presets, for two
+    // reasons. The classic bar already carries five per-series buttons and three more would be nine in a row
+    // on a phone-width window; and these three are not three independent questions - they are one ("is this a
+    // scan of a printed page?"), whose useful answers are a short list. The ladder:
+    //
+    //     0 off   1 de-moire   2 denoise   3 sharpen   4 all three ("print")
+    //
+    // Each single correction is still reachable on its own, and the combination a scanned print actually
+    // needs is one press from off. The three values are STORED SEPARATELY (kDemoire/kDenoise/kSharpen), so the
+    // store holds the state and not the ladder position: a hand-edited ini can name any of the eight
+    // combinations, the label then names what is on, and the next press goes to "off" (scanPresetIndex
+    // answers -1 for a set the ladder does not name, and nextScanPreset restarts from there).
+    inline constexpr int kScanPresetCount = 5;
+    ScanFixes scanPreset(int index);              // an index outside 0..4 is "off"
+    int       scanPresetIndex(const ScanFixes& f);// 0..4, or -1 for a combination the ladder does not name
+    ScanFixes nextScanPreset(const ScanFixes& f);
+
+    // ---- WHERE A ZOOMED PAGE OPENS (increment 2) -----------------------------------------------------------
+    // A page zoomed past fit-to-width is bigger than the viewport, so opening it means CHOOSING a scroll
+    // offset. Per series:
+    //
+    //   * Top          the top of the page, with the horizontal position LEFT WHERE IT WAS. That is exactly
+    //                  what the reader has always done (showPage set the vertical bar to 0 and touched
+    //                  nothing else), which is why it is the default and why a series with no stored opinion
+    //                  reads as it.
+    //   * Centre       the middle of the page in both axes - for a zoom that is about looking at the art.
+    //   * ReadingSide  the top, at the edge the eye starts from: the LEFT in a left-to-right comic, the RIGHT
+    //                  in a right-to-left one. In an LTR comic that x is 0, which is where an unscrolled bar
+    //                  already is; the option earns its place in a manga, where the first panel of a zoomed
+    //                  page is at the far end from where a scroll bar starts.
+    //
+    // `current` is where the scroll bars are NOW, and only Top reads it. Every answer is clamped into
+    // [0, content - viewport] per axis, so a page SMALLER than the viewport gives (0, 0) for all three: there
+    // is nowhere to scroll and no option can invent somewhere.
+    //
+    // WEBTOON IGNORES IT ENTIRELY (zoomStartApplies). The strip owns its own position - it is one continuous
+    // scroll whose offset IS the resume position, and re-aiming it at a page boundary would fight both the
+    // stored position and the reader's thumb.
+    enum class ZoomStart
+    {
+        Top         = 0,   // the stored default: 0 is "no opinion" everywhere in this file
+        Centre      = 1,
+        ReadingSide = 2,
+    };
+
+    inline bool zoomStartApplies(Mode m) { return isPaged(m); }
+    inline ZoomStart zoomStartFor(int stored)
+    {
+        return stored == int(ZoomStart::Centre)      ? ZoomStart::Centre
+             : stored == int(ZoomStart::ReadingSide) ? ZoomStart::ReadingSide
+                                                     : ZoomStart::Top;   // anything else is "never set"
+    }
+    QPoint zoomStartOffset(const QSize& content, const QSize& viewport, ZoomStart z, bool rtl,
+                           const QPoint& current);
+
     // ---- THE WHOLE DISPLAY PIPELINE FOR ONE PAGE -----------------------------------------------------------
-    // ORDER IS LOAD-BEARING: crop, then split, then filter.
+    // ORDER IS LOAD-BEARING: crop, then split, then the scan fixes, then the colour filter.
     //   * Crop BEFORE split, because the midpoint of a spread with a 5% white margin down one side is not the
-    //     midpoint of the art — splitting first would cut one half short and pad the other.
+    //     midpoint of the art - splitting first would cut one half short and pad the other.
+    //   * The SCAN FIXES after both, so each runs over the pixels that will actually be shown rather than
+    //     over a margin about to be trimmed or a half about to be thrown away - and so a 3x3 kernel's
+    //     replicate-padded border is the border of the page on screen.
     //   * Filter LAST, because the crop's corner test reads the scan's own colours and a sepia tint would
     //     move them (and because tinting pixels that are about to be thrown away is wasted work).
     struct PageOptions
@@ -194,6 +313,7 @@ namespace ComicRead
         int   cropTolerance = kCropTolerance;
         int   half = -1;          // -1 whole page, 0 first half, 1 second half (see splitHalfRect)
         bool  rtl  = false;       // which side "first" is, when half >= 0
+        ScanFixes   scan;         // increment 2: de-moire / denoise / sharpen, in that order
         ColorAdjust adjust;
     };
     QImage preparePage(const QImage& src, const PageOptions& o);
@@ -324,8 +444,9 @@ namespace ComicRead
         inline constexpr char kFilter[] = "filter";   // ComicRead::Filter
         inline constexpr char kRail[]   = "rail";     // 0 off, 1 on (the webtoon thumbnail rail)
 
-        // RESERVED FOR INCREMENT 2 — declared so the two increments cannot pick different spellings, and
-        // deliberately unread and unwritten by anything in this one.
+        // INCREMENT 2, under the names increment 1 reserved. Each of the three corrections stores its own
+        // 0/1 (the control is one ladder, the STATE is three flags - see nextScanPreset); zoomStart holds a
+        // ComicRead::ZoomStart, with 0 = Top = the default, like every other option here.
         inline constexpr char kDemoire[]   = "demoire";
         inline constexpr char kDenoise[]   = "denoise";
         inline constexpr char kSharpen[]   = "sharpen";

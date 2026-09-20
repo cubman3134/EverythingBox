@@ -164,6 +164,222 @@ QImage applyAdjust(const QImage& src, const ColorAdjust& a)
     return out;
 }
 
+// ---- Scan-quality corrections (increment 2) ------------------------------------------------------------------
+//
+// All three are 3x3 neighbourhood passes with REPLICATE padding: a sample outside the image is the nearest
+// edge pixel. That one convention is what makes each of them total - a 1x1 page is its own neighbourhood, so
+// there is no smallest-size special case to get wrong - and it is the convention the probe's border oracles
+// are computed against. See ReadingModes.h for the kernels and for why they compose in the order they do.
+
+namespace
+{
+    // 32-bit, so a scan line is an array of QRgb and every read below is one load. Alpha is carried from the
+    // CENTRE pixel and never filtered: a comic page is opaque, and averaging alpha would only matter for the
+    // one page that is not, where it would be wrong in a way nobody could see coming.
+    inline QImage to32(const QImage& s)
+    {
+        const QImage::Format f = s.hasAlphaChannel() ? QImage::Format_ARGB32 : QImage::Format_RGB32;
+        return s.format() == f ? s : s.convertToFormat(f);
+    }
+
+    inline int clampByte(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+    // The [1 2 1] HORIZONTAL half of the binomial kernel over one row, replicate padded, written into `out`
+    // as three ints per pixel. UNDIVIDED on purpose: the vertical half adds these and divides by 16 once, so
+    // the integer answer is the exact 2D kernel's rather than two roundings of it. Each entry is at most
+    // 255 * 4 = 1020.
+    void rowSums121(const QImage& in, int y, int* out)
+    {
+        const int w = in.width();
+        const QRgb* line = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+        for (int x = 0; x < w; ++x)
+        {
+            const QRgb a = line[x > 0 ? x - 1 : 0];
+            const QRgb b = line[x];
+            const QRgb c = line[x + 1 < w ? x + 1 : w - 1];
+            int* o = out + x * 3;
+            o[0] = qRed(a)   + 2 * qRed(b)   + qRed(c);
+            o[1] = qGreen(a) + 2 * qGreen(b) + qGreen(c);
+            o[2] = qBlue(a)  + 2 * qBlue(b)  + qBlue(c);
+        }
+    }
+
+    // The binomial low-pass itself, as ONE routine both de-moire and sharpen go through: de-moire returns
+    // `blur` and sharpen subtracts it from the original. Only THREE rows of horizontal sums are ever held
+    // (the row above, the row itself, the row below), so a 12000-pixel-tall webtoon page costs three row
+    // buffers and not a second image's worth of intermediates.
+    QImage binomialBlur(const QImage& in)
+    {
+        const int w = in.width(), h = in.height();
+        QImage out(w, h, in.format());
+        if (out.isNull()) return QImage();
+        QVector<int> buf(3 * w * 3);
+        int* a = buf.data();                 // the row ABOVE (y-1, clamped)
+        int* b = buf.data() + w * 3;         // the row itself
+        int* c = buf.data() + w * 3 * 2;     // the row BELOW (y+1, clamped)
+        rowSums121(in, 0, b);
+        std::copy(b, b + w * 3, a);          // y = -1 replicates row 0
+        rowSums121(in, h > 1 ? 1 : 0, c);
+        for (int y = 0; y < h; ++y)
+        {
+            const QRgb* srcLine = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+            QRgb* dst = reinterpret_cast<QRgb*>(out.scanLine(y));
+            for (int x = 0; x < w; ++x)
+            {
+                const int i = x * 3;
+                // (a + 2b + c + 8) / 16 - the +8 is the round-to-nearest, and the maximum is
+                // (1020 + 2040 + 1020 + 8) / 16 = 255, so no clamp is possible here.
+                dst[x] = qRgba((a[i]     + 2 * b[i]     + c[i]     + 8) / 16,
+                               (a[i + 1] + 2 * b[i + 1] + c[i + 1] + 8) / 16,
+                               (a[i + 2] + 2 * b[i + 2] + c[i + 2] + 8) / 16,
+                               qAlpha(srcLine[x]));
+            }
+            int* t = a; a = b; b = c; c = t;             // shift the window down one row...
+            rowSums121(in, qMin(y + 2, h - 1), c);       // ... and fill the new bottom (clamped at the end)
+        }
+        return out;
+    }
+
+    // The median of five, in six compare-exchanges. min(a,b,d,e) is below at least three of the five and
+    // max(a,b,d,e) is above at least three, so neither can be the third-smallest: both are discarded and the
+    // median of the five is the median of what is left.
+    inline int median5(int a, int b, int c, int d, int e)
+    {
+        const int p = qMin(a, b), q = qMax(a, b);
+        const int r = qMin(d, e), s = qMax(d, e);
+        const int lo = qMax(p, r);                       // drop min(a,b,d,e)
+        const int hi = qMin(q, s);                       // drop max(a,b,d,e)
+        return qMax(qMin(lo, c), qMin(qMax(lo, c), hi)); // median of three
+    }
+}
+
+QImage demoire(const QImage& src)
+{
+    if (src.isNull()) return src;
+    const QImage in = to32(src);
+    if (in.isNull()) return src;
+    const QImage out = binomialBlur(in);
+    return out.isNull() ? src : out;
+}
+
+QImage denoise(const QImage& src)
+{
+    if (src.isNull()) return src;
+    const QImage in = to32(src);
+    if (in.isNull()) return src;
+    const int w = in.width(), h = in.height();
+    QImage out(w, h, in.format());
+    if (out.isNull()) return src;
+    for (int y = 0; y < h; ++y)
+    {
+        const QRgb* up  = reinterpret_cast<const QRgb*>(in.constScanLine(y > 0 ? y - 1 : 0));
+        const QRgb* mid = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+        const QRgb* dn  = reinterpret_cast<const QRgb*>(in.constScanLine(y + 1 < h ? y + 1 : h - 1));
+        QRgb* dst = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < w; ++x)
+        {
+            const QRgb l = mid[x > 0 ? x - 1 : 0];
+            const QRgb m = mid[x];
+            const QRgb r = mid[x + 1 < w ? x + 1 : w - 1];
+            const QRgb u = up[x], d = dn[x];
+            dst[x] = qRgba(median5(qRed(l),   qRed(m),   qRed(r),   qRed(u),   qRed(d)),
+                           median5(qGreen(l), qGreen(m), qGreen(r), qGreen(u), qGreen(d)),
+                           median5(qBlue(l),  qBlue(m),  qBlue(r),  qBlue(u),  qBlue(d)),
+                           qAlpha(m));
+        }
+    }
+    return out;
+}
+
+QImage sharpen(const QImage& src)
+{
+    if (src.isNull()) return src;
+    const QImage in = to32(src);
+    if (in.isNull()) return src;
+    const QImage blur = binomialBlur(in);
+    if (blur.isNull()) return src;
+    const int w = in.width(), h = in.height();
+    QImage out(w, h, in.format());
+    if (out.isNull()) return src;
+    // centre + (centre - blur) * kSharpenPercent/100, written as one rounded expression per channel. At the
+    // shipped 50% that is (3*c - blur + 1) / 2; the guard keeps the division off a negative numerator, where
+    // C++ would truncate towards zero instead of down - and where the answer clamps to 0 regardless.
+    const auto mask = [](int c, int b) {
+        const int v = (100 + kSharpenPercent) * c - kSharpenPercent * b + 50;
+        return v <= 0 ? 0 : clampByte(v / 100);
+    };
+    for (int y = 0; y < h; ++y)
+    {
+        const QRgb* s = reinterpret_cast<const QRgb*>(in.constScanLine(y));
+        const QRgb* b = reinterpret_cast<const QRgb*>(blur.constScanLine(y));
+        QRgb* dst = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < w; ++x)
+            dst[x] = qRgba(mask(qRed(s[x]),   qRed(b[x])),
+                           mask(qGreen(s[x]), qGreen(b[x])),
+                           mask(qBlue(s[x]),  qBlue(b[x])),
+                           qAlpha(s[x]));
+    }
+    return out;
+}
+
+QImage applyScanFixes(const QImage& src, const ScanFixes& f)
+{
+    if (f.isIdentity() || src.isNull()) return src;   // "off" is the image itself, not a copy of it
+    QImage img = src;
+    if (f.demoire) img = demoire(img);
+    if (f.denoise) img = denoise(img);
+    if (f.sharpen) img = sharpen(img);
+    return img;
+}
+
+// The ladder the one control cycles. Written out rather than computed from the three bits, because the order
+// is a reading decision (the single corrections first, the combination a scanned print needs last) and not a
+// binary count - a count would put "de-moire + denoise" between "denoise" and "sharpen".
+ScanFixes scanPreset(int index)
+{
+    ScanFixes f;
+    switch (index)
+    {
+    case 1: f.demoire = true; break;
+    case 2: f.denoise = true; break;
+    case 3: f.sharpen = true; break;
+    case 4: f.demoire = f.denoise = f.sharpen = true; break;
+    default: break;   // 0, and anything off the ladder, is off
+    }
+    return f;
+}
+
+int scanPresetIndex(const ScanFixes& f)
+{
+    for (int i = 0; i < kScanPresetCount; ++i)
+        if (scanPreset(i) == f) return i;
+    return -1;   // a combination the ladder does not name (only a hand-edited store can produce one)
+}
+
+ScanFixes nextScanPreset(const ScanFixes& f)
+{
+    const int i = scanPresetIndex(f);
+    return scanPreset(i < 0 ? 0 : (i + 1) % kScanPresetCount);
+}
+
+QPoint zoomStartOffset(const QSize& content, const QSize& viewport, ZoomStart z, bool rtl,
+                       const QPoint& current)
+{
+    // The scrollable range, per axis. A page no bigger than the viewport has a range of 0, so every option
+    // below collapses to (0, 0) there - which is the only honest answer when there is nowhere to scroll.
+    const int maxX = qMax(0, content.width()  - qMax(0, viewport.width()));
+    const int maxY = qMax(0, content.height() - qMax(0, viewport.height()));
+    switch (z)
+    {
+    case ZoomStart::Centre:      return QPoint(maxX / 2, maxY / 2);
+    case ZoomStart::ReadingSide: return QPoint(rtl ? maxX : 0, 0);
+    case ZoomStart::Top:         break;
+    }
+    // Top: the top of the page, with the horizontal position left exactly where the reader had it - the
+    // reader's behaviour before this option existed, clamped into the range this page actually has.
+    return QPoint(qBound(0, current.x(), maxX), 0);
+}
+
 QImage preparePage(const QImage& src, const PageOptions& o)
 {
     if (src.isNull()) return src;
@@ -174,6 +390,9 @@ QImage preparePage(const QImage& src, const PageOptions& o)
         if (r != QRect(0, 0, img.width(), img.height())) img = img.copy(r);
     }
     if (o.half >= 0) img = img.copy(splitHalfRect(img.size(), o.half, o.rtl));
+    // The scan fixes run over the pixels that will actually be shown - after the crop and the split, before
+    // the tint (ReadingModes.h states the order and why each step is where it is).
+    img = applyScanFixes(img, o.scan);
     return applyAdjust(img, o.adjust);
 }
 
