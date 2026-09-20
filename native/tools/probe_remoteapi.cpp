@@ -348,6 +348,137 @@ int main()
         CHECK(QByteArray(reasonPhrase(507)) == "Insufficient Storage");
     }
 
+    // ---- 6. #423: the origin gate -------------------------------------------------------------------------
+    //
+    // One pure gate for the whole listener. Every case below is a request an attacker or a real browser can
+    // actually put on the wire; the expected answers are hand-authored, never derived from the function under
+    // test.
+    {
+        const QString self = PlayOn::advertisedHostName(QStringLiteral("a1b2c3d4e5f6"));
+        CHECK(self == QLatin1String("a1b2c3d4e5f6.local"));
+
+        // --- the Host rule: accepted ---
+        for (const char* h : { "192.168.1.5:8080", "192.168.1.5", "127.0.0.1", "10.0.0.7:1", "8.8.8.8:65535",
+                               "[::1]:8080", "[::1]", "[::]", "[2001:db8::1]:443", "[fe80::1%25eth0]:8080",
+                               "[fe80::1%eth0]", "[::ffff:192.168.1.5]", "[1:2:3:4:5:6:7:8]",
+                               "localhost", "localhost:8080", "LocalHost:8080", "LOCALHOST",
+                               "a1b2c3d4e5f6.local", "A1B2C3D4E5F6.LOCAL", "a1b2c3d4e5f6.local:8080",
+                               "a1b2c3d4e5f6.local.", "a1b2c3d4e5f6.local.:8080", "  127.0.0.1:8080  " })
+            CHECK(hostAllowed(h, self));
+
+        // --- the Host rule: refused. A name that merely CONTAINS or ENDS WITH an accepted one is another
+        //     name; so is another device's .local; so is a Host carrying credentials, a path or a query. ---
+        for (const char* h : { "evil.example.com", "evil.example.com:8080", "EVIL.EXAMPLE.COM",
+                               "192.168.1.5.evil.com", "192.168.1.5.evil.com:8080",
+                               "evilocalhost", "localhost.evil.com", "xlocalhost:8080", "localhostx",
+                               "deadbeefcafe.local", "deadbeefcafe.local:8080",          // another device
+                               "a1b2c3d4e5f6.local.evil.com", "evil-a1b2c3d4e5f6.local", "xa1b2c3d4e5f6.local",
+                               "a1b2c3d4e5f6.locale", ".local", "local",
+                               "", " ", "\t", ":8080", "192.168.1.5:", "192.168.1.5::8080",
+                               "user:pass@192.168.1.5", "192.168.1.5@evil.com", "192.168.1.5/drop",
+                               "192.168.1.5:8080/drop", "192.168.1.5?x=1", "192.168.1.5#f",
+                               "192.168.1.5\\drop", "192.168.1.5 evil.com", "192.168.1.5,evil.com",
+                               "192.168.1.5:0", "192.168.1.5:99999", "192.168.1.5:80x", "192.168.1.5:-1",
+                               "010.0.0.1", "1.2.3", "1.2.3.4.5", "256.1.1.1", "1.2.3.4:8080:9",
+                               "::1", "::1:8080", "[::1", "::1]", "[]", "[::1]:x", "[::1]x", "[1::2::3]",
+                               "[1:2:3:4:5:6:7:8:9]", "[gggg::1]", "[fe80::1%]", "[12345::1]" })
+            CHECK(!hostAllowed(h, self));
+
+        // The .local name is accepted only when this device HAS one, and only its own.
+        CHECK(!hostAllowed("a1b2c3d4e5f6.local", QString()));
+        CHECK(!hostAllowed("a1b2c3d4e5f6.local", QStringLiteral(".local")));
+        CHECK(!hostAllowed(".local", QStringLiteral(".local")));
+        CHECK(!hostAllowed("device.lan", QStringLiteral("device.lan")));      // only a .local name is taken
+        CHECK(hostAllowed("127.0.0.1", QString()));                            // IP literals never need one
+
+        // --- parseRequest keeps the two headers, and counts them ---
+        {
+            const Request r = parseRequest("GET /drop HTTP/1.1\r\nHost: 192.168.1.5:8080\r\n"
+                                           "Origin: http://192.168.1.5:8080\r\n\r\n");
+            CHECK(r.host == "192.168.1.5:8080");
+            CHECK(r.origin == "http://192.168.1.5:8080");
+            CHECK(r.hostSeen == 1);
+            CHECK(r.originSeen == 1);
+            CHECK(requestAllowed(r, self));
+            const Request bare = parseRequest("GET /drop HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            CHECK(bare.originSeen == 0);
+            CHECK(requestAllowed(bare, self));                                 // a same-origin fetch sends none
+            const Request twice = parseRequest("GET /drop HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example.com\r\n\r\n");
+            CHECK(twice.hostSeen == 2);
+            CHECK(!requestAllowed(twice, self));                               // two Hosts is malformed, not a choice
+            const Request noHost = parseRequest("GET /drop HTTP/1.1\r\n\r\n");
+            CHECK(noHost.hostSeen == 0);
+            CHECK(!requestAllowed(noHost, self));                              // HTTP/1.1 without a Host
+            const Request lower = parseRequest("GET /drop HTTP/1.1\r\nhost: 127.0.0.1\r\norigin: http://127.0.0.1\r\n\r\n");
+            CHECK(lower.hostSeen == 1);                                        // header names are case-insensitive
+            CHECK(lower.originSeen == 1);
+            CHECK(requestAllowed(lower, self));
+        }
+
+        // --- the Origin rule ---
+        auto withOrigin = [&](const char* host, const char* origin) {
+            QByteArray raw = QByteArray("GET /drop HTTP/1.1\r\nHost: ") + host + "\r\n";
+            if (origin) raw += QByteArray("Origin: ") + origin + "\r\n";
+            return requestAllowed(parseRequest(raw + "\r\n"), self);
+        };
+        CHECK(withOrigin("192.168.1.5:8080", "http://192.168.1.5:8080"));      // matching
+        CHECK(withOrigin("192.168.1.5:8080", "HTTP://192.168.1.5:8080"));      // the scheme is case-insensitive
+        CHECK(withOrigin("192.168.1.5", "http://192.168.1.5"));                // both on the default port
+        CHECK(withOrigin("localhost:8080", "http://localhost:8080"));
+        CHECK(withOrigin("a1b2c3d4e5f6.local:8080", "http://a1b2c3d4e5f6.local:8080"));
+        CHECK(withOrigin("[::1]:8080", "http://[::1]:8080"));
+        CHECK(withOrigin("127.0.0.1:8080", nullptr));                          // absent stays allowed
+        CHECK(!withOrigin("192.168.1.5:8080", "http://evil.example.com"));     // cross-origin
+        CHECK(!withOrigin("192.168.1.5:8080", "https://evil.example.com"));
+        CHECK(!withOrigin("192.168.1.5:8080", "http://192.168.1.5:9090"));     // same name, another port
+        CHECK(!withOrigin("192.168.1.5:8080", "http://192.168.1.5"));          // ... including the default one
+        CHECK(!withOrigin("192.168.1.5", "http://192.168.1.5:8080"));
+        CHECK(!withOrigin("192.168.1.5:443", "https://192.168.1.5"));          // https is a different origin
+        CHECK(!withOrigin("192.168.1.5:8080", "null"));                        // a sandboxed frame
+        CHECK(!withOrigin("192.168.1.5:8080", "192.168.1.5:8080"));            // not a serialized origin
+        CHECK(!withOrigin("192.168.1.5:8080", "http://192.168.1.5:8080/drop")); // an origin has no path
+        CHECK(!withOrigin("192.168.1.5:8080", "file://"));
+        CHECK(!withOrigin("192.168.1.5:8080", "chrome-extension://abcd"));
+        CHECK(!withOrigin("192.168.1.5:8080", ""));
+        CHECK(!withOrigin("evil.example.com", "http://evil.example.com"));     // an Origin cannot rescue a Host
+        CHECK(!requestAllowed(parseRequest("GET /drop HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\n"
+                                           "Origin: http://evil.example.com\r\n\r\n"), self));   // two Origins
+
+        // --- the gate is the same for EVERY route on this listener, and it does not read the method's body ---
+        for (const char* path : { "/drop", "/drop/destinations", "/drop/start", "/drop/status", "/drop/chunk",
+                                  "/drop/finish", "/pair", "/state", "/player", "/input", "/open", "/inventory",
+                                  "/bundle", "/gamelists", "/gamelists/flush", "/nonsense" })
+        {
+            const QByteArray target = QByteArray(path);
+            CHECK(!requestAllowed(parseRequest("GET " + target + " HTTP/1.1\r\nHost: evil.example.com\r\n\r\n"), self));
+            CHECK(requestAllowed(parseRequest("GET " + target + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), self));
+            CHECK(!requestAllowed(parseRequest("OPTIONS " + target + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), self));
+        }
+        // ... including the one request that streams: its plan is never consulted for a refused Host.
+        CHECK(!requestAllowed(parseRequest("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\nHost: evil.example.com\r\n"
+                                           "Content-Length: 4096\r\n\r\n"), self));
+        CHECK(requestAllowed(parseRequest("PUT /drop/chunk?id=a&offset=0 HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                          "Content-Length: 4096\r\n\r\n"), self));
+        // An unparseable request is answered 400 as it always was; the gate does not claim it.
+        CHECK(requestAllowed(parseRequest("not-a-request"), self));
+        CHECK(requestAllowed(Request(), self));
+
+        // --- the refusal: 403, plain text, nothing about what is served here, and never a CORS header ---
+        const QByteArray forbidden = forbiddenResponse();
+        CHECK(forbidden.startsWith("HTTP/1.1 403 Forbidden\r\n"));
+        CHECK(forbidden.contains("Content-Type: text/plain\r\n"));
+        CHECK(forbidden.contains("Content-Length: 10\r\n"));
+        CHECK(forbidden.endsWith("\r\n\r\nforbidden\n"));
+        CHECK(forbidden.size() < 160);
+        for (const char* leak : { "drop", "pair", "EverythingBox", "token", "Access-Control" })
+            CHECK(!forbidden.contains(leak));
+        CHECK(QByteArray(reasonPhrase(403)) == "Forbidden");
+        // No response this surface can build carries one either.
+        for (int status : { 200, 400, 401, 403, 404, 411, 413, 507 })
+            CHECK(!httpResponse(status, "x", "application/json").contains("Access-Control"));
+        CHECK(!httpResponse(200, "x", "text/html", { QByteArray("X-A: 1") }).contains("Access-Control"));
+    }
+
     if (failures == 0) std::printf("REMOTEAPI-OK\n");
     else               std::fprintf(stderr, "REMOTEAPI had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

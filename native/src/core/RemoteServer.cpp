@@ -182,6 +182,15 @@ void RemoteServer::onReadyRead(QTcpSocket* sock)
         if (headerEnd(buf) < 0) return;
 
         const RemoteApi::Request head = RemoteApi::parseRequest(buf);
+        // #423 -- THE ORIGIN GATE, and it is deliberately the FIRST decision taken about any request on this
+        // listener: before routing, before the token check, before the streaming decision, and so before a
+        // single body byte is accepted, a spool is opened or a part file is created. A refused request never
+        // touches this device's disk and is told nothing about what is served here.
+        if (!RemoteApi::requestAllowed(head, localHostName_))
+        {
+            finish(sock, RemoteApi::forbiddenResponse());
+            return;
+        }
         const RemoteApi::BodyPlan plan = RemoteApi::bodyPlanFor(head);
         if (plan != RemoteApi::BodyPlan::Buffer)
         {

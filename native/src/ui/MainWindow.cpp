@@ -5427,6 +5427,10 @@ void MainWindow::updateRemoteServer()
     h.gamelistIdle  = [gamelistBatches] { gamelistBatches->flushAll(); };
     remoteServer_->setHooks(h);
     remoteServer_->setControlSurface(Settings::remoteControlEnabled());   // #115: 404 the remote when off
+    // #423: the one DNS name this listener answers to is the one it advertises for itself. Everything else
+    // reaching it has to be an IP literal or localhost, so a name a hostile site controls cannot be pointed
+    // at this address to serve this device's own file-drop page.
+    remoteServer_->setLocalHostName(PlayOn::advertisedHostName(Settings::deviceId()));
     const quint16 port = static_cast<quint16>(Settings::remoteControlPort());
     if (remoteServer_->start(port))
         mwLog(QStringLiteral("remote: control server listening on %1").arg(RemoteServer::lanUrl(remoteServer_->port())));

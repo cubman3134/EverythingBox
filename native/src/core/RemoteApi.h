@@ -40,6 +40,14 @@ namespace RemoteApi
         // these off the HEADERS alone, before a body byte is accepted.
         qint64     declaredLength = -1;
         QByteArray contentType;
+        // Issue #423. The Host and Origin headers, kept for the origin gate below. The values exactly as
+        // sent -- the gate does its own trimming and case folding -- plus how many times each header
+        // appeared, so a request carrying two Hosts (malformed, and the shape a smuggled second one arrives
+        // in) can be refused outright rather than quietly answering for the last of them.
+        QByteArray host;
+        QByteArray origin;
+        int hostSeen   = 0;
+        int originSeen = 0;
     };
 
     // Split a raw request into method / path / query / body, honouring Content-Length (a body shorter than
@@ -167,4 +175,40 @@ namespace RemoteApi
     BodyPlan bodyPlanFor(const Request& headers);
     // True for the headers of a streamed file-drop piece (PUT /drop/chunk), whatever its plan says.
     bool isDropChunk(const Request& headers);
+
+    // ---- Issue #423: the origin gate ---------------------------------------------------------------------
+    //
+    // This listener sits on a LAN address, and a browser will send a request to it on behalf of ANY page: a
+    // hostile site can point a name it controls at this device's address (DNS rebinding) and then load /drop
+    // from that name. It cannot upload -- every /drop/ route needs the code shown on this device's own screen
+    // -- but what it renders IS this device's page, and a page can ask the user to read that code out loud.
+    // So: ONE gate, pure, applied to EVERY route (the page, /pair, /state, /player, /input, /open,
+    // /inventory, /bundle, /gamelists, all of /drop) BEFORE routing, before the token check, before a body
+    // byte is accepted and before any spool or part file exists. A refused request never touches disk.
+    //
+    //   Host    -- an IP literal (IPv4, or IPv6 in brackets) with an optional port; `localhost` with an
+    //              optional port; or THIS device's own advertised mDNS name (PlayOn::advertisedHostName,
+    //              i.e. "<deviceId>.local"). Every other DNS name is refused, and so is a missing, empty,
+    //              repeated or malformed Host, and one carrying credentials, a path, a query or whitespace.
+    //              Matching is case-insensitive and EXACT once the port (and one trailing dot) is stripped:
+    //              a name that merely ENDS WITH an accepted one ("192.168.1.5.evil.com", "evilocalhost") is a
+    //              different name and is refused.
+    //   Origin  -- when present, it must be an http origin (this listener is plaintext; no https page was
+    //              ever loaded from it), its host must pass the same rule, and it must name the same origin
+    //              as the request's own Host -- same name, same effective port, the default being 80 for
+    //              both. A same-origin fetch may send no Origin at all, which stays allowed; "null",
+    //              "file://", an extension scheme and every cross-origin value are refused.
+    //   OPTIONS -- refused outright. Nothing here answers a CORS preflight, and NO response anywhere on this
+    //              listener carries an Access-Control-* header, so a browser cannot read these answers
+    //              cross-origin either.
+    //
+    // `selfLocalName` is this device's own ".local" name; empty (or anything not ending in ".local") means no
+    // DNS name is accepted at all -- IP literals and localhost still are, so a device that advertises nothing
+    // is still reachable and still not rebindable.
+    bool hostAllowed(const QByteArray& hostHeaderValue, const QString& selfLocalName);
+    bool requestAllowed(const Request& req, const QString& selfLocalName);
+
+    // What a refused request is answered with: 403, a short plain-text body, and not one word about what is
+    // served here.
+    QByteArray forbiddenResponse();
 }

@@ -25,6 +25,136 @@ namespace RemoteApi
             return Method::Other;
         }
 
+        // ---- #423: the origin gate's primitives -------------------------------------------------------
+        bool isDigit(char c)    { return c >= '0' && c <= '9'; }
+        bool isHexDigit(char c) { return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+        bool isAlnum(char c)    { return isDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+        // A dotted quad, strictly: four decimal groups of 0..255 with no leading zero on a multi-digit group
+        // (an "010" that one resolver reads as decimal 10 and another as octal 8 is not an accepted spelling
+        // of anything here).
+        bool ipv4Literal(const QByteArray& s)
+        {
+            const QList<QByteArray> parts = s.split('.');
+            if (parts.size() != 4) return false;
+            for (const QByteArray& p : parts)
+            {
+                if (p.isEmpty() || p.size() > 3) return false;
+                for (char c : p) if (!isDigit(c)) return false;
+                if (p.size() > 1 && p.at(0) == '0') return false;
+                if (p.toInt() > 255) return false;
+            }
+            return true;
+        }
+
+        // The 16-bit groups in one half of an IPv6 literal, or -1 if that half is malformed. A trailing
+        // dotted quad counts as two groups and is only allowed where the literal ends.
+        int ipv6Groups(const QByteArray& part, bool allowTrailingV4)
+        {
+            if (part.isEmpty()) return 0;
+            const QList<QByteArray> groups = part.split(':');
+            int n = 0;
+            for (int i = 0; i < groups.size(); ++i)
+            {
+                const QByteArray g = groups.at(i);
+                if (g.isEmpty()) return -1;
+                if (g.contains('.'))
+                {
+                    if (!allowTrailingV4 || i != groups.size() - 1) return -1;
+                    if (!ipv4Literal(g)) return -1;
+                    n += 2;
+                    continue;
+                }
+                if (g.size() > 4) return -1;
+                for (char c : g) if (!isHexDigit(c)) return -1;
+                n += 1;
+            }
+            return n;
+        }
+
+        // What goes INSIDE the brackets of a Host: an IPv6 literal, with at most one "::" and an optional
+        // zone id (an interface name, "%eth0" or the "%25eth0" a URL spells it as -- it names a link, not a
+        // host, so it is checked for shape and then ignored).
+        bool ipv6Literal(QByteArray s)
+        {
+            const int pct = s.indexOf('%');
+            if (pct >= 0)
+            {
+                QByteArray zone = s.mid(pct + 1);
+                if (zone.startsWith("25")) zone = zone.mid(2);
+                if (zone.isEmpty()) return false;
+                for (char c : zone)
+                    if (!isAlnum(c) && c != '-' && c != '_' && c != '.') return false;
+                s = s.left(pct);
+            }
+            if (s.isEmpty()) return false;
+            const int dc = s.indexOf("::");
+            if (dc >= 0 && s.indexOf("::", dc + 1) >= 0) return false;   // ":::" and a second "::" alike
+            const QByteArray head = (dc < 0) ? s : s.left(dc);
+            const QByteArray tail = (dc < 0) ? QByteArray() : s.mid(dc + 2);
+            const int h = ipv6Groups(head, dc < 0 || tail.isEmpty());
+            const int t = tail.isEmpty() ? 0 : ipv6Groups(tail, true);
+            if (h < 0 || t < 0) return false;
+            if (dc < 0) return h == 8;
+            return h + t <= 7;      // "::" stands for at least one group, so the halves cannot fill all eight
+        }
+
+        // Split a Host-header-shaped authority into its name and port. Refuses everything a host is not
+        // allowed to contain -- whitespace, a control byte, non-ASCII, a userinfo '@', a path, a query, a
+        // fragment, a backslash -- and any bracket mismatch. `bracketed` marks the [IPv6] form.
+        bool splitHostPort(const QByteArray& value, QByteArray& name, QByteArray& port, bool& bracketed)
+        {
+            name.clear();
+            port.clear();
+            bracketed = false;
+            if (value.isEmpty() || value.size() > 255) return false;
+            for (char c : value)
+            {
+                const unsigned char u = static_cast<unsigned char>(c);
+                if (u <= 0x20 || u >= 0x7F) return false;
+                if (c == '/' || c == '\\' || c == '@' || c == '?' || c == '#'
+                    || c == ',' || c == '"' || c == '<' || c == '>') return false;
+            }
+            QByteArray rest;
+            if (value.startsWith('['))
+            {
+                const int close = value.indexOf(']');
+                if (close < 2) return false;
+                name = value.mid(1, close - 1);
+                rest = value.mid(close + 1);
+                bracketed = true;
+            }
+            else
+            {
+                if (value.contains('[') || value.contains(']')) return false;
+                const int colon = value.indexOf(':');
+                if (colon < 0) { name = value; return !name.isEmpty(); }
+                name = value.left(colon);
+                rest = value.mid(colon);     // a bare (unbracketed) IPv6 keeps its colons here and is refused
+            }
+            if (name.isEmpty()) return false;
+            if (rest.isEmpty()) return true;
+            if (rest.at(0) != ':') return false;
+            port = rest.mid(1);
+            if (port.isEmpty() || port.size() > 5) return false;
+            for (char c : port) if (!isDigit(c)) return false;
+            const int p = port.toInt();
+            return p >= 1 && p <= 65535;
+        }
+
+        // Case-folded, with one trailing dot (the absolute form of the same name) removed.
+        QByteArray canonicalName(QByteArray name)
+        {
+            name = name.toLower();
+            if (name.endsWith('.')) name.chop(1);
+            return name;
+        }
+
+        int effectivePort(const QByteArray& port, int schemeDefault)
+        {
+            return port.isEmpty() ? schemeDefault : port.toInt();
+        }
+
         // A parameter lookup that reads the query string first, then the JSON body. Query wins so a
         // `?action=play` is honoured even on a POST with an empty body. Returns a null QString when neither
         // carries the key, which the callers use to tell "absent" from "present but empty".
@@ -128,6 +258,18 @@ namespace RemoteApi
             else if (name == "x-eb-token")
             {
                 req.token = QString::fromLatin1(line.mid(colon + 1).trimmed());
+            }
+            // #423. Kept, not judged: requestAllowed does the judging, and it is the only caller. Counted,
+            // because two Host headers is a malformed request and the gate refuses it rather than picking one.
+            else if (name == "host")
+            {
+                ++req.hostSeen;
+                req.host = line.mid(colon + 1).trimmed();
+            }
+            else if (name == "origin")
+            {
+                ++req.originSeen;
+                req.origin = line.mid(colon + 1).trimmed();
             }
         }
 
@@ -548,6 +690,71 @@ namespace RemoteApi
         r += "\r\n";
         r += body;
         return r;
+    }
+
+    bool hostAllowed(const QByteArray& hostHeaderValue, const QString& selfLocalName)
+    {
+        QByteArray name, port;
+        bool bracketed = false;
+        if (!splitHostPort(hostHeaderValue.trimmed(), name, port, bracketed)) return false;
+        if (bracketed) return ipv6Literal(name);
+        const QByteArray n = canonicalName(name);
+        if (n.isEmpty()) return false;
+        if (n == "localhost") return true;
+        if (ipv4Literal(n)) return true;
+        // The ONE DNS name this device answers to: its own mDNS name, compared EXACTLY. A suffix match would
+        // accept "<id>.local.evil.com"; a prefix match would accept "evil-<id>.local"; both are other names.
+        const QByteArray self = canonicalName(selfLocalName.trimmed().toUtf8());
+        if (self.size() <= 6 || !self.endsWith(".local")) return false;
+        return n == self;
+    }
+
+    namespace
+    {
+        // An Origin, when the browser sends one: a serialized origin ("http://192.168.1.5:8080"), which must
+        // pass the same host rule AND name the same origin the request's own Host does. "null" (a sandboxed
+        // frame, a file:// page), an opaque value and every cross-origin one fall out here.
+        bool originMatchesHost(const QByteArray& origin, const QByteArray& hostHeader, const QString& selfLocalName)
+        {
+            const QByteArray o = origin.trimmed();
+            const int sep = o.indexOf("://");
+            if (sep <= 0) return false;
+            // Only http: this listener is plaintext, so no https page was ever loaded FROM it and no https
+            // origin can be the same origin as its Host. "null", "file://" and an extension's scheme fall
+            // out here too.
+            if (o.left(sep).toLower() != "http") return false;
+            const int schemeDefault = 80;
+            const QByteArray authority = o.mid(sep + 3);
+            if (!hostAllowed(authority, selfLocalName)) return false;
+            QByteArray oName, oPort, hName, hPort;
+            bool oBracketed = false, hBracketed = false;
+            if (!splitHostPort(authority, oName, oPort, oBracketed)) return false;
+            if (!splitHostPort(hostHeader.trimmed(), hName, hPort, hBracketed)) return false;
+            if (oBracketed != hBracketed) return false;
+            if (canonicalName(oName) != canonicalName(hName)) return false;
+            // The Host header's own default is 80: a browser that omitted the port from one omitted it from
+            // the other, because both come from the same address bar.
+            return effectivePort(oPort, schemeDefault) == effectivePort(hPort, 80);
+        }
+    }
+
+    bool requestAllowed(const Request& req, const QString& selfLocalName)
+    {
+        // An unparseable request reaches no route at all (it is answered 400 either way) and carries no Host
+        // worth weighing. The gate speaks for the parseable ones, which is every request an attacker sends.
+        if (!req.valid) return true;
+        // No preflight is ever answered: nothing here is reachable cross-origin, so nothing needs one.
+        if (req.methodRaw.compare(QStringLiteral("OPTIONS"), Qt::CaseInsensitive) == 0) return false;
+        if (req.hostSeen != 1) return false;                        // missing, or sent more than once
+        if (!hostAllowed(req.host, selfLocalName)) return false;
+        if (req.originSeen == 0) return true;                       // a same-origin fetch may send none
+        if (req.originSeen != 1) return false;
+        return originMatchesHost(req.origin, req.host, selfLocalName);
+    }
+
+    QByteArray forbiddenResponse()
+    {
+        return httpResponse(403, "forbidden\n", "text/plain");
     }
 
     int requestCapBytes(const QByteArray& rawPrefix)

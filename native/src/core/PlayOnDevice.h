@@ -58,6 +58,11 @@ namespace PlayOn
     // fixture is the only way to catch a silent record-layout change.
     QList<QByteArray> txtRecords(const Advert& a);
 
+    // The ".local" name this device publishes for ITSELF -- the target of the SRV record and the owner of the
+    // A record below, "<instanceId>.local". One source of truth with two readers: the mDNS responder encodes
+    // it, and #423's Host gate (RemoteApi::hostAllowed) accepts exactly this DNS name and no other.
+    QString advertisedHostName(const QString& instanceId);
+
     // ---- 2. the wire --------------------------------------------------------------------------------------
 
     // An mDNS query: one PTR question for kServiceDomain. No compression, no additional records.
