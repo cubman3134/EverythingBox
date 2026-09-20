@@ -68,6 +68,36 @@ namespace JellyfinServerStore
     QList<JellyfinServer> enabled();         // the subset the merged library fans out to
     QStringList           ids();             // every configured server's id — the migration's "which server"
 
+    // ==================================================================================================
+    // "SHOW ONLY <SERVER>" AND THE CONTINUE WATCHING SHAPE (issue #160, increment 2)
+    // ==================================================================================================
+    // Two VIEWING conveniences, and both are therefore PER DEVICE and not synced. Which server you feel
+    // like looking at this evening, and whether the television groups its Continue Watching by box, are
+    // facts about the machine in front of you — the television and the phone should be free to differ,
+    // and neither of them is library state. They are stored under the same "jellyfin/" prefix
+    // CloudSync::isDeviceLocalKey already carves out of the synced bundle (probe_cloudmerge pins it), for
+    // the reason this header's top section gives about the token.
+
+    // The remembered "show only this server" choice, EMPTY for "all servers". Never returns a server that
+    // is not currently configured and enabled: removing or switching off the server you were looking at
+    // must put you back on everything rather than on a browse root that can never fill. setEnabled() and
+    // remove() below clear the stored value as well — the masking here is the belt to that braces, and it
+    // is what makes the reset true even for a row edited out of the ini by hand.
+    QString browseFilterId();
+    void    setBrowseFilterId(const QString& id);   // empty clears it
+
+    // WHAT THE BROWSE ROOT FANS OUT TO — enabled(), narrowed to the remembered choice when there is one.
+    // The filter is applied HERE, one call above the fan-out, precisely so that a filtered browse does not
+    // open a socket to the servers it is not showing: filtering the rows afterwards would still wake the
+    // friend's box, still cost its budget, and still be a request nobody asked for.
+    QList<JellyfinServer> browseServers();
+
+    // Does the home screen show ONE Continue Watching section across the servers (the default, and what
+    // #160 shipped), or one per server labelled with its name? Jellyfin::continueSections is the rule; this
+    // is only where the answer is kept.
+    bool continueMerged();
+    void setContinueMerged(bool merged);
+
     bool hasServers();
 
     // Add or update. The id is the server's OWN id and is REQUIRED: a server whose identity could not be

@@ -40,6 +40,19 @@ QString srvKey()
            + QStringLiteral("/servers");
 }
 
+// #160 increment 2: the remembered "show only this server" choice. Per profile, exactly like the server
+// list it names an id out of, and under the same device-local "jellyfin/" prefix.
+QString filterKey()
+{
+    const QString id = ProfileStore::currentId();
+    return QStringLiteral("jellyfin/") + (id.isEmpty() ? QStringLiteral("default") : id)
+           + QStringLiteral("/browseFilter");
+}
+
+// ...and the Continue Watching shape. NOT per profile: it is a statement about this screen — "this is a
+// shared television, show me which box each row is on" — and a profile switch is not a change of screen.
+QString continueMergeKey() { return QStringLiteral("jellyfin/continueMerge"); }
+
 std::function<void()> g_changeHook;
 void fireChanged() { if (g_changeHook) g_changeHook(); }
 
@@ -102,6 +115,59 @@ QList<JellyfinServer> JellyfinServerStore::enabled()
     return out;
 }
 
+QString JellyfinServerStore::browseFilterId()
+{
+    const QString id = store().value(filterKey()).toString();
+    if (id.isEmpty()) return QString();
+    // MASKED, not merely cleared elsewhere. A filter naming a server that is gone or switched off would
+    // leave the browse root permanently empty with nothing on it to say why — and the one row that could
+    // say so is the very list this would be hiding.
+    for (const JellyfinServer& s : enabled())
+        if (s.id == id) return id;
+    return QString();
+}
+
+void JellyfinServerStore::setBrowseFilterId(const QString& id)
+{
+    if (id.isEmpty()) store().remove(filterKey());
+    else              store().setValue(filterKey(), id);
+    store().sync();
+    // DELIBERATELY NOT fireChanged(). The hook means "the set of connected servers has changed", and its
+    // one subscriber rebuilds the whole home from the top — which, fired from inside a browse level's own
+    // activation, tears that level down and leaves the re-populate rendering into the catalogue root
+    // underneath it. (Observed exactly that on the themed layout: choosing "Show only Loft" narrowed the
+    // fan-out correctly and then drew the answer under the Video root's folder rows.) Nothing about the
+    // library changed here; the caller re-populates the one level this affects.
+}
+
+QList<JellyfinServer> JellyfinServerStore::browseServers()
+{
+    const QList<JellyfinServer> on = enabled();
+    const QString only = browseFilterId();
+    if (only.isEmpty()) return on;
+    QList<JellyfinServer> out;
+    for (const JellyfinServer& s : on)
+        if (s.id == only) out.push_back(s);
+    // browseFilterId() has already established that the id names an enabled server, so `out` is never
+    // empty here; returning `on` on a miss would silently un-filter the view instead of showing the one
+    // server that was asked for.
+    return out.isEmpty() ? on : out;
+}
+
+bool JellyfinServerStore::continueMerged()
+{
+    // MERGED BY DEFAULT — it is what #160 shipped, and an upgrade must not rearrange somebody's home
+    // screen on its own.
+    return store().value(continueMergeKey(), true).toBool();
+}
+
+void JellyfinServerStore::setContinueMerged(bool merged)
+{
+    store().setValue(continueMergeKey(), merged);
+    store().sync();
+    fireChanged();
+}
+
 QStringList JellyfinServerStore::ids()
 {
     QStringList out;
@@ -157,7 +223,16 @@ void JellyfinServerStore::setEnabled(const QString& id, bool on)
 {
     QList<JellyfinServer> all = list();
     for (int i = 0; i < all.size(); ++i)
-        if (all[i].id == id) { all[i].enabled = on; saveAll(all); return; }
+        if (all[i].id == id)
+        {
+            all[i].enabled = on;
+            // #160 increment 2: switching off the server you were looking at puts you back on all of
+            // them. Cleared in the same breath rather than only masked on read, so that switching the
+            // server back on later does not silently restore a filter the user never re-chose.
+            if (!on && store().value(filterKey()).toString() == id) store().remove(filterKey());
+            saveAll(all);
+            return;
+        }
 }
 
 void JellyfinServerStore::remove(const QString& id)
@@ -170,6 +245,10 @@ void JellyfinServerStore::remove(const QString& id)
             // The token goes with the row, in the same write. Nothing else is touched: the stored rows under
             // this server's qualified ids stay exactly where they are (the header says why).
             all.removeAt(i);
+            // ...with the one exception the removal implies: a "show only this server" choice naming the
+            // server that has just been forgotten is not a row of item data, it is a pointer at a thing
+            // that no longer exists (#160 increment 2).
+            if (store().value(filterKey()).toString() == id) store().remove(filterKey());
             saveAll(all);
             return;
         }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.304 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.305 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -2650,8 +2650,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         # #83 section 20: QUICK CONNECT, the one socket in this probe. The REAL session polls a fake Jellyfin
         # on 127.0.0.1 (never a real server), because "cancel stops polling" is a claim about requests the
         # server stops receiving, and only a server can count those. Qt6::Network comes with it.
-        src/core/JellyfinQuickConnect.cpp src/core/JellyfinQuickConnect.h)
-    target_include_directories(probe_jellyfin PRIVATE src src/core tools)
+        src/core/JellyfinQuickConnect.cpp src/core/JellyfinQuickConnect.h
+        # #160 increment 2: THE REAL CLIENT, so that "a browse narrowed to one server does not call the
+        # others" can be asserted the only way it honestly can be - by counting the requests the OTHER
+        # fixture server never receives. A hand-built server list beside the filter would prove only that
+        # the probe can filter its own vector. JellyfinDownload (the download-url minter) and Settings
+        # (the client's request headers) come with the client; DownloadsStore and FormFactor come with
+        # those two.
+        src/core/JellyfinClient.cpp      src/core/JellyfinClient.h
+        src/core/JellyfinDownload.cpp    src/core/JellyfinDownload.h
+        src/core/DownloadsStore.cpp      src/core/DownloadsStore.h
+        src/core/Settings.cpp            src/core/Settings.h
+        src/theme2/FormFactor.cpp        src/theme2/FormFactor.h)
+    target_include_directories(probe_jellyfin PRIVATE src src/core src/theme2 tools)
     # The ini-redirect seam, same rule as probe_musicid's and probe_musicremap's: without the macro the
     # setters are not compiled at all, so a production call is a compile error rather than a silent
     # process-wide redirect. Load-bearing twice over here - this probe WRITES records, and the server

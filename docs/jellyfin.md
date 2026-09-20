@@ -25,6 +25,35 @@ signing in by itself. No password is typed with a remote.
 
 Either way the result is the same sign-in, stored the same device-local way.
 
+## Several servers: showing one of them, and where Continue Watching goes
+
+With **two or more servers connected and answering**, the **Jellyfin** folder grows a short list at the
+bottom of its first page:
+
+* **◎ All servers** — every connected server's libraries together, tagged with the server they came from.
+  This is the default and nothing changes until you pick something else.
+* **◎ Show only *<server>*** — one entry per connected server.
+
+Picking one narrows the Jellyfin folder to that server, and the folder's heading says so
+(*Jellyfin — Attic*). It is a genuine narrowing rather than a filter over the rows: the servers you are not
+showing **are not contacted at all**, so nothing is waiting on a box you are not looking at.
+
+The choice is remembered **on this device** — which server you feel like browsing tonight is not a fact about
+your library, and your phone is free to be showing something else. It goes back to **All servers** by itself
+if you switch that server off or remove it. Nothing is ever hidden permanently: the list is at the bottom of
+the same page, whichever server you are showing.
+
+**Continue Watching** has its own setting, under **Settings → Jellyfin**:
+
+* **Merge Continue Watching across servers** *(on by default)* — one **Continue Watching** section on your
+  home screen, with every server's half-watched items in it.
+* Switch it off and each server gets **its own section**, labelled with the server's name, in the order the
+  servers are listed. A server that is switched off or unreachable contributes no section at all, exactly as
+  it contributes no rows today.
+
+This setting is about this screen, so it too is kept on **this device** and is never synced. The same title
+part-watched on two servers stays **two rows** — nothing is ever silently merged into one.
+
 ## Downloads — taking it on a plane
 
 Any film or episode from a Jellyfin server can be kept on this device and watched with the network off.

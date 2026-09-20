@@ -376,6 +376,70 @@ namespace Jellyfin
     QString categoryForCollection(const QString& collectionType);
     bool    isVideoCollection(const QString& collectionType);
 
+    // ====================================================================================================
+    // 6. WHICH SERVERS A VIEW IS SHOWING (issue #160, increment 2) - still pure, still no socket
+    // ====================================================================================================
+    // Two questions the merged library raises the moment there is more than one box behind it, and both of
+    // them are POLICY rather than plumbing: what the browse root offers as a way to narrow itself, and what
+    // shape the server's own Continue Watching takes. They live here, beside the union they are about, so
+    // that probe_jellyfin can hold them without a widget, a socket or a settings file - the view turns the
+    // answers into rows and the store remembers the choice, but neither of them decides anything.
+
+    // One entry of the "show only this server" list at the browse root. `id` empty is the ALL SERVERS
+    // entry; `name` is empty with it, because what that entry is CALLED is the view's word and not this
+    // layer's. `current` marks the entry the view is showing now, so the list says where you are as well
+    // as where you can go.
+    struct ServerChoice
+    {
+        QString id;
+        QString name;
+        bool    current = false;
+    };
+
+    // THE RULE #160 ASKS FOR, IN ONE PLACE: the filter appears only when it would mean something.
+    //
+    //   * Showing every server, and fewer than two of them actually CONTRIBUTED to this level: nothing is
+    //     offered. One server's library needs no "show only" list, and neither does two servers of which
+    //     one is switched off at the wall - what is on the screen is already one server's worth.
+    //   * Fewer than two servers enabled: nothing is offered, for the same reason, and this is also what
+    //     keeps the list from appearing the instant a second server is added but before it answers.
+    //   * Otherwise: ALL SERVERS first, then one entry per ENABLED server in the order the store lists
+    //     them. Deliberately every enabled server and not only the contributors, because once a filter is
+    //     active exactly one server contributes and a list built from contributors alone would be a
+    //     one-way door - you could narrow to a server and never reach any other.
+    //
+    // `contributors` is the set of server ids whose rows are in the level being drawn (duplicates are
+    // fine); `activeId` is the remembered choice, empty for all servers.
+    QVector<ServerChoice> serverFilterChoices(const QVector<ServerChoice>& enabledServers,
+                                              const QStringList& contributors,
+                                              const QString& activeId);
+
+    // One Continue Watching section. `serverId`/`serverName` are EMPTY in the merged shape - there is one
+    // section and it belongs to no single server - and filled in the per-server shape, where the name is
+    // what the section is labelled with.
+    struct ContinueSection
+    {
+        QString            serverId;
+        QString            serverName;
+        QVector<UnionItem> items;
+    };
+
+    // THE TWO SHAPES THE `jellyfin/continueMerge` SETTING CHOOSES BETWEEN.
+    //
+    //   * merged (the default, and what #160 shipped): ONE section carrying every item, in union order.
+    //   * per server: one section per server that has items here, ordered by `serverOrder` - the store's
+    //     own order - so the sections do not reshuffle between two refreshes according to which box
+    //     answered first. A server in `serverOrder` with nothing here gets NO SECTION, which is the
+    //     failure isolation #160 asks for expressed as the absence of a special case: a box that is off
+    //     costs the home screen nothing, exactly as it does today, and the browse levels are where a
+    //     server being unreachable is explained.
+    //
+    // A server with items but NOT in `serverOrder` (removed while its rows were on screen) still gets its
+    // section, after the ordered ones: dropping rows on the floor because a lookup missed is how a shelf
+    // silently loses half of itself.
+    QVector<ContinueSection> continueSections(const QVector<UnionItem>& items,
+                                              const QStringList& serverOrder, bool merged);
+
     // ---- Items, seasons and episodes -------------------------------------------------------------------
     // The query strings, spelled once each so the builder and any reader cannot drift, and so that a probe
     // can assert what was asked for. The FIELDS are requested explicitly: Jellyfin omits ProductionYear and

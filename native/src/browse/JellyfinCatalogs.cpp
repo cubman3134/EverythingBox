@@ -72,10 +72,17 @@ MediaItem jellyfinLeafRow(const Jellyfin::UnionItem& it, bool tagServer)
 }
 
 MediaCatalog jellyfinLibrariesCatalog(const QVector<Jellyfin::LibraryRef>& libraries,
-                                      const QStringList& notes)
+                                      const QStringList& notes,
+                                      const QVector<Jellyfin::ServerChoice>& filterChoices)
 {
     MediaCatalog c;
     c.title = QCoreApplication::translate("browse", "Jellyfin");
+    // NARROWED TO ONE SERVER: the level says so in its own heading. The filter rows are at the bottom and
+    // may be scrolled away, so without this a filtered root and a root whose other server is simply down
+    // would look exactly alike — and one of those is something the user did.
+    for (const Jellyfin::ServerChoice& ch : filterChoices)
+        if (ch.current && !ch.id.isEmpty() && !ch.name.isEmpty())
+            c.title = QCoreApplication::translate("browse", "Jellyfin — %1").arg(ch.name);
     // MORE THAN ONE SERVER CONTRIBUTED => TAG. Computed here rather than taken as a parameter because at
     // THIS level the answer is a property of the list itself, and a caller free to get it wrong is a
     // caller that will.
@@ -102,6 +109,24 @@ MediaCatalog jellyfinLibrariesCatalog(const QVector<Jellyfin::LibraryRef>& libra
     appendNotesAndEmptiness(c, notes,
         QCoreApplication::translate("browse",
             "No libraries to show. Check the servers under Settings, or that this account can see them."));
+    // "Show only <server>" (#160, increment 2), AFTER the emptiness line rather than before it: appended
+    // first they would count as rows, and a filtered root whose one server did not answer would lose the
+    // sentence explaining why it is empty — on the one level where the way out is the rows below it.
+    for (const Jellyfin::ServerChoice& ch : filterChoices)
+    {
+        MediaItem row;
+        row.id    = QString::fromLatin1(kJellyfinFilterType) + QLatin1Char(':') + ch.id;
+        row.type  = QString::fromLatin1(kJellyfinFilterType);
+        row.mime  = QString::fromLatin1(kJellyfinFilterPrefix) + ch.id;
+        row.title = ch.id.isEmpty()
+                        ? QCoreApplication::translate("browse", "◎  All servers")
+                        : QCoreApplication::translate("browse", "◎  Show only %1").arg(ch.name);
+        // The entry you are already on says so instead of pretending to be a destination. It stays
+        // ACTIVATABLE — pressing it is a no-op that re-fetches, which is the honest thing for a row that
+        // names the view you are looking at.
+        if (ch.current) row.subtitle = QCoreApplication::translate("browse", "Showing now");
+        c.items.push_back(row);
+    }
     return c;
 }
 

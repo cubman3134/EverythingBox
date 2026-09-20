@@ -919,6 +919,16 @@ int main(int argc, char** argv)
         // issue itself. Both ways, and the per-server enable flag rides the same blob so it is covered too.
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/profileA/servers")) == true);
         CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/profileA/servers")) == false);
+        // #160 increment 2: the TWO VIEWING PREFERENCES that joined that prefix — which server the browse
+        // root is narrowed to ("show only <server>"), and whether the home screen's Continue Watching is
+        // one section or one per server. No credential in either, and they are device-local for the other
+        // reason the carve-out exists: they are facts about THIS screen. Which box you feel like looking at
+        // on the television tonight is not a statement about the library, and syncing it would reach across
+        // and narrow the phone's browse root to a server the phone may not even be on the network with.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/profileA/browseFilter")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/profileA/browseFilter")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("jellyfin/continueMerge")) == true);
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("jellyfin/continueMerge")) == false);
         // #110: EVERY KEY THE OFFLINE-DOWNLOAD FEATURE ADDS, asked through the feature's OWN key builders
         // rather than through a spelling copied here — so a rename that quietly moved one out of a carved
         // prefix fails HERE, which is the only place that can tell.

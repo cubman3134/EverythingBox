@@ -8346,17 +8346,25 @@ void HomeView::renderRecents()
     // producer, so a profile with no Jellyfin server (or none answering, or nothing part-watched) gets no
     // row, no header and no change of order whatsoever. What appears for somebody who HAS one is a shelf
     // they never had to ask for, which is what "merged in like any other source" means.
+    // ONE SECTION OR ONE PER SERVER (#160 increment 2, the `jellyfin/continueMerge` setting). The shape was
+    // decided when the fetch landed — Jellyfin::continueSections, in the store's own server order — so this
+    // renders whatever sections it was given and owns only their headers. A section that names a server is
+    // LABELLED with it; the merged one keeps the plain heading it has always had.
     auto buildJellyfinContinue = [this]() {
         QVector<Group> out;
-        Group g;
-        g.header = tr("Continue Watching");
-        for (const MediaItem& raw : jellyfinContinue_)
+        for (const JellyfinContinueShelf& sh : jellyfinContinue_)
         {
-            const MediaItem it = correctedRow(raw);
-            if (isHiddenItem(it)) continue;
-            g.items.push_back(it);
+            Group g;
+            g.header = sh.serverName.isEmpty() ? tr("Continue Watching")
+                                               : tr("Continue Watching — %1").arg(sh.serverName);
+            for (const MediaItem& raw : sh.rows)
+            {
+                const MediaItem it = correctedRow(raw);
+                if (isHiddenItem(it)) continue;
+                g.items.push_back(it);
+            }
+            if (!g.items.isEmpty()) out.push_back(g);
         }
-        if (!g.items.isEmpty()) out.push_back(g);
         return out;
     };
 
@@ -9282,6 +9290,14 @@ void HomeView::activateItem(int row)
     if (it.type == QString::fromLatin1(browse::kJellyfinSeasonType))
     {
         openJellyfinSeasonLevel(browse::jellyfinKeyOf(it.mime, browse::kJellyfinSeasonPrefix), it.title);
+        return;
+    }
+    // #160 increment 2: "Show only <server>" / "All servers". A COMMAND row, so it pushes no level — it
+    // remembers the choice and re-fetches this one. The body is in HomeViewJellyfin.cpp with the rest of
+    // the feature.
+    if (it.type == QString::fromLatin1(browse::kJellyfinFilterType))
+    {
+        chooseJellyfinServerFilter(browse::jellyfinKeyOf(it.mime, browse::kJellyfinFilterPrefix));
         return;
     }
 

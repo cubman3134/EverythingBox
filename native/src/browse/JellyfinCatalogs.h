@@ -68,6 +68,14 @@ namespace browse
     // could occur inside an id.
     inline const char* kJellyfinSeasonPrefix = "jfseason:";
 
+    // "SHOW ONLY <SERVER>" (issue #160, increment 2). A COMMAND row, not a level: activating it remembers
+    // the choice and re-populates the root in place, which is why it assigns no `expandable` and pushes
+    // nothing — the "➕ Add a source…" rows (kNewLiveTv, "_newopds") are the same shape for the same reason.
+    // The mime is this prefix followed by the server id, and the ALL SERVERS entry carries the prefix and
+    // nothing else, so jellyfinKeyOf reads it back as the empty string the store means by "all".
+    inline const char* kJellyfinFilterType   = "_jffilter";
+    inline const char* kJellyfinFilterPrefix = "jffilter:";     // + <server id>, or nothing for all servers
+
     // --- LOCAL LEAF KIND (declared with the feature that stamps it — see LeafRoute.h) ---
     // A PLAYABLE JELLYFIN ITEM. Keyed: the mime is this prefix followed by the row's qualified id, and
     // jellyfinKeyOf reads it back. It is a "local" leaf in LeafRoute's sense — no addon can resolve it —
@@ -90,8 +98,14 @@ namespace browse
     // server that contributed nothing — and are appended as non-actionable rows.
     // Jellyfin::LibraryRef, and NOT a struct of this file's own: the union that produces these rows is in
     // Jellyfin.cpp, and a second copy of the same four fields is how a builder and its producer drift.
+    // `filterChoices` is Jellyfin::serverFilterChoices' answer — empty when the filter is not offered.
+    // The entries go at the BOTTOM of the level, under the notes: the libraries are what the user came
+    // here for, and three rows of view controls above them would push a two-server user's first library
+    // off the top of the screen on every single open. The level's own title says which server it is
+    // narrowed to, so the state is never in doubt while the list is scrolled away.
     MediaCatalog jellyfinLibrariesCatalog(const QVector<Jellyfin::LibraryRef>& libraries,
-                                          const QStringList& notes);
+                                          const QStringList& notes,
+                                          const QVector<Jellyfin::ServerChoice>& filterChoices = {});
 
     // The titles inside one library: a Movie is a LEAF, a Series is a CONTAINER that drills into its
     // seasons. `title` is the level's own heading (the library's name).

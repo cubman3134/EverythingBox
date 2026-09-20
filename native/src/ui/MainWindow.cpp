@@ -22571,6 +22571,12 @@ void MainWindow::openGeneralSettings()
         sep(tr("Jellyfin"));
         action(QStringLiteral("jellyfin.servers"), tr("Jellyfin servers…"));
         info(QStringLiteral("jellyfin.serverstatus"), tr("Jellyfin"), jellyfinServerStatusLine());
+        // #160 increment 2: one Continue Watching section across the servers, or one per server. DEVICE-
+        // LOCAL, under the "jellyfin/" prefix CloudSync::isDeviceLocalKey already carves out — which box
+        // you want your half-watched rows grouped by is a fact about this screen, not about the library.
+        // The classic twin is in the QWidget builder below (GS_TWINS).
+        toggle(QStringLiteral("jellyfin.continuemerge"), tr("Merge Continue Watching across servers"),
+               JellyfinServerStore::continueMerged());
         // --- Requests (#109): the service that goes and gets things you do not have. ONE row, because set
         // up / replace the key / forget it are three verbs about one credential. The classic twin is in the
         // QWidget builder below; a setting in one builder only is unreachable in the other mode. The info
@@ -23200,6 +23206,9 @@ void MainWindow::openGeneralSettings()
                     checkJellyfinDownloadCap();   // a tighter limit may make this true immediately
                 }
                 else if (id == QStringLiteral("downloads.removewatched")) JellyfinDownload::setRemoveAfterWatched(on);
+                // #160: the same setter the QWidget twin calls — one write path. The store's change hook
+                // re-renders the home, so the sections re-shape without a restart.
+                else if (id == QStringLiteral("jellyfin.continuemerge")) JellyfinServerStore::setContinueMerged(on);
                 else if (id == QStringLiteral("emu.autoinc")) Settings::setStateAutoIncrement(on);
                 else if (id == QStringLiteral("emu.resume")) {
                     for (const auto& r : resumeModePairs) if (r.first == val) { Settings::setResumeMode(r.second); break; }
@@ -24887,6 +24896,17 @@ void MainWindow::openGeneralSettings()
             home_->manageJellyfinServersInteractive();
             jfSrvStatus->setText(jellyfinServerStatusLine());
         });
+        // The classic twin of the themed jellyfin.continuemerge row (#160 increment 2). Same store, same
+        // setter — one write path, no drift (GS_TWINS).
+        auto* jfMerge = new QCheckBox(tr("Merge Continue Watching across servers"));
+        jfMerge->setStyleSheet(QStringLiteral("font-size:15px;"));
+        jfMerge->setChecked(JellyfinServerStore::continueMerged());
+        jfMerge->setToolTip(tr("On, the servers' half-watched items share one Continue Watching section. "
+                               "Off, each server gets its own section, labelled with its name. This is a "
+                               "setting for THIS device and is never included in anything this app syncs."));
+        connect(jfMerge, &QCheckBox::toggled, this,
+                [](bool c) { JellyfinServerStore::setContinueMerged(c); });
+        v->addWidget(jfMerge);
         v->addSpacing(10);
 
         // --- Requests (#109): the classic twin of the themed requests.service row. Same manager, same

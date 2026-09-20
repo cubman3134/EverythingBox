@@ -73,6 +73,34 @@ bool moreThanOneServerIn(const QVector<Jellyfin::UnionItem>& items)
     return false;
 }
 
+// ---- "Show only <server>" (issue #160, increment 2) ------------------------------------------------------
+// The CHOICES are Jellyfin::serverFilterChoices' answer and nothing else; this function's whole job is to
+// hand that rule the three facts it reasons about — which servers are enabled, which of them contributed to
+// the level being drawn, and what the remembered choice is. The rule itself is pure and probe_jellyfin holds
+// it; a second copy of "when is this filter worth offering" living here is how the two would drift.
+//
+// A free function rather than a HomeView member on purpose: it needs no state, and a member would put
+// Jellyfin.h into HomeView.h — a nine-thousand-line header every branch in the tree already recompiles.
+QVector<Jellyfin::ServerChoice> jellyfinFilterChoices(const QVector<Jellyfin::LibraryRef>& libraries)
+{
+    QVector<Jellyfin::ServerChoice> enabled;
+    for (const JellyfinServer& s : JellyfinServerStore::enabled())
+    {
+        Jellyfin::ServerChoice c;
+        c.id   = s.id;
+        c.name = s.name.trimmed().isEmpty() ? QStringLiteral("Jellyfin") : s.name;
+        enabled.push_back(c);
+    }
+    // CONTRIBUTORS ARE ASKED OF THE ROWS, not of the store — the same rule moreThanOneServerIn states for
+    // the server tag, and for the same reason: two servers configured and one not answering is a
+    // one-server view, and a "show only" list over it would be a control that changes nothing.
+    QStringList contributors;
+    for (const Jellyfin::LibraryRef& l : libraries)
+        if (!l.serverId.isEmpty() && !contributors.contains(l.serverId)) contributors << l.serverId;
+
+    return Jellyfin::serverFilterChoices(enabled, contributors, JellyfinServerStore::browseFilterId());
+}
+
 } // namespace
 
 // ---- The shared one-row levels ---------------------------------------------------------------------------
@@ -124,10 +152,20 @@ void HomeView::populateJellyfinLibraries()
     const QString title = tr("Jellyfin");
     showJellyfinLoading(title);
     JellyfinClient::instance().fetchLibraries(kLevelBudgetMs,
-        [this, gen, title](const QVector<Jellyfin::LibraryRef>& libraries, const QStringList& notes) {
+        [this, gen](const QVector<Jellyfin::LibraryRef>& libraries, const QStringList& notes) {
             if (gen != jellyfinFetchGen_) return;   // superseded: the user has navigated away
-            showSyntheticCatalog(browse::jellyfinLibrariesCatalog(libraries, notes));
+            showSyntheticCatalog(browse::jellyfinLibrariesCatalog(libraries, notes,
+                                                                  jellyfinFilterChoices(libraries)));
         });
+}
+
+void HomeView::chooseJellyfinServerFilter(const QString& serverId)
+{
+    // REMEMBER, THEN RE-FETCH THE LEVEL IN PLACE. No level is pushed and none is popped: the user is still
+    // at the Jellyfin root, it is only showing less (or more) of itself — so Back from here still leaves
+    // Jellyfin, as it did before the filter existed.
+    JellyfinServerStore::setBrowseFilterId(serverId);
+    populateJellyfinLibraries();
 }
 
 // ---- Level 2: one library's titles ------------------------------------------------------------------------
@@ -294,18 +332,38 @@ void HomeView::refreshJellyfinContinue()
             Q_UNUSED(notes);   // the home list is not the place to explain a server being off; the browse
                                // levels carry those notes, where the user went looking for that server
             jellyfinContinueInFlight_ = false;
-            const QVector<MediaItem> rows =
-                browse::jellyfinContinueRows(items, moreThanOneServerIn(items));
+            // ONE SECTION OR ONE PER SERVER (#160, increment 2). The shape is Jellyfin::continueSections'
+            // answer, in the store's own server order; this loop only turns each section's items into
+            // rows. A section that NAMES its server does not tag its rows with it as well — the header
+            // has said it once already, and repeating it on every row is the noise the tag rule exists to
+            // avoid.
+            QVector<JellyfinContinueShelf> shelves;
+            for (const Jellyfin::ContinueSection& sec
+                     : Jellyfin::continueSections(items, JellyfinServerStore::ids(),
+                                                  JellyfinServerStore::continueMerged()))
+            {
+                JellyfinContinueShelf sh;
+                sh.serverName = sec.serverName;
+                sh.rows = browse::jellyfinContinueRows(
+                    sec.items, sec.serverName.isEmpty() && moreThanOneServerIn(sec.items));
+                shelves.push_back(sh);
+            }
             // RE-RENDER ONLY ON A CHANGE. The answer is usually identical to the last one, and re-rendering
             // the home list rebuilds every row and reloads every thumbnail — on a surface the user may be
             // in the middle of scrolling.
-            bool same = rows.size() == jellyfinContinue_.size();
-            for (int i = 0; same && i < rows.size(); ++i)
-                same = rows[i].id == jellyfinContinue_[i].id
-                    && rows[i].title == jellyfinContinue_[i].title
-                    && rows[i].subtitle == jellyfinContinue_[i].subtitle;
+            bool same = shelves.size() == jellyfinContinue_.size();
+            for (int s = 0; same && s < shelves.size(); ++s)
+            {
+                const QVector<MediaItem>& rows = shelves[s].rows;
+                const QVector<MediaItem>& was  = jellyfinContinue_[s].rows;
+                same = shelves[s].serverName == jellyfinContinue_[s].serverName && rows.size() == was.size();
+                for (int i = 0; same && i < rows.size(); ++i)
+                    same = rows[i].id == was[i].id
+                        && rows[i].title == was[i].title
+                        && rows[i].subtitle == was[i].subtitle;
+            }
             if (same) return;
-            jellyfinContinue_ = rows;
+            jellyfinContinue_ = shelves;
             if (recentView_) renderRecents();
         });
 }
