@@ -29,6 +29,7 @@
 #include <QObject>
 #include <QSet>
 #include <memory>
+#include "FileDrop.h"
 #include "LibraryBundle.h"
 #include "PlayOnDevice.h"
 #include "RemoteApi.h"
@@ -89,6 +90,23 @@ public:
 
     void setHooks(const Hooks& h) { hooks_ = h; }
 
+    // #115, the LAN file drop. `uploads` null means file drop is OFF and every /drop route is a 404 (after the
+    // token check the /drop/ prefix always gets). `destinations` is asked on every request that needs the
+    // list, so a changed ROM folder is honoured at once; `landed` runs after a file is in place (the app's
+    // scan). The page itself is FileDrop::pageHtml(), the embedded resource -- nothing from the request picks
+    // what GET /drop serves.
+    struct DropHooks
+    {
+        std::shared_ptr<FileDrop::Uploads>              uploads;
+        std::function<QList<FileDrop::Destination>()>   destinations;
+        std::function<void(const FileDrop::Answer&)>    landed;
+    };
+    void setFileDrop(const DropHooks& d) { drop_ = d; }
+    // #115: when the listener is up ONLY for file drop, the control and hand-off routes (/state, /player,
+    // /input, /open, /inventory, /bundle, /gamelists...) answer 404, so turning file drop on never opens the
+    // unauthenticated remote control. /pair stays: it is how a browser gets its token. Default on (#76).
+    void setControlSurface(bool on) { controlSurface_ = on; }
+
     // Bind to all interfaces on `port` (called ONLY when the setting is on). Returns true when it is listening.
     // A failure to bind (port in use, permission) leaves the server not listening and returns false.
     bool start(quint16 port);
@@ -117,6 +135,9 @@ private:
     void pumpStream(QTcpSocket* sock);
     void dropStream(QTcpSocket* sock);
     void armSidecarIdle();   // #401
+    void beginDropChunk(QTcpSocket* sock, const RemoteApi::Request& head, RemoteApi::BodyPlan plan);
+    QByteArray dropRoute(const RemoteApi::Command& c, const RemoteApi::Request& req, int& status,
+                         QList<QByteArray>& extraHeaders, QByteArray& contentType);
     void noteBuffered(qint64 n) { if (n > bufferHighWater_) bufferHighWater_ = n; }
 
     QTcpServer* server_ = nullptr;
@@ -129,6 +150,8 @@ private:
     int    bodyIdleTimeoutMs_ = 30000;
     int    sidecarIdleTimeoutMs_ = 30000;   // #401: mirrors the body idle timeout
     QTimer* sidecarIdle_       = nullptr;    // #401: restarted by every gamelist request; owned by this
+    DropHooks drop_;                           // #115
+    bool      controlSurface_ = true;          // #115
 
     // The per-request read cap is RemoteApi::requestCapBytes (#76's tiny one for every route, a payload-sized
     // one for POST /bundle alone). Kept there rather than here so the exception is a testable function.

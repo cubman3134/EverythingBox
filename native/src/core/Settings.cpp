@@ -842,6 +842,11 @@ void Settings::setRemoteControlEnabled(bool on)
     store().setValue(QStringLiteral("remote/enabled"), on); store().sync();
 }
 int Settings::remoteControlPort() { return store().value(QStringLiteral("remote/port"), 8090).toInt(); }
+bool Settings::fileDropEnabled() { return store().value(QStringLiteral("remote/fileDrop"), false).toBool(); }
+void Settings::setFileDropEnabled(bool on)
+{
+    store().setValue(QStringLiteral("remote/fileDrop"), on); store().sync();
+}
 void Settings::setRemoteControlPort(int port)
 {
     if (port < 1) port = 1; else if (port > 65535) port = 65535;   // clamp to a valid TCP port

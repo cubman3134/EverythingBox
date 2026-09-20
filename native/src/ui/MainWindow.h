@@ -25,6 +25,7 @@
 #include "../core/MediaSegments.h"
 #include "../core/LibraryBundle.h"    // LibraryBundle::Receipt / Progress are by-value members (issue #127)
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
+namespace FileDrop { class Uploads; }  // issue #115: held by shared_ptr only
 #include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
@@ -761,6 +762,13 @@ private:
     // hook reports (tracked off PlaybackSession::trackChanged, the one place a display title flows through).
     class RemoteServer* remoteServer_ = nullptr;
     void updateRemoteServer();
+    // LAN file drop (issue #115). DEFINED IN src/ui/MainWindowFileDrop.cpp. The upload registry outlives a
+    // listener restart; applyFileDrop hands it to the server (or takes it away) per Settings::fileDropEnabled.
+    std::shared_ptr<FileDrop::Uploads> fileDrop_;
+    bool    fileDropOn_ = false;
+    void    applyFileDrop();
+    void    setFileDropFromUi(bool on);          // both settings builders' toggle
+    QString fileDropStatusText() const;          // the URL to open, or how to get one
     QString curPlayTitle_;
 
     // ---- "Play on device" (issue #143). EVERY MEMBER BELOW IS DEFINED IN src/ui/MainWindowPlayOn.cpp ----

@@ -418,6 +418,11 @@ namespace Settings
     void setRemoteControlEnabled(bool on);
     int  remoteControlPort();                    // key "remote/port", default 8090 (clamped 1..65535 on write)
     void setRemoteControlPort(int port);
+    // The LAN file drop (issue #115): a browser on the network uploads ROMs and media into fixed destinations.
+    // Rides the listener above; when that is off, turning this on opens it for file drop ALONE (no remote
+    // control). Every upload route is token-gated by the existing pairing. Default OFF.
+    bool fileDropEnabled();                      // key "remote/fileDrop", default false
+    void setFileDropEnabled(bool on);
 
     // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
     // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.

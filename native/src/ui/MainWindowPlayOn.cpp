@@ -73,7 +73,8 @@ void MainWindow::updatePlayOnAdvert()
 {
     if (!castMgr_) return;
     if (!playOnHost_) playOnHost_ = new PlayOnHost(this);
-    if (remoteServer_ && remoteServer_->isListening())
+    // #115: a listener up for file drop alone is not a Play-on-device target -- its hand-off routes are 404.
+    if (remoteServer_ && remoteServer_->isListening() && Settings::remoteControlEnabled())
         castMgr_->setPlayOnAdvert(PlayOnHost::advertFor(remoteServer_->port()));
     else
         castMgr_->clearPlayOnAdvert();

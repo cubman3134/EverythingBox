@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.299 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.301 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -821,6 +821,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/QuitSignals.cpp  src/core/QuitSignals.h   # SIGTERM/SIGINT/SIGHUP -> the window's close, once (#409)
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
+        src/core/FileDrop.cpp     src/core/FileDrop.h      # LAN file drop: destinations, names, resumable landing (#115)
         src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h  # pure "Play on device": advert, picker merge, hand-off, pairing (#143)
         src/core/PlayOnClient.cpp src/core/PlayOnClient.h  # the source side: talks to a peer's #76 surface (#143)
         src/core/PlayOnHost.cpp   src/core/PlayOnHost.h    # device-local pairing tokens, both directions (#143)
@@ -960,6 +961,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
         src/ui/AddonConfigurePanel.cpp src/ui/AddonConfigurePanel.h   # #80: the nav-kit waiting card that finishes it
@@ -1133,6 +1135,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # why probe_recipes byte-compares the embedded copy against the file in the source tree.
     qt_add_resources(EB_RECIPES_RCC resources/recipes.qrc)
     target_sources(everythingbox PRIVATE ${EB_RECIPES_RCC})
+    # #115: the LAN file-drop page (resources/filedrop/drop.html), through qt_add_resources for the same reason:
+    # a .qrc in the source list is silently not embedded, and GET /drop would then answer 500 for ever.
+    # probe_filedrop byte-compares the embedded copy with the file in the source tree.
+    qt_add_resources(EB_FILEDROP_RCC resources/filedrop.qrc)
+    target_sources(everythingbox PRIVATE ${EB_FILEDROP_RCC})
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
@@ -3572,7 +3579,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # builds request/response bytes and JSON with QByteArray/QJsonDocument), so it links Qt6::Core and nothing
     # heavier — no QTcpServer, no player, no window.
     add_executable(probe_remoteapi tools/probe_remoteapi.cpp
-        src/core/RemoteApi.cpp src/core/RemoteApi.h)
+        src/core/RemoteApi.cpp src/core/RemoteApi.h
+        src/core/PlayOnDevice.cpp src/core/PlayOnDevice.h)   # #115: routeNeedsToken over the /drop routes
     target_include_directories(probe_remoteapi PRIVATE src src/core)
     target_link_libraries(probe_remoteapi PRIVATE Qt6::Core)
 
@@ -3612,10 +3620,31 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PlayOnDevice.cpp  src/core/PlayOnDevice.h
         src/core/RemoteApi.cpp     src/core/RemoteApi.h
         src/core/RemoteServer.cpp  src/core/RemoteServer.h    # #291: the streaming path, on a real loopback socket
+        src/core/FileDrop.cpp      src/core/FileDrop.h        # #115: RemoteServer routes /drop through it
         # #292: gamelist sidecars land where GamelistStore reads them, so the probe reads them back with it.
         src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp src/core/StreamHeaders.cpp)
     target_include_directories(probe_bundlexfer PRIVATE src src/core src/addons)
     target_link_libraries(probe_bundlexfer PRIVATE Qt6::Core Qt6::Network)
+
+    # LAN file drop (#115): the destination list (opaque, stable ids; never a path out), the shared name rule's
+    # whole refusal table, the start / piece-offset / finish state machine with its caps and free-space check,
+    # the durable no-replace landing, the 24 h sweep, a census proving nothing is written outside the
+    # destination, routeNeedsToken over every /drop route, and a REAL loopback socket: a 200 MiB upload in
+    # 8 MiB pieces hash-compared, a connection killed mid-piece and resumed, 401 with no part file. The page is
+    # compiled in through qt_add_resources, exactly as the app does, and byte-compared with its source.
+    qt_add_resources(EB_FILEDROP_RCC_PROBE resources/filedrop.qrc)
+    add_executable(probe_filedrop tools/probe_filedrop.cpp
+        src/core/FileDrop.cpp      src/core/FileDrop.h
+        src/core/LibraryBundle.cpp src/core/LibraryBundle.h
+        src/core/PlayOnDevice.cpp  src/core/PlayOnDevice.h
+        src/core/RemoteApi.cpp     src/core/RemoteApi.h
+        src/core/RemoteServer.cpp  src/core/RemoteServer.h
+        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp src/core/StreamHeaders.cpp
+        ${EB_FILEDROP_RCC_PROBE})
+    target_include_directories(probe_filedrop PRIVATE src src/core src/addons)
+    target_link_libraries(probe_filedrop PRIVATE Qt6::Core Qt6::Network)
+    target_compile_definitions(probe_filedrop PRIVATE
+        EB_FILEDROP_PAGE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/resources/filedrop/drop.html")
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache) AND the pure .nfo>scraped
     # metadata merge for a resolved local file (#73), composed with MetaOverrides to pin override>.nfo>scraped.
