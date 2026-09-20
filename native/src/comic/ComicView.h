@@ -93,6 +93,10 @@ public:
     void toggleBorderCrop();
     void cycleColorFilter();     // none -> greyscale -> sepia -> night -> high contrast -> none
     void toggleThumbnailRail();  // webtoon only; turning it on also gives it the reader's key cursor
+    // Increment 2. The three scan-quality corrections are ONE control cycling a ladder of named presets
+    // (ReadingModes.h says why they are not three buttons), and the zoom-start position is its own.
+    void cycleScanFixes();       // off -> de-moire -> denoise -> sharpen -> all three -> off
+    void cycleZoomStart();       // top -> centre -> reading side -> top
 
     // The themed chrome's extra comic controls, as labels + "is it on" + one activation by index. ONE generic
     // trio rather than ten typed virtuals: the QML row appends one entry per label and fires back the index it
@@ -182,6 +186,9 @@ private:
     void readDisplayOptions();          // load this comic's per-series options out of the store
     void writeOption(const char* option, int value);
     void applyMode();                   // swap the scroll area between the paged label and the webtoon strip
+    // #154 increment 2: aim the scroll bars at this series' zoom-start position. Called wherever the old
+    // "start each page at the top" line was, and it IS that line's answer when the position is Top.
+    void applyZoomStart();
     void rebuildStrip();                // (re)compute the strip layout for the current viewport width
     void relayoutStrip();               // rebuild AND land back on the same reading position
     void scrollToPosition(int page, double fraction);
@@ -233,6 +240,10 @@ private:
     ComicRead::Filter filter_ = ComicRead::Filter::None;
     bool crop_ = false;
     bool railOn_ = false;
+    // Increment 2, per series like the five above and off / Top by default, so a comic opened before this
+    // existed reads exactly as it did.
+    ComicRead::ScanFixes scan_;
+    ComicRead::ZoomStart zoomStart_ = ComicRead::ZoomStart::Top;
     QString seriesKey_;
     int  half_ = -1;              // paged split: -1 whole page, 0 first half on screen, 1 second half
     // #285: the half this comic's stored resume recorded, held from open until the reader navigates away from
@@ -267,4 +278,6 @@ private:
     QPushButton* cropBtn_ = nullptr;
     QPushButton* filterBtn_ = nullptr;
     QPushButton* railBtn_ = nullptr;
+    QPushButton* scanBtn_ = nullptr;        // increment 2: the scan-fix ladder
+    QPushButton* zoomStartBtn_ = nullptr;   // ... and where a zoomed page opens
 };

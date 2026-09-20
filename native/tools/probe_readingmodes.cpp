@@ -33,6 +33,14 @@
 //   7. THE COLOUR FILTERS as exact pixel arithmetic, each preset's numbers written out by hand.
 //   8. THE STORE KEY: the document's series when there is one, the filename's otherwise — and two chapters
 //      of one series land on the SAME key, which is the whole reason the key exists.
+//   9. THE SCAN-QUALITY CORRECTIONS (increment 2) as exact pixel arithmetic on synthetic pages whose answer
+//      is worked out in the comment above each check: a checkerboard for de-moire (the kernel's whole claim
+//      is that it flattens one), a flat field with salt-and-pepper specks for denoise, a step edge for
+//      sharpen. Plus: "off" is byte-identical AND not even a copy; a 1x1 and a 2x2 page go through every
+//      filter; each filter is the identity on a flat field; THE COMPOSITION ORDER, with the number the
+//      swapped order would give written out beside it; and the preset ladder the one control cycles.
+//  10. WHERE A ZOOMED PAGE OPENS: top / centre / reading side, in both directions, clamped for a page
+//      smaller than the viewport — and that a webtoon ignores the whole question.
 //
 // Prints READINGMODES-OK on success; any failure prints READINGMODES-FAIL <cond> (line) and exits non-zero.
 //
@@ -44,7 +52,9 @@
 #include "Settings.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QImage>
+#include <QPoint>
 #include <QSize>
 #include <QString>
 #include <QVector>
@@ -71,6 +81,46 @@ static QImage pageWithBlock(int w, int h, QRgb bg, const QRect& block, QRgb fg)
         for (int x = block.left(); x <= block.right(); ++x)
             img.setPixel(x, y, fg);
     return img;
+}
+
+// A page of one solid tone. The flat field every scan-quality filter has to leave alone.
+static QImage flatPage(int w, int h, int v)
+{
+    QImage img(w, h, QImage::Format_RGB32);
+    img.fill(qRgb(v, v, v));
+    return img;
+}
+
+// A CHECKERBOARD alternating every single pixel — the highest frequency an image can carry, and a stand-in
+// for the halftone screen a scanned print is printed with.
+static QImage checkerPage(int w, int h)
+{
+    QImage img(w, h, QImage::Format_RGB32);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            img.setPixel(x, y, ((x + y) % 2 == 0) ? qRgb(255, 255, 255) : qRgb(0, 0, 0));
+    return img;
+}
+
+// A vertical STEP EDGE: `lo` in the columns left of `at`, `hi` from `at` rightwards, every row identical.
+static QImage stepPage(int w, int h, int at, int lo, int hi)
+{
+    QImage img(w, h, QImage::Format_RGB32);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            const int v = x < at ? lo : hi;
+            img.setPixel(x, y, qRgb(v, v, v));
+        }
+    return img;
+}
+
+static bool allPixelsAre(const QImage& img, int v)
+{
+    for (int y = 0; y < img.height(); ++y)
+        for (int x = 0; x < img.width(); ++x)
+            if (img.pixel(x, y) != qRgb(v, v, v)) return false;
+    return true;
 }
 
 int main()
@@ -610,6 +660,321 @@ int main()
               == ComicName::seriesKey(QStringLiteral("Bone")));
         // Nothing to go on == no key, and no key stores nothing (section 2).
         CHECK(ComicRead::seriesKeyFor(QString(), QString()).isEmpty());
+    }
+
+    // ---- 9. The scan-quality corrections (increment 2) ----------------------------------------------------
+    {
+        using ComicRead::ScanFixes;
+
+        // ---- 9a. DE-MOIRE is the 3x3 binomial [1 2 1; 2 4 2; 1 2 1]/16 with replicate padding, computed as
+        // a [1 2 1] pass along each row (call it h(x,y)) and then [1 2 1] down those, divided once:
+        //     out(x,y) = ( h(x,y-1) + 2*h(x,y) + h(x,y+1) + 8 ) / 16
+        //
+        // On the checkerboard every INTERIOR h is 255 + 2*0 + 255 = 510 for a black pixel and
+        // 0 + 2*255 + 0 = 510 for a white one \u2014 the same number, which is the whole point of the kernel \u2014
+        // so out = (510 + 1020 + 510 + 8) / 16 = 2048 / 16 = 128 EXACTLY, everywhere inside the border.
+        // That is the halftone gone: a screen that alternated 0/255 every pixel is a flat mid grey.
+        {
+            const QImage checker = checkerPage(8, 8);
+            const QImage out = ComicRead::demoire(checker);
+            CHECK(out.size() == QSize(8, 8));
+            bool interiorFlat = true;
+            for (int y = 1; y <= 6; ++y)
+                for (int x = 1; x <= 6; ++x)
+                    if (out.pixel(x, y) != qRgb(128, 128, 128)) interiorFlat = false;
+            CHECK(interiorFlat);
+            // Tripwire against "de-moire does nothing": the pre-increment-2 answer is the checkerboard itself.
+            CHECK(out.pixel(1, 1) != checker.pixel(1, 1));
+
+            // THE BORDER, by hand, so the replicate padding is pinned rather than assumed. At (0,0) (white):
+            //   h(0,0) = s(0,0) + 2*s(0,0) + s(1,0) = 255 + 510 + 0   = 765   (x-1 clamps to x=0)
+            //   h(0,1) = s(0,1) + 2*s(0,1) + s(1,1) = 0   + 0   + 255 = 255
+            //   out    = (h(0,-1 -> 0) + 2*h(0,0) + h(0,1) + 8) / 16
+            //          = (765 + 1530 + 255 + 8) / 16 = 2558 / 16 = 159
+            CHECK(out.pixel(0, 0) == qRgb(159, 159, 159));
+            CHECK(out.pixel(7, 7) == qRgb(159, 159, 159));   // the far corner is the same figure mirrored
+            // ... while a border pixel that is NOT a corner clamps in one axis only and lands back on 128:
+            //   h(0,2) = h(0,4) = 255 + 510 + 0 = 765 (white), h(0,3) = 0 + 0 + 255 = 255 (black)
+            //   out(0,3) = (765 + 510 + 765 + 8) / 16 = 2048 / 16 = 128
+            CHECK(out.pixel(0, 3) == qRgb(128, 128, 128));
+        }
+
+        // ---- 9b. DENOISE is the cross median: median{left, centre, right, above, below}, replicate padded.
+        // On a flat field an isolated speck is outvoted 4-to-1 and goes; everything else is its own value.
+        {
+            QImage speckled = flatPage(16, 16, 60);
+            speckled.setPixel(5, 5, qRgb(255, 255, 255));   // salt
+            speckled.setPixel(9, 9, qRgb(0, 0, 0));         // pepper
+            speckled.setPixel(0, 7, qRgb(255, 255, 255));   // on the LEFT EDGE: {c,c,60,60,60} -> 60, gone too
+            speckled.setPixel(0, 0, qRgb(255, 255, 255));   // in the CORNER: {c,c,c,60,60} -> c, it survives
+
+            const QImage out = ComicRead::denoise(speckled);
+            CHECK(out.pixel(5, 5) == qRgb(60, 60, 60));      // median{60,255,60,60,60} = 60
+            CHECK(out.pixel(9, 9) == qRgb(60, 60, 60));      // median{60,0,60,60,60}   = 60
+            CHECK(out.pixel(0, 7) == qRgb(60, 60, 60));      // one clamp: median{255,255,60,60,60} = 60
+            // A CORNER speck survives, because replicate padding makes the corner pixel three of the five
+            // votes: median{255,255,255,60,60} = 255. Stated rather than hidden \u2014 it is one pixel of one
+            // corner, and the alternative (special-casing the corner) would be a rule with no other reason.
+            CHECK(out.pixel(0, 0) == qRgb(255, 255, 255));
+            // Tripwire against "denoise does nothing".
+            CHECK(out.pixel(5, 5) != speckled.pixel(5, 5));
+            // A NEIGHBOUR of a speck is untouched: median{60,60,60,255,60} = 60.
+            CHECK(out.pixel(5, 6) == qRgb(60, 60, 60));
+
+            // A STEP EDGE survives a median EXACTLY \u2014 that is what edge-preserving means. At the last dark
+            // column: median{50,50,200,50,50} = 50; at the first bright one: median{50,200,200,200,200} = 200.
+            const QImage step = stepPage(8, 8, 4, 50, 200);
+            CHECK(ComicRead::denoise(step) == step);
+
+            // IDEMPOTENT on this fixture: the second pass has nothing left to outvote.
+            CHECK(ComicRead::denoise(out) == out);
+        }
+
+        // ---- 9c. SHARPEN is the unsharp mask at 50%: out = (3*c - blur + 1) / 2, clamped, with `blur` the
+        // de-moire kernel. On the step edge every row is identical, so the vertical half of the kernel is the
+        // identity and blur(x) = (4*h(x) + 8) / 16 with h the [1 2 1] row pass:
+        //   x=1 (flat 50):   h = 50 + 100 + 50   = 200 -> blur = 808  / 16 = 50   -> (150 - 50  + 1)/2 = 50
+        //   x=3 (last 50):   h = 50 + 100 + 200  = 350 -> blur = 1408 / 16 = 88   -> (150 - 88  + 1)/2 = 31
+        //   x=4 (first 200): h = 50 + 400 + 200  = 650 -> blur = 2608 / 16 = 163  -> (600 - 163 + 1)/2 = 219
+        //   x=6 (flat 200):  h = 200 + 400 + 200 = 800 -> blur = 3208 / 16 = 200  -> (600 - 200 + 1)/2 = 200
+        // The flat runs come back untouched and the edge gains its halo: darker on the dark side, brighter on
+        // the bright side. That is the whole of what an unsharp mask does.
+        {
+            const QImage step = stepPage(8, 8, 4, 50, 200);
+            const QImage out = ComicRead::sharpen(step);
+            CHECK(out.pixel(0, 3) == qRgb(50, 50, 50));
+            CHECK(out.pixel(1, 3) == qRgb(50, 50, 50));
+            CHECK(out.pixel(2, 3) == qRgb(50, 50, 50));
+            CHECK(out.pixel(3, 3) == qRgb(31, 31, 31));
+            CHECK(out.pixel(4, 3) == qRgb(219, 219, 219));
+            CHECK(out.pixel(5, 3) == qRgb(200, 200, 200));
+            CHECK(out.pixel(7, 0) == qRgb(200, 200, 200));   // the top row is the same, by replicate padding
+            // Tripwire against "sharpen does nothing".
+            CHECK(out.pixel(3, 3) != step.pixel(3, 3));
+        }
+
+        // ---- 9d. A FLAT FIELD is the fixed point of all three. Nothing to low-pass, nothing to outvote,
+        // nothing to sharpen: c == blur, so (3c - c + 1)/2 == c.
+        {
+            const QImage flat = flatPage(16, 16, 77);
+            CHECK(ComicRead::demoire(flat) == flat);
+            CHECK(ComicRead::denoise(flat) == flat);
+            CHECK(ComicRead::sharpen(flat) == flat);
+        }
+
+        // ---- 9e. OFF IS NOT EVEN A COPY. An identity set hands `src` straight back, so a series with no
+        // scan fixes pays nothing for the feature existing \u2014 same pixels, same buffer.
+        {
+            const QImage page = checkerPage(8, 8);
+            const QImage out = ComicRead::applyScanFixes(page, ScanFixes());
+            CHECK(out == page);
+            CHECK(out.constBits() == page.constBits());
+        }
+
+        // ---- 9f. THE COMPOSITION ORDER: de-moire, then denoise, then sharpen.
+        //
+        // The pair that proves it is denoise-then-sharpen over one salt speck on a flat 60 field. In the
+        // STATED order the median removes the speck first, so sharpen is handed a flat field and returns it
+        // untouched: the answer is a flat 60 page, to the byte.
+        //
+        // SWAPPED, sharpen goes first and amplifies exactly what the median was going to remove:
+        //   blur(5,5) = (240 + 2*630 + 240 + 8)/16 = 109  -> (765 - 109 + 1)/2 = 328 -> clamped to 255
+        //   blur(4,5) = (240 + 2*435 + 240 + 8)/16 = 84   -> (180 -  84 + 1)/2 = 48   (a dark halo)
+        // and the median then sees median{48,255,48,48,48} = 48. So the speck is not removed at all \u2014 it is
+        // replaced by a dark pit two shades off the page. 48, not 60, is what the wrong order ships.
+        {
+            QImage salted = flatPage(16, 16, 60);
+            salted.setPixel(5, 5, qRgb(255, 255, 255));
+
+            ScanFixes f;
+            f.denoise = true;
+            f.sharpen = true;
+            const QImage out = ComicRead::applyScanFixes(salted, f);
+            CHECK(out == flatPage(16, 16, 60));
+            CHECK(allPixelsAre(out, 60));
+            // ... and the swapped order, computed above, gives 48 there.
+            CHECK(ComicRead::denoise(ComicRead::sharpen(salted)).pixel(5, 5) == qRgb(48, 48, 48));
+
+            // All three together are exactly sharpen(denoise(demoire(x))) and not any other arrangement.
+            ScanFixes all;
+            all.demoire = all.denoise = all.sharpen = true;
+            const QImage three = ComicRead::applyScanFixes(salted, all);
+            CHECK(three == ComicRead::sharpen(ComicRead::denoise(ComicRead::demoire(salted))));
+            CHECK(three != ComicRead::demoire(ComicRead::denoise(ComicRead::sharpen(salted))));
+            CHECK(three != ComicRead::sharpen(ComicRead::demoire(ComicRead::denoise(salted))));
+        }
+
+        // ---- 9g. THE SCAN FIXES RUN AFTER CROP AND SPLIT AND BEFORE THE COLOUR FILTER.
+        // A 200x300 page, white margin, a 100x100 block of flat mid grey art at (50,100) with one black
+        // speck in it. Crop takes it down to the 100x100 block; the half takes the left 50x100 of THAT; the
+        // median then removes the speck (it is at (10,10) of the block, inside the left half); and the
+        // greyscale filter runs last over the finished page. If the scan fixes ran before the crop, the
+        // kernel's replicate border would be the paper's border and not the art's.
+        {
+            const QRgb art = qRgb(120, 120, 120);
+            QImage scan = pageWithBlock(200, 300, white, QRect(50, 100, 100, 100), art);
+            scan.setPixel(60, 110, black);   // a speck 10,10 into the block
+
+            ComicRead::PageOptions o;
+            o.crop = true;
+            o.half = 0;                      // the left half of the cropped block, ltr
+            o.scan.denoise = true;
+            const QImage out = ComicRead::preparePage(scan, o);
+            CHECK(out.width() == 50 && out.height() == 100);
+            CHECK(out.pixel(10, 10) == art);         // the speck is gone, inside the cropped+split page
+            CHECK(allPixelsAre(out, 120));
+            // Without the scan fixes the same pipeline keeps the speck \u2014 the pre-increment-2 answer.
+            ComicRead::PageOptions plain;
+            plain.crop = true;
+            plain.half = 0;
+            CHECK(ComicRead::preparePage(scan, plain).pixel(10, 10) == black);
+        }
+
+        // ---- 9h. A 1x1 AND A 2x2 PAGE go through every filter. With replicate padding a 1x1 image is its
+        // own whole neighbourhood, so all three are the identity on it; the 2x2 checkerboard is small enough
+        // to work out by hand and is the case where EVERY pixel is a border pixel.
+        {
+            QImage one(1, 1, QImage::Format_RGB32);
+            one.fill(qRgb(200, 100, 50));
+            CHECK(ComicRead::demoire(one) == one);
+            CHECK(ComicRead::denoise(one) == one);
+            CHECK(ComicRead::sharpen(one) == one);
+
+            const QImage two = checkerPage(2, 2);
+            // h(0,0) = 255+510+0 = 765, h(1,0) = 255+0+0 = 255, h(0,1) = 0+0+255 = 255, h(1,1) = 0+510+255 = 765
+            //   out(0,0) = (765 + 1530 + 255 + 8)/16 = 159      out(1,0) = (255 + 510 + 765 + 8)/16 =  96
+            //   out(0,1) = (765 +  510 + 255 + 8)/16 =  96      out(1,1) = (255 + 1530 + 765 + 8)/16 = 159
+            const QImage blurred = ComicRead::demoire(two);
+            CHECK(blurred.pixel(0, 0) == qRgb(159, 159, 159));
+            CHECK(blurred.pixel(1, 0) == qRgb(96, 96, 96));
+            CHECK(blurred.pixel(0, 1) == qRgb(96, 96, 96));
+            CHECK(blurred.pixel(1, 1) == qRgb(159, 159, 159));
+            // On a 2x2 every cross has three votes for the centre (two clamps), so the median keeps it;
+            // and the unsharp mask saturates each pixel back to the value it already had.
+            CHECK(ComicRead::denoise(two) == two);
+            CHECK(ComicRead::sharpen(two) == two);
+
+            // A null page is handed straight back rather than crashing anything.
+            CHECK(ComicRead::demoire(QImage()).isNull());
+            CHECK(ComicRead::denoise(QImage()).isNull());
+            CHECK(ComicRead::sharpen(QImage()).isNull());
+            ScanFixes all;
+            all.demoire = all.denoise = all.sharpen = true;
+            CHECK(ComicRead::applyScanFixes(QImage(), all).isNull());
+        }
+
+        // ---- 9i. THE PRESET LADDER the one control cycles: off, de-moire, denoise, sharpen, all three.
+        {
+            CHECK(ComicRead::scanPreset(0).isIdentity());
+            CHECK(ComicRead::scanPreset(1).demoire && !ComicRead::scanPreset(1).denoise && !ComicRead::scanPreset(1).sharpen);
+            CHECK(!ComicRead::scanPreset(2).demoire && ComicRead::scanPreset(2).denoise && !ComicRead::scanPreset(2).sharpen);
+            CHECK(!ComicRead::scanPreset(3).demoire && !ComicRead::scanPreset(3).denoise && ComicRead::scanPreset(3).sharpen);
+            CHECK(ComicRead::scanPreset(4).demoire && ComicRead::scanPreset(4).denoise && ComicRead::scanPreset(4).sharpen);
+            CHECK(ComicRead::scanPreset(5).isIdentity());    // off the ladder is "off"
+            CHECK(ComicRead::scanPreset(-1).isIdentity());
+
+            for (int i = 0; i < ComicRead::kScanPresetCount; ++i)
+                CHECK(ComicRead::scanPresetIndex(ComicRead::scanPreset(i)) == i);
+
+            // The cycle, all the way round and back to off.
+            ScanFixes f;                                       // off
+            f = ComicRead::nextScanPreset(f); CHECK(ComicRead::scanPresetIndex(f) == 1);
+            f = ComicRead::nextScanPreset(f); CHECK(ComicRead::scanPresetIndex(f) == 2);
+            f = ComicRead::nextScanPreset(f); CHECK(ComicRead::scanPresetIndex(f) == 3);
+            f = ComicRead::nextScanPreset(f); CHECK(ComicRead::scanPresetIndex(f) == 4);
+            f = ComicRead::nextScanPreset(f); CHECK(f.isIdentity());
+
+            // A combination the ladder does not name (a hand-edited ini) reads as -1 and the next press is off.
+            ScanFixes odd;
+            odd.denoise = true;
+            odd.sharpen = true;
+            CHECK(ComicRead::scanPresetIndex(odd) == -1);
+            CHECK(ComicRead::nextScanPreset(odd).isIdentity());
+        }
+
+        // ---- 9j. THE COST, at a realistic page. Printed, never asserted: a wall-clock number is a property
+        // of the machine the probe ran on, and a threshold here would fail on a loaded CI runner while
+        // telling nobody anything. The brief's budget is 80 ms per filter at about 1600x2400.
+        {
+            const QImage big = checkerPage(1600, 2400);
+            QElapsedTimer t;
+            t.start(); const QImage a = ComicRead::demoire(big); const qint64 msD = t.elapsed();
+            t.start(); const QImage b = ComicRead::denoise(big); const qint64 msN = t.elapsed();
+            t.start(); const QImage c = ComicRead::sharpen(big); const qint64 msS = t.elapsed();
+            CHECK(!a.isNull() && !b.isNull() && !c.isNull());
+            std::printf("READINGMODES-TIMING 1600x2400 demoire=%lldms denoise=%lldms sharpen=%lldms\n",
+                        (long long)msD, (long long)msN, (long long)msS);
+        }
+    }
+
+    // ---- 10. Where a zoomed page opens --------------------------------------------------------------------
+    {
+        using ComicRead::ZoomStart;
+
+        // A page scaled to 1000x3000 inside a 400x800 viewport. The scrollable range is therefore
+        // 1000-400 = 600 across and 3000-800 = 2200 down; every answer lives in [0,600] x [0,2200].
+        const QSize content(1000, 3000), viewport(400, 800);
+
+        // TOP is what the reader has always done: the vertical bar to 0, the horizontal one left alone.
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Top, false, QPoint(137, 999))
+              == QPoint(137, 0));
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Top, true, QPoint(137, 999))
+              == QPoint(137, 0));           // the direction changes nothing about Top
+        // ... clamped, so a stale horizontal position from a wider page cannot land off the end.
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Top, false, QPoint(5000, 0))
+              == QPoint(600, 0));
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Top, false, QPoint(-40, 0))
+              == QPoint(0, 0));
+
+        // CENTRE is the middle of both ranges: 600/2 = 300 across, 2200/2 = 1100 down.
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Centre, false, QPoint(137, 999))
+              == QPoint(300, 1100));
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::Centre, true, QPoint(137, 999))
+              == QPoint(300, 1100));
+
+        // READING SIDE is the top at the edge the eye starts from: the left in a left-to-right comic,
+        // the RIGHT (x = 600, the far end of the range) in a right-to-left one.
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::ReadingSide, false, QPoint(137, 999))
+              == QPoint(0, 0));
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::ReadingSide, true, QPoint(137, 999))
+              == QPoint(600, 0));
+        // The two directions must not agree, or the option is decorative.
+        CHECK(ComicRead::zoomStartOffset(content, viewport, ZoomStart::ReadingSide, false, QPoint(0, 0))
+              != ComicRead::zoomStartOffset(content, viewport, ZoomStart::ReadingSide, true, QPoint(0, 0)));
+
+        // A PAGE SMALLER THAN THE VIEWPORT has nowhere to scroll, so every option answers (0,0) \u2014 including
+        // Top, whose remembered horizontal position clamps to 0 along with everything else.
+        const QSize small(300, 500);
+        CHECK(ComicRead::zoomStartOffset(small, viewport, ZoomStart::Top, false, QPoint(77, 88)) == QPoint(0, 0));
+        CHECK(ComicRead::zoomStartOffset(small, viewport, ZoomStart::Centre, false, QPoint(77, 88)) == QPoint(0, 0));
+        CHECK(ComicRead::zoomStartOffset(small, viewport, ZoomStart::ReadingSide, true, QPoint(77, 88)) == QPoint(0, 0));
+        // A degenerate viewport (the reader before it has been laid out) is not a divide by anything.
+        CHECK(ComicRead::zoomStartOffset(content, QSize(0, 0), ZoomStart::Centre, false, QPoint(0, 0))
+              == QPoint(500, 1500));
+
+        // A WEBTOON IGNORES IT. The strip owns its own position; only the paged modes ask.
+        CHECK(ComicRead::zoomStartApplies(Mode::PagedLtr));
+        CHECK(ComicRead::zoomStartApplies(Mode::PagedRtl));
+        CHECK(!ComicRead::zoomStartApplies(Mode::Webtoon));
+
+        // The stored value reads forgivingly, exactly as every other option in this file does: 0 (and
+        // anything that is not a position) is Top, which is what a series with no opinion gets.
+        CHECK(ComicRead::zoomStartFor(0) == ZoomStart::Top);
+        CHECK(ComicRead::zoomStartFor(1) == ZoomStart::Centre);
+        CHECK(ComicRead::zoomStartFor(2) == ZoomStart::ReadingSide);
+        CHECK(ComicRead::zoomStartFor(7) == ZoomStart::Top);
+        CHECK(ComicRead::zoomStartFor(-3) == ZoomStart::Top);
+
+        // The store round-trips it under the reserved key, beside increment 1's options and without
+        // disturbing them (section 2 owns the general property; this is the new key's own).
+        const QString key = QStringLiteral("zoomstart-series");
+        Settings::setComicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kZoomStart), 2);
+        Settings::setComicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kDemoire), 1);
+        CHECK(ComicRead::zoomStartFor(Settings::comicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kZoomStart)))
+              == ZoomStart::ReadingSide);
+        CHECK(Settings::comicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kDemoire)) == 1);
+        CHECK(Settings::comicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kDenoise)) == 0);
+        CHECK(Settings::comicDisplayOption(key, QString::fromLatin1(ComicRead::Opt::kSharpen)) == 0);
     }
 
     if (g_fails) { std::fprintf(stderr, "READINGMODES-FAIL %d check(s)\n", g_fails); return 1; }
