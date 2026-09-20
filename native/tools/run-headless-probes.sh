@@ -2446,6 +2446,7 @@ else
     'library.rematch|new QPushButton(tr("Re-match Local Library online"))'
     'library.clearmetaedits|new QPushButton(tr("Reset my metadata edits'
     'jellyfin.servers|jfSrv = new QPushButton(tr("Jellyfin servers'
+    'jellyfin.continuemerge|new QCheckBox(tr("Merge Continue Watching across servers"))'
     'requests.service|rqSrv = new QPushButton(tr("Request service'
     'photos.change|phBrowse = new QPushButton(tr("Change…"))'
     'music.change|muBrowse = new QPushButton(tr("Change…"))'

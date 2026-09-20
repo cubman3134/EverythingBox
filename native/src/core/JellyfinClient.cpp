@@ -402,7 +402,13 @@ void JellyfinClient::fetchEpisodes(const QString& qualifiedSeriesId, const QStri
 
 void JellyfinClient::fetchLibraries(int budgetMs, LibrariesDone done)
 {
-    const QList<JellyfinServer> servers = JellyfinServerStore::enabled();
+    // THE ONE FAN-OUT THE "show only <server>" FILTER CUTS (#160, increment 2), and it is cut HERE rather
+    // than in the view for the reason JellyfinServerStore::browseServers states: a browse narrowed to one
+    // box must not open a socket to the others at all. Everything below this level is addressed by a
+    // qualified id and is already one server's business, so this is the whole of it. The HOME surfaces
+    // (fetchLibrary's merged shelf and fetchContinueWatching) deliberately stay on enabled(): the filter
+    // is a browse convenience, and the home screen's own per-server question is the continueMerge setting.
+    const QList<JellyfinServer> servers = JellyfinServerStore::browseServers();
     if (servers.isEmpty()) { if (done) done({}, {}); return; }
 
     struct Fan

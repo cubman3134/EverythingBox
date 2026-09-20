@@ -370,6 +370,97 @@ bool Jellyfin::isVideoCollection(const QString& collectionType)
     return categoryForCollection(collectionType) == QLatin1String("video");
 }
 
+// ---- Which servers a view is showing (issue #160, increment 2) -------------------------------------------
+
+QVector<Jellyfin::ServerChoice> Jellyfin::serverFilterChoices(const QVector<ServerChoice>& enabledServers,
+                                                              const QStringList& contributors,
+                                                              const QString& activeId)
+{
+    // Two enabled servers is the floor for the list existing at all: with one there is nothing to choose
+    // between, and offering a "show only" list over a single server is a control that cannot change what is
+    // on the screen.
+    if (enabledServers.size() < 2) return {};
+
+    // ...and while nothing is filtered, two enabled servers are not enough on their own - two or more of
+    // them have to have CONTRIBUTED. A friend's box that is switched off at the wall makes this a
+    // one-server view, and a filter over a one-server view is the same do-nothing control.
+    if (activeId.isEmpty())
+    {
+        QStringList distinct;
+        for (const QString& id : contributors)
+            if (!id.isEmpty() && !distinct.contains(id)) distinct << id;
+        if (distinct.size() < 2) return {};
+    }
+
+    QVector<ServerChoice> out;
+    ServerChoice all;                       // id and name deliberately empty - see the header
+    all.current = activeId.isEmpty();
+    out.push_back(all);
+    for (const ServerChoice& s : enabledServers)
+    {
+        if (s.id.isEmpty()) continue;       // an entry with no id could never be chosen back out of
+        ServerChoice c;
+        c.id      = s.id;
+        c.name    = s.name;
+        c.current = (s.id == activeId);
+        out.push_back(c);
+    }
+    return out;
+}
+
+QVector<Jellyfin::ContinueSection> Jellyfin::continueSections(const QVector<UnionItem>& items,
+                                                              const QStringList& serverOrder, bool merged)
+{
+    QVector<ContinueSection> out;
+    if (merged)
+    {
+        // ONE SECTION, belonging to no server: exactly the shape #160 shipped, expressed as a single
+        // section rather than as a separate code path, so the two shapes cannot come to disagree about
+        // what a row in them looks like.
+        if (items.isEmpty()) return out;
+        ContinueSection one;
+        one.items = items;
+        out.push_back(one);
+        return out;
+    }
+
+    // Per server, in the STORE's order. Built by walking the order and picking the items out, rather than
+    // by walking the items and sorting afterwards, because the order is the thing being asserted: sections
+    // that reshuffled according to which box answered first would move under the user between refreshes.
+    auto take = [&items](const QString& serverId, ContinueSection& sec) {
+        for (const UnionItem& it : items)
+        {
+            if (it.serverId != serverId) continue;
+            if (sec.serverName.isEmpty()) sec.serverName = it.serverName;
+            sec.items.push_back(it);
+        }
+    };
+    QStringList placed;
+    for (const QString& id : serverOrder)
+    {
+        if (id.isEmpty() || placed.contains(id)) continue;
+        placed << id;
+        ContinueSection sec;
+        sec.serverId = id;
+        take(id, sec);
+        // NO ITEMS, NO SECTION. A server that did not answer (or has nothing part-watched) costs the home
+        // screen nothing at all - see the header.
+        if (!sec.items.isEmpty()) out.push_back(sec);
+    }
+    // Anything left over: a server whose rows are still in hand after it was removed from the store. Its
+    // section goes last rather than nowhere.
+    for (const UnionItem& it : items)
+    {
+        if (it.serverId.isEmpty() || placed.contains(it.serverId)) continue;
+        placed << it.serverId;
+        ContinueSection sec;
+        sec.serverId = it.serverId;
+        take(it.serverId, sec);
+        if (!sec.items.isEmpty()) out.push_back(sec);
+    }
+    return out;
+}
+
 // ---- Items, seasons and episodes ------------------------------------------------------------------------
 
 QString Jellyfin::libraryItemsQuery(const QString& libraryId)

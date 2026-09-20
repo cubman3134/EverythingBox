@@ -986,6 +986,9 @@ private:
     // request against a box on your own network.
     void openJellyfinLevel();                                  // Home's "Jellyfin" folder -> the libraries
     void populateJellyfinLibraries();                          // ...the union across every enabled server
+    // #160 increment 2: "Show only <server>" at that root. Empty serverId is ALL SERVERS. Remembers the
+    // choice device-locally and re-fetches the level IN PLACE — nothing is pushed, so Back is unchanged.
+    void chooseJellyfinServerFilter(const QString& serverId);
     void openJellyfinLibraryLevel(const QString& libraryRef, const QString& title);
     void populateJellyfinLibrary(const QString& libraryRef, const QString& title);
     void openJellyfinSeriesLevel(const QString& seriesRef, const QString& title);
@@ -1409,7 +1412,15 @@ private:
     // idiom, and for the same reason - a reply that arrives after the user has navigated away must change
     // nothing), and the Continue Watching rows the home list renders as a section.
     int                jellyfinFetchGen_ = 0;
-    QVector<MediaItem> jellyfinContinue_;
+    // #160 increment 2: the cache is a LIST OF SECTIONS rather than a flat row list, because the
+    // `jellyfin/continueMerge` setting chooses between one section across the servers and one per server.
+    // `serverName` empty is the merged shape — one section belonging to no particular box.
+    struct JellyfinContinueShelf
+    {
+        QString            serverName;
+        QVector<MediaItem> rows;
+    };
+    QVector<JellyfinContinueShelf> jellyfinContinue_;
     bool               jellyfinContinueInFlight_ = false;
     // Live TV EPG (#75 inc 3): the parsed XMLTV guide for the currently open source (the now/next on the channel
     // list and the guide grid read it), which source it belongs to, and a generation counter dropping a

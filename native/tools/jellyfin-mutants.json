@@ -189,6 +189,42 @@
       "replace": "    return false;",
       "count": 1,
       "expect": "killed"
+    },
+    {
+      "name": "FILTER-LOSES-show-only-does-not-cut-the-fan-out",
+      "//": "#160 increment 2, THE CLAIM THE WHOLE DECISION RESTS ON. The browse fan-out goes back to enabled(), so 'show only Loft' still opens a socket to the Attic — the friend's box is woken, its budget is spent and its rows are then thrown away in the view. It looks correct on screen for as long as both servers answer, which is exactly why the probe counts the requests the OTHER fixture never receives rather than the rows that came back.",
+      "file": "native/src/core/JellyfinClient.cpp",
+      "find": "    const QList<JellyfinServer> servers = JellyfinServerStore::browseServers();",
+      "replace": "    const QList<JellyfinServer> servers = JellyfinServerStore::enabled();",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "FILTER-CORRUPTS-offered-when-only-one-server-contributed",
+      "//": "The 'two or more enabled servers that CONTRIBUTED' condition, dropped. Two servers configured and one switched off at the wall is a one-server view, and this puts three rows of view controls under it that cannot change a thing — including a 'Show only <server>' entry for a box that answered nothing, which opens onto an empty root. The direction matters: a filter offered too eagerly is a control that lies, where one offered too rarely is merely absent.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "        if (distinct.size() < 2) return {};",
+      "replace": "        if (false) return {};",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "FILTER-LOSES-a-removed-server-still-filters-the-browse-root",
+      "//": "browseFilterId() stops masking an id that names no enabled server. Switch the chosen server off (or edit it out of the ini) and the browse root narrows to a server that is not there: every open fetches nothing, and the one row that could explain it is the very list this is hiding. setEnabled/remove clear the key as well, so this mutant is caught by the hand-edited-ini arm specifically - which is what that arm is for.",
+      "file": "native/src/core/JellyfinServerStore.cpp",
+      "find": "    for (const JellyfinServer& s : enabled())\n        if (s.id == id) return id;\n    return QString();",
+      "replace": "    return id;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "CONTINUE-CORRUPTS-per-server-sections-in-the-items-order",
+      "//": "The per-server Continue Watching sections stop being built from the STORE's order and follow the order the items happen to arrive in instead. Two servers, two refreshes, and the sections swap places under a user who is mid-scroll - a fault that is invisible in any single screenshot and shows up only as the home screen moving on its own.",
+      "file": "native/src/core/Jellyfin.cpp",
+      "find": "    QStringList placed;\n    for (const QString& id : serverOrder)",
+      "replace": "    QStringList placed;\n    QStringList itemOrder;\n    for (const UnionItem& it : items) if (!it.serverId.isEmpty() && !itemOrder.contains(it.serverId)) itemOrder << it.serverId;\n    for (const QString& id : itemOrder)",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

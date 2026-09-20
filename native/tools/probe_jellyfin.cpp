@@ -27,6 +27,7 @@
 //
 // Prints JELLYFIN-OK on success; any failure prints JELLYFIN-FAIL <cond> and exits non-zero.
 #include "Jellyfin.h"
+#include "JellyfinClient.h"          // #160 inc 2: the REAL fan-out, so a filtered browse can be COUNTED
 #include "JellyfinMigrate.h"
 #include "JellyfinQuickConnect.h"   // #83 section 20: the Quick Connect session, driven over a socket
 #include "JellyfinServerStore.h"
@@ -119,6 +120,13 @@ public:
     int        connectStatus   = 200;     // anything but 200 is sent as-is (404 = expired secret)
     QByteArray authBody;                  // /Users/AuthenticateWithQuickConnect's AuthenticationResult
 
+    // #160 increment 2: the two BROWSE answers, so the real JellyfinClient fan-out can be driven against
+    // two of these at once. Matched by path SUFFIX, so the fixture does not have to know which user id the
+    // store was seeded with. An empty body here means "this server answers 404", which is how a leg that
+    // contributes nothing is staged.
+    QByteArray viewsBody;                 // /Users/<uid>/Views
+    QByteArray resumeBody;                // /Users/<uid>/Items/Resume
+
     static constexpr const char* kSecret = "5ec2e7a5ec2e7a5ec2e7a5ec2e7a5ec2";
     static constexpr const char* kCode   = "482915";
 
@@ -190,6 +198,12 @@ private:
     }
     void reply(QTcpSocket* sock, const Seen& s)
     {
+        // #160 increment 2: the browse answers. First, so that a request this probe is counting is never
+        // also matched by one of the Quick Connect arms below.
+        if (s.path.endsWith(QLatin1String("/Views")))
+        { send(sock, viewsBody.isEmpty() ? 404 : 200, viewsBody); return; }
+        if (s.path.endsWith(QLatin1String("/Items/Resume")))
+        { send(sock, resumeBody.isEmpty() ? 404 : 200, resumeBody); return; }
         if (s.path == QLatin1String("/QuickConnect/Enabled"))
         { send(sock, enabledStatus, enabledBody); return; }
         if (s.path == QLatin1String("/QuickConnect/Initiate"))
@@ -1503,6 +1517,344 @@ int main(int argc, char** argv)
             CHECK(o2.failed == 1 && o2.codes.isEmpty());
             CHECK(connects(off) == 0);
         }
+    }
+
+    // =====================================================================================================
+    // 21. "SHOW ONLY <SERVER>" AND THE CONTINUE WATCHING SHAPE — the pure rules (issue #160, increment 2)
+    // =====================================================================================================
+    // Both are policy, and both are asserted here with no store, no socket and no widget. The store section
+    // below proves what is REMEMBERED; section 23 proves what the fan-out then does with it.
+    {
+        auto choice = [](const char* id, const char* name) {
+            Jellyfin::ServerChoice c;
+            c.id = QString::fromLatin1(id); c.name = QString::fromLatin1(name);
+            return c;
+        };
+        const QVector<Jellyfin::ServerChoice> two  { choice(kSrvA, "Attic"), choice(kSrvB, "Loft") };
+        const QVector<Jellyfin::ServerChoice> one  { choice(kSrvA, "Attic") };
+        const QStringList bothContributed { QString::fromLatin1(kSrvA), QString::fromLatin1(kSrvB) };
+        const QStringList onlyA           { QString::fromLatin1(kSrvA) };
+
+        // ---- 21a. WHEN IT IS OFFERED AT ALL. ----
+        // One server: never. This is the "with one, nothing new appears" half of the decision, and it is
+        // what keeps a single-server user's browse root exactly as it was.
+        CHECK(Jellyfin::serverFilterChoices(one, onlyA, QString()).isEmpty());
+        CHECK(Jellyfin::serverFilterChoices({}, {}, QString()).isEmpty());
+        // Two enabled but only ONE contributed — the friend's box is off at the wall. Still nothing: what
+        // is on the screen is already one server's worth, and a filter over it changes nothing.
+        CHECK(Jellyfin::serverFilterChoices(two, onlyA, QString()).isEmpty());
+        CHECK(Jellyfin::serverFilterChoices(two, {}, QString()).isEmpty());
+        // A contributor list that names the SAME server twice is one server.
+        CHECK(Jellyfin::serverFilterChoices(two, QStringList{ QString::fromLatin1(kSrvA),
+                                                              QString::fromLatin1(kSrvA) },
+                                            QString()).isEmpty());
+        // Two contributed: offered.
+        const QVector<Jellyfin::ServerChoice> all = Jellyfin::serverFilterChoices(two, bothContributed,
+                                                                                  QString());
+        CHECK(all.size() == 3);
+        if (all.size() == 3)
+        {
+            // ALL SERVERS FIRST, and it is the one marked current while nothing is filtered.
+            CHECK(all[0].id.isEmpty() && all[0].name.isEmpty() && all[0].current);
+            // ...then one per enabled server, in the STORE's order, neither of them current.
+            CHECK(all[1].id == QLatin1String(kSrvA) && all[1].name == QStringLiteral("Attic") && !all[1].current);
+            CHECK(all[2].id == QLatin1String(kSrvB) && all[2].name == QStringLiteral("Loft") && !all[2].current);
+        }
+
+        // ---- 21b. WITH A FILTER ON, the list is offered even though only one server contributed. ----
+        // The one-way-door case: built from contributors alone, a filtered root would offer no way back.
+        const QVector<Jellyfin::ServerChoice> filtered =
+            Jellyfin::serverFilterChoices(two, QStringList{ QString::fromLatin1(kSrvB) },
+                                          QString::fromLatin1(kSrvB));
+        CHECK(filtered.size() == 3);
+        if (filtered.size() == 3)
+        {
+            CHECK(!filtered[0].current);                       // "all servers" is a destination now
+            CHECK(filtered[0].id.isEmpty());
+            CHECK(filtered[1].id == QLatin1String(kSrvA) && !filtered[1].current);
+            CHECK(filtered[2].id == QLatin1String(kSrvB) && filtered[2].current);
+        }
+        // ...and a filtered root whose one server answered NOTHING still offers the way out.
+        CHECK(Jellyfin::serverFilterChoices(two, {}, QString::fromLatin1(kSrvB)).size() == 3);
+        // One enabled server is still a floor, filter or no filter: the stored id cannot name a second one.
+        CHECK(Jellyfin::serverFilterChoices(one, onlyA, QString::fromLatin1(kSrvA)).isEmpty());
+
+        // ---- 21c. CONTINUE WATCHING: MERGED. One section, every item, union order, no server name. ----
+        Jellyfin::UnionItem a1; a1.id = qualA; a1.title = QStringLiteral("Alien");
+        a1.serverId = QString::fromLatin1(kSrvA); a1.serverName = QStringLiteral("Attic");
+        Jellyfin::UnionItem b1; b1.id = qualB; b1.title = QStringLiteral("Brazil");
+        b1.serverId = QString::fromLatin1(kSrvB); b1.serverName = QStringLiteral("Loft");
+        Jellyfin::UnionItem a2 = a1; a2.title = QStringLiteral("Aliens");
+        const QVector<Jellyfin::UnionItem> mixed { a1, b1, a2 };
+        const QStringList order { QString::fromLatin1(kSrvA), QString::fromLatin1(kSrvB) };
+
+        const QVector<Jellyfin::ContinueSection> merged =
+            Jellyfin::continueSections(mixed, order, /*merged*/ true);
+        CHECK(merged.size() == 1);
+        if (merged.size() == 1)
+        {
+            CHECK(merged[0].serverId.isEmpty() && merged[0].serverName.isEmpty());
+            CHECK(merged[0].items.size() == 3);
+            CHECK(merged[0].items[0].title == QStringLiteral("Alien")
+               && merged[0].items[1].title == QStringLiteral("Brazil")
+               && merged[0].items[2].title == QStringLiteral("Aliens"));
+        }
+        // Nothing to show is no section at all, in either shape — the home screen must not grow an empty
+        // header (the #161 promise).
+        CHECK(Jellyfin::continueSections({}, order, true).isEmpty());
+        CHECK(Jellyfin::continueSections({}, order, false).isEmpty());
+
+        // ---- 21d. PER SERVER: the sections, their labels, and their ORDER. ----
+        const QVector<Jellyfin::ContinueSection> per =
+            Jellyfin::continueSections(mixed, order, /*merged*/ false);
+        CHECK(per.size() == 2);
+        if (per.size() == 2)
+        {
+            CHECK(per[0].serverId == QLatin1String(kSrvA));
+            CHECK(per[0].serverName == QStringLiteral("Attic"));         // the LABEL
+            CHECK(per[0].items.size() == 2);                             // ...and both of that box's rows
+            CHECK(per[0].items[0].title == QStringLiteral("Alien")
+               && per[0].items[1].title == QStringLiteral("Aliens"));
+            CHECK(per[1].serverId == QLatin1String(kSrvB));
+            CHECK(per[1].serverName == QStringLiteral("Loft"));
+            CHECK(per[1].items.size() == 1 && per[1].items[0].title == QStringLiteral("Brazil"));
+        }
+        // THE ORDER IS THE STORE'S, NOT THE ITEMS'. Same items, reversed store order, reversed sections —
+        // which is what stops the home screen reshuffling according to which box answered first.
+        const QStringList reversed { QString::fromLatin1(kSrvB), QString::fromLatin1(kSrvA) };
+        const QVector<Jellyfin::ContinueSection> rev =
+            Jellyfin::continueSections(mixed, reversed, false);
+        CHECK(rev.size() == 2);
+        if (rev.size() == 2)
+        {
+            CHECK(rev[0].serverId == QLatin1String(kSrvB));
+            CHECK(rev[1].serverId == QLatin1String(kSrvA));
+        }
+        // NO DEDUPE, here as everywhere in #160: the same title on two servers is two rows in two sections.
+        Jellyfin::UnionItem sameTitleOnB = b1; sameTitleOnB.title = QStringLiteral("Alien");
+        const QVector<Jellyfin::ContinueSection> dup =
+            Jellyfin::continueSections(QVector<Jellyfin::UnionItem>{ a1, sameTitleOnB }, order, false);
+        CHECK(dup.size() == 2);
+        if (dup.size() == 2) CHECK(dup[0].items.size() == 1 && dup[1].items.size() == 1);
+
+        // ---- 21e. AN UNREACHABLE SERVER IN PER-SERVER MODE. ----
+        // It contributed nothing, so it has NO SECTION — exactly what it costs the home screen today —
+        // and the box that did answer keeps its rows. That is the failure isolation, unchanged by the
+        // new shape.
+        const QVector<Jellyfin::ContinueSection> oneDown =
+            Jellyfin::continueSections(QVector<Jellyfin::UnionItem>{ a1, a2 }, order, false);
+        CHECK(oneDown.size() == 1);
+        if (oneDown.size() == 1)
+        {
+            CHECK(oneDown[0].serverId == QLatin1String(kSrvA));
+            CHECK(oneDown[0].items.size() == 2);
+        }
+        // ...and a server whose rows are in hand but which is no longer in the store still gets a section,
+        // last. Rows are never dropped on the floor because a lookup missed.
+        const QVector<Jellyfin::ContinueSection> orphan =
+            Jellyfin::continueSections(mixed, QStringList{ QString::fromLatin1(kSrvA) }, false);
+        CHECK(orphan.size() == 2);
+        if (orphan.size() == 2)
+        {
+            CHECK(orphan[0].serverId == QLatin1String(kSrvA));
+            CHECK(orphan[1].serverId == QLatin1String(kSrvB) && orphan[1].items.size() == 1);
+        }
+    }
+
+    // =====================================================================================================
+    // 22. WHAT IS REMEMBERED, AND WHEN IT RESETS (issue #160, increment 2)
+    // =====================================================================================================
+    {
+        const QString vIni = tmpDir() + QStringLiteral("/view-prefs.ini");
+        QFile::remove(vIni);
+        JellyfinServerStore::setIniPathForTesting(vIni);
+
+        JellyfinServer sa; sa.id = QString::fromLatin1(kSrvA); sa.name = QStringLiteral("Attic");
+        sa.url = QStringLiteral("https://attic.invalid"); sa.userId = QStringLiteral("ua");
+        sa.token = QStringLiteral("t-a");
+        JellyfinServer sb = sa; sb.id = QString::fromLatin1(kSrvB); sb.name = QStringLiteral("Loft");
+        sb.url = QStringLiteral("https://loft.invalid"); sb.userId = QStringLiteral("ub");
+        sb.token = QStringLiteral("t-b");
+        CHECK(JellyfinServerStore::add(sa));
+        CHECK(JellyfinServerStore::add(sb));
+
+        // ---- 22a. The default is ALL SERVERS, and browseServers() is then exactly enabled(). ----
+        CHECK(JellyfinServerStore::browseFilterId().isEmpty());
+        CHECK(JellyfinServerStore::browseServers().size() == 2);
+        CHECK(JellyfinServerStore::continueMerged());          // merged is the default — today's behaviour
+
+        // ---- 22b. The choice is kept, and it NARROWS browseServers() to one. ----
+        JellyfinServerStore::setBrowseFilterId(QString::fromLatin1(kSrvB));
+        CHECK(JellyfinServerStore::browseFilterId() == QLatin1String(kSrvB));
+        CHECK(JellyfinServerStore::browseServers().size() == 1);
+        CHECK(JellyfinServerStore::browseServers().value(0).id == QLatin1String(kSrvB));
+        // enabled() is UNCHANGED by the filter: the home surfaces still see both servers.
+        CHECK(JellyfinServerStore::enabled().size() == 2);
+
+        JellyfinServerStore::setContinueMerged(false);
+        CHECK(!JellyfinServerStore::continueMerged());
+
+        // ---- 22c. IT SURVIVES A RESTART. Re-pointing the seam at the same file drops the cached
+        // QSettings, so what comes back is what actually reached the disk. ----
+        JellyfinServerStore::setIniPathForTesting(QString());
+        JellyfinServerStore::setIniPathForTesting(vIni);
+        CHECK(JellyfinServerStore::browseFilterId() == QLatin1String(kSrvB));
+        CHECK(!JellyfinServerStore::continueMerged());
+        CHECK(JellyfinServerStore::browseServers().size() == 1);
+
+        // ---- 22d. BOTH KEYS ARE UNDER THE DEVICE-LOCAL "jellyfin/" PREFIX. ----
+        // Read out of the file itself rather than asserted against a constant of this probe's own, so a
+        // key that moved out from under the carve-out shows up here. probe_cloudmerge holds the carve-out.
+        {
+            QSettings raw(vIni, QSettings::IniFormat);
+            int jfKeys = 0, otherKeys = 0;
+            for (const QString& k : raw.allKeys())
+                (k.startsWith(QStringLiteral("jellyfin/")) ? jfKeys : otherKeys)++;
+            CHECK(jfKeys >= 3);          // servers, browseFilter, continueMerge
+            CHECK(otherKeys == 0);
+        }
+
+        // ---- 22e. SWITCHING THE CHOSEN SERVER OFF RESETS IT. ----
+        JellyfinServerStore::setEnabled(QString::fromLatin1(kSrvB), false);
+        CHECK(JellyfinServerStore::browseFilterId().isEmpty());
+        CHECK(JellyfinServerStore::browseServers().size() == 1);       // only A is enabled now
+        {
+            // Cleared on the DISK, not merely masked on read: switching B back on must not silently put
+            // the user back behind a filter they never re-chose.
+            QSettings raw(vIni, QSettings::IniFormat);
+            bool anyFilterKey = false;
+            for (const QString& k : raw.allKeys())
+                if (k.endsWith(QStringLiteral("/browseFilter"))) anyFilterKey = true;
+            CHECK(!anyFilterKey);
+        }
+        JellyfinServerStore::setEnabled(QString::fromLatin1(kSrvB), true);
+        CHECK(JellyfinServerStore::browseFilterId().isEmpty());
+
+        // ---- 22f. REMOVING THE CHOSEN SERVER RESETS IT TOO. ----
+        JellyfinServerStore::setBrowseFilterId(QString::fromLatin1(kSrvB));
+        CHECK(JellyfinServerStore::browseFilterId() == QLatin1String(kSrvB));
+        JellyfinServerStore::remove(QString::fromLatin1(kSrvB));
+        CHECK(JellyfinServerStore::browseFilterId().isEmpty());
+        CHECK(JellyfinServerStore::browseServers().size() == 1);
+
+        // ---- 22g. A STORED ID THAT NAMES NO ENABLED SERVER IS MASKED. The belt to 22e/22f's braces —
+        // an ini edited by hand, or a row that went away some other way, must not leave the browse root
+        // permanently empty. ----
+        JellyfinServerStore::setBrowseFilterId(QString::fromLatin1(kSrvB));   // removed above
+        CHECK(JellyfinServerStore::browseFilterId().isEmpty());
+        CHECK(JellyfinServerStore::browseServers().size() == 1);
+        JellyfinServerStore::setBrowseFilterId(QString());
+
+        JellyfinServerStore::setContinueMerged(true);
+        CHECK(JellyfinServerStore::continueMerged());
+        JellyfinServerStore::setIniPathForTesting(srvIni);
+        QFile::remove(vIni);
+    }
+
+    // =====================================================================================================
+    // 23. A FILTERED BROWSE DOES NOT CALL THE OTHER SERVER (issue #160, increment 2)
+    // =====================================================================================================
+    // The claim the whole decision rests on, and the only honest way to assert it is to count the requests
+    // the other box NEVER RECEIVES. Two fake Jellyfins on 127.0.0.1, the REAL JellyfinClient fan-out, and
+    // the real store underneath it.
+    {
+        FakeJellyfin srvA, srvB;
+        CHECK(srvA.listen(QHostAddress::LocalHost, 0));
+        CHECK(srvB.listen(QHostAddress::LocalHost, 0));
+        srvA.viewsBody = "{\"Items\":[{\"Id\":\"lib-a\",\"Name\":\"A Films\",\"CollectionType\":\"movies\"}]}";
+        srvB.viewsBody = "{\"Items\":[{\"Id\":\"lib-b\",\"Name\":\"B Films\",\"CollectionType\":\"movies\"}]}";
+
+        const QString fIni = tmpDir() + QStringLiteral("/fanout.ini");
+        QFile::remove(fIni);
+        JellyfinServerStore::setIniPathForTesting(fIni);
+        JellyfinServer fa;
+        fa.id = QString::fromLatin1(kSrvA); fa.name = QStringLiteral("Attic"); fa.url = srvA.root();
+        fa.userId = QStringLiteral("ua"); fa.userName = QStringLiteral("p");
+        fa.token = QStringLiteral("fixture-a"); fa.allowPlainHttp = true;
+        JellyfinServer fb = fa;
+        fb.id = QString::fromLatin1(kSrvB); fb.name = QStringLiteral("Loft"); fb.url = srvB.root();
+        fb.userId = QStringLiteral("ub"); fb.token = QStringLiteral("fixture-b");
+        CHECK(JellyfinServerStore::add(fa));
+        CHECK(JellyfinServerStore::add(fb));
+
+        JellyfinClient client;
+        auto browse = [&client](QVector<Jellyfin::LibraryRef>* out, QStringList* notes) {
+            bool done = false;
+            client.fetchLibraries(4000, [&](const QVector<Jellyfin::LibraryRef>& libs, const QStringList& n) {
+                if (out) *out = libs;
+                if (notes) *notes = n;
+                done = true;
+            });
+            CHECK(waitFor([&] { return done; }));
+        };
+        auto views = [](const FakeJellyfin& s) {
+            int n = 0;
+            for (const FakeJellyfin::Seen& seen : s.seen)
+                if (seen.path.endsWith(QLatin1String("/Views"))) ++n;
+            return n;
+        };
+
+        // ---- 23a. UNFILTERED: both boxes are asked, and both libraries come back tagged. ----
+        QVector<Jellyfin::LibraryRef> libs;
+        QStringList notes;
+        browse(&libs, &notes);
+        CHECK(views(srvA) == 1);
+        CHECK(views(srvB) == 1);
+        CHECK(notes.isEmpty());
+        CHECK(libs.size() == 2);
+        if (libs.size() == 2)
+        {
+            CHECK(libs[0].serverId == QLatin1String(kSrvA) && libs[0].name == QStringLiteral("A Films"));
+            CHECK(libs[1].serverId == QLatin1String(kSrvB) && libs[1].name == QStringLiteral("B Films"));
+        }
+        // ...and with two contributors the filter is on offer.
+        {
+            QStringList contributors;
+            for (const Jellyfin::LibraryRef& l : libs)
+                if (!contributors.contains(l.serverId)) contributors << l.serverId;
+            QVector<Jellyfin::ServerChoice> enabledChoices;
+            for (const JellyfinServer& s : JellyfinServerStore::enabled())
+            {
+                Jellyfin::ServerChoice c; c.id = s.id; c.name = s.name; enabledChoices.push_back(c);
+            }
+            CHECK(Jellyfin::serverFilterChoices(enabledChoices, contributors,
+                                                JellyfinServerStore::browseFilterId()).size() == 3);
+        }
+
+        // ---- 23b. "SHOW ONLY LOFT": server A IS NOT CALLED AT ALL. ----
+        const int aBefore = views(srvA);
+        JellyfinServerStore::setBrowseFilterId(QString::fromLatin1(kSrvB));
+        browse(&libs, &notes);
+        CHECK(views(srvA) == aBefore);        // THE ASSERTION: not one more request reached the other box
+        CHECK(views(srvB) == 2);
+        CHECK(libs.size() == 1);
+        if (libs.size() == 1) CHECK(libs[0].serverId == QLatin1String(kSrvB));
+        // ...and no "that server did not answer" note is invented for a server nobody asked.
+        CHECK(notes.isEmpty());
+        // Settle any straggling sockets before the count below, so it is a claim about the FILTER and not
+        // about timing.
+        spinFor(250);
+        CHECK(views(srvA) == aBefore);
+
+        // ---- 23c. BACK TO ALL SERVERS: A is called again. The filter is a view, not a disconnection. ----
+        JellyfinServerStore::setBrowseFilterId(QString());
+        browse(&libs, &notes);
+        CHECK(views(srvA) == aBefore + 1);
+        CHECK(libs.size() == 2);
+
+        // ---- 23d. A FILTER ON A SERVER THAT IS SWITCHED OFF falls back to all servers rather than to an
+        // empty root — the reset rule, seen from the fan-out's side. ----
+        JellyfinServerStore::setBrowseFilterId(QString::fromLatin1(kSrvB));
+        JellyfinServerStore::setEnabled(QString::fromLatin1(kSrvB), false);
+        const int aBefore2 = views(srvA), bBefore2 = views(srvB);
+        browse(&libs, &notes);
+        CHECK(views(srvA) == aBefore2 + 1);
+        CHECK(views(srvB) == bBefore2);       // switched off: not asked, filter or no filter
+        CHECK(libs.size() == 1);
+        if (libs.size() == 1) CHECK(libs[0].serverId == QLatin1String(kSrvA));
+
+        JellyfinServerStore::setIniPathForTesting(srvIni);
+        QFile::remove(fIni);
     }
 
     QFile::remove(ini);
