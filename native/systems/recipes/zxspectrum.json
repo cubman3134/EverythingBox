@@ -1,8 +1,9 @@
 {
   "system": "zxspectrum",
-  "summary": "Fuse auto-loads tapes and runs snapshots directly. Auto model selection picks a 128K machine for content that needs one, which is the single most common reason a Spectrum game appears to do nothing.",
+  "summary": "Fuse auto-loads tapes and runs snapshots directly. Auto model selection picks a 128K machine for content that needs one, which is the single most common reason a Spectrum game appears to do nothing. Where the same game is present as a snapshot and as a tape, the snapshot is the one listed — it starts at the game instead of loading for three minutes.",
   "firmwareFolder": "system",
   "folderIsGame": false,
+  "formats": ["szx", "z80", "sna", "tzx", "tap"],
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
   "cores": [
     {

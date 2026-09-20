@@ -1,8 +1,9 @@
 {
   "system": "amstradcpc",
-  "summary": "cap32 carries the CPC firmware itself, so nothing has to be supplied. It reads the disk's own catalogue and types the RUN\" command for you; where its own guess would give up and just list the disk, EverythingBox reads the catalogue and supplies the command instead.",
+  "summary": "cap32 carries the CPC firmware itself, so nothing has to be supplied. It reads the disk's own catalogue and types the RUN\" command for you; where its own guess would give up and just list the disk, EverythingBox reads the catalogue and supplies the command instead. A TOSEC disk set (Disk 1 of 2, Side A) is one library entry that swaps disks itself.",
   "firmwareFolder": "system",
   "folderIsGame": false,
+  "tosecDiskTags": true,
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
   "cores": [
     {

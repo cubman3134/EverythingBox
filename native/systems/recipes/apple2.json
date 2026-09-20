@@ -1,8 +1,9 @@
 {
   "system": "apple2",
-  "summary": "AppleWin has the Apple II ROMs built in, so a disk image boots with nothing supplied. The enhanced //e is the machine most software expects.",
+  "summary": "AppleWin has the Apple II ROMs built in, so a disk image boots with nothing supplied. The enhanced //e is the machine most software expects. A TOSEC disk set (Disk 1 of 2, Side A) is one library entry that swaps disks itself.",
   "firmwareFolder": "system",
   "folderIsGame": false,
+  "tosecDiskTags": true,
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
   "cores": [
     {

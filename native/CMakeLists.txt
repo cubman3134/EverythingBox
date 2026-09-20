@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.302 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.303 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -3872,7 +3872,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for RegionCollapse (#50): region ranking, revision tie-break, same-title grouping and the
     # winner/loser pick. RegionCollapse.h is header-only (reuses DiscGroup.h), so this links just Qt6::Core.
     add_executable(probe_regioncollapse tools/probe_regioncollapse.cpp
-        src/core/RegionCollapse.h src/core/DiscGroup.h)
+        src/core/RegionCollapse.h src/core/DiscGroup.h
+        src/core/FormatCollapse.h)   # #190 item 2: the format-preference collapse, probed in the same file
     target_include_directories(probe_regioncollapse PRIVATE src src/core)
     target_link_libraries(probe_regioncollapse PRIVATE Qt6::Core)
 

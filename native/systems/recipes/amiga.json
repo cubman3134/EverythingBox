@@ -1,8 +1,10 @@
 {
   "system": "amiga",
-  "summary": "Prefer WHDLoad .lha sets — PUAE launches one directly with no setup at all, where a raw .adf means picking a model and swapping disks. The Kickstart ROM is copyrighted and has to come from you.",
+  "summary": "Prefer WHDLoad .lha sets — PUAE launches one directly with no setup at all, where a raw .adf means picking a model and swapping disks. A title present in several of these formats is listed once, on the best of them, and the others stay reachable as alternates; a TOSEC disk set (Disk 1 of 2, Side A) is one entry that swaps disks itself. The Kickstart ROM is copyrighted and has to come from you.",
   "firmwareFolder": "system",
   "folderIsGame": false,
+  "formats": ["lha", "hdf", "adf", "adz", "dms"],
+  "tosecDiskTags": true,
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
   "cores": [
     {

@@ -7,6 +7,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include "../src/core/FormatCollapse.h"
 #include "../src/core/RegionCollapse.h"
 
 static int fails = 0;
@@ -155,6 +156,129 @@ int main(int argc, char** argv)
         const QStringList de = RegionCollapse::defaultPriority("de-DE");
         const QStringList deExpect = { "Europe", "Germany", "World", "USA", "Japan" };
         CHECK(de == deExpect, "German default leads with Europe then Germany");
+    }
+
+    // ---- 9. FORMAT collapse (issue #190, item 2) --------------------------------------------------------
+    // The same title present in several interchangeable formats is ONE entry on the best-ranked format, with
+    // the others carried as its alternates. Expected winners/alternates are hand-authored here, never
+    // computed by calling the function under test. The ranking is the shipped Amiga one, written out in full
+    // so the expectations below do not depend on what the recipe file happens to say.
+    const QStringList amigaFmt = { QStringLiteral("lha"), QStringLiteral("hdf"), QStringLiteral("adf"),
+                                   QStringLiteral("adz"), QStringLiteral("dms") };
+
+    CHECK(FormatCollapse::formatOf("C:/roms/amiga/Lemmings.LHA") == "lha", "formatOf lowercases the extension");
+    CHECK(FormatCollapse::formatRank("Lemmings.lha", amigaFmt) == 0, "lha is the top-ranked Amiga format");
+    CHECK(FormatCollapse::formatRank("Lemmings.adf", amigaFmt) == 2, "adf ranks third under lha>hdf>adf>adz>dms");
+    CHECK(FormatCollapse::formatRank("Lemmings.ipf", amigaFmt) == -1, "an unlisted format ranks -1, not last");
+
+    // 9a — two formats of one title: one entry, on the .lha, with the .adf as an alternate.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Lemmings.adf"),
+            QStringLiteral("C:/roms/amiga/Lemmings.lha"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 1, "Game.lha + Game.adf collapse to exactly one entry");
+        CHECK(gs.size() == 1 && gs[0].chosenPath == "C:/roms/amiga/Lemmings.lha", "the .lha wins");
+        CHECK(gs.size() == 1 && gs[0].chosenFormat == "lha", "the entry reports the format it chose");
+        CHECK(gs.size() == 1 && gs[0].alternates.size() == 1
+                 && gs[0].alternates[0] == "C:/roms/amiga/Lemmings.adf",
+              "the .adf is remembered as an alternate, not listed as its own entry");
+        CHECK(gs.size() == 1 && gs[0].chosenTitle == "Lemmings", "the entry keeps the readable title");
+    }
+
+    // 9b — the RANKING is respected across three formats, and the losers come back best-ranked first.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Turrican.dms"),
+            QStringLiteral("C:/roms/amiga/Turrican.adf"),
+            QStringLiteral("C:/roms/amiga/Turrican.hdf"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 1 && gs[0].chosenPath == "C:/roms/amiga/Turrican.hdf",
+              "with no .lha present the .hdf wins over .adf and .dms");
+        const QVector<QString> expectedAlts = { QStringLiteral("C:/roms/amiga/Turrican.adf"),
+                                                QStringLiteral("C:/roms/amiga/Turrican.dms") };
+        CHECK(gs.size() == 1 && gs[0].alternates == expectedAlts,
+              "alternates are ordered by the ranking (adf before dms), hand-authored");
+    }
+
+    // 9c — a format the ranking does not list keeps TODAY's behaviour: its own entry, untouched.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Rick Dangerous.lha"),
+            QStringLiteral("C:/roms/amiga/Rick Dangerous.ipf"),   // preservation dump: not in the ranking
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 2, "an unlisted format stays a separate entry");
+        bool ipfAlone = false;
+        for (const auto& g : gs)
+            if (g.chosenPath.endsWith(".ipf")) ipfAlone = g.alternates.isEmpty();
+        CHECK(ipfAlone, "the unlisted file is its own entry with no alternates");
+    }
+
+    // 9d — two genuinely different titles never merge, however they are ranked.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Lemmings.lha"),
+            QStringLiteral("C:/roms/amiga/Worms.adf"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 2, "two different games stay two entries");
+        CHECK(gs.size() == 2 && gs[0].alternates.isEmpty() && gs[1].alternates.isEmpty(),
+              "neither game claims the other as an alternate");
+    }
+
+    // 9e — two files of the SAME listed format are a REGION question, not a format one: they stay separate
+    // here and are left to collapseByRegion (which is off by default and asks the user's language).
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Zool (Europe).adf"),
+            QStringLiteral("C:/roms/amiga/Zool (USA).adf"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 2, "same-format region variants are not collapsed by the FORMAT pass");
+    }
+
+    // 9f — an EMPTY ranking (every console, and any computer whose recipe says nothing about formats) passes
+    // the list through unchanged. This is the safety property that lets the pass run for every system.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/snes/Zelda.sfc"),
+            QStringLiteral("C:/roms/snes/Zelda.smc"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, {});
+        CHECK(gs.size() == 2, "an empty ranking collapses nothing");
+        CHECK(gs.size() == 2 && gs[0].alternates.isEmpty() && gs[1].alternates.isEmpty(),
+              "an empty ranking produces no alternates either");
+    }
+
+    // 9g — region tags still collapse as they do today: the FORMAT pass leaves #50's answer alone. The same
+    // three files, through collapseByRegion with a hand-written priority, still yield one winner.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Zool (Japan).adf"),
+            QStringLiteral("C:/roms/amiga/Zool (USA).adf"),
+            QStringLiteral("C:/roms/amiga/Zool (Europe).adf"),
+        };
+        const auto gs = RegionCollapse::collapseByRegion(in, prio);
+        CHECK(gs.size() == 1 && gs[0].chosenPath == "C:/roms/amiga/Zool (USA).adf",
+              "region collapse is unchanged by the format pass");
+    }
+
+    // 9h — the two passes COMPOSE in the order the scan runs them: format first (the .lha beats the disk
+    // set), then whatever is left. A TOSEC two-disk .adf set plus the same title as one .lha is one entry.
+    {
+        const QVector<QString> in = {
+            QStringLiteral("C:/roms/amiga/Lemmings (1991) (Psygnosis) (Disk 1 of 2).adf"),
+            QStringLiteral("C:/roms/amiga/Lemmings (1991) (Psygnosis) (Disk 2 of 2).adf"),
+            QStringLiteral("C:/roms/amiga/Lemmings (1991) (Psygnosis).lha"),
+        };
+        const auto gs = FormatCollapse::collapseByFormat(in, amigaFmt);
+        CHECK(gs.size() == 1 && gs[0].chosenFormat == "lha",
+              "a WHDLoad .lha beats the same title's two-disk .adf set");
+        CHECK(gs.size() == 1 && gs[0].alternates.size() == 2,
+              "both disks of the beaten set are remembered as alternates");
     }
 
     if (fails == 0) printf("REGIONCOLLAPSE-OK\n");

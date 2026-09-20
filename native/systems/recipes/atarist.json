@@ -1,8 +1,9 @@
 {
   "system": "atarist",
-  "summary": "Atari ST disk images run in hatari, which needs a TOS ROM image you supply. Without it the core rejects every game.",
+  "summary": "Atari ST disk images run in hatari, which needs a TOS ROM image you supply. Without it the core rejects every game. A TOSEC disk set (Disk 1 of 2) is one library entry that swaps disks itself.",
   "firmwareFolder": "system",
   "folderIsGame": false,
+  "tosecDiskTags": true,
   "executables": { "extensions": [], "prefer": [], "avoid": [] },
   "cores": [
     {

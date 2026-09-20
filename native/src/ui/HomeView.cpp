@@ -11521,6 +11521,20 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
     // A single joined "Label: value  •  …" string for the detail view's facts text element. joinFactsText is
     // shared with the hover panel's merge (MainWindow's themedMetaReady) so both surfaces read identically.
     if (facts.isEmpty()) facts = out.value(QStringLiteral("facts")).toList();
+    // #190 item 2: WHICH content format this entry is — and what else for it is on disk. A retro-computer
+    // title is listed once, on the format its system's recipe ranks highest, so the entry has to be able to
+    // say which one that was; on every system with no ranking (every console) formatSummary is empty and no
+    // row appears. The classic twin is showMetaComposited's Format row.
+    if (it.type == QStringLiteral("game"))
+    {
+        const QString fmt = RomLibrary::formatSummary(it.url);
+        if (!fmt.isEmpty())
+        {
+            facts << QVariantMap{ { QStringLiteral("label"), tr("Format") },
+                                  { QStringLiteral("value"), fmt } };
+            out.insert(QStringLiteral("facts"), facts);
+        }
+    }
     const QString factsText = joinFactsText(facts);
     if (!factsText.isEmpty()) out.insert(QStringLiteral("factsText"), factsText);
 
@@ -11672,8 +11686,12 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
     // actually has sibling variants on disk (re-derived cheaply from its own folder) — otherwise the pill
     // would open an empty menu. Never shown on a metadata-only entry (systemForGameItem gates that with the
     // sibling scan, which needs a real local file).
-    if (Settings::collapseRegionalDuplicates() && systemForGameItem(it)
-        && !RomLibrary::otherRegionVersions(it.url).isEmpty())
+    // #190 adds the second kind of hidden sibling to the same pill: the FORMAT alternates the scan collapsed
+    // ("Game.adf", behind the "Game.lha" that is listed). That half is NOT gated on the region setting —
+    // format collapse always runs and has no setting — so the pill appears whenever either kind exists.
+    if (systemForGameItem(it)
+        && ((Settings::collapseRegionalDuplicates() && !RomLibrary::otherRegionVersions(it.url).isEmpty())
+            || !RomLibrary::otherFormatVersions(it.url).isEmpty()))
         verbs << QStringLiteral("otherversions");
     // THE FAILED OPEN (issue #239). A record for this item turns the page into an answer to "why did nothing
     // happen when I pressed that": the sentence the ActionRow draws above its pills, when it was said, and
@@ -12686,6 +12704,14 @@ void HomeView::showMetaComposited(const MediaDetail& d)
         rows << QStringLiteral("<b>%1:</b> %2").arg(tr("Last played"), PlayStats::formatLastPlayed(ps.lastPlayed));
         if (ps.totalSeconds > 0)
             rows << QStringLiteral("<b>%1:</b> %2").arg(tr("Time played"), PlayStats::formatDuration(ps.totalSeconds));
+    }
+    // #190 item 2, the classic twin of the themed "Format" fact: the content format this entry was listed
+    // on, and the same title's other formats still on disk. Empty (so no row) for every system whose recipe
+    // ranks no formats, which is every console.
+    {
+        const QString fmt = RomLibrary::formatSummary(metaItem_.url);
+        if (!fmt.isEmpty())
+            rows << QStringLiteral("<b>%1:</b> %2").arg(tr("Format"), fmt.toHtmlEscaped());
     }
     for (const MediaFact& f : d.facts)
         rows << QStringLiteral("<b>%1:</b> %2").arg(f.label.toHtmlEscaped(), f.value.toHtmlEscaped());
