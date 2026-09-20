@@ -1679,13 +1679,13 @@ int main(int argc, char** argv)
             LibraryBundle::Payload p1;
             CHECK(LibraryBundle::readPayload(srcRoot, idA, p1, err));
             const QByteArray json = LibraryBundle::encodePayload(p1);
-            QByteArray head = "POST /bundle HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: "
+            QByteArray head = "POST /bundle HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: "
                               + QByteArray::number(json.size()) + "\r\nX-EB-Token: " + token.toLatin1() + "\r\n\r\n";
             const fx::HttpResult r = fx::httpRequest(port, head, json, -1, false);
             CHECK(r.status == 200);
             CHECK(QFileInfo::exists(nRoot + QLatin1Char('/') + idA + QStringLiteral("/meta.json")));
 
-            const fx::HttpResult inv = fx::httpRequest(port, "GET /inventory HTTP/1.1\r\nX-EB-Token: " + token.toLatin1()
+            const fx::HttpResult inv = fx::httpRequest(port, "GET /inventory HTTP/1.1\r\nHost: 127.0.0.1\r\nX-EB-Token: " + token.toLatin1()
                                                          + "\r\n\r\n", QByteArray(), 0, false);
             CHECK(inv.status == 200);
             QList<LibraryBundle::Entry> items;

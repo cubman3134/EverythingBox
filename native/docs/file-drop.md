@@ -45,6 +45,22 @@ the themed and the classic settings surfaces.
 
 ## Security posture
 
+- **One origin gate in front of everything (issue #423).** Before a request is routed, before the token is
+  weighed and before a body byte is read, `RemoteApi::requestAllowed` decides whether this listener will
+  answer it at all:
+
+  | | accepted | refused |
+  |---|---|---|
+  | `Host` | an IP literal with an optional port (`192.168.1.5:8080`, `127.0.0.1`, `[::1]:8080`); `localhost[:port]`; this device's own advertised mDNS name (`PlayOn::advertisedHostName` = `<deviceId>.local`) | every other DNS name (`evil.example.com`), anything that merely ends with an accepted one (`192.168.1.5.evil.com`, `evilocalhost`, `<id>.local.evil.com`), another device's `.local`, a missing or empty `Host`, two `Host` headers, a `Host` carrying credentials, a path, a query or whitespace |
+  | `Origin` | absent (a same-origin `fetch` may send none); an `http` origin whose host passes the same rule **and** names the same host and port as `Host` | every cross-origin value, `null`, a non-`http` scheme, a value with a path, two `Origin` headers |
+  | `OPTIONS` | — | always `403`: no CORS preflight is answered, and **no response on this listener ever carries an `Access-Control-*` header**, so a browser cannot read these answers cross-origin either |
+
+  A refusal is `403` with a ten-byte plain-text body that says nothing about what is served here. It happens
+  before any spool or `.part` file exists, so **a refused request never touches disk**. This is what closes
+  DNS rebinding: a hostile page can point a name it controls at this device's LAN address, but the request it
+  then makes carries that name in `Host` and is refused — so it cannot put this device's own "type the code
+  from your screen" page in front of the user. `/pair` is covered for the same reason: it is the other place
+  that code is typed.
 - **Token-gated.** Every `/drop` route except the page itself is in `PlayOn::routeNeedsToken` (the whole
   `/drop/` prefix), so an unpaired caller is refused 401 before anything is looked up, and — for a streamed
   piece — before a single body byte is read.
@@ -74,7 +90,12 @@ the themed and the classic settings surfaces.
 - **One piece at a time per upload.** A second `PUT` for the same upload while one is in flight is refused
   ("busy"); the page backs off and resumes.
 - **A dangling-symlink race remains on filesystems without hard links** (FAT/exFAT): there the landing falls
-  back to `rename()` after an `lstat`, which is checked-then-acted rather than atomic.
+  back to `rename()` after an `lstat`, which is checked-then-acted rather than atomic. The same caveat applies
+  to two uploads racing on one name: on NTFS and on Linux the no-replace rename is atomic, so the second is
+  refused `exists`; on FAT/exFAT it degrades to check-then-rename, and a sufficiently tight race could clobber.
+- **No cross-origin access, and no CORS.** The origin gate above is not a CORS policy: nothing is ever
+  permitted cross-origin, so no `Access-Control-*` header is sent and a preflight is refused like anything
+  else.
 
 ## Where the code is
 
@@ -83,7 +104,8 @@ the themed and the classic settings surfaces.
 | `native/src/core/FileDrop.{h,cpp}` | the pure core: destinations, names, the start/piece/finish state machine, caps, sweep, the durable landing |
 | `native/src/core/RemoteApi.{h,cpp}` | routing (`/drop*`), `PUT`, the streaming plan for a piece |
 | `native/src/core/RemoteServer.{h,cpp}` | the routes, the streamed piece, the control-surface switch |
-| `native/src/core/PlayOnDevice.cpp` | `routeNeedsToken` |
+| `native/src/core/PlayOnDevice.cpp` | `routeNeedsToken`, `advertisedHostName` (the one `.local` name the Host gate accepts) |
 | `native/resources/filedrop/drop.html` | the page (embedded through `qt_add_resources`) |
 | `native/src/ui/MainWindowFileDrop.cpp` | the destination roots, the sweep, the scan after landing, the settings toggle |
-| `native/tools/probe_filedrop.cpp` | the probe, including the real-socket 200 MiB upload and the resumed one |
+| `native/tools/probe_filedrop.cpp` | the probe, including the real-socket 200 MiB upload, the resumed one, and the rebinding-`Host` refusals |
+| `native/tools/probe_remoteapi.cpp` | the origin gate's whole accept/refuse table (#423) |

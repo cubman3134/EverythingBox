@@ -107,6 +107,13 @@ public:
     // unauthenticated remote control. /pair stays: it is how a browser gets its token. Default on (#76).
     void setControlSurface(bool on) { controlSurface_ = on; }
 
+    // #423: this device's own advertised mDNS name (PlayOn::advertisedHostName(Settings::deviceId()), i.e.
+    // "<deviceId>.local"). The origin gate accepts a Host that is an IP literal, `localhost`, or exactly this
+    // name -- nothing else -- so a hostile page cannot point a name it controls at this address and put this
+    // device's own "type the code from your screen" page in front of the user. Unset (the default) means no
+    // DNS name at all is accepted; IP literals and localhost still are.
+    void setLocalHostName(const QString& name) { localHostName_ = name; }
+
     // Bind to all interfaces on `port` (called ONLY when the setting is on). Returns true when it is listening.
     // A failure to bind (port in use, permission) leaves the server not listening and returns false.
     bool start(quint16 port);
@@ -152,6 +159,7 @@ private:
     QTimer* sidecarIdle_       = nullptr;    // #401: restarted by every gamelist request; owned by this
     DropHooks drop_;                           // #115
     bool      controlSurface_ = true;          // #115
+    QString   localHostName_;                  // #423: "<deviceId>.local", the one DNS name a Host may carry
 
     // The per-request read cap is RemoteApi::requestCapBytes (#76's tiny one for every route, a payload-sized
     // one for POST /bundle alone). Kept there rather than here so the exception is a testable function.

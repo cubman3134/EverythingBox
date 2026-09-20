@@ -77,7 +77,7 @@ namespace
     }
     QByteArray hostFqdn(const QString& instanceId)
     {
-        return instanceId.toUtf8() + ".local";
+        return advertisedHostName(instanceId).toUtf8();
     }
 
     QString dotted(quint32 ip)
@@ -97,6 +97,11 @@ namespace
 bool advertValid(const Advert& a)
 {
     return !a.instanceId.isEmpty() && a.port != 0;
+}
+
+QString advertisedHostName(const QString& instanceId)
+{
+    return instanceId + QStringLiteral(".local");
 }
 
 QList<QByteArray> txtRecords(const Advert& a)

@@ -623,6 +623,39 @@ int main()
         CHECK(o.contains(QStringLiteral("volumeControllable")));
     }
 
+    {
+        // #423: the ".local" name this device answers to is the one it ADVERTISES -- one string, two readers,
+        // so the responder and the Host gate cannot drift apart.
+        PlayOn::Advert a;
+        a.instanceId = QStringLiteral("a1b2c3d4e5f6");
+        a.name = QStringLiteral("Living Room");
+        a.version = QStringLiteral("1.0");
+        a.port = 8080;
+        const QString host = PlayOn::advertisedHostName(a.instanceId);
+        CHECK(host == QLatin1String("a1b2c3d4e5f6.local"));
+        // The A record's owner name, as the responder encodes it: <len>a1b2c3d4e5f6<len>local<0>.
+        const QByteArray encoded = QByteArray(1, char(12)) + "a1b2c3d4e5f6" + QByteArray(1, char(5)) + "local" + QByteArray(1, char(0));
+        CHECK(PlayOn::mdnsResponse(a, 0xC0A80105u).contains(encoded));
+        // And the gate accepts exactly it -- not another device's, not a name that merely ends with it.
+        CHECK(RemoteApi::hostAllowed("a1b2c3d4e5f6.local:8080", host));
+        CHECK(RemoteApi::hostAllowed("192.168.1.5:8080", host));
+        CHECK(!RemoteApi::hostAllowed("deadbeefcafe.local:8080", host));
+        CHECK(!RemoteApi::hostAllowed("a1b2c3d4e5f6.local.evil.com", host));
+        CHECK(!RemoteApi::hostAllowed("evil-a1b2c3d4e5f6.local", host));
+        // /open and /pair sit behind the same gate as everything else on that listener: /pair especially,
+        // since it is the other place a code shown on this screen is typed in.
+        for (const char* target : { "/open", "/pair", "/state" })
+        {
+            const QByteArray t(target);
+            CHECK(!RemoteApi::requestAllowed(
+                      RemoteApi::parseRequest("POST " + t + " HTTP/1.1\r\nHost: evil.example.com\r\n\r\n"), host));
+            CHECK(RemoteApi::requestAllowed(
+                      RemoteApi::parseRequest("POST " + t + " HTTP/1.1\r\nHost: a1b2c3d4e5f6.local\r\n\r\n"), host));
+            CHECK(!RemoteApi::requestAllowed(
+                      RemoteApi::parseRequest("OPTIONS " + t + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), host));
+        }
+    }
+
     if (failures == 0) std::printf("PLAYON-OK\n");
     else               std::fprintf(stderr, "PLAYON had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

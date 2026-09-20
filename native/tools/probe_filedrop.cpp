@@ -895,13 +895,103 @@ int main(int argc, char** argv)
             CHECK(big.status == 413);
             const HttpResult past = httpRequest(port, putHead(id, 0, 101, token));
             CHECK(past.status == 400);
-            QByteArray noLen = "PUT /drop/chunk?id=" + id.toUtf8() + "&offset=0 HTTP/1.1\r\nX-EB-Token: " + token.toUtf8() + "\r\n\r\n";
+            QByteArray noLen = "PUT /drop/chunk?id=" + id.toUtf8() + "&offset=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nX-EB-Token: " + token.toUtf8() + "\r\n\r\n";
             CHECK(httpRequest(port, noLen).status == 411);
             CHECK(httpRequest(port, putHead(QStringLiteral("0123456789abcdef0123456789abcdef"), 0, 10, token)).status == 404);
-            QByteArray noOffset = "PUT /drop/chunk?id=" + id.toUtf8() + " HTTP/1.1\r\nX-EB-Token: " + token.toUtf8() + "\r\nContent-Length: 10\r\n\r\n";
+            QByteArray noOffset = "PUT /drop/chunk?id=" + id.toUtf8() + " HTTP/1.1\r\nHost: 127.0.0.1\r\nX-EB-Token: " + token.toUtf8() + "\r\nContent-Length: 10\r\n\r\n";
             CHECK(httpRequest(port, noOffset).status == 400);
             CHECK(uploads->status(id).received == 0);
             CHECK(server.streamsInFlight() == 0);
+        }
+
+        // (h2) #423, over the wire: a REBINDING Host -- a name a hostile site has pointed at this device's
+        // LAN address -- is refused 403 before the request is routed, before the token is weighed, before a
+        // body byte is read and before any part file exists. The page and /pair are the two places a code is
+        // read off the screen and typed, so they matter most; the gate covers every route on the listener.
+        {
+            server.setLocalHostName(QStringLiteral("a1b2c3d4e5f6.local"));
+            const QMap<QString, QString> gateBefore = census(sroot);
+            const QStringList partsBefore = partFilesIn(sdir);
+            const int pairsBefore = pairBegins;
+
+            // One request with an arbitrary Host / Origin. A null pointer means the header is not sent at all.
+            auto raw = [&](const char* method, const QByteArray& target, const char* host, const char* origin,
+                           const QByteArray& body, bool hasBody, bool withToken) {
+                QByteArray h = QByteArray(method) + " " + target + " HTTP/1.1\r\n";
+                if (host)   h += QByteArray("Host: ") + host + "\r\n";
+                if (origin) h += QByteArray("Origin: ") + origin + "\r\n";
+                if (withToken) h += "X-EB-Token: " + token.toUtf8() + "\r\n";
+                if (hasBody)
+                    h += "Content-Type: application/json\r\nContent-Length: "
+                         + QByteArray::number(body.size()) + "\r\n";
+                return h + "\r\n" + body;
+            };
+            const QByteArray none;
+
+            for (const char* host : { "evil.example.com", "127.0.0.1.evil.com", "evilocalhost",
+                                      "deadbeefcafe.local", "a1b2c3d4e5f6.local.evil.com",
+                                      "evil-a1b2c3d4e5f6.local", "", static_cast<const char*>(nullptr) })
+            {
+                const HttpResult page403 = httpRequest(port, raw("GET", "/drop", host, nullptr, none, false, false));
+                CHECK(page403.status == 403);
+                CHECK(page403.body.trimmed() == "forbidden");            // nothing about what is served here
+                CHECK(!page403.body.contains("<"));
+                CHECK(!page403.head.contains("Access-Control"));
+                CHECK(page403.head.contains("Content-Type: text/plain"));
+                CHECK(httpRequest(port, raw("GET", "/state", host, nullptr, none, false, false)).status == 403);
+                CHECK(httpRequest(port, raw("GET", "/drop/destinations", host, nullptr, none, false, true)).status == 403);
+                CHECK(httpRequest(port, raw("POST", "/pair", host, nullptr, none, true, false)).status == 403);
+            }
+            CHECK(pairBegins == pairsBefore);                            // no code was ever put on the screen
+
+            // The addresses a browser on this LAN really uses still work, Origin or no Origin.
+            CHECK(httpRequest(port, raw("GET", "/drop", "127.0.0.1", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "127.0.0.1:8080", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "192.168.1.5:8080", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "[::1]:8080", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "localhost:8080", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "a1b2c3d4e5f6.local", nullptr, none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "127.0.0.1", "http://127.0.0.1", none, false, false)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop", "127.0.0.1", "http://evil.example.com", none, false, false)).status == 403);
+            CHECK(httpRequest(port, raw("GET", "/drop", "127.0.0.1", "null", none, false, false)).status == 403);
+            CHECK(httpRequest(port, raw("GET", "/drop/destinations", "127.0.0.1", "http://127.0.0.1", none, false, true)).status == 200);
+            CHECK(httpRequest(port, raw("GET", "/drop/destinations", "127.0.0.1", "http://evil.example.com", none, false, true)).status == 403);
+            // A CORS preflight is never answered -- with or without a token, on any route.
+            CHECK(httpRequest(port, raw("OPTIONS", "/drop", "127.0.0.1", nullptr, none, false, false)).status == 403);
+            CHECK(httpRequest(port, raw("OPTIONS", "/drop/start", "127.0.0.1", nullptr, none, false, true)).status == 403);
+            CHECK(httpRequest(port, raw("OPTIONS", "/pair", "127.0.0.1", "http://evil.example.com", none, false, false)).status == 403);
+
+            // A refused /drop/start writes nothing, and a refused piece reads no body and keeps no bytes.
+            QJsonObject gs;
+            gs.insert(QStringLiteral("dest"), destId);
+            gs.insert(QStringLiteral("name"), QStringLiteral("Rebound (USA).bin"));
+            gs.insert(QStringLiteral("size"), 4096);
+            CHECK(httpRequest(port, raw("POST", "/drop/start", "evil.example.com", nullptr, jsonBody(gs), true, true)).status == 403);
+            CHECK(partFilesIn(sdir) == partsBefore);
+            CHECK(census(sroot) == gateBefore);
+            CHECK(!QFileInfo::exists(sdir + QStringLiteral("/Rebound (USA).bin")));
+
+            const HttpResult okStart = httpRequest(port, post(QStringLiteral("/drop/start"), jsonBody(gs), token));
+            CHECK(okStart.status == 200);
+            const QString gateId = okStart.json.value(QStringLiteral("uploadId")).toString();
+            const QByteArray piece = pieceBytes(423, 0, 4096);
+            const QByteArray reboundHead = "PUT /drop/chunk?id=" + gateId.toUtf8()
+                + "&offset=0 HTTP/1.1\r\nHost: evil.example.com\r\nX-EB-Token: " + token.toUtf8()
+                + "\r\nContent-Type: application/octet-stream\r\nContent-Length: 4096\r\n\r\n";
+            CHECK(httpRequest(port, reboundHead, piece).status == 403);
+            CHECK(uploads->status(gateId).received == 0);                // not one byte of the body was taken
+            CHECK(server.streamsInFlight() == 0);                        // and no spool or part file was opened
+            CHECK(server.bufferedHighWater() < 64 * 1024);
+
+            // The same upload, from the device's own address, still goes through end to end.
+            CHECK(httpRequest(port, putHead(gateId, 0, 4096, token), piece).status == 200);
+            CHECK(uploads->status(gateId).received == 4096);
+            QJsonObject gf;
+            gf.insert(QStringLiteral("id"), gateId);
+            CHECK(httpRequest(port, post(QStringLiteral("/drop/finish"), jsonBody(gf), token)).status == 200);
+            CHECK(QFileInfo(sdir + QStringLiteral("/Rebound (USA).bin")).size() == 4096);
+            CHECK(QFile::remove(sdir + QStringLiteral("/Rebound (USA).bin")));
+            CHECK(census(sroot) == gateBefore);                          // the tree is exactly as it was
         }
 
         // (i) A listener up for file drop alone: no remote control, no hand-off; pairing and the drop still work.
