@@ -5,6 +5,7 @@
 #include "../core/SystemCatalog.h"       // #187: the system ids a pack's folders are matched against
 #include "../core/ThemeRegistry.h"
 #include "../core/ThemeZip.h"   // #91: the zip install lane, shared with the themed surface
+#include "../core/ThemeShots.h" // #91: a screenshot's fetch, cap and cache — shared with the themed surface
 #include "../addons/AddonManager.h"
 
 #include <QVBoxLayout>
@@ -30,6 +31,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QPair>
+#include <QPixmap>
+#include <QPointer>
 #include <QUrl>
 #include <QVector>
 
@@ -448,11 +451,24 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
 void RegistryBrowser::addCard(const QString& name, const QString& author, const QString& description,
                               const QStringList& formFactors, const QString& indexUrl, bool installed,
                               const std::function<void(QPushButton*)>& onInstall,
-                              const QString& installedAction)
+                              const QString& installedAction, const CardExtras& extras)
 {
     auto* card = new QFrame();
     card->setFrameShape(QFrame::StyledPanel);
     auto* h = new QHBoxLayout(card);
+
+    // The picture slot (issue #91), FIRST in the row so a card with one reads left-to-right. It is created
+    // empty and with no fixed size, so until — and unless — a screenshot lands it occupies nothing and the
+    // card is laid out exactly as it was before this parameter existed. Nothing is fetched here: this
+    // function draws cards, and the fetch is the caller's (renderThemeEntry), which is where the rule about
+    // WHICH url may be fetched lives.
+    if (extras.thumbnailOut)
+    {
+        auto* shot = new QLabel();
+        shot->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        h->addWidget(shot, 0, Qt::AlignTop);
+        *extras.thumbnailOut = shot;
+    }
 
     auto* texts = new QVBoxLayout();
     auto* title = new QLabel(QStringLiteral("<b>%1</b>%2").arg(name.toHtmlEscaped(),
@@ -493,6 +509,17 @@ void RegistryBrowser::addCard(const QString& name, const QString& author, const 
         onInstall(btn);
     });
     h->addWidget(btn, 0, Qt::AlignTop);
+
+    // PREVIEW, beside the install verb rather than instead of it (issue #91). This surface is a mouse-and-
+    // keyboard one with room for two buttons on a card — unlike its themed twin, where one D-pad row is one
+    // action and the verb has to be a row of its own. Offered only when the host supplied an implementation
+    // AND the theme is actually on disk; there is nothing to apply otherwise.
+    if (!extras.previewVerb.isEmpty() && extras.onPreview)
+    {
+        auto* pv = new QPushButton(extras.previewVerb, card);
+        connect(pv, &QPushButton::clicked, this, [fn = extras.onPreview] { fn(); });
+        h->addWidget(pv, 0, Qt::AlignTop);
+    }
 
     listLayout_->addWidget(card);
 }
@@ -599,6 +626,20 @@ void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const 
     else if (updatable) verb = tr("Update to %1").arg(entry.version);
     else if (onDisk)    verb = tr("Remove");
 
+    // PREVIEW is offered for a theme that is ON DISK, bundled or not: applying one neither installs nor
+    // removes anything, so the rule that keeps this surface off a bundled theme (its registry copy has
+    // drifted from what the app ships — #57) has nothing to say about looking at it. The host owns what
+    // the verb does; with no host handler there is no button.
+    QLabel* shot = nullptr;
+    const QString folder = entry.folder();
+    CardExtras extras;
+    extras.thumbnailOut = &shot;
+    if (onDisk && onPreview_)
+    {
+        extras.previewVerb = tr("Preview");
+        extras.onPreview   = [this, folder] { if (onPreview_) onPreview_(folder); };
+    }
+
     addCard(entry.name, entry.author, desc, entry.formFactors, indexUrl,
             bundled || onDisk,
             [this, entry, indexUrl, bundled, updatable](QPushButton* btn) {
@@ -625,7 +666,31 @@ void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const 
         btn->setText(ok ? tr("Remove") : tr("Retry"));
         btn->setEnabled(true);
     },
-    verb);
+    verb, extras);
+
+    // THE PICTURE (issue #91), started after the card exists and never blocking it. Which urls may be
+    // fetched is ThemeRegistry's answer — https, on the index's own host or on a registry the user added,
+    // at most four, anything else dropped without a word — and what may then be cached and drawn is
+    // ThemeShots': a 2 MB cap held to as the bytes arrive, and the product's one magic-byte picture rule.
+    // Both are shared with the themed gallery, so the two surfaces cannot end up with different bounds.
+    //
+    // ONE picture per card: the first admitted url. The rest of the array is what a detail view would show,
+    // and there is no detail view on either surface yet — fetching pictures nothing can display would spend
+    // a user's connection on nothing.
+    const QStringList shots = ThemeRegistry::screenshotUrls(indexUrl, entry, extraRegistries());
+    if (shots.isEmpty() || folder.isEmpty() || !shot) return;
+    // QPointer, because this dialog is rebuilt on every refresh and destroyed when the panel hosting it
+    // navigates away — both of which can happen while a picture is in flight.
+    QPointer<QLabel> target(shot);
+    ThemeShots::fetch(nam_, folder, shots.first(), [target](const QString& localPath) {
+        if (!target || localPath.isEmpty()) return;
+        QPixmap pm(localPath);
+        // A file ThemeShots stored has already been judged a picture by its bytes; a decode that fails
+        // anyway (a truncated write, a format Qt was not built with) leaves the card exactly as it is
+        // rather than drawing an empty frame.
+        if (pm.isNull()) return;
+        target->setPixmap(pm.scaled(160, 90, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    });
 }
 
 // The themes that ship inside the app, and the two predicates the card rests on. ThemeRegistry owns both

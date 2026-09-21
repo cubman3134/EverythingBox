@@ -147,6 +147,7 @@
 #include "../core/ThemeAssetPath.h"    // theme.json "music" may not name a file outside the theme folder
 #include "../core/ThemeChoice.h"
 #include "../core/ThemeFormFactors.h"  // theme `formFactors` declaration -> a note on the theme rows (#32)
+#include "../core/ThemeShots.h"        // #91: a gallery row's screenshot — the cached path, drawn as a thumbnail
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
 #include "../core/BrandMigration.h"   // mergeProgress re-runs the stored-add-on-id repair after every merge (#58)
@@ -10015,7 +10016,27 @@ void MainWindow::presentThemeRegistry()
                 else if (updatable)   { r.value = tr("Update to %1").arg(e.version); r.enabled = true; }
                 else if (installed)   { r.value = tr("Remove"); r.enabled = true; }
                 else                  { r.value = sub; r.enabled = true; }
+                // The row's picture, if this entry advertises one and the registry is allowed to serve it
+                // from where it points (issue #91). Already-cached ones are handed back in this very call,
+                // so a gallery visited before draws its thumbnails in the pass that builds it; a first
+                // visit gets them patched in as each lands. Nothing here waits for the network.
+                r.thumbnail = ThemeShots::cachedPath(
+                    e.folder(), ThemeRegistry::screenshotUrls(st->entries[i].second, e,
+                                                              themeExtraRegistryUrls()).value(0));
                 rows << r;
+
+                // PREVIEW (issue #91), as its own row rather than a second verb on the one above. One D-pad
+                // row is one action — that is the rule the verb ladder above exists to keep — and this panel
+                // cannot grow a row later (the host patches rows in place; re-presenting it mid-activation is
+                // the #28/#211 teardown family), so the row is built for every entry and is simply not
+                // activatable until the theme is on disk. Installing enables it in place, which is what "the
+                // same action, offered straight after an install" means here.
+                PanelRow pv; pv.kind = PanelRow::Action;
+                pv.id = QStringLiteral("tregpv:") + QString::number(i);
+                pv.label = tr("Preview %1").arg(r.label);
+                pv.value = installed ? tr("Apply live") : tr("Install first");
+                pv.enabled = installed;
+                rows << pv;
             }
         }
         // One Info row per registry that answered with something unreadable, AFTER the entries: the themes
@@ -10033,6 +10054,32 @@ void MainWindow::presentThemeRegistry()
         }
         themedPanelHost_->replaceTop(tr("Browse Themes"), rows,
             [this, st](const QString& id, const QString&) {
+                // PREVIEW rows first: their ids share this panel and nothing else, and the install/remove
+                // ladder below must not see one. Preview APPLIES the theme (there is no other way to show
+                // what one looks like) and leaving this panel puts the previous one back — see
+                // beginThemePreview, which owns both halves for both surfaces.
+                if (id.startsWith(QStringLiteral("tregpv:")))
+                {
+                    const int pi = id.mid(int(qstrlen("tregpv:"))).toInt();
+                    if (pi < 0 || pi >= st->entries.size())
+                    { updatePanelInfo(QStringLiteral("treg.status"),
+                                      tr("That entry is no longer in this list — reopen this page.")); return; }
+                    const ThemeRegistry::Entry& pe = st->entries[pi].first;
+                    // Re-derived here rather than trusted from the row, exactly as the verb below is: this
+                    // panel stays live across an install, a removal, and a folder the user may have changed
+                    // from another surface, so "is it on disk" is only true at the moment it is asked.
+                    if (!QFile::exists(ThemeEngine::themesRoot() + QStringLiteral("/") + pe.folder()
+                                       + QStringLiteral("/theme.json")))
+                    { updatePanelInfo(QStringLiteral("treg.status"),
+                                      tr("Install \"%1\" first — there is nothing on disk to preview yet.")
+                                          .arg(pe.name.isEmpty() ? pe.folder() : pe.name)); return; }
+                    beginThemePreview(pe.folder());
+                    updatePanelInfo(QStringLiteral("treg.status"),
+                                    tr("Previewing \"%1\" — leaving Settings puts your theme back. "
+                                       "Pick it in Theme… to keep it.")
+                                        .arg(pe.name.isEmpty() ? pe.folder() : pe.name));
+                    return;
+                }
                 if (!id.startsWith(QStringLiteral("treg:"))) return;   // no other Action row exists — not a refusal
                 const int i = id.mid(5).toInt();
                 if (i < 0 || i >= st->entries.size())
@@ -10059,7 +10106,33 @@ void MainWindow::presentThemeRegistry()
                 else
                     installThemeRegistryEntry(e, st->entries[i].second, id);
             },
+            // Back lands on Appearance and a running preview SURVIVES it: every themed settings panel is
+            // rendered by the theme, so the step out of the gallery is the first place the preview is worth
+            // anything. It ends when the SETTINGS AREA is left, by whichever door — see leaveSettingsArea.
             [this] { openAppearance(); });
+
+        // THE PICTURES, started only now: after the rows are on screen, so nothing about drawing the list
+        // waits for a socket, and only for the entries this panel actually built. Each fetch is bounded and
+        // judged by ThemeShots and lands as a patch on ONE row; an entry with no screenshot, or one whose
+        // screenshots point somewhere the registry may not serve from, never starts a request at all and its
+        // row keeps exactly the layout it has always had.
+        //
+        // The row is re-read before it is patched (rowById) rather than amended from the copy above: an
+        // install may have changed its verb in the seconds a picture took to arrive, and handing back the
+        // stale copy would undo that.
+        for (int i = 0; i < st->entries.size(); ++i)
+        {
+            const QString rowId = QStringLiteral("treg:") + QString::number(i);
+            fetchThemeShot(st->entries[i].first, st->entries[i].second,
+                           [this, rowId](const QString& localPath) {
+                if (!themedPanelHost_) return;
+                PanelRow cur = themedPanelHost_->rowById(rowId);
+                if (cur.id.isEmpty()) return;        // that panel is gone — nothing to patch
+                if (cur.thumbnail == localPath) return;
+                cur.thumbnail = localPath;
+                themedPanelHost_->updateRow(rowId, cur);
+            });
+        }
     };
 
     // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
@@ -10126,6 +10199,21 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
     };
     setRow(tr("Installing…"), false);
 
+    // PREVIEW, offered the moment an install lands (issue #91). That row is already on this panel, built
+    // DISABLED because a theme that is not on disk cannot be previewed, so "offering the action straight
+    // after an install" is enabling it in place. A presented panel cannot grow a row — the host patches
+    // rows, and re-presenting from inside an activation is the #28/#211 teardown family — which is why
+    // every entry has one from the start rather than the installed ones acquiring one.
+    auto offerPreview = [this, rowId] {
+        if (!rowId.startsWith(QStringLiteral("treg:"))) return;
+        const QString pvId = QStringLiteral("tregpv:") + rowId.mid(int(qstrlen("treg:")));
+        PanelRow pv = themedPanelHost_->rowById(pvId);
+        if (pv.id.isEmpty()) return;     // a panel rebuilt under us: nothing to enable, and not an error
+        pv.value = tr("Apply live");
+        pv.enabled = true;
+        themedPanelHost_->updateRow(pvId, pv);
+    };
+
     const QString folder = entry.folder();
     if (folder.isEmpty())
     { updatePanelInfo(QStringLiteral("treg.status"), tr("This entry doesn't name a usable theme folder."));
@@ -10183,8 +10271,10 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
         { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
 
         setRow(tr("Remove"), true);
+        offerPreview();
         updatePanelInfo(QStringLiteral("treg.status"),
-                        tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
+                        tr("Installed \"%1\". Preview it on the row below, or pick it from Theme… on "
+                           "Appearance.").arg(label));
         return;
     }
 
@@ -10268,8 +10358,10 @@ void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString i
     // The verb an INSTALLED row carries. Not the old disabled "Installed" tick: an installed theme is one
     // the user may now want to take back off, and the panel they installed it from is where they will look.
     setRow(tr("Remove"), true);
+    offerPreview();
     updatePanelInfo(QStringLiteral("treg.status"),
-                    tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
+                    tr("Installed \"%1\". Preview it on the row below, or pick it from Theme… on "
+                       "Appearance.").arg(label));
 }
 
 // ---- Decoration (bezel) packs: the themed gallery (issue #187) ---------------------------------------
@@ -14414,6 +14506,12 @@ void MainWindow::openAppearance()
                 }
             };
         // defensive root onBack: Appearance is nested, so a pop re-renders the hub
+        //
+        // A THEME PREVIEW IS NOT ENDED HERE, and deliberately (issue #91). This lambda does not run on an
+        // ordinary Back at all — a nested level pops by re-rendering its parent panel, and only the ROOT
+        // panel's onBack is ever called — so ending a preview here would be a claim the code does not keep,
+        // on exactly one of the two surfaces. A preview ends where BOTH surfaces leave: the settings area
+        // itself (leaveSettingsArea), which covers Back out of the hub, Home, and the F8 shortcut alike.
         auto onBack = [this] { openSettingsHub(); };
         // REPLACE the top level when Appearance is already the top panel. openAppearance() is now RE-ENTRANT — the
         // picker's onPicked/onBack both call it to re-render the label and style — and a plain present() would push
@@ -14441,6 +14539,19 @@ void MainWindow::openAppearance()
     QVariantMap previewSystem; previewSystem.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
 
     showPanel(tr("Appearance"), [this, previewItems, previewSystem](QVBoxLayout* v) {
+        // A PREVIEW IS RUNNING (issue #91): say so, and say what leaving does. Without this line the panel
+        // is indistinguishable from one where the user simply chose that theme — and the restore on the way
+        // out would then look like the app undoing their choice. The preview box below already shows the
+        // previewed theme, because it is the theme now.
+        if (themePreviewActive())
+        {
+            auto* note = new QLabel(tr("Previewing \"%1\" — leaving Settings puts your own theme back. "
+                                       "Pick it in the list to keep it.").arg(themePreviewFolder_));
+            note->setWordWrap(true);
+            note->setTextFormat(Qt::PlainText);   // a theme FOLDER name, which comes off a registry
+            note->setStyleSheet(QStringLiteral("font-weight:bold;"));
+            v->addWidget(note);
+        }
         auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"));
         enable->setChecked(themedHomeEnabled());
         connect(enable, &QCheckBox::toggled, this, [this](bool on) {
@@ -14525,6 +14636,16 @@ void MainWindow::openAppearance()
         browse->setMinimumHeight(40);
         connect(browse, &QPushButton::clicked, this, [this] {
             auto* dlg = new RegistryBrowser(RegistryBrowser::Themes, nullptr, this);
+            // PREVIEW (issue #91). The browser names the theme; applying one is MainWindow's — it owns the
+            // per-profile choice, the re-render and the restore, and the same two calls end a preview
+            // started on the themed gallery. The browser is then CLOSED, because the thing the user asked
+            // to look at is rendered by the panel this dialog is sitting on top of: Appearance's live
+            // preview box rebuilds from the just-written choice as soon as the panel is re-rendered, which
+            // the finished handler below does unconditionally.
+            dlg->setPreviewHandler([this, dlg](const QString& folder) {
+                beginThemePreview(folder);
+                dlg->closeWhenIdle();
+            });
             showDialogPanel(tr("Browse Themes"), dlg, [this](int) {
                 // Re-render Appearance EITHER WAY, install or not. availableThemes() reads the directory
                 // live, so a newly installed theme is in the list as soon as the panel is rebuilt. And it
@@ -14607,6 +14728,10 @@ void MainWindow::openAppearance()
         // theme the user chose on another device. Seed the preview only.
         if (QListWidgetItem* it = list->currentItem())
         { *shown = it->data(Qt::UserRole).toString(); rebuildPreview(*shown); }
+    // No endThemePreview() here either — see the themed builder. A preview ends when the SETTINGS AREA is
+    // left (leaveSettingsArea), which is the one edge both surfaces genuinely share; ending it one level
+    // earlier here would give the classic layout a shorter preview than the themed one for no reason the
+    // user could see.
     }, [this] { openSettingsHub(); });
 }
 #else
@@ -21272,6 +21397,15 @@ void MainWindow::enterSettingsArea()
 
 bool MainWindow::leaveSettingsArea(std::function<void(SettingsReturn)> proceed)
 {
+    // A THEME PREVIEW NEVER SURVIVES THE SETTINGS AREA (issue #91). Previewing writes the real theme choice
+    // — there is no lighter way to show a theme — so a preview the user walked out of by a door that is not
+    // Appearance's Back (Home, the F8 shortcut, a hub root) would otherwise be permanent and silent.
+    //
+    // BEFORE dirtyCount() below, deliberately: the restore puts that key back to the value this visit
+    // started with, so a visit whose only write was a preview is clean again and does not prompt the user
+    // to save or discard something they did not change.
+    endThemePreview();
+
     // Classify the return page BEFORE anything closes the transaction. Discard's rollback() fires the hook
     // installed in the ctor, which calls showHomeScreen() -> showThemedHome(): that reassigns themedHome_ and
     // deleteLater()s the widget panelReturnTo_ may be holding. Re-reading the pointer afterwards would compare

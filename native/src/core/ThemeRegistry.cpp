@@ -228,6 +228,17 @@ Index parseIndex(const QByteArray& json)
         e.zip         = o.value(QStringLiteral("zip")).toString();
         for (const QJsonValue& f : o.value(QStringLiteral("formFactors")).toArray())
             if (!f.toString().isEmpty()) e.formFactors << f.toString();
+        // Screenshots: optional, string elements only, at most kMaxScreenshots of them. A non-string element
+        // yields an empty string from .toString() and is skipped, the same degradation `version` and `zip`
+        // already have — a registry that puts an object in this array loses the picture, not the theme. The
+        // overflow is DROPPED here rather than making the entry an error: the theme is installable either way,
+        // and refusing one because its author listed nine screenshots would be the tail wagging the dog.
+        for (const QJsonValue& s : o.value(QStringLiteral("screenshots")).toArray())
+        {
+            if (e.screenshots.size() >= kMaxScreenshots) break;
+            const QString u = s.toString().trimmed();
+            if (!u.isEmpty()) e.screenshots << u;
+        }
 
         // Drop anything without a usable folder, so no caller ever holds an Entry it cannot install. This
         // is also what rejects the legacy flat "file"/"assets" shape: it has no dir.
@@ -566,13 +577,24 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     return true;
 }
 
-Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStringList& userRegistries)
+namespace {
+
+// THE HOST RULE, in one place. Both things an index entry may point at — the archive an install downloads
+// and a screenshot the row draws — resolve and are admitted through this, so there is exactly one copy of
+// "https, and the index's own host or one the user added" to get right, to mutate, and to read. Two copies
+// of it is how one surface ends up stricter than the other, which is the same class of defect the whole of
+// ThemeRegistry exists to prevent.
+//
+// `what` names the kind of thing in the refusal, because these sentences are read off a television by
+// someone who has to decide whether the registry or the app is at fault.
+Download resolveFromIndex(const QString& indexUrl, const QString& spec_, const QStringList& userRegistries,
+                          const QString& what)
 {
     Download out;
-    const QString spec = zip.trimmed();
+    const QString spec = spec_.trimmed();
     if (spec.isEmpty())
     {
-        out.error = QStringLiteral("This entry doesn't name a download.");
+        out.error = QStringLiteral("This entry doesn't name a %1.").arg(what);
         return out;
     }
 
@@ -580,14 +602,14 @@ Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStri
     if (!index.isValid() || index.host().isEmpty())
     {
         out.error = QStringLiteral("This registry's own URL names no host, so there is nothing to check a "
-                                   "download against.");
+                                   "%1 against.").arg(what);
         return out;
     }
 
     const QUrl raw(spec);
     if (!raw.isValid())
     {
-        out.error = QStringLiteral("This entry's download isn't a URL: %1").arg(spec);
+        out.error = QStringLiteral("This entry's %1 isn't a URL: %2").arg(what, spec);
         return out;
     }
     // Resolve FIRST, check afterwards. A relative "packs/x.zip" cannot leave the index's host by
@@ -597,13 +619,15 @@ Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStri
     const QUrl abs = raw.isRelative() ? index.resolved(raw) : raw;
     if (!abs.isValid() || abs.host().isEmpty())
     {
-        out.error = QStringLiteral("This entry's download doesn't resolve to a host: %1").arg(spec);
+        // Where a data: URL lands, and the reason it is refused BY SHAPE rather than by a scheme blacklist:
+        // it carries its payload instead of naming a host, so there is nothing for the host rule to check.
+        out.error = QStringLiteral("This entry's %1 doesn't resolve to a host: %2").arg(what, spec);
         return out;
     }
     if (abs.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) != 0)
     {
-        out.error = QStringLiteral("This entry's download isn't https (it is \"%1\"), so it was refused.")
-                        .arg(abs.scheme());
+        out.error = QStringLiteral("This entry's %1 isn't https (it is \"%2\"), so it was refused.")
+                        .arg(what, abs.scheme());
         return out;
     }
 
@@ -621,19 +645,62 @@ Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStri
         if (h.compare(abs.host(), Qt::CaseInsensitive) == 0) { hostOk = true; break; }
     if (!hostOk)
     {
-        out.error = QStringLiteral("This registry points its download at another host (%1), which is not "
-                                   "one you added. Refused.").arg(abs.host());
-        return out;
-    }
-
-    if (!abs.path().endsWith(QLatin1String(".zip"), Qt::CaseInsensitive))
-    {
-        out.error = QStringLiteral("This entry's download is not a .zip: %1").arg(abs.path());
+        out.error = QStringLiteral("This registry points its %1 at another host (%2), which is not "
+                                   "one you added. Refused.").arg(what, abs.host());
         return out;
     }
 
     out.url = abs.toString();
     return out;
+}
+
+} // namespace
+
+Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStringList& userRegistries)
+{
+    Download out = resolveFromIndex(indexUrl, zip, userRegistries, QStringLiteral("download"));
+    if (!out.ok()) return out;
+
+    // The one clause a screenshot does not share. An archive is unpacked and written into the themes
+    // folder, so it is named by what it is, and an entry whose "zip" is a .html is either a mistake or an
+    // attempt at something else — in both cases the right answer is to stop before the transfer.
+    const QUrl abs(out.url);
+    if (!abs.path().endsWith(QLatin1String(".zip"), Qt::CaseInsensitive))
+    {
+        out.url.clear();
+        out.error = QStringLiteral("This entry's download is not a .zip: %1").arg(abs.path());
+        return out;
+    }
+    return out;
+}
+
+Download screenshotUrlFor(const QString& indexUrl, const QString& shot, const QStringList& userRegistries)
+{
+    return resolveFromIndex(indexUrl, shot, userRegistries, QStringLiteral("screenshot"));
+}
+
+QStringList screenshotUrls(const QString& indexUrl, const Entry& entry, const QStringList& userRegistries)
+{
+    QStringList out;
+    for (const QString& s : entry.screenshots)
+    {
+        // The count is bounded HERE as well as in parseIndex, and not because the parse is untrusted: an
+        // Entry is a plain struct that a future caller may assemble itself, and this is the function that
+        // turns strings into requests. A bound applied only where the value is read from JSON is a bound on
+        // one of the two ways the value can arrive.
+        if (out.size() >= kMaxScreenshots) break;
+        const Download d = screenshotUrlFor(indexUrl, s, userRegistries);
+        if (d.ok() && !out.contains(d.url)) out << d.url;
+    }
+    return out;
+}
+
+bool previewShouldRestore(const QString& previewed, const QString& storedNow)
+{
+    // Nothing was ever applied, so there is nothing to put back. Stated first because "restore whatever we
+    // saved" with an empty previewed folder would write the saved value over a choice made since.
+    if (previewed.isEmpty()) return false;
+    return storedNow == previewed;
 }
 
 namespace {

@@ -6,6 +6,7 @@
 #pragma once
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 #include <QVariant>
 #include <QVariantList>
 #include <QVariantMap>
@@ -27,6 +28,13 @@ struct PanelRow {
     bool destructive = false; // styled with the warning accent (Uninstall)
     bool masked = false;      // TextField: render the value as dots (credentials) — the OSK editor is unchanged
 
+    // An optional picture for the row, as a LOCAL FILE PATH — the theme gallery's screenshot thumbnails
+    // (issue #91). Never a remote url: the QML would then do its own unbounded, unjudged download, and the
+    // whole of ThemeShots (the size cap, the magic-byte rule, the cache) exists so that it does not. Empty
+    // for every row that has no picture, which is every row this product had before, and an empty value
+    // renders nothing and occupies no width — the row is laid out exactly as it was.
+    QString thumbnail;
+
     // The single-row map SettingsPanel.qml's ListView delegate binds. Kind is marshaled as an int the QML
     // switches on (see SettingsPanel.qml's kind* readonly ints); options become a JS array of strings.
     QVariantMap toMap() const
@@ -42,6 +50,13 @@ struct PanelRow {
         m.insert(QStringLiteral("enabled"), enabled);
         m.insert(QStringLiteral("destructive"), destructive);
         m.insert(QStringLiteral("masked"), masked);
+        // Marshaled as a file: URL, not as the path. A bare path assigned to an Image's `source` is resolved
+        // against the QML file's own base url — which turns an absolute Windows path into a nonsense url and
+        // a POSIX one into a file with too many slashes — and getting that wrong is a picture that silently
+        // never appears. C++ holds the path (that is what every other caller deals in); the ONE conversion
+        // lives here, where kind is already converted to an int for the same reason.
+        m.insert(QStringLiteral("thumbnail"),
+                 thumbnail.isEmpty() ? QString() : QUrl::fromLocalFile(thumbnail).toString());
         return m;
     }
 };

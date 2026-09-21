@@ -115,6 +115,11 @@ public:
                  std::function<void(const QString& rowId, const QString& newValue)> onActivate,
                  std::function<void()> onBack);
     void updateRow(const QString& rowId, const PanelRow& row); // in-place (Progress/Info live updates)
+    // The row as it stands now, for a caller about to patch ONE of its fields. updateRow replaces the whole
+    // row, so an async patch (a theme screenshot arriving) must read the row it is amending rather than a
+    // copy taken when the panel was built — otherwise it hands back a verb that an install has since
+    // changed. Empty id in the returned row = no panel on the stack carries that id.
+    PanelRow rowById(const QString& rowId) const;
 
     // Swap the TOP panel's contents in place — same graph level, no push/pop — and re-render (lands on the first
     // selectable row). For a state-gated panel whose row SET changes (not just a value): Cloud Sync omits/adds

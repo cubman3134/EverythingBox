@@ -13,11 +13,15 @@
 
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/ProfileStore.h"        // the preview writes the per-PROFILE theme choice, like the picker
+#include "../core/ThemeChoice.h"         // …and ThemeChoice owns that key, both halves of it
 #include "../core/ThemeRegistry.h"
+#include "../core/ThemeShots.h"          // the screenshot fetch/cache, shared with the classic browser
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ThemedPanelHost.h"   // PanelRow — the row this patches after a removal
 
 #include <QDir>
+#include <QNetworkAccessManager>   // the shared docNam_ the screenshot fetch borrows
 #include <QSettings>
 #include <QString>
 #include <QStringList>
@@ -104,4 +108,80 @@ void MainWindow::removeInstalledTheme(ThemeRegistry::Entry entry, const QString&
     r.enabled = true;
     themedPanelHost_->updateRow(rowId, r);
     updatePanelInfo(QStringLiteral("treg.status"), tr("Removed \"%1\".").arg(label));
+}
+
+// ---- Preview: applying an installed theme, and putting the old one back (issue #91) --------------------
+//
+// "Preview" means APPLY. There is no lighter thing it could mean: a theme is a folder of QML and JSON that
+// the engine renders the product with, so the only way to show what one looks like is to make it the theme
+// — which is exactly what the picker's live preview does (ThemeChoice::setForProfile, then the surface
+// re-renders). What makes it a preview rather than a choice is that leaving restores the previous value.
+//
+// WHY THE RAW STORED VALUE IS WHAT IS SAVED, not currentThemeFolder(): Appearance shows a RESOLVED folder
+// while nothing at all may be stored (ThemeChoice::resolve falls back to the shipped theme). Writing that
+// resolution back on the way out would persist a choice the user never made — onto a key that SYNCS to
+// their other devices — and would silently answer the forced first-run pick for them. An empty restore is
+// written back as empty, which is the same fact as unset everywhere this key is read (forProfile returns
+// "" for both, and needsPick then stays true).
+void MainWindow::beginThemePreview(const QString& folder)
+{
+    if (folder.isEmpty()) return;
+    const QString profile = ProfileStore::currentId();
+    // FIRST preview only: a second Preview press (another theme, or the same one again) must not overwrite
+    // the saved value with the theme the first press applied, or leaving would restore a preview.
+    if (themePreviewFolder_.isEmpty()) themePreviewRestore_ = ThemeChoice::forProfile(profile);
+    themePreviewFolder_ = folder;
+    ThemeChoice::setForProfile(profile, folder);
+
+    // Make it visible where the user is standing. On the themed surface the panel itself is theme-rendered,
+    // so re-resolving its style block IS the preview landing (the same mechanism apply-on-select uses on
+    // Appearance); the full theme — home, browse, detail — lands the way it always does, when the surface is
+    // left and showHomeScreen rebuilds from the saved key. On the classic surface the Appearance panel's
+    // live preview box is rebuilt by its own re-render, which its caller drives.
+    if (themedPanelHost_) themedPanelHost_->setStyle(settingsPanelStyle());
+}
+
+void MainWindow::endThemePreview()
+{
+    if (themePreviewFolder_.isEmpty()) return;             // nothing is being previewed — not an error
+    const QString previewed = themePreviewFolder_;
+    const QString restore   = themePreviewRestore_;
+    themePreviewFolder_.clear();
+    themePreviewRestore_.clear();
+
+    const QString profile = ProfileStore::currentId();
+    // The one question worth asking on the way out, and ThemeRegistry answers it so it is pinned rather
+    // than inferred: is what is stored now still what the preview applied? If the user walked into Theme…
+    // while previewing and CHOSE something, that is a decision — restoring over it would silently undo it.
+    if (!ThemeRegistry::previewShouldRestore(previewed, ThemeChoice::forProfile(profile))) return;
+    ThemeChoice::setForProfile(profile, restore);
+    if (themedPanelHost_) themedPanelHost_->setStyle(settingsPanelStyle());
+}
+
+// ---- Screenshots: one thumbnail per row (issue #91) ---------------------------------------------------
+//
+// WHICH url may be fetched is ThemeRegistry's answer (https, the index's own host or one the user added, at
+// most four per entry, anything else dropped without a word). WHAT may then be cached and drawn is
+// ThemeShots' (2 MB held to as the bytes arrive, and the product's one magic-byte picture rule). Neither
+// question is answered here, and neither gallery answers it either — this is the single place the two halves
+// are joined, so the classic browser and the themed panel cannot end up with different bounds.
+//
+// The ROW gets the FIRST admitted screenshot. The rest of the array is what a detail view would show; there
+// is no detail view on either gallery today, and fetching pictures nothing can display would spend a TV's
+// connection on nothing.
+//
+// `then` does NOT fire when there is no picture: a row with no thumbnail is the row this product already
+// had, and every caller's "patch the row" path would otherwise have to re-derive that it should do nothing.
+void MainWindow::fetchThemeShot(const ThemeRegistry::Entry& entry, const QString& indexUrl,
+                                std::function<void(const QString&)> then)
+{
+    if (!then) return;
+    const QStringList urls = ThemeRegistry::screenshotUrls(indexUrl, entry, themeExtraRegistryUrls());
+    if (urls.isEmpty()) return;
+    const QString folder = entry.folder();
+    if (folder.isEmpty()) return;
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    ThemeShots::fetch(docNam_, folder, urls.first(), [then](const QString& path) {
+        if (!path.isEmpty()) then(path);
+    });
 }

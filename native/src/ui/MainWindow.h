@@ -1209,6 +1209,35 @@ private:
     // state a panel callback owns. The twin of removeDecorationPack, patching the row rather than rebuilding.
     void removeInstalledTheme(ThemeRegistry::Entry entry, const QString& rowId);
 
+    // PREVIEW (issue #91). An installed theme's row applies it LIVE — by writing the same per-profile choice
+    // the theme picker writes, because that is the only thing in this product that makes a theme visible —
+    // and LEAVING THE SETTINGS AREA puts the previous value back.
+    //
+    // That edge, rather than "leaving the panel it was started from", because it is the only one both
+    // surfaces really share: a nested themed panel pops by re-rendering its parent and never calls its own
+    // onBack, so a hook there would fire on classic and not on themed. leaveSettingsArea is the single door
+    // every exit goes through — Back out of the hub, Home, the F8 shortcut — and it is also where the
+    // restore has to happen for the settings transaction's dirty count to be honest about it.
+    //
+    // Both halves are here, on MainWindow, rather than on either gallery: the classic browser is a dialog
+    // that knows nothing about profiles or the themed host, and a preview started on one surface has to be
+    // ended by the same two lines as one started on the other.
+    //
+    // `themePreviewRestore_` is the RAW STORED VALUE, which may be empty (nothing stored yet — the picker
+    // shows a RESOLVED folder while nothing is committed). Restoring the resolved folder instead would
+    // persist a choice the user never made, onto a key that syncs to their other devices.
+    void beginThemePreview(const QString& folder);
+    void endThemePreview();                     // no-op when no preview is running
+    bool themePreviewActive() const { return !themePreviewFolder_.isEmpty(); }
+    QString themePreviewFolder_;                // the folder currently being previewed ("" = none)
+    QString themePreviewRestore_;               // what was stored before it started (may legitimately be "")
+
+    // One theme entry's row thumbnail: fetch the first screenshot the host rule admits and hand back the
+    // local file. Async and never blocking; `then` does not fire at all when there is no picture to draw.
+    // Shared by both galleries so neither can invent its own size cap or its own idea of a picture.
+    void fetchThemeShot(const ThemeRegistry::Entry& entry, const QString& indexUrl,
+                        std::function<void(const QString& localPath)> then);
+
     // ---- Themed decoration (bezel) pack gallery (issue #187): the twin of the classic
     // RegistryBrowser(Decorations), for exactly the reason the theme pair above exists. Packs come from the
     // SAME registry index document under a `decorations` key, and everything that is easy to get subtly

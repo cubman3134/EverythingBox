@@ -234,9 +234,31 @@ Rectangle {
                                             : (del.sel ? root.cAccent : Qt.darker(root.cRow, 1.25))
                 opacity: del.dim ? 0.5 : 1.0
 
+                // A row's picture — the theme gallery's screenshot thumbnail (issue #91). The source is a
+                // file: url of something the app itself fetched, held under a size cap and judged to be a
+                // picture by its own bytes (ThemeShots), so this Image never makes a request: pointing it
+                // at a registry's url would hand an unbounded, unjudged download to the QML engine.
+                //
+                // A row with no picture is laid out EXACTLY as it was before this existed: invisible, zero
+                // width, and the label keeps its own 18px margin off the card edge.
+                Image {
+                    id: thumb
+                    visible: source != ""
+                    source: (del.rowData && del.rowData.thumbnail) ? del.rowData.thumbnail : ""
+                    anchors.left: parent.left; anchors.leftMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: Math.round(38 * root.density)
+                    width: visible ? Math.round(height * 16 / 9) : 0
+                    fillMode: Image.PreserveAspectCrop
+                    clip: true
+                    asynchronous: true          // decoding a screenshot must not stall the list
+                    smooth: true
+                }
+
                 Text {   // left label (log rows anchor it to the top instead of centring)
                     id: lbl
-                    anchors.left: parent.left; anchors.leftMargin: 18
+                    anchors.left: thumb.visible ? thumb.right : parent.left
+                    anchors.leftMargin: thumb.visible ? 12 : 18
                     anchors.right: rightSide.left; anchors.rightMargin: 12
                     anchors.verticalCenter: del.isLog ? undefined : parent.verticalCenter
                     anchors.top: del.isLog ? parent.top : undefined

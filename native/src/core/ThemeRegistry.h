@@ -48,6 +48,20 @@ inline constexpr qint64 kMaxTotalBytes = 32 * 1024 * 1024;
 // filesUnder already refuses), so a registry holding hundreds of themes lists in well under 500 KB.
 inline constexpr qint64 kMaxListingBytes = 4 * 1024 * 1024;
 
+// ---- Screenshots (issue #91) -------------------------------------------------------------------------
+//
+// An entry may advertise pictures of itself. They are DECORATION: nothing about installing, updating or
+// removing a theme depends on one, and a row whose pictures were all refused is exactly the row it was
+// before this existed. So every bound here fails toward "no picture", never toward "no theme".
+//
+// FOUR per entry, because the row draws one and a detail view would show the rest; a list of forty URLs in
+// a public document is forty requests the browser would make on the user's connection for one row of text.
+// TWO MEGABYTES each, which is generous for a screenshot of a television UI (a 1080p PNG of a dark theme is
+// a few hundred KB) and is the number the two fetch paths hold the transfer to as it arrives — see
+// ThemeShots, which is where the cap is applied, because a size checked after readAll() bounds nothing.
+inline constexpr int    kMaxScreenshots     = 4;
+inline constexpr qint64 kMaxScreenshotBytes = 2 * 1024 * 1024;
+
 struct Entry {
     QString     name;          // display text ONLY — never used as a path
     QString     author;
@@ -68,6 +82,14 @@ struct Entry {
     // request.
     QString     version;
     QString     zip;
+
+    // OPTIONAL pictures of the theme, in the order the registry listed them: the first is the row's
+    // thumbnail and the rest are a detail view's. Kept as the registry SPELLED them — relative or absolute,
+    // unchecked — because an entry's strings are attacker-supplied and the only thing allowed to turn one
+    // into a request is screenshotUrlFor, exactly as `zip` may only become one through downloadUrlFor. At
+    // most kMaxScreenshots survive the parse; anything past that is ignored and the entry is otherwise
+    // untouched, because a theme with five screenshots is still a theme.
+    QStringList screenshots;
 
     // The install folder: the last segment of `dir`. Empty when `dir` is unusable, which is the single
     // predicate callers check — parseIndex already drops those, so an Entry in hand always has one.
@@ -257,6 +279,35 @@ struct Download
     bool ok() const { return error.isEmpty(); }
 };
 Download downloadUrlFor(const QString& indexUrl, const QString& zip, const QStringList& userRegistries);
+
+// A SCREENSHOT's URL, under exactly the rule above and through the same code: resolved against the index,
+// https, and on the index's own host or on a host the user added themselves. A picture is fetched, decoded
+// by an image library and drawn — it is not a more innocent kind of URL than an archive is, and a registry
+// that may point one at any host may probe the user's network and name it a thumbnail.
+//
+// The one clause it does NOT carry is the .zip suffix: a screenshot's extension says nothing useful (plenty
+// of real image URLs end in a query, a hash or nothing at all), and the question "are these bytes a picture"
+// is answered from the BYTES by ThemeShots. So the extension is not consulted here at all rather than
+// consulted loosely, which would read as a check while admitting "shot.png.exe".
+Download screenshotUrlFor(const QString& indexUrl, const QString& shot, const QStringList& userRegistries);
+
+// Every screenshot of `entry` that may be fetched, absolute and in the registry's own order, at most
+// kMaxScreenshots of them. A URL that fails the rule is DROPPED SILENTLY: it is a picture that will not be
+// shown, the row reads exactly as it did before pictures existed, and there is nothing the user of a
+// television can do about someone else's registry. (The refusal reason is not lost to the developer — it is
+// screenshotUrlFor's, and a caller that wants it asks that directly.)
+QStringList screenshotUrls(const QString& indexUrl, const Entry& entry, const QStringList& userRegistries);
+
+// ---- Previewing an installed theme (issue #91) --------------------------------------------------------
+//
+// Preview APPLIES the theme — it writes the same per-profile choice the picker writes, because that is the
+// only thing in this product that makes a theme visible — and leaving the surface puts the old value back.
+// So the restore has to answer one question honestly: is the thing that would be put back still an undo?
+//
+// Only when what is stored NOW is still the folder the preview applied. If the user walked into Theme… mid
+// preview and chose something, that is a decision, not a preview, and restoring over it would silently undo
+// a choice the user made deliberately. Pure, so the rule is pinned rather than inferred from two call sites.
+bool previewShouldRestore(const QString& previewed, const QString& storedNow);
 
 // ---- Is the registry offering something newer than what is installed? ---------------------------------
 //
