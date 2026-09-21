@@ -1804,6 +1804,9 @@ private:
     // push, and show a bar with no marks on it at all.
     QString                  themedMarkSig_;
     const QObject*           themedMarkRoot_ = nullptr;
+    // The last markup line written to stream_debug.log, so the three triggers say what the bar holds once
+    // per change rather than once per call.
+    QString                  lastMarkLog_;
     void gatherSegments();
     // Re-run gatherSegments() after the user marks or forgets a range, so the mark applies to the rest of THIS
     // episode. The latch is dropped HERE and not inside gatherSegments(): the once-per-open guarantee exists to

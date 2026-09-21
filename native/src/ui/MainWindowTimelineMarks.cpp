@@ -32,8 +32,28 @@
 #include <QQuickItem>
 #endif
 
+#include "../core/AppPaths.h"
+
+#include <QDateTime>
+#include <QFile>
 #include <QStringList>
 #include <QVariantMap>
+
+namespace {
+
+// The same one-line append to <app>/stream_debug.log that MainWindow.cpp's mwLog does, copied for the same
+// reason MainWindowOpenFail.cpp copies it: mwLog is a file-static there. Markup that does not appear is the
+// failure mode of this whole feature, and it is silent by design — so the one thing the log has to be able
+// to answer is "what did the bar actually get handed", which is what this line says.
+void tmLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg
+                 + QStringLiteral("\n")).toUtf8());
+}
+
+} // namespace
 
 // The one place the model is built. Cheap enough to run on any of its three triggers: a handful of chapters
 // and at most a few ranges, no allocation that matters, no I/O.
@@ -50,6 +70,18 @@ void MainWindow::refreshTimelineMarks()
 {
     const TimelineMarks::Marks m = timelineMarkModel();
     if (seek_) seek_->setMarks(m);
+    // Said once per CHANGE, not per call: the three triggers fire a handful of times per open, and a line
+    // per repaint would drown the log this one exists to be findable in.
+    QStringList shape;
+    for (double t : m.ticks) shape << QString::number(t, 'f', 1);
+    for (const TimelineMarks::Band& b : m.bands)
+        shape << QStringLiteral("%1 %2-%3").arg(b.kind == TimelineMarks::BandKind::Intro
+                                                    ? QStringLiteral("intro") : QStringLiteral("credits"),
+                                                QString::number(b.start, 'f', 1), QString::number(b.end, 'f', 1));
+    const QString line = QStringLiteral("marks: %1 tick(s), %2 band(s) over %3 s [%4]")
+                             .arg(m.ticks.size()).arg(m.bands.size())
+                             .arg(QString::number(m.duration, 'f', 1), shape.join(QStringLiteral(", ")));
+    if (line != lastMarkLog_) { lastMarkLog_ = line; tmLog(line); }
 #ifdef EB_HAVE_QML
     pushThemedTimelineMarks();
 #endif
