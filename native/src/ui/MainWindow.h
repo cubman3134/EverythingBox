@@ -44,6 +44,8 @@ namespace FileDrop { class Uploads; }  // issue #115: held by shared_ptr only
 #include "../comic/PageSupply.h"    // PageSupplyOptions — what a page supplier may ask of openImagePages
 #include "../ebook/OpdsPse.h"       // OpdsPseLink — pseLink_ is a value member (#153)
 #include "../core/Trickplay.h"      // issue #85: Trickplay::Index is a value member (Qt-Core-only, header-only)
+#include "TimelineMarks.h"          // issue #85: TimelineMarks::Marks is returned by value (same, header-only)
+#include "SeekSlider.h"             // …and seek_ is a SeekSlider*, which is what carries the marks
 #include "../core/TrickplayIdle.h"  // issue #302: TrickplayIdle::Conditions is returned by value below
 #include <QPixmap>                  // …and the one decoded preview grid is held by value beside it
 
@@ -637,6 +639,25 @@ private:
     // per-book speed memory and the segment stack each ask this question and three answers would be three
     // features that disagreed about whether the thing playing has chapters.
     QVector<MediaSegments::Chapter> currentChapters() const;
+
+    // ---- issue #85: the marked-up timeline (MainWindowTimelineMarks.cpp) ------------------------------
+    // Rebuild the seek bar's chapter ticks and intro/credits bands out of what this window already holds
+    // for the file that is open — currentChapters() and segArmed_ — and hand the SAME model to both the
+    // classic transport and the themed now-playing bar. Called wherever one of those two inputs changes:
+    // the segment arm, the chapter count landing, and the per-file reset. No fetch, no setting, no timer.
+    void refreshTimelineMarks();
+    // The model itself: chapter boundaries + armed intro/credits ranges for the file that is open, or an
+    // empty set when there is nothing to mark (and for a length that still belongs to the previous file).
+    TimelineMarks::Marks timelineMarkModel() const;
+#ifdef EB_HAVE_QML
+    void pushThemedTimelineMarks();
+#endif
+    // The marks as the themed QML bar positions things: fractions of the bar it is drawing, which inside a
+    // multi-file audiobook is the whole BOOK's timeline rather than this part's. A cheap signature of the
+    // two lists gates the push, because a QML binding fed the same value again does not re-evaluate.
+    QVariantList timelineTickFractions() const;
+    QVariantList timelineBandSpans() const;
+    QString      timelineMarkSignature() const;
     // The Settings line that says whether any audiobook servers are set up. The twin of
     // musicServerStatusLine, and the ONE place either builder says it.
     QString audiobookServerStatusLine() const;
@@ -1772,6 +1793,17 @@ private:
     // would reset() the tracker and wipe its consumed_ set — re-offering a segment the user already passed
     // (duplicate seek + duplicate notice) and repeating the synchronous .edl disk read on the GUI thread.
     bool                     segGathered_ = false;
+    // What the last arm RESOLVED to, kept so the seek bar can shade it (issue #85). The Tracker owns the
+    // same list but privately and for a different purpose — it is consuming them one at a time — and asking
+    // it to also be the bar's model would make "already offered" and "still drawn" the same fact, which they
+    // are not: a skipped intro is still an intro, and its band stays on the bar.
+    QVector<MediaSegments::Segment> segArmed_;
+    // The themed bar's last-pushed mark signature, and the root it was pushed INTO. The root is an identity
+    // only — compared, never dereferenced — because a themed page is rebuilt as a fresh ThemeView whenever
+    // the view changes: without it, a page reopened on the same file would match the signature, skip the
+    // push, and show a bar with no marks on it at all.
+    QString                  themedMarkSig_;
+    const QObject*           themedMarkRoot_ = nullptr;
     void gatherSegments();
     // Re-run gatherSegments() after the user marks or forgets a range, so the mark applies to the rest of THIS
     // episode. The latch is dropped HERE and not inside gatherSegments(): the once-per-open guarantee exists to
@@ -2555,7 +2587,10 @@ private:
     QPointF playerTouchStart_;          // TouchBegin pos, for the pre-#162 tap-vs-drag discriminator
     bool    playerTouchTap_ = false;    // the in-flight touch is still a tap candidate (small travel, 1 finger)
     QStackedWidget* stack_ = nullptr;
-    QSlider* seek_ = nullptr;
+    // Typed as the SeekSlider it has always been constructed as, rather than as a plain QSlider: the bar now
+    // has an API of its own (setMarks — issue #85's chapter ticks and intro/credits bands), and everything
+    // else about it is QSlider's, so every existing use is unchanged.
+    SeekSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
     QSlider* volume_ = nullptr;        // player volume (0..200; above 100% = software boost)
     void applyPlayerVolume();          // push volume_ scaled by the sleep fade to mpv — the only writer

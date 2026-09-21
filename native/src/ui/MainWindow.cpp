@@ -2415,6 +2415,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // re-shaped here — otherwise a chaptered book opens with no chapter buttons until the next session.
         chapterCount_ = count;
         if (themedAudioSession_) pushThemedAudioTransport();
+        // …and for the same reason the seek bar's ticks are (re)placed here: mpv reports the chapter list
+        // after the load, so a bar marked up at open time would have been marked up with nothing (#85).
+        refreshTimelineMarks();
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
@@ -7953,6 +7956,8 @@ void MainWindow::resetSegmentState()
     // starts playback first (which reaches here) and only then asks for the segments, precisely so that
     // this line cannot wipe the answer it is waiting for.
     jellyfinSegments_.clear();
+    segArmed_.clear();      // #85: and the bar's shading with them — a new file is never marked up as the old one
+    themedMarkSig_.clear(); // …so the next push is a change even if the new file's marks happen to match
     segGathered_ = false;
     hideSkipChip();         // the previous file's offer dies with it — never inherited by the new one
     skipChipSeg_ = {};      // …including the range it was holding: stale per-playback state, cleared like the rest
@@ -7967,6 +7972,10 @@ void MainWindow::resetSegmentState()
     // marks menu both refuse a number whose epoch is not the current one.
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
+    // #85: clear the bar's markup — AFTER the epoch bump, which is what makes timelineMarkModel() refuse the
+    // length (and so the chapters) still standing from the file that just ended. Refreshed above the bump it
+    // would redraw the OLD file's ticks onto the bar of the new one.
+    refreshTimelineMarks();
     // ABANDONING, not committing. A queue advance or a next-episode hand-off opens a new file while STAYING
     // on the player page, so none of the five user-initiated exits runs: a listener aiming the seek bar near
     // the end of a chapter, whose file hits EOF underneath them, would keep the latch across the boundary and
@@ -12697,6 +12706,10 @@ void MainWindow::updateThemedAudioProgress()
     r->setProperty("audioPartEnd", bookPartEnd());
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
+    // #85: the chapter ticks and intro/credits bands, as fractions of THIS bar (which inside a book is the
+    // book's timeline, so they are offset and rescaled the same way the position above is). Cheap because
+    // the push itself is gated on the marks having changed — see pushThemedTimelineMarks.
+    pushThemedTimelineMarks();
     // Karaoke sync (#142): the current line comes from refreshLyricLine, which both layouts share — it applies
     // this track's remembered offset and pushes the index only when it changes. This tick is already throttled
     // to whole-second position changes (~1 Hz), so the line moves at most once a second.
@@ -12716,6 +12729,8 @@ void MainWindow::pushThemedAudioQueue()
     for (const QString& t : themedAudioQueue_) q << t;
     r->setProperty("audioQueue", q);
     r->setProperty("audioQueueCurrent", themedAudioCurrent_);
+    // #85: this runs when the page is (re)built, which is the other moment its bar has no marks on it yet.
+    pushThemedTimelineMarks();
     // #193: the queue can now change LENGTH while this page is open. syncAudioPageZone counts this zone once,
     // when the view flips — so after an insert the added row would be unreachable, and after a remove the
     // cursor could still walk onto (and Enter) a row that is no longer there. Recounted here, at the one choke
@@ -29296,6 +29311,11 @@ void MainWindow::gatherSegments()
               .arg(chapters.size()).arg(learnedInherited.size())
               .arg(segCtx_.seriesKey.isEmpty() ? QStringLiteral("—") : segCtx_.seriesKey).arg(segCtx_.season));
     segTracker_.reset(resolved);
+    // …and the same ranges go to the SEEK BAR (issue #85). Fed from the resolved set rather than from any
+    // one tier, so what is shaded is exactly what would be skipped — and re-fed here, which is what makes a
+    // freshly marked intro appear on the bar the moment regatherSegments runs.
+    segArmed_ = resolved;
+    refreshTimelineMarks();
 }
 
 // A segment was just entered: take it (auto) or offer it (the chip).
@@ -29559,6 +29579,11 @@ void MainWindow::onDuration(double seconds)
         player_->setPosition(at);
 
     gatherSegments();
+    // Issue #85 (timeline markup): every mark is a TIME laid out against this length, so the length landing
+    // is the moment the bar can place them. Outside gatherSegments on purpose — that call is once-per-open
+    // and has several early returns (audio, the skip setting off), none of which mean "this file has no
+    // chapters to tick".
+    refreshTimelineMarks();
     // Issue #85: the length is also what tells the seek-preview side which file the bar now describes.
     // Idempotent across mpv's repeated `duration` emissions for the same file (see armTrickplay).
     armTrickplay();

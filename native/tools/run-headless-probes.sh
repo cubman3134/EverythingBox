@@ -3585,6 +3585,7 @@ tp_note() { echo "  $1"; tp_fail=1; }
 # The host files that reach the themed scene. Every setProperty RECEIVER in these is classified below.
 TP_HOSTS=(
   "$HERE/../src/ui/MainWindow.cpp"
+  "$HERE/../src/ui/MainWindowTimelineMarks.cpp"
   "$HERE/../src/theme2/ThemeEngine.cpp"
   "$HERE/../src/theme2/ThemedPanelHost.cpp"
   "$HERE/../src/theme2/ThemePickerHost.cpp"
@@ -3596,6 +3597,7 @@ TP_ROOTS=(
   'MainWindow.cpp:r'
   'MainWindow.cpp:rr'
   'MainWindow.cpp:dr'
+  'MainWindowTimelineMarks.cpp:r'
   'ThemeEngine.cpp:r'
   'ThemeEngine.cpp:root'
 )

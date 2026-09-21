@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.305 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.306 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -960,6 +960,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowGestures.cpp
         # Issue #85: the seek-preview overlay's MainWindow members, same rule as the row above.
         src/ui/MainWindowTrickplay.cpp
+        # Issue #85 again: the marked-up timeline (chapter ticks + shaded intro/credits ranges).
+        src/ui/MainWindowTimelineMarks.cpp
+        src/ui/TimelineMarks.h   # the pure time -> pixel geometry both bars lay their marks out with
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
         src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
@@ -3942,7 +3945,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Header-only unit, so there is no .cpp to also add to the app's source list (the issue-#182 trap);
     # links nothing but Qt6::Core, which it needs only for the Qt::Key_* enum.
     add_executable(probe_playerbar tools/probe_playerbar.cpp
-        src/ui/PlayerBarNav.h)
+        src/ui/PlayerBarNav.h
+        src/ui/TimelineMarks.h)
     target_include_directories(probe_playerbar PRIVATE src src/ui)
     target_link_libraries(probe_playerbar PRIVATE Qt6::Core)
 

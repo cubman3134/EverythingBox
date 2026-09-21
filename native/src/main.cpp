@@ -45,7 +45,7 @@
 #include "core/QuitSignals.h"  // issue #409: SIGTERM/SIGINT/SIGHUP close the window instead of being dropped
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.305";
+static constexpr const char* kAppVersion = "0.6.306";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
