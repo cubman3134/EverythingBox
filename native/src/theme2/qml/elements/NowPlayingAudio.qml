@@ -45,6 +45,10 @@ Item {
     // span of the part playing within it. Both 0 for every other kind of audio — see ThemeView.qml.
     readonly property real partStart: host ? host.audioPartStart : 0
     readonly property real partEnd: host ? host.audioPartEnd : 0
+    // Issue #85: what the file contains, as fractions of this bar — chapter boundaries, and the intro /
+    // credits ranges. Both empty for anything that has neither, which is a bar drawn exactly as before.
+    readonly property var markTicks: (host && host.audioMarkTicks) ? host.audioMarkTicks : []
+    readonly property var markBands: (host && host.audioMarkBands) ? host.audioMarkBands : []
     readonly property bool paused: !!(host && host.audioPaused)
     readonly property real spd: host ? host.audioSpeed : 1.0
 
@@ -223,6 +227,41 @@ Item {
                 width: parent.width * Math.max(0, progress.highFrac - progress.lowFrac)
                 height: parent.height; radius: parent.radius
                 color: Qt.rgba(1, 1, 1, 0.34)
+            }
+            // ISSUE #85 — the markup, and it is declared HERE, above the fill and the knob, because QML
+            // paints siblings in declaration order: a band or a tick drawn over the played colour would
+            // compete with the one thing the bar exists to say (where you are), and one drawn over the knob
+            // would smudge the only control on it. So the marks sit under both and emerge as the fill
+            // passes them — the same z-order the classic SeekSlider achieves with a clip region.
+            //
+            // Positions are FRACTIONS computed by the host (see ThemeView.qml): the element does no
+            // timeline arithmetic of its own, which is what keeps the two bars from ever disagreeing about
+            // where a chapter is — and is also why a book-scale bar needs no special case here.
+            Repeater {
+                model: page.markBands
+                Rectangle {
+                    required property var modelData
+                    visible: page.dur > 0
+                    x: bar.width * Math.max(0, Math.min(1, modelData.start))
+                    width: Math.max(1, bar.width * Math.max(0, Math.min(1, modelData.end) - Math.min(1, modelData.start)))
+                    height: bar.height; radius: bar.radius
+                    // The theme's own accent for the intro, its text colour for the credits — both as
+                    // washes, so the track under them is still visibly track. No literal colours: a theme
+                    // that repaints this page repaints its markup with it.
+                    color: modelData.kind === "credits" ? Qt.rgba(page.fg.r, page.fg.g, page.fg.b, 0.30)
+                                                        : Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.42)
+                }
+            }
+            Repeater {
+                model: page.markTicks
+                Rectangle {
+                    required property real modelData
+                    visible: page.dur > 0
+                    width: Math.max(2, bar.height * 0.5)
+                    height: bar.height
+                    x: bar.width * Math.max(0, Math.min(1, modelData)) - width / 2
+                    color: Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.95)
+                }
             }
             Rectangle {
                 id: fill

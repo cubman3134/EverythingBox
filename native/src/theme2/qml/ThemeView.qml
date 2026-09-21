@@ -76,6 +76,16 @@ Item {
     // one file's and scrubs across all of it, which is every other kind of audio there is.
     property real audioPartStart: 0
     property real audioPartEnd: 0
+    // Issue #85, the marked-up timeline. What the file being played CONTAINS, drawn on the same bar: a tick
+    // at every chapter boundary and a shaded band over the intro and the end credits. Both arrive as
+    // fractions of the bar the page is drawing (so the element never has to know what a second is, nor that
+    // a book's bar is a different timeline from its part's) — audioMarkTicks is a list of numbers in [0,1],
+    // audioMarkBands a list of { start, end, kind } with kind "intro" or "credits". MainWindow computes them
+    // from the chapters and the ARMED segment set, through the same TimelineMarks header the classic
+    // transport bar paints from, and pushes them only when they change. Empty for anything unchaptered and
+    // unsegmented, which is a bar that draws exactly what it drew before.
+    property var audioMarkTicks: []
+    property var audioMarkBands: []
     property bool audioPaused: false
     property real audioSpeed: 1.0
     property var audioQueue: []
