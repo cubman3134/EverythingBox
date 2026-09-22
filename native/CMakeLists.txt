@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.309 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.310 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -637,6 +637,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CustomCores.cpp        src/core/CustomCores.h
         src/core/CustomCoreInstall.cpp  src/core/CustomCoreInstall.h
         src/libretro/CoreInspect.cpp    src/libretro/CoreInspect.h
+        # Issue #98's "All cores" browser: the pure buildbot index reader (which now also owns the platform's
+        # buildbot naming CoreManager uses) and the fetch/extract/inspect/swap install path.
+        src/core/BuildbotIndex.cpp      src/core/BuildbotIndex.h
+        src/core/BuildbotInstall.cpp    src/core/BuildbotInstall.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         # PS3 auto-update units: run for RPCS3 before boot to install a game's official Sony update PKG chain.
         src/core/ps3/Ps3Sfo.cpp              src/core/ps3/Ps3Sfo.h
@@ -1585,6 +1589,25 @@ if(EVERYTHINGBOX_BUILD_APP)
     set_target_properties(probe_customcore_fixture probe_customcore_notacore PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:probe_customcore>"
         RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:probe_customcore>")
+
+    # Issue #98 increments 2-3 (the "All cores" browser): the buildbot index parser and its caps and name
+    # refusals, catalogue / installed-custom / available classification, the https + buildbot-host rule as a
+    # pure function and the EB_UITEST-gated loopback override, and the install / inspect / update / atomic-swap
+    # byte path driven against a loopback stub with the policy injected. The zips it serves hold the SAME
+    # fixture stub core probe_customcore builds from source (found by name beside this probe, so it depends on
+    # those two MODULE targets and shares their output directory). QtCore + QtNetwork, offscreen-safe.
+    add_executable(probe_buildbotindex tools/probe_buildbotindex.cpp
+        src/core/BuildbotIndex.cpp      src/core/BuildbotIndex.h
+        src/core/BuildbotInstall.cpp    src/core/BuildbotInstall.h
+        src/core/CustomCores.cpp        src/core/CustomCores.h
+        src/core/CustomCoreInstall.cpp  src/core/CustomCoreInstall.h
+        src/libretro/CoreInspect.cpp    src/libretro/CoreInspect.h
+        src/core/SystemCatalog.h
+        third_party/miniz.c)
+    target_include_directories(probe_buildbotindex PRIVATE src src/core src/libretro third_party)
+    target_compile_definitions(probe_buildbotindex PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_buildbotindex PRIVATE Qt6::Core Qt6::Network)
+    add_dependencies(probe_buildbotindex probe_customcore_fixture probe_customcore_notacore)
 
     # Emulation Context Menu Task 1: the pure scope/context helper (src/core/EmulationScope.h, header-only) —
     # contextKind (game/console/none from browse-focus bools) + initialScope (which layer the Start panel opens on).

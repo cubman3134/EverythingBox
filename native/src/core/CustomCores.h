@@ -17,7 +17,8 @@
 // THE REF. A custom core is named "custom:<id>" everywhere a catalogue core is named by its base name. The
 // prefix is load-bearing three times over: it can never collide with a buildbot core name (none contains a
 // colon), it tells CoreManager to resolve the path from THIS registry instead of building a buildbot URL — so a
-// custom core is never downloaded, only ever loaded from the file the user named — and it makes every log line
+// custom core is never fetched by a launch, only ever loaded from its registered file (the "All cores" browser
+// downloads one only when the user presses Install or Update, through BuildbotInstall) — and it makes every log line
 // that carries a core name self-labelling, which is the "crashes are labelled as coming from a custom core"
 // half of the warranty below.
 //
@@ -56,13 +57,22 @@ struct CustomCore
     bool        needFullpath = false;   // retro_get_system_info().need_fullpath
     QString     needs;        // "" = nothing missing; else the sentence naming what this core asked us for
     qint64      addedAt = 0;  // epoch ms, registration order tiebreak (the list order is authoritative)
+    // WHERE IT CAME FROM (the "All cores" browser, #98 increments 2-3). All three empty for a core loaded by
+    // hand — which is what makes "a hand-loaded core never shows an update" true by construction: there is no
+    // index entry it can be compared against. A core installed from the buildbot records the source, the zip's
+    // file name in the index, and the index date it was installed from; an index carrying a later date for the
+    // same file is an update.
+    QString     source;       // "" (loaded by hand) or CustomCores::sourceBuildbot()
+    QString     sourceFile;   // the index's file field, e.g. "2048_libretro.dll.zip"
+    QString     sourceDate;   // the index date it came from, "yyyy-MM-dd"
 };
 
 inline bool operator==(const CustomCore& a, const CustomCore& b)
 {
     return a.id == b.id && a.path == b.path && a.name == b.name && a.version == b.version
         && a.extensions == b.extensions && a.supportsNoGame == b.supportsNoGame
-        && a.needFullpath == b.needFullpath && a.needs == b.needs && a.addedAt == b.addedAt;
+        && a.needFullpath == b.needFullpath && a.needs == b.needs && a.addedAt == b.addedAt
+        && a.source == b.source && a.sourceFile == b.sourceFile && a.sourceDate == b.sourceDate;
 }
 inline bool operator!=(const CustomCore& a, const CustomCore& b) { return !(a == b); }
 
@@ -77,6 +87,9 @@ struct CustomCoreRegistry
 
 namespace CustomCores
 {
+    // CustomCore::source for a core the "All cores" browser installed.
+    inline QString sourceBuildbot() { return QStringLiteral("buildbot"); }
+
     // ---- pure vocabulary: the "custom:<id>" ref ----------------------------------------------------------
     QString refFor(const QString& id);          // "custom:<id>" ("" for an empty id)
     bool    isCustomRef(const QString& ref);    // does this core name belong to the custom tier?
@@ -110,9 +123,9 @@ namespace CustomCores
 
     // PURE. May the frontend FETCH this core when it is not installed? False for a custom ref and true for
     // every catalogue core. The policy behind CoreManager's two download paths, spelled here so it is pinned
-    // by a probe rather than only by reading the call sites: #98 loads a file the user already has, and the
-    // moment a custom ref could reach a buildbot URL the feature would have quietly grown a download it was
-    // explicitly scoped not to have (the "All cores" browser is the increment after this one).
+    // by a probe rather than only by reading the call sites: a launch loads the file the user already has, and
+    // the moment a custom ref could reach a buildbot URL a missing file would quietly turn into a download. The
+    // "All cores" browser is the ONE place a custom core is fetched, and only on the user's Install / Update.
     bool mayDownload(const QString& coreName);
 
     // The cores that earn a direct Run entry: exactly those declaring supports_no_game. A content-requiring

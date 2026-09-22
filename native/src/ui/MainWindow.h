@@ -51,6 +51,7 @@ namespace FileDrop { class Uploads; }  // issue #115: held by shared_ptr only
 
 namespace LaunchOpts { struct Override; }   // issue #189: the per-game content levers' row-value helper
 class MpvWidget;
+struct CustomCore;          // issue #98: a registered custom core (announceCustomCore takes one)
 class TrickplayGen;         // issue #85: the seek-preview background job, held as a pointer
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
@@ -1099,6 +1100,9 @@ private:
     void presentCustomCores();                                   // the custom-core panel (nested under the picker)
     void loadCustomCoreFromPicker();                             // native file dialog -> registerCustomCore
     bool registerCustomCore(const QString& file);                // load+register one file; fires the one-time notice
+    void announceCustomCore(const CustomCore& rec, const QString& done); // the one-time notice, then needs / `done`
+    void presentAllCores(bool refetch = false);                  // the "All cores" buildbot browser (nested here)
+    void installFromAllCores(const QString& coreName);           // install / update one browser entry (async)
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
     // Scope-aware overload (Task 3): in ThisGame scope (non-empty token) each row reads/writes the per-game
     // core-option DELTA layer (issue #95, Settings::gameOptionValue); Universal reads/writes the per-core

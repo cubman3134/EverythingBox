@@ -6,8 +6,9 @@ point of the app — but until now it was also a wall. A core we deliberately ex
 table, a fork you built yourself, or something that is not an emulator at all (a game engine like `2048` or
 `mrboom`) simply could not run.
 
-**Custom cores are the way out.** You point EverythingBox at a core file you already have, and it becomes a
-choice you can make — for one game, or for a whole system.
+**Custom cores are the way out.** You point EverythingBox at a core file you already have — or pick one from
+the libretro buildbot in the **All cores** browser — and it becomes a choice you can make, for one game or for a
+whole system.
 
 ## Loading one
 
@@ -68,9 +69,47 @@ it wants by **calling the frontend back**, and only the calls it makes during `r
 visible before it runs. Anything it demands later — inside `retro_init`, at load time, or on the first frame —
 cannot be seen up front, so this list is what the core told us, never a guarantee that it will work.
 
-**It will never download a core.** This feature loads a file *you* already have. `custom:` cores are excluded
-from the buildbot fetch entirely: if a registered core's file is gone, the launch fails saying so rather than
-going looking for a replacement.
+**It will never download a core behind your back.** A custom core is only ever fetched when *you* press
+Install or Update in the All cores browser (below). `custom:` cores are excluded from the launch-time buildbot
+fetch entirely: if a registered core's file is gone, the launch fails saying so rather than going looking for a
+replacement.
+
+## The All cores browser
+
+**Settings ▸ Emulator Settings ▸ Custom cores… ▸ All cores (libretro buildbot)…** (both layouts — a panel on the
+themed home, a page on the classic one).
+
+It lists every core on the [libretro buildbot](https://buildbot.libretro.com/nightly/) for this platform that
+EverythingBox does **not** already ship, with the date of its latest build, and a search box. Cores the catalogue
+already knows (FCEUmm, mGBA, …) are not listed: they install the normal way, the first time you open a game that
+needs one.
+
+- **Install** downloads the core, checks it, and registers it as a custom core — exactly as if you had loaded the
+  file by hand. So the one-time *not curated* notice, the note about anything the core asked for that we can't
+  provide, and the per-system / per-game choice all apply to it the same way.
+- **Update available** appears beside a core you installed from here when the buildbot has a build with a later
+  date. Choosing it fetches the new build and swaps it in.
+- A core you **loaded by hand** is shown as *Installed (loaded by hand)* and is never offered an update: EverythingBox
+  can't know which build your file is. Load the new file to update it.
+
+### What it does, and what it refuses
+
+- **Where it downloads from.** Only `https://buildbot.libretro.com` — the same host EverythingBox already fetches
+  catalogue cores from. Plain http, another host, another port, or a redirect to any of those is refused before a
+  byte is fetched (or the moment the redirect arrives).
+- **How much.** The core list is read up to 4 MiB and at most 2,000 cores; a core download up to 256 MiB. A line
+  of the list it can't read is skipped (and counted in the page's "Not listed" line) — one bad line never costs
+  you the rest.
+- **What names.** A core's name becomes a file name on your disk, so only plain names are accepted — letters,
+  digits, `_`, `-`, `+`. Anything carrying a path (`../`, a folder, a drive, a dot) is refused, and only this
+  platform's own file (`<name>_libretro.dll` on Windows, `.so` on Linux, `.dylib` on macOS) is ever taken.
+- **What gets written.** Only the one core file the list names is taken out of the download, under that name, into
+  `<data>/cores/custom/`. Whatever else the archive holds, and whatever folders it claims, is ignored.
+- **Checked before it counts.** The downloaded core is loaded and asked what it is (`retro_get_system_info`)
+  **before** it is registered. A file that won't load, or doesn't answer, is **deleted**, and you're told why.
+- **Updates can't break what you have.** The new build is downloaded to a staging folder, checked, and only then
+  put in place in a single rename. A download that fails, an archive without the core in it, a file that isn't a
+  core, or a core that is in use by a running game all leave the **old core exactly where it was**, and say so.
 
 ## Removing one
 
@@ -82,10 +121,6 @@ runs again — a stale choice never errors a launch out.
 
 ## Not covered yet
 
-- **The "All cores" buildbot browser.** EverythingBox already downloads from the libretro buildbot and filters
-  the index to catalogue cores; browsing the *whole* index, installing any of it, and using that as the
-  answer to core *updates* is separate work and is not in this release. For now, a core you want from the
-  buildbot is one you download yourself and load here.
 - **Custom cores do not sync between devices.** The registry records a path on *this* machine, and a peer that
   does not have the file would carry a choice it could never honour.
 - Content-less cores are **not** recorded in Continue Watching or play statistics: both are keyed by a game,

@@ -1,10 +1,16 @@
 #pragma once
 #include <QDialog>
 #include <QHash>
+#include <QPointer>
+#include <QSet>
+
+#include "../core/BuildbotIndex.h"   // issue #98: the "All cores" browser's index model
 
 class QComboBox;
 class QStackedWidget;
 class QLabel;
+class QLineEdit;
+class QListWidget;
 
 // Emulator settings: which libretro core each system uses, and per-core options (resolution/BIOS/...).
 // Input remapping lives in its own window (ControllerRemapDialog), reached from the main toolbar.
@@ -33,6 +39,24 @@ private:
     void editCustomCores();
     void loadCustomCorePicked();   // native file dialog -> CustomCoreInstall::loadFromFile + the one-time notice
     void sayCustomCore(const QString& text);   // write one message to BOTH status lines
+
+    // Issue #98's classic twin of MainWindow::presentAllCores — the "All cores" buildbot browser, a page pushed
+    // above the Custom cores page: a search box, the list, Install/Update. The deciding is BuildbotIndex's and
+    // BuildbotInstall's; this lists rows and says what happened.
+    void editAllCores(bool refetch);
+    void fillAllCores();                              // (re)build the list from the index + the search text
+    void installAllCoresEntry(const QString& name);   // install / update one entry (async)
+    void sayAllCores(const QString& text);
+
+    QPointer<QLineEdit>   allSearch_;
+    QPointer<QListWidget> allList_;
+    QPointer<QLabel>      allStatus_;
+    QPointer<QLabel>      allSummary_;
+    BuildbotIndex::Parsed allIndex_;
+    bool allLoaded_ = false;
+    bool allLoading_ = false;
+    QString allError_;
+    QSet<QString> allBusy_;
 
     QHash<QString, QComboBox*> combos_; // systemId -> core combo
     QStackedWidget* stack_ = nullptr;   // page 0 = cores list, page 1 = (transient) per-core options editor
