@@ -72,6 +72,9 @@ QJsonObject CustomCores::toJson(const CustomCore& c)
     if (c.needFullpath)   o.insert(QStringLiteral("needFullpath"), true);
     if (!c.needs.isEmpty()) o.insert(QStringLiteral("needs"), c.needs);
     if (c.addedAt != 0)   o.insert(QStringLiteral("addedAt"), c.addedAt);
+    if (!c.source.isEmpty())     o.insert(QStringLiteral("source"), c.source);
+    if (!c.sourceFile.isEmpty()) o.insert(QStringLiteral("sourceFile"), c.sourceFile);
+    if (!c.sourceDate.isEmpty()) o.insert(QStringLiteral("sourceDate"), c.sourceDate);
     return o;
 }
 
@@ -91,6 +94,9 @@ CustomCore CustomCores::fromJson(const QJsonObject& o)
     c.needFullpath   = o.value(QStringLiteral("needFullpath")).toBool(false);
     c.needs          = o.value(QStringLiteral("needs")).toString();
     c.addedAt        = static_cast<qint64>(o.value(QStringLiteral("addedAt")).toDouble(0));
+    c.source         = o.value(QStringLiteral("source")).toString().trimmed();
+    c.sourceFile     = o.value(QStringLiteral("sourceFile")).toString().trimmed();
+    c.sourceDate     = o.value(QStringLiteral("sourceDate")).toString().trimmed();
     return c;
 }
 

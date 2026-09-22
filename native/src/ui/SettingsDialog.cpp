@@ -7,6 +7,7 @@
 #include "../emu/RetroParkOptions.h"   // Task B3: RetroPark-backed systems' options via live harvest + descriptor cache
 #include "../core/CustomCores.h"        // issue #98: the user-tier custom-core registry
 #include "../core/CustomCoreInstall.h"  // issue #98: a file, inspected, copied in and registered
+#include "../core/BuildbotInstall.h"    // issue #98: the "All cores" browser's fetch / install / update path
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -24,6 +25,8 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGroupBox>
+#include <QLineEdit>
+#include <QListWidget>
 #include <vector>
 
 namespace {
@@ -436,6 +439,10 @@ void SettingsDialog::editCustomCores()
         sayCustomCore(message);
     });
     buttons->addWidget(scanBtn);
+    auto* browseBtn = new QPushButton(tr("All cores (libretro buildbot)..."), page);
+    browseBtn->setObjectName(QStringLiteral("allCoresButton"));
+    connect(browseBtn, &QPushButton::clicked, this, [this] { editAllCores(true); });
+    buttons->addWidget(browseBtn);
     buttons->addStretch(1);
     outer->addLayout(buttons);
 
@@ -467,6 +474,8 @@ void SettingsDialog::editCustomCores()
         file->setWordWrap(true);
         file->setTextInteractionFlags(Qt::TextSelectableByMouse);
         bv->addWidget(file);
+        if (c.source == CustomCores::sourceBuildbot())
+            bv->addWidget(new QLabel(tr("From: the libretro buildbot, %1").arg(c.sourceDate), box));
         if (!c.needs.isEmpty())
         {
             auto* needs = new QLabel(c.needs, box);
@@ -513,4 +522,192 @@ void SettingsDialog::editCustomCores()
 
     stack_->addWidget(page);
     stack_->setCurrentWidget(page);
+}
+
+// ---- Issue #98: the "All cores" buildbot browser (classic twin of MainWindow::presentAllCores) ----------------
+
+void SettingsDialog::sayAllCores(const QString& text)
+{
+    if (allStatus_) { allStatus_->setText(text); allStatus_->setVisible(!text.isEmpty()); }
+}
+
+void SettingsDialog::editAllCores(bool refetch)
+{
+    // Pushed ABOVE the Custom cores page (index 1); anything already above it is replaced.
+    while (stack_->count() > 2)
+    {
+        QWidget* old = stack_->widget(stack_->count() - 1);
+        stack_->removeWidget(old);
+        old->deleteLater();
+    }
+
+    auto* page = new QWidget(stack_);
+    page->setObjectName(QStringLiteral("allCoresPage"));
+    auto* outer = new QVBoxLayout(page);
+
+    auto* back = new QPushButton(tr("Back"), page);
+    outer->addWidget(back, 0, Qt::AlignLeft);
+
+    auto* intro = new QLabel(
+        tr("Every core on the libretro buildbot that EverythingBox doesn't already ship. One you install here "
+           "becomes a custom core - not curated by EverythingBox - and is offered updates when the buildbot has "
+           "a newer build."), page);
+    intro->setWordWrap(true);
+    outer->addWidget(intro);
+    outer->addWidget(new QLabel(tr("From: %1").arg(BuildbotInstall::effectivePolicy().base.host()), page));
+
+    allSearch_ = new QLineEdit(page);
+    allSearch_->setObjectName(QStringLiteral("allCoresSearch"));
+    allSearch_->setPlaceholderText(tr("Search"));
+    allSearch_->setClearButtonEnabled(true);
+    outer->addWidget(allSearch_);
+
+    // The buttons and the status line sit ABOVE the list: the dialog is as tall as its longest page (the
+    // per-system list), so anything placed under a stretching list lands far below the fold.
+    auto* row = new QHBoxLayout();
+    auto* installBtn = new QPushButton(tr("Install / update"), page);
+    installBtn->setObjectName(QStringLiteral("allCoresInstall"));
+    row->addWidget(installBtn);
+    auto* reloadBtn = new QPushButton(tr("Reload the list"), page);
+    row->addWidget(reloadBtn);
+    row->addStretch(1);
+    outer->addLayout(row);
+
+    allStatus_ = new QLabel(page);
+    allStatus_->setWordWrap(true);
+    allStatus_->hide();
+    outer->addWidget(allStatus_);
+
+    allSummary_ = new QLabel(page);
+    allSummary_->setWordWrap(true);
+    outer->addWidget(allSummary_);
+
+    allList_ = new QListWidget(page);
+    allList_->setObjectName(QStringLiteral("allCoresList"));
+    outer->addWidget(allList_, 1);
+
+    connect(allSearch_.data(), &QLineEdit::textChanged, this, [this] { fillAllCores(); });
+    connect(allList_.data(), &QListWidget::itemActivated, this, [this](QListWidgetItem* it) {
+        if (it) installAllCoresEntry(it->data(Qt::UserRole).toString());
+    });
+    connect(installBtn, &QPushButton::clicked, this, [this] {
+        QListWidgetItem* it = allList_ ? allList_->currentItem() : nullptr;
+        if (!it) { sayAllCores(tr("Pick a core in the list first.")); return; }
+        installAllCoresEntry(it->data(Qt::UserRole).toString());
+    });
+    connect(reloadBtn, &QPushButton::clicked, this, [this] { editAllCores(true); });
+    // Back rebuilds the Custom cores page, so a core installed here is listed there.
+    connect(back, &QPushButton::clicked, this, [this] { editCustomCores(); });
+
+    stack_->addWidget(page);
+    stack_->setCurrentWidget(page);
+
+    if ((refetch || !allLoaded_) && !allLoading_)
+    {
+        allLoading_ = true;
+        allError_.clear();
+        BuildbotInstall::fetchIndex(BuildbotInstall::effectivePolicy(), this,
+            [this](const BuildbotIndex::Parsed& parsed, const QString& error) {
+                allLoading_ = false;
+                allLoaded_  = error.isEmpty();
+                allError_   = error;
+                if (error.isEmpty()) allIndex_ = parsed;
+                fillAllCores();
+            });
+    }
+    fillAllCores();
+}
+
+void SettingsDialog::fillAllCores()
+{
+    if (!allList_ || !allSummary_) return;
+    const QString keep = allList_->currentItem() ? allList_->currentItem()->data(Qt::UserRole).toString() : QString();
+    allList_->clear();
+
+    if (!allLoaded_)
+    {
+        allSummary_->setText(allLoading_ ? tr("Reading the core list...")
+                                         : tr("Couldn't read the core list: %1").arg(allError_));
+        return;
+    }
+
+    const QString query = allSearch_ ? allSearch_->text().trimmed() : QString();
+    const QList<BuildbotIndex::Row> shown = BuildbotIndex::browsable(
+        BuildbotIndex::classify(allIndex_.entries, BuildbotIndex::catalogueCoreNames(), CustomCores::all()), query);
+    int installed = 0, updates = 0;
+    for (const BuildbotIndex::Row& r : shown)
+    {
+        if (r.status == BuildbotIndex::Status::InstalledCustom) ++installed;
+        if (r.updateAvailable) ++updates;
+        const QString date = r.entry.date.toString(QStringLiteral("yyyy-MM-dd"));
+        QString state;
+        if (allBusy_.contains(r.entry.name))                        state = tr("installing...");
+        else if (r.updateAvailable)                                 state = tr("Update available, %1").arg(date);
+        else if (r.status == BuildbotIndex::Status::InstalledCustom)
+            state = r.fromBuildbot ? tr("installed, %1").arg(date) : tr("installed (loaded by hand)");
+        else                                                        state = tr("available, %1").arg(date);
+        auto* item = new QListWidgetItem(QStringLiteral("%1  -  %2").arg(r.entry.name, state), allList_);
+        item->setData(Qt::UserRole, r.entry.name);
+        if (r.entry.name == keep) allList_->setCurrentItem(item);
+    }
+    const int skipped = allIndex_.malformed + allIndex_.refused + allIndex_.dropped;
+    QString summary = (shown.size() == 1 ? tr("1 core") : tr("%1 cores").arg(shown.size()))
+                      + tr(", %1 installed, %2 with an update.").arg(installed).arg(updates);
+    if (skipped > 0)
+        summary += QLatin1Char(' ') + tr("%1 lines of the list couldn't be read or named a file EverythingBox "
+                                         "won't install.").arg(skipped);
+    allSummary_->setText(summary);
+    if (!allList_->currentItem() && allList_->count() > 0) allList_->setCurrentRow(0);
+}
+
+void SettingsDialog::installAllCoresEntry(const QString& name)
+{
+    if (name.isEmpty()) return;
+    if (allBusy_.contains(name)) { sayAllCores(tr("%1 is already being installed.").arg(name)); return; }
+
+    const QList<BuildbotIndex::Row> classified =
+        BuildbotIndex::classify(allIndex_.entries, BuildbotIndex::catalogueCoreNames(), CustomCores::all());
+    const BuildbotIndex::Row* row = nullptr;
+    for (const BuildbotIndex::Row& r : classified)
+        if (r.entry.name == name) { row = &r; break; }
+    if (!row || row->status == BuildbotIndex::Status::Catalogue) return;
+    if (row->status == BuildbotIndex::Status::InstalledCustom && !row->updateAvailable)
+    {
+        sayAllCores(row->fromBuildbot
+                        ? tr("%1 is up to date.").arg(name)
+                        : tr("You loaded %1 by hand, so EverythingBox doesn't update it. Load the new file to "
+                             "update it.").arg(name));
+        return;
+    }
+
+    const bool updating = row->updateAvailable;
+    const BuildbotIndex::Entry entry = row->entry;
+    allBusy_.insert(name);
+    sayAllCores(updating ? tr("Updating %1...").arg(name) : tr("Installing %1...").arg(name));
+    fillAllCores();
+
+    BuildbotInstall::install(BuildbotInstall::effectivePolicy(), entry, this, {},
+        [this, name, updating](bool ok, const CustomCore& rec, const QString& error) {
+            allBusy_.remove(name);
+            QString message;
+            if (ok)
+            {
+                // The same announcement a hand-loaded core gets (see loadCustomCorePicked): the warranty once,
+                // then the capability sentence or a plain confirmation.
+                QStringList said;
+                if (CustomCores::noticeDue(CustomCores::registry()))
+                {
+                    said << CustomCores::noticeText();
+                    CustomCores::acknowledgeNotice();
+                }
+                if (!rec.needs.isEmpty()) said << rec.needs;
+                if (said.isEmpty()) said << (updating ? tr("Updated %1.").arg(rec.name) : tr("Installed %1.").arg(rec.name));
+                message = said.join(QStringLiteral(" "));
+            }
+            else
+                message = error.isEmpty() ? tr("Couldn't install %1.").arg(name) : error;
+            sayAllCores(message);
+            if (status_) { status_->setText(message); status_->setVisible(true); }
+            fillAllCores();
+        });
 }

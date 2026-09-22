@@ -31,6 +31,21 @@ QString CustomCoreInstall::idFor(const QString& libraryName, const QString& file
     return CustomCores::sanitizeId(stem);
 }
 
+CustomCore CustomCoreInstall::recordFrom(const CoreInspection& info, const QString& id, const QString& path)
+{
+    CustomCore rec;
+    rec.id             = id;
+    rec.path           = QDir::toNativeSeparators(path);
+    rec.name           = info.libraryName.isEmpty() ? id : info.libraryName;
+    rec.version        = info.libraryVersion;
+    rec.extensions     = info.extensions;
+    rec.supportsNoGame = info.supportsNoGame;
+    rec.needFullpath   = info.needFullpath;
+    rec.needs          = CoreInspect::unmetSentence(info);
+    rec.addedAt        = QDateTime::currentMSecsSinceEpoch();
+    return rec;
+}
+
 bool CustomCoreInstall::loadFromFile(const QString& file, CustomCore* out, QString* error)
 {
     const QFileInfo fi(file);
@@ -80,17 +95,9 @@ bool CustomCoreInstall::loadFromFile(const QString& file, CustomCore* out, QStri
         finalPath = dest;
     }
 
-    // 4. Register (or update).
-    CustomCore rec;
-    rec.id             = id;
-    rec.path           = QDir::toNativeSeparators(finalPath);
-    rec.name           = info.libraryName.isEmpty() ? id : info.libraryName;
-    rec.version        = info.libraryVersion;
-    rec.extensions     = info.extensions;
-    rec.supportsNoGame = info.supportsNoGame;
-    rec.needFullpath   = info.needFullpath;
-    rec.needs          = CoreInspect::unmetSentence(info);
-    rec.addedAt        = QDateTime::currentMSecsSinceEpoch();
+    // 4. Register (or update). A re-load by hand REPLACES any earlier record under this id, source and all: a
+    // core the user now supplies themselves is theirs to update, and it stops being offered an update here.
+    const CustomCore rec = recordFrom(info, id, finalPath);
     if (!CustomCores::add(rec, error))
         return false;
     if (out) *out = rec;

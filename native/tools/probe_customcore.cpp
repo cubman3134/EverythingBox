@@ -27,6 +27,9 @@
 //     (the default-core picker's lever) and per game (#51's override, whose resolveCore accepts exactly this
 //     candidate list). Its picker row is tagged "(custom core)".
 //   * THE ONE-TIME NOTICE. Due once, not due after acknowledgement, and still not due across a reload.
+//   * WHERE IT CAME FROM. The "All cores" browser's source / sourceFile / sourceDate round-trip the registry
+//     and are part of equality; a hand-loaded core records none (so it can never be offered an update), and
+//     re-loading by hand a core the browser installed clears them. probe_buildbotindex owns the browser itself.
 //   * NO DOWNLOADS. mayDownload() — the policy behind CoreManager's two fetch paths — is false for a custom
 //     ref and true for a catalogue core, so this increment can never quietly grow the buildbot browser.
 //
@@ -207,6 +210,22 @@ int main(int argc, char** argv)
         CHECK(back.cores.size() == 1);
         CHECK(back.cores.value(0) == c);
 
+        // The "All cores" browser's source fields (#98 increments 2-3) survive the document, and are part of
+        // equality — a record that forgot where it came from could never be offered an update.
+        CustomCore fromBot = c;
+        fromBot.source = QStringLiteral("buildbot");
+        fromBot.sourceFile = QStringLiteral("2048_libretro.dll.zip");
+        fromBot.sourceDate = QStringLiteral("2024-03-01");
+        CHECK(CustomCores::fromJson(CustomCores::toJson(fromBot)) == fromBot);
+        CHECK(fromBot != c);
+        CHECK(CustomCores::toJson(fromBot).value(QStringLiteral("source")).toString() == QStringLiteral("buildbot"));
+        CHECK(CustomCores::toJson(fromBot).value(QStringLiteral("sourceDate")).toString() == QStringLiteral("2024-03-01"));
+        // Canonical: a hand-loaded record carries no source keys at all.
+        CHECK(!CustomCores::toJson(c).contains(QStringLiteral("source")));
+        CHECK(!CustomCores::toJson(c).contains(QStringLiteral("sourceFile")));
+        CHECK(!CustomCores::toJson(c).contains(QStringLiteral("sourceDate")));
+        CHECK(CustomCores::sourceBuildbot() == QStringLiteral("buildbot"));
+
         // Malformed => EMPTY, with a reason. Never a partial registry, never a crash.
         err.clear();
         const CustomCoreRegistry bad = CustomCores::parse(QByteArray("{ this is not json"), &err);
@@ -362,6 +381,21 @@ int main(int argc, char** argv)
 
         // Re-loading the same core is an UPDATE, not a second entry.
         CHECK(CustomCoreInstall::loadFromFile(fixture, nullptr, &err));
+        CHECK(CustomCores::all().size() == 1);
+
+        // A core loaded by hand records no source (so the "All cores" browser never offers it an update)...
+        CHECK(contentRec.source.isEmpty() && contentRec.sourceFile.isEmpty() && contentRec.sourceDate.isEmpty());
+        // ...and loading by hand a core the browser installed makes it the user's own: the source goes.
+        CustomCore asIfFromBot = contentRec;
+        asIfFromBot.source = CustomCores::sourceBuildbot();
+        asIfFromBot.sourceFile = QStringLiteral("x_libretro.dll.zip");
+        asIfFromBot.sourceDate = QStringLiteral("2024-03-01");
+        CHECK(CustomCores::add(asIfFromBot));
+        CHECK(CustomCores::byRef(CustomCores::refFor(contentRec.id))->source == QStringLiteral("buildbot"));
+        CustomCore reloaded;
+        CHECK(CustomCoreInstall::loadFromFile(fixture, &reloaded, &err));
+        CHECK(reloaded.source.isEmpty());
+        CHECK(CustomCores::byRef(CustomCores::refFor(contentRec.id))->source.isEmpty());
         CHECK(CustomCores::all().size() == 1);
     }
     const QString contentRef = CustomCores::refFor(contentRec.id);

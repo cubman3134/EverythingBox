@@ -23,6 +23,8 @@
 #include <QStringList>
 #include "CustomCores.h"
 
+struct CoreInspection;
+
 namespace CustomCoreInstall
 {
     // The platform's shared-library suffix (".dll" / ".dylib" / ".so"). Exposed so the file picker's filter and
@@ -33,6 +35,12 @@ namespace CustomCoreInstall
     // (with a trailing "_libretro" dropped — every buildbot core file carries it and it is noise in an id).
     // Empty only when BOTH are unusable, which the caller reports rather than registering an unnamed core.
     QString idFor(const QString& libraryName, const QString& filePath);
+
+    // The registration record an inspected core gets — name, version, extensions, supports_no_game, the
+    // capability sentence — stamped now. ONE spelling of it, shared by a hand-loaded core (loadFromFile) and a
+    // core the "All cores" browser installed (BuildbotInstall), so the two are registered identically and the
+    // notice, the capability report and the per-system choice treat them the same. `source*` stay empty here.
+    CustomCore recordFrom(const CoreInspection& info, const QString& id, const QString& path);
 
     // Inspect + copy + register, as described above. On success *out (when given) holds the registered record
     // and the registry has been written. On failure returns false with a sentence in *error and NOTHING has
