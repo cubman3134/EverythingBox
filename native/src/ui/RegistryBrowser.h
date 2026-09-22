@@ -117,9 +117,9 @@ private:
     // it is the only place they will look for that.
     //
     // `extras` is the furniture only a THEME card carries today (issue #91) — a picture on the left and a
-    // second button beside the install verb. It is one defaulted struct rather than four defaulted
-    // parameters so the add-on and decoration call sites are untouched and the theme one reads as what it
-    // is; an empty `extras` produces exactly the card this dialog drew before screenshots existed.
+    // second button beside the install verb. It is ONE struct rather than four more parameters, and the
+    // overload below is what every other card uses, so the add-on and decoration call sites are untouched
+    // and an empty `extras` produces exactly the card this dialog drew before screenshots existed.
     struct CardExtras
     {
         // Where to put the QLabel that holds the picture. Non-null = reserve the slot and hand the label
@@ -132,8 +132,15 @@ private:
     void addCard(const QString& name, const QString& author, const QString& description,
                  const QStringList& formFactors, const QString& indexUrl, bool installed,
                  const std::function<void(QPushButton*)>& onInstall,
-                 const QString& installedAction = QString(),
-                 const CardExtras& extras = CardExtras());
+                 const QString& installedAction, const CardExtras& extras);
+    // …and the two-argument form every card that wants neither uses. An OVERLOAD rather than a pair of
+    // default arguments: `= CardExtras()` as a default for a NESTED class is ill-formed on GCC ("default
+    // member initializer required before the end of its enclosing class") though MSVC accepts it, which is
+    // a local build that passes and a Linux CI that does not.
+    void addCard(const QString& name, const QString& author, const QString& description,
+                 const QStringList& formFactors, const QString& indexUrl, bool installed,
+                 const std::function<void(QPushButton*)>& onInstall,
+                 const QString& installedAction = QString());
 
     // A registry that answered, parsed, and turned out not to be a document this app understands. It gets a
     // ROW OF ITS OWN in the list rather than only a line in the status bar, for two reasons the status bar

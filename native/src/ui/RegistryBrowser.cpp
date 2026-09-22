@@ -448,6 +448,17 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
 // The chrome a row is, for either kind. The two kinds no longer share a data shape — an add-on entry is a
 // raw QJsonObject, a theme is a parsed ThemeRegistry::Entry — so what they share is spelled as parameters
 // rather than as branches on kind_ inside one function reading one JSON object.
+// The plain card: no picture, no second button — what the add-on and decoration entries draw, and what a
+// theme card drew before issue #91.
+void RegistryBrowser::addCard(const QString& name, const QString& author, const QString& description,
+                              const QStringList& formFactors, const QString& indexUrl, bool installed,
+                              const std::function<void(QPushButton*)>& onInstall,
+                              const QString& installedAction)
+{
+    addCard(name, author, description, formFactors, indexUrl, installed, onInstall, installedAction,
+            CardExtras());
+}
+
 void RegistryBrowser::addCard(const QString& name, const QString& author, const QString& description,
                               const QStringList& formFactors, const QString& indexUrl, bool installed,
                               const std::function<void(QPushButton*)>& onInstall,
