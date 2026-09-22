@@ -239,6 +239,24 @@ void ThemedPanelHost::updateRow(const QString& rowId, const PanelRow& row)
     model_->patchRow(rowId, row);   // no-op (false) when the row isn't in the top panel's model
 }
 
+// The row as it is RIGHT NOW, by id, from the topmost panel that carries it (the same set updateRow
+// patches), or a default-constructed row with an empty id when no panel holds it.
+//
+// It exists because a row can be patched by two things that know nothing about each other: an install
+// changes a theme row's verb, and a screenshot landing a moment later changes the same row's thumbnail.
+// updateRow takes a WHOLE row, so the second patch has to start from the row's current state — an
+// async handler that patched from a copy captured when the panel was built would hand back a verb that
+// was true minutes ago and undo the install's own label.
+PanelRow ThemedPanelHost::rowById(const QString& rowId) const
+{
+    if (rowId.isEmpty()) return PanelRow();
+    // Innermost (topmost) first: that is the copy on screen, and the one a caller is patching.
+    for (int i = stack_.size() - 1; i >= 0; --i)
+        for (const PanelRow& r : stack_.at(i).rows)
+            if (r.id == rowId) return r;
+    return PanelRow();
+}
+
 void ThemedPanelHost::reset()
 {
     // Hard clear: drop every stacked panel + its graph level, running NO onBack (a fresh root presentation or a

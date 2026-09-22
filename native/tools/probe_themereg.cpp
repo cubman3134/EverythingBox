@@ -19,10 +19,19 @@
 #include "DecorationPack.h"   // #187: the `decorations` section of the SAME index document — block 12
 #include "ThemeZip.h"         // #91: the zip install lane's member rules — blocks 18 and 19
 
+#include "ThemeShots.h"     // #91 blocks 20-21: the screenshot fetch, its cap, its picture rule
+
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
+#include <QHostAddress>
+#include <QNetworkAccessManager>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTimer>
 #include <cstdio>
+#include <memory>
 
 // The zip fixtures below are BUILT rather than checked in, and building one needs the reader's own
 // library: the CRC-32 a central directory carries, and the constants a stored entry is spelled with.
@@ -316,6 +325,143 @@ static ZipMember goodThemeJson()
 static bool refusedBecause(const QString& error, const char* phrase)
 {
     return error.contains(QLatin1String(phrase), Qt::CaseInsensitive);
+}
+
+
+// ---- The loopback server block 21 drives ThemeShots against (issue #91) ------------------------------
+//
+// A screenshot's two real rules cannot be asked of anything but a live transfer: a size cap tested after
+// readAll() is a cap on an allocation that already happened, and "are these bytes a picture" is a question
+// about a body, not a url. So the probe serves the four shapes that matter, on loopback, itself.
+//
+// Hand-written HTTP rather than anything reusable: what makes two of these cases the cases they are lives
+// in the HEADERS (an image Content-Type on an HTML page; a Content-Length that declares itself over the
+// budget; no Content-Length at all), and no convenience wrapper lets a test lie in exactly those ways.
+
+// A real 1x1 PNG. Real, rather than "the eight signature bytes and some padding", so the thing the app
+// stores is a file an image library will actually open - which is what the classic card then decodes.
+static QByteArray tinyPng()
+{
+    static const QByteArray png = QByteArray::fromBase64(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+    return png;
+}
+
+// The body of the two OVERSIZE cases: a real PNG padded past the cap, so the only thing that can refuse it
+// is its size. SIXTEEN megabytes, and the figure is load-bearing: the refusal has to be unambiguous against
+// any cap a plausible mutant would raise it to, and the "how much did the client let through" assertion
+// below needs a margin that is not the same order as the overshoot. The overshoot is a fixed handful of
+// chunks (whatever is in flight while the abort lands), not a fraction of the body, so a big body and a
+// half-way threshold is the arrangement that does not depend on how fast this machine is.
+static QByteArray oversizePicture()
+{
+    static QByteArray b;
+    if (b.isEmpty()) { b = tinyPng(); b.append(QByteArray(16 * 1024 * 1024 - b.size(), 'x')); }
+    return b;
+}
+
+class ShotServer : public QTcpServer
+{
+public:
+    int    requests = 0;   // how many request lines were served - "cached" has to mean NO socket at all
+    qint64 offered  = 0;   // body bytes this server got as far as OFFERING, one chunk per event-loop turn
+
+protected:
+    void incomingConnection(qintptr sd) override
+    {
+        auto* sock = new QTcpSocket(this);
+        if (!sock->setSocketDescriptor(sd)) { delete sock; return; }
+        QObject::connect(sock, &QTcpSocket::readyRead, sock, [this, sock] {
+            const QByteArray req = sock->readAll();
+            const int sp1 = req.indexOf(' ');
+            const int sp2 = sp1 < 0 ? -1 : req.indexOf(' ', sp1 + 1);
+            if (sp1 < 0 || sp2 < 0) return;              // a partial request line: wait for the rest
+            ++requests;
+            respond(sock, req.mid(sp1 + 1, sp2 - sp1 - 1));
+        });
+        QObject::connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+    }
+
+private:
+    // A small body, written and closed in one go.
+    static void send(QTcpSocket* sock, const QByteArray& contentType, const QByteArray& body,
+                     bool declareLength)
+    {
+        sock->write(head(contentType, declareLength ? body.size() : -1));
+        sock->write(body);
+        sock->flush();
+        sock->disconnectFromHost();
+    }
+
+    // A LARGE body, offered ONE CHUNK PER EVENT-LOOP TURN and stopped the moment the client goes away.
+    //
+    // This is what makes "the cap is applied as the bytes arrive" observable at all. Handing the whole body
+    // to the socket in one write does not measure anything: on loopback the kernel accepts megabytes before
+    // the client has parsed the status line, so a client that aborts instantly and one that reads the lot
+    // look identical from here. Chunked at one per turn, the count is what the CLIENT actually let through.
+    void sendSlowly(QTcpSocket* sock, const QByteArray& body, bool declareLength)
+    {
+        sock->write(head("image/png", declareLength ? body.size() : -1));
+        auto sent = std::make_shared<qsizetype>(0);
+        auto step = std::make_shared<std::function<void()>>();
+        ShotServer* self = this;
+        *step = [self, sock, body, sent, step] {
+            if (sock->state() != QAbstractSocket::ConnectedState) return;   // the client stopped it
+            const qsizetype n = qMin<qsizetype>(256 * 1024, body.size() - *sent);
+            if (n <= 0) { sock->disconnectFromHost(); return; }
+            sock->write(body.constData() + *sent, n);
+            sock->flush();
+            *sent += n;
+            self->offered += n;
+            QTimer::singleShot(1, sock, [step] { (*step)(); });
+        };
+        QTimer::singleShot(1, sock, [step] { (*step)(); });
+    }
+
+    static QByteArray head(const QByteArray& contentType, qsizetype length)
+    {
+        QByteArray h = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nConnection: close\r\n";
+        // NO Content-Length is the point of one of the four cases: the body then ends when the connection
+        // does, so nothing about it can be refused before it starts arriving.
+        if (length >= 0) h += "Content-Length: " + QByteArray::number(length) + "\r\n";
+        return h + "\r\n";
+    }
+
+    void respond(QTcpSocket* sock, const QByteArray& path)
+    {
+        if (path == "/good.png" || path == "/good2.png")
+            send(sock, "image/png", tinyPng(), true);
+        else if (path == "/page.png")
+            // An HTML page, served under an image name AND an image Content-Type - every header says
+            // picture and the bytes say otherwise. Only the bytes are consulted.
+            send(sock, "image/png", "<!DOCTYPE html>\n<html><body>sign in</body></html>", true);
+        else if (path == "/huge.png")
+            sendSlowly(sock, oversizePicture(), true);     // DECLARES itself over the cap
+        else if (path == "/stream.png")
+            sendSlowly(sock, oversizePicture(), false);    // declares nothing and streams past it
+        else
+            send(sock, "text/plain", "no", true);
+    }
+};
+
+// One fetch, driven to its callback or to a wall. The callback state is heap-allocated and shared: a fetch
+// that times out here still has a live reply behind it, and its callback must not land on a dead stack.
+static QString fetchShot(QNetworkAccessManager* nam, const QString& folder, const QString& url)
+{
+    struct State { QString path; bool done = false; };
+    auto st = std::make_shared<State>();
+    QEventLoop loop;
+    ThemeShots::fetch(nam, folder, url, [st, &loop](const QString& p) {
+        st->path = p;
+        st->done = true;
+        loop.quit();
+    });
+    if (!st->done)   // not already cached: wait for the network turn, behind a wall
+    {
+        QTimer::singleShot(20000, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    return st->path;
 }
 
 int main(int argc, char** argv)
@@ -2004,6 +2150,217 @@ int main(int argc, char** argv)
             CHECK(!QDir(root + QStringLiteral("/Probe")).exists());
             CHECK(QDir(root).exists());
             QDir(base).removeRecursively();
+        }
+    }
+
+    // 20. SCREENSHOTS, the pure half (issue #91). An entry may advertise pictures of itself; they are
+    //     DECORATION, so every bound here fails toward "no picture" and never toward "no theme", and a row
+    //     whose pictures were all refused has to be exactly the row it was before this field existed.
+    {
+        static const char* const kShotIndex = R"JSON({
+  "themes2": [
+    { "name": "None",  "dir": "themes2/None" },
+    { "name": "One",   "dir": "themes2/One",   "screenshots": ["shots/one.png"] },
+    { "name": "Four",  "dir": "themes2/Four",
+      "screenshots": ["a.png", "b.png", "c.png", "d.png"] },
+    { "name": "Five",  "dir": "themes2/Five",
+      "screenshots": ["a.png", "b.png", "c.png", "d.png", "e.png"] },
+    { "name": "Junk",  "dir": "themes2/Junk",
+      "screenshots": ["http://raw.githubusercontent.com/o/r/main/a.png",
+                      "https://evil.test/a.png",
+                      "data:image/png;base64,iVBORw0KGgo=",
+                      "https://elsewhere.test/b.png"] },
+    { "name": "Typed", "dir": "themes2/Typed", "screenshots": [7, {"url": "x.png"}, "ok.png"] }
+  ]
+})JSON";
+        const ThemeRegistry::Index ix = ThemeRegistry::parseIndex(QByteArray(kShotIndex));
+        CHECK(ix.ok());
+        CHECK(ix.entries.size() == 6);
+
+        // 0, 1 and 4 all parse; the FIFTH is dropped and the entry is otherwise untouched.
+        CHECK(ix.entries.value(0).screenshots.isEmpty());
+        CHECK(ix.entries.value(1).screenshots == (QStringList{ QStringLiteral("shots/one.png") }));
+        CHECK(ix.entries.value(2).screenshots.size() == 4);
+        CHECK(ix.entries.value(3).screenshots.size() == ThemeRegistry::kMaxScreenshots);
+        CHECK(ix.entries.value(3).screenshots.size() == 4);
+        CHECK(!ix.entries.value(3).screenshots.contains(QStringLiteral("e.png")));
+        CHECK(ix.entries.value(3).folder() == QStringLiteral("Five"));   // still perfectly installable
+        // A non-string element loses the PICTURE, not the theme - the degradation `version` and `zip`
+        // already have.
+        CHECK(ix.entries.value(5).screenshots == (QStringList{ QStringLiteral("ok.png") }));
+
+        const QString indexUrl =
+            QStringLiteral("https://raw.githubusercontent.com/o/r/main/index.json");
+
+        // A relative screenshot resolves against the index and cannot leave its host by construction.
+        const QStringList one = ThemeRegistry::screenshotUrls(indexUrl, ix.entries.value(1), {});
+        CHECK(one == (QStringList{
+            QStringLiteral("https://raw.githubusercontent.com/o/r/main/shots/one.png") }));
+
+        // THE THREE REFUSALS, each dropped SILENTLY: the list simply does not contain them, so the row has
+        // no picture and says nothing about it.
+        const QStringList junk = ThemeRegistry::screenshotUrls(indexUrl, ix.entries.value(4), {});
+        CHECK(junk.isEmpty());
+        CHECK(!ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("http://raw.githubusercontent.com/o/r/main/a.png"), {}).ok());
+        CHECK(refusedBecause(ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("http://raw.githubusercontent.com/o/r/main/a.png"), {}).error,
+              "isn't https"));
+        CHECK(!ThemeRegistry::screenshotUrlFor(indexUrl, QStringLiteral("https://evil.test/a.png"), {}).ok());
+        CHECK(refusedBecause(ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("https://evil.test/a.png"), {}).error, "another host"));
+        CHECK(!ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("data:image/png;base64,iVBORw0KGgo="), {}).ok());
+        // THE TWO SHAPES A SUFFIX TEST GETS WRONG, and they are wrong in opposite directions - which is why
+        // the rule compares WHOLE hosts and neither of these is a near miss:
+        //   * a host that merely BEGINS with the index's ("raw.githubusercontent.com.evil.test" is a domain
+        //     anyone can register), and
+        //   * a host that merely ENDS with it ("evil.raw.githubusercontent.com"), which is what a rule
+        //     written as host.endsWith(allowed) admits - a subdomain is a different machine under a
+        //     different owner on plenty of real hosts.
+        CHECK(!ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("https://raw.githubusercontent.com.evil.test/a.png"), {}).ok());
+        CHECK(!ThemeRegistry::screenshotUrlFor(
+                   indexUrl, QStringLiteral("https://evil.raw.githubusercontent.com/a.png"), {}).ok());
+        CHECK(!ThemeRegistry::downloadUrlFor(
+                   indexUrl, QStringLiteral("https://evil.raw.githubusercontent.com/a.zip"), {}).ok());
+
+        // ...and the one host that is NOT the index's: a registry the user added themselves. Same clause as
+        // the download rule, because it is the same code.
+        const QStringList added = ThemeRegistry::screenshotUrls(
+            indexUrl, ix.entries.value(4),
+            QStringList{ QStringLiteral("https://elsewhere.test/index.json") });
+        CHECK(added == (QStringList{ QStringLiteral("https://elsewhere.test/b.png") }));
+
+        // The count is bounded at the fetch boundary too, not only at the parse: an Entry is a plain struct
+        // a future caller may assemble itself.
+        ThemeRegistry::Entry hand;
+        hand.dir = QStringLiteral("themes2/Hand");
+        for (int i = 0; i < 9; ++i) hand.screenshots << QStringLiteral("s%1.png").arg(i);
+        CHECK(ThemeRegistry::screenshotUrls(indexUrl, hand, {}).size()
+              == ThemeRegistry::kMaxScreenshots);
+
+        // A ROW WITHOUT SCREENSHOTS IS UNCHANGED: nothing to resolve, nothing cached, nothing to draw.
+        CHECK(ThemeRegistry::screenshotUrls(indexUrl, ix.entries.value(0), {}).isEmpty());
+        CHECK(ThemeShots::cachedPath(ix.entries.value(0).folder(), QString()).isEmpty());
+
+        // THE CACHE KEY CHANGES WITH THE URL, which is what makes a repointed screenshot refetch instead of
+        // being served from the old bytes for ever. The same url twice is the same role, by construction.
+        CHECK(!ThemeShots::cacheRole(QStringLiteral("https://h.test/a.png")).isEmpty());
+        CHECK(ThemeShots::cacheRole(QStringLiteral("https://h.test/a.png"))
+              == ThemeShots::cacheRole(QStringLiteral("https://h.test/a.png")));
+        CHECK(ThemeShots::cacheRole(QStringLiteral("https://h.test/a.png"))
+              != ThemeShots::cacheRole(QStringLiteral("https://h.test/b.png")));
+        // The DIRECTORY matters as well as the file name: two registries both serving "shot.png".
+        CHECK(ThemeShots::cacheRole(QStringLiteral("https://h.test/x/shot.png"))
+              != ThemeShots::cacheRole(QStringLiteral("https://h.test/y/shot.png")));
+        CHECK(ThemeShots::cacheKey(QStringLiteral("Grid"))
+              != ThemeShots::cacheKey(QStringLiteral("Lumen")));
+        CHECK(ThemeShots::cacheKey(QString()).isEmpty());
+        CHECK(ThemeShots::cacheRole(QString()).isEmpty());
+
+        // THE SIZE CAP AND THE PICTURE RULE, as pure predicates. The live half is block 21.
+        CHECK(ThemeRegistry::kMaxScreenshotBytes == 2 * 1024 * 1024);
+        CHECK(ThemeShots::acceptBytes(tinyPng()));
+        CHECK(!ThemeShots::acceptBytes(QByteArray()));
+        CHECK(!ThemeShots::acceptBytes(QByteArrayLiteral("<!DOCTYPE html><html>nope</html>")));
+        CHECK(!ThemeShots::acceptBytes(tinyPng()
+                                       + QByteArray(int(ThemeRegistry::kMaxScreenshotBytes), '\0')));
+        // Exactly at the cap is accepted; one byte past it is not. A picture either way, so only the size
+        // is deciding.
+        QByteArray atCap = tinyPng();
+        atCap.append(QByteArray(int(ThemeRegistry::kMaxScreenshotBytes) - atCap.size(), '\0'));
+        CHECK(atCap.size() == int(ThemeRegistry::kMaxScreenshotBytes));
+        CHECK(ThemeShots::acceptBytes(atCap));
+        CHECK(!ThemeShots::acceptBytes(atCap + QByteArrayLiteral("!")));
+
+        // PREVIEW's restore rule. Restore only while what is stored is still what the preview applied - a
+        // theme the user CHOSE meanwhile is a decision, and putting the old one back over it would undo it.
+        CHECK(ThemeRegistry::previewShouldRestore(QStringLiteral("Grid"), QStringLiteral("Grid")));
+        CHECK(!ThemeRegistry::previewShouldRestore(QStringLiteral("Grid"), QStringLiteral("Lumen")));
+        CHECK(!ThemeRegistry::previewShouldRestore(QStringLiteral("Grid"), QString()));
+        CHECK(!ThemeRegistry::previewShouldRestore(QString(), QStringLiteral("Grid")));
+        CHECK(!ThemeRegistry::previewShouldRestore(QString(), QString()));
+    }
+
+    // 21. SCREENSHOTS, THE LIVE HALF (issue #91) - the rules that are only real against a transfer. A size
+    //     cap checked after readAll() is a cap on an allocation that already happened, and "are these bytes
+    //     a picture" cannot be asked of a url. So this drives ThemeShots against a loopback server that
+    //     serves, in turn: a real picture, an HTML page wearing an image name and an image Content-Type, a
+    //     response that DECLARES itself over the cap, and one that declares nothing and streams past it.
+    {
+        ShotServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            std::printf("THEMEREG-SKIP block 21: no loopback listener available\n");
+        }
+        else
+        {
+            const QString base = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+            QNetworkAccessManager nam;
+
+            // A REAL PICTURE lands, is cached, and the cached file holds the bytes the server sent.
+            const QString goodUrl = base + QStringLiteral("/good.png");
+            const int before = server.requests;
+            const QString path = fetchShot(&nam, QStringLiteral("Probe"), goodUrl);
+            CHECK(!path.isEmpty());
+            CHECK(server.requests == before + 1);
+            QFile got(path);
+            CHECK(got.open(QIODevice::ReadOnly));
+            CHECK(got.readAll() == tinyPng());
+            got.close();
+            // ...and it is what cachedPath answers with afterwards, which is what a row is drawn from.
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), goodUrl) == path);
+
+            // SECOND ASK, NO REQUEST. The cache is the whole reason a gallery revisited does not re-fetch
+            // every thumbnail, and "cached" has to mean no socket at all rather than a cheap one.
+            const int beforeCached = server.requests;
+            CHECK(fetchShot(&nam, QStringLiteral("Probe"), goodUrl) == path);
+            CHECK(server.requests == beforeCached);
+
+            // A DIFFERENT URL IS A DIFFERENT PICTURE even from the same folder: its own role, its own file,
+            // its own fetch. This is the repointed-screenshot case, from the caller's side.
+            const QString otherUrl = base + QStringLiteral("/good2.png");
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), otherUrl).isEmpty());
+            const QString otherPath = fetchShot(&nam, QStringLiteral("Probe"), otherUrl);
+            CHECK(!otherPath.isEmpty());
+            CHECK(otherPath != path);
+            CHECK(QFile::exists(path));            // the first one is still there, not replaced
+
+            // NON-PICTURE BYTES WITH AN IMAGE EXTENSION AND AN IMAGE CONTENT-TYPE. This is the shape a
+            // captive portal, a login wall and a reverse proxy's error page all take, and believing any of
+            // them would put a permanently "already cached" broken thumbnail on the row.
+            const QString pageUrl = base + QStringLiteral("/page.png");
+            CHECK(fetchShot(&nam, QStringLiteral("Probe"), pageUrl).isEmpty());
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), pageUrl).isEmpty());
+
+            // OVER THE CAP, DECLARED. The response announces more than the budget in its Content-Length,
+            // so it is dropped before its body arrives. The body IS a picture, padded past the cap, so the
+            // only thing that can be refusing it is its size.
+            const QString hugeUrl = base + QStringLiteral("/huge.png");
+            qint64 offeredBefore = server.offered;
+            CHECK(fetchShot(&nam, QStringLiteral("Probe"), hugeUrl).isEmpty());
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), hugeUrl).isEmpty());
+            // AND THE SERVER NEVER GOT TO SEND IT ALL. This is the assertion no outcome can make: a cap
+            // applied to bytes that are ALREADY RESIDENT refuses exactly the same downloads and bounds
+            // nothing, and from the caller's side the two are the same empty string. The server offers this
+            // body a chunk per event-loop turn and stops when the client goes away, so what it got through
+            // is what the client allowed: 16 MB on offer, and a transfer stopped as it arrives cannot have
+            // taken half of it.
+            CHECK(server.offered - offeredBefore < 8 * 1024 * 1024);
+
+            // OVER THE CAP, UNDECLARED. No Content-Length at all - the body ends when the connection does -
+            // so nothing can be refused up front and the transfer has to be stopped WHILE IT IS READ.
+            const QString streamUrl = base + QStringLiteral("/stream.png");
+            offeredBefore = server.offered;
+            CHECK(fetchShot(&nam, QStringLiteral("Probe"), streamUrl).isEmpty());
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), streamUrl).isEmpty());
+            CHECK(server.offered - offeredBefore < 8 * 1024 * 1024);
+
+            // A refused picture leaves NOTHING behind: the next visit asks again rather than being served
+            // an error page for ever.
+            CHECK(ThemeShots::cachedPath(QStringLiteral("Probe"), pageUrl).isEmpty());
+            server.close();
         }
     }
 

@@ -42,6 +42,17 @@ public:
 
     bool installedSomething() const { return installed_; }
 
+    // PREVIEW (issue #91). An installed theme's card offers to apply it live — and applying a theme means
+    // writing the per-profile choice the picker writes, re-rendering the surface, and putting the old value
+    // back on the way out. None of that is this dialog's to do: it knows nothing about profiles, and the
+    // engine it would have to re-render with is not even linked here (see themesRoot() in the .cpp — this
+    // dialog is in the unconditional sources and ThemeEngine is built only with QML).
+    //
+    // So the host hands in the verb's IMPLEMENTATION and this dialog only names the theme folder. A host
+    // that does not set one gets no Preview button at all, rather than a button that does nothing: the two
+    // Appearance surfaces both set one, and a future host that cannot preview should not claim it can.
+    void setPreviewHandler(std::function<void(const QString& folder)> fn) { onPreview_ = std::move(fn); }
+
     // An install is SYNCHRONOUS: it downloads one file per nested event loop (downloadTo), each behind a
     // 20 s wall, and the surfaces that host this dialog inline keep their own navigation live while it
     // runs. A host that navigates away replaces the panel content, which DELETES this dialog — under its
@@ -104,6 +115,28 @@ private:
     // this surface, and #131 turns on installed themes never being re-offered); decoration packs do — a
     // pack is bulk artwork the user will want to take back off a small disk, and the place they browsed for
     // it is the only place they will look for that.
+    //
+    // `extras` is the furniture only a THEME card carries today (issue #91) — a picture on the left and a
+    // second button beside the install verb. It is ONE struct rather than four more parameters, and the
+    // overload below is what every other card uses, so the add-on and decoration call sites are untouched
+    // and an empty `extras` produces exactly the card this dialog drew before screenshots existed.
+    struct CardExtras
+    {
+        // Where to put the QLabel that holds the picture. Non-null = reserve the slot and hand the label
+        // back, so an async screenshot fetch can patch it once the bytes land. The label starts EMPTY and
+        // zero-width: a card whose picture never arrives is the card it always was.
+        QLabel** thumbnailOut = nullptr;
+        QString  previewVerb;              // non-empty = a second button carrying this verb
+        std::function<void()> onPreview;   // …and what it does. Both, or neither.
+    };
+    void addCard(const QString& name, const QString& author, const QString& description,
+                 const QStringList& formFactors, const QString& indexUrl, bool installed,
+                 const std::function<void(QPushButton*)>& onInstall,
+                 const QString& installedAction, const CardExtras& extras);
+    // …and the two-argument form every card that wants neither uses. An OVERLOAD rather than a pair of
+    // default arguments: `= CardExtras()` as a default for a NESTED class is ill-formed on GCC ("default
+    // member initializer required before the end of its enclosing class") though MSVC accepts it, which is
+    // a local build that passes and a Linux CI that does not.
     void addCard(const QString& name, const QString& author, const QString& description,
                  const QStringList& formFactors, const QString& indexUrl, bool installed,
                  const std::function<void(QPushButton*)>& onInstall,
@@ -214,4 +247,7 @@ private:
     // no longer exists. finishInstall() posts the refused fetchAll rather than calling it — see the note
     // there; calling it directly is the use-after-free the fetchAll guard exists to prevent.
     bool refreshPending_ = false;
+    // What a card's Preview button does, supplied by the host (see setPreviewHandler). Empty = no such
+    // button is offered.
+    std::function<void(const QString& folder)> onPreview_;
 };
