@@ -3122,14 +3122,13 @@ void MainWindow::installAbsProgressHooks()
         // IN BOOK TIME. The server tracks one position per item, and the position it wants is the
         // listener's place in the BOOK — a position in part four, reported bare, would send them back four
         // minutes into a fifteen-hour book on every other client they own.
-        double at    = pos;
+        //
+        // Through THIS book's own session (AbsClient::bookTime), never through "the book opened last": the
+        // final report of a book being left fires from the clearQueue of the NEXT open, after openAbsItem has
+        // already installed the next book's tracks — and read through those, it went to the server as a
+        // position in the part rather than in the book (#197 inc 3, seen live on the first drive).
         double total = dur;
-        if (book == absBookId_ && !absTracks_.isEmpty())
-        {
-            const int idx = absQueueIndexOf(identity);
-            if (idx >= 0) at = Abs::absoluteTime(absTracks_, idx, pos);
-            if (absDuration_ > 0.0) total = absDuration_;
-        }
+        const double at = AbsClient::instance().bookTime(book, absQueueIndexOf(identity), pos, &total);
         AbsClient::instance().reportProgress(book, at, total, /*force*/ leaving);
         return true;   // ...and NOTHING is written into our synced resume categories for this id.
     });

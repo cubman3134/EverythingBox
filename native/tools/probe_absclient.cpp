@@ -262,6 +262,16 @@ private:
                    "duration":2400}]}})");
             return;
         }
+        // #197: a SECOND book, a single file, so a probe can open two sessions and ask about the first.
+        if (path == QLatin1String("/api/items/li_one/play"))
+        {
+            send(sock, 200, R"({"id":"sess_2","duration":60,"currentTime":0,
+              "libraryItem":{"id":"li_one","media":{"metadata":{"title":"One File"}}},
+              "audioTracks":[{"index":1,"startOffset":0,"duration":60,"title":"one.mp3",
+                              "contentUrl":"/api/items/li_one/file/af_9","mimeType":"audio/mpeg"}],
+              "chapters":[]})");
+            return;
+        }
         if (path.endsWith(QLatin1String("/play")) || path.contains(QLatin1String("/play/")))
         {
             // WITH `libraryItem`, which a real Audiobookshelf sends and which a client re-opening from its
@@ -1052,6 +1062,29 @@ static void testLive(AbsStub& stub, quint16 port)
                        == 345.0);
     }
 
+    // #197: THE BOOK BEING LEFT IS REPORTED IN ITS OWN TIME. Opening the next book lands its session first;
+    // the last report of the one being left fires after that (from the next open's clearQueue). It has to be
+    // converted through ITS OWN tracks — before this, it went through "the book opened last", so leaving
+    // "The Long Book" 5 s into part three for another book told the server 5 s, not 305 s.
+    {
+        const QString single = Abs::qualify(g_serverId, QStringLiteral("li_one"));
+        done = false; Abs::Session one;
+        c.openSession(single, [&](const AbsClient::Result& r, const Abs::Session& s) { done = true; one = s; });
+        CHECK(waitFor([&] { return done; }));
+        CHECK(one.ok && one.tracks.size() == 1 && one.duration == 60.0);
+        double total = 0.0;
+        CHECK(c.bookTime(book, 2, 5.0, &total) == 305.0);        // the first book, opened BEFORE this one
+        CHECK(total == 450.0);
+        CHECK(c.bookTime(book, 1, 150.0) == 250.0);
+        total = 0.0;
+        CHECK(c.bookTime(single, 0, 12.0, &total) == 12.0);      // a single file: part 0 is the book
+        CHECK(total == 60.0);
+        double untouched = 7.0;                                  // no session: the position, unconverted
+        CHECK(c.bookTime(QStringLiteral("abs:nope:li"), 1, 9.0, &untouched) == 9.0 && untouched == 7.0);
+        CHECK(c.bookTime(book, 99, 9.0) == 9.0);                 // no such part: likewise
+        CHECK(c.bookTime(book, -1, 9.0) == 9.0);
+    }
+
     // Reading it back.
     done = false; Abs::Progress got;
     c.fetchProgress(book, [&](const AbsClient::Result& r, const Abs::Progress& p) { done = true; got = p; });
@@ -1094,9 +1127,10 @@ static void testSessionHooks(const QString& scratchIni)
         if (b.isEmpty()) return false;
         int idx = -1;
         for (int i = 0; i < queue.size(); ++i) if (queue.at(i) == id) idx = i;
-        reported.push_back({ b, idx >= 0 ? Abs::absoluteTime(tracks, idx, pos) : pos });
+        // MainWindow's own conversion, through the book's OWN session (the one testLive opened) — #197.
+        double total = dur;
+        reported.push_back({ b, AbsClient::instance().bookTime(b, idx, pos, &total) });
         if (leaving) sawLeaving = true;
-        Q_UNUSED(dur);
         return true;
     });
     // The seed the app computes from the play session's currentTime: 250 -> part 1, 150 in.

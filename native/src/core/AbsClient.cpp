@@ -426,6 +426,22 @@ Abs::Session AbsClient::session(const QString& qualifiedId) const
     return sessions_.value(qualifiedId);
 }
 
+double AbsClient::bookTime(const QString& qualifiedId, int partIndex, double pos, double* total) const
+{
+    const Abs::Session s = sessions_.value(qualifiedId);
+    if (!s.ok || s.tracks.isEmpty()) return pos;
+    if (total)
+    {
+        // The server's own figure for the whole item, else the end of its last track.
+        const double len = s.duration > 0.0 ? s.duration
+                                            : Abs::absoluteTime(s.tracks, int(s.tracks.size()) - 1,
+                                                                s.tracks.last().duration);
+        if (len > 0.0) *total = len;
+    }
+    if (partIndex < 0 || partIndex >= s.tracks.size()) return pos;
+    return Abs::absoluteTime(s.tracks, partIndex, pos);
+}
+
 QString AbsClient::partStreamUrl(const QString& qualifiedId, int partIndex) const
 {
     const Abs::Session s = sessions_.value(qualifiedId);
