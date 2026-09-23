@@ -63,13 +63,14 @@ void MainWindow::initDownloadRemint()
         // Exactly once, whatever the resolve does; a shared flag because AddonManager's callback is a copyable
         // std::function and an answer arriving twice must not start the transfer twice.
         auto answered = std::make_shared<bool>(false);
-        auto finish = [done, answered, r](const QString& url, const QString&, const StreamHeaders::Headers& h) {
+        auto finish = [done, answered, r](const QString& url, const QString&,
+                                          const StreamHeaders::Headers& headers) {
             if (*answered) return;
             *answered = true;
             remintLog(QStringLiteral("download: re-mint via %1 (%2, %3) — %4")
                           .arg(r.route, r.type, r.addonId.isEmpty() ? QStringLiteral("-") : r.addonId,
                                url.isEmpty() ? QStringLiteral("no link") : QStringLiteral("fresh link")));
-            done(url, h);
+            done(url, headers);
         };
 
         switch (how)
