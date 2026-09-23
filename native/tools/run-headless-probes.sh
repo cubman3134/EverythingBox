@@ -4095,6 +4095,20 @@ else
   RB_AT="$HERE/../src/ui/MainWindowAbsTimeline.cpp"
   [ -f "$RB_AT" ] && [ "$(sed -E 's://.*$::' "$RB_AT" | grep -c -F 'session_->overrideResumeSeek(within);')" -eq 1 ] \
     || rb_note "absBookSeek no longer places the start inside the part it jumps to (#197): a seek to the middle of another track would play that track from its top."
+  # #432: AN ARROW PRESS ON A BOOK-SCALE BAR IS THE SKIP STEP IN BOOK SECONDS. BookTimeline::stepRuleFor and
+  # stepBook hold the rule and the arithmetic and probe_booktimeline pins them (inside a part, across a boundary
+  # both ways, both ends, a torrent release stopping at the part edge); what it cannot see is the wiring -- the
+  # key handler handing the press to them with the player's own step, the release committing the aim they left,
+  # and both live-seek sites (the immediate one and the trailing shot) seeking in book time.
+  RB_BS="$HERE/../src/ui/MainWindowBookStep.cpp"
+  [ "$(grep -c -F 'if (!bookStepKey(delta))' "$rb_mwt")" -eq 1 ] \
+    || rb_note "the classic seek bar's arrow keys do not offer a multi-part book's step to bookStepKey (#432): a press moves the book bar by a slice of the part that is playing again."
+  [ -f "$RB_BS" ] && [ "$(sed -E 's://.*$::' "$RB_BS" | grep -c -F 'BookTimeline::stepBook(from, delta, audioSkipStep(), total, parts,')" -eq 1 ] \
+    && [ "$(sed -E 's://.*$::' "$RB_BS" | grep -c -F 'BookTimeline::stepRuleFor(bookScale(), bookPartsFree())')" -eq 1 ] \
+    || rb_note "bookStepKey no longer steps through BookTimeline::stepRuleFor/stepBook with the player's skip step (#432): the arrow step on a book bar is not the step the rest of the player uses, or a torrent release crosses a part it would have to mint."
+  [ "$(grep -c -F 'if (bookStepCommit()) return;' "$rb_mwt")" -eq 1 ] \
+    && [ "$(grep -c -F 'liveSeekNow();' "$rb_mwt")" -ge 2 ] \
+    || rb_note "the classic seek bar's release or its live seek does not use the book-step aim (#432): the handle would say one point in the book and playback would go to another."
   # THE DRAG MAY NOT LEAVE THE PART. Crossing one means minting its link -- a fresh resolve of the whole
   # release, and #216 is the issue of one of those taking 65 seconds and coming back with nothing. Both
   # commit paths clamp, because the verb channel is reachable from more than the page.
