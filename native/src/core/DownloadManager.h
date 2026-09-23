@@ -20,7 +20,10 @@ struct DownloadJob
 {
     QString id;      // unique
     QString title;
-    QString url;     // source (a debrid link may expire; retry re-uses it — a dead link just fails again)
+    QString url;     // source (a debrid link may expire; retry re-uses it — a dead link just fails again).
+                     // #437: EMPTY for a job that can mint its link (sourceRef); sealed at rest on Windows and
+                     // kept in an owner-only file elsewhere while it can resume; cut to StoredUrl::location
+                     // (no query, no fragment) the moment the job fails. See core/UrlAtRest.h.
     QString dest;    // final local path (the .part is dest + ".part")
     QString kind;    // "video" | "audio" | "document" | "game" | "pcgame"
     QString sysId;   // game system id, else empty
@@ -39,6 +42,12 @@ struct DownloadJob
     // Persisted: the ref is the durable half. It carries no credential — "jf:<serverId>:<itemId>" is two
     // ids — and it is exactly what a restart needs in order to ask for the link again.
     QString sourceRef;
+    // A link ALREADY MINTED for this job's ref, used by the next start() INSTEAD of asking the minter, and
+    // cleared by it (#437). An add-on download arrives with its link freshly resolved; asking the source a
+    // second time for the first transfer would be a wasted round trip, and on the imdb route possibly a
+    // different release. NEVER PERSISTED: it is a credential, and it is exactly what sourceRef exists to keep
+    // out of queue.json. Jellyfin, Subsonic and Audiobookshelf jobs never set it.
+    QString mintedUrl;
     // The source's behaviorHints.proxyHeaders.request, declared for `url` (#59). A download is a plain HTTP
     // fetch of the very URL the player would have played, so a header-gated source that PLAYS fine used to
     // fail here with a 403 the user reads as "the download is broken".
@@ -70,6 +79,12 @@ struct DownloadJob
     enum State { Queued, Active, Paused, Failed, Done };
     State state = Queued;
     QString error;
+    // #437: this plain-link job FAILED and its url's query and fragment were dropped on the spot (the part
+    // that carries a debrid token or an add-on key), so the link left cannot be trusted to fetch the file
+    // again. Retry cannot help. Starting the download again from the item can: it re-resolves the link, and
+    // enqueue() de-dups by destination, so the fresh link RESUMES the .part. The job's error says so.
+    // Persisted ("dropped"); cleared by that fresh enqueue.
+    bool linkDropped = false;
 };
 
 class DownloadManager : public QObject
@@ -88,6 +103,18 @@ public:
     // is, and nothing in it should be able to reach a token store.
     using UrlMinter = std::function<QString(const QString& sourceRef)>;
     void setUrlMinter(UrlMinter minter) { minter_ = std::move(minter); }
+    // THE ASYNCHRONOUS MINTER (#437), for refs only a network round trip can answer: an add-on download's
+    // #224 recipe (core/DownloadRecipe.h), re-resolved through the add-on that served it. Owns exactly the
+    // refs DownloadRecipe::isRef accepts; every other ref still goes to the synchronous minter above, so a
+    // Jellyfin, Subsonic or Audiobookshelf job runs exactly as before.
+    //
+    // `done` may be called at once or later, at most once; an empty url means the source could not mint one.
+    // The headers are the ones the source declared for THAT url (#59), used for this request and not kept.
+    // Installing one pumps the queue: a restored recipe job waits for its minter rather than failing for the
+    // lack of one.
+    using MintDone = std::function<void(const QString& url, const StreamHeaders::Headers& headers)>;
+    using AsyncUrlMinter = std::function<void(const QString& sourceRef, MintDone done)>;
+    void setAsyncUrlMinter(AsyncUrlMinter minter);
     const QVector<DownloadJob>& jobs() const { return jobs_; }
     bool hasActiveOrQueued() const;
 
@@ -106,6 +133,16 @@ signals:
 private:
     void pump();                                // start the next queued job if nothing is active
     void start(int idx);
+    // The transfer itself, once `fetchUrl` is known: straight from start() for a plain job or a ref the
+    // synchronous minter answers, from onMinted() for a recipe job (#437).
+    void beginTransfer(int idx, const QString& fetchUrl);
+    void onMinted(quint64 gen, const QString& id, const QString& url, const StreamHeaders::Headers& headers);
+    // Every way a job ends Failed goes through here, because #437's rule has to hold on every one of them:
+    // a plain link loses its query and fragment the moment its job can no longer resume.
+    void failJob(DownloadJob& j, const QString& error);
+    // Throw the .part away and fetch the file from the top, as the app's own work rather than the user's:
+    // a 416 about our offset, or a re-minted link that names a different file (#437).
+    void restartFromTop(int idx, const QString& why);
     void onReadyRead();
     void onFinished();
     void noteResponseHead();            // read this response's own size facts, exactly once per transfer
@@ -116,7 +153,7 @@ private:
     int indexOf(const QString& id) const;
     int activeIndex() const;
     void save() const;
-    void load();
+    bool load();   // true when what it read has to be written back in today's shape (#437's migration)
 
     QVector<DownloadJob> jobs_;
     QNetworkAccessManager* nam_ = nullptr;
@@ -136,4 +173,16 @@ private:
     qint64 bodyReceived_ = 0;           // bytes of THIS response written so far (not the .part's total size)
     bool rangeAsked_ = false;           // we sent a resume Range, so a 416 is an answer about OUR offset
     UrlMinter minter_;                  // #110: sourceRef -> a fresh url, asked once per start()
+    AsyncUrlMinter asyncMinter_;        // #437: a recipe ref -> a fresh url, later
+    // A recipe job between start() and its minter's answer. It holds the slot (one download at a time) with
+    // no reply yet, so pump(), pause and cancel each have to see it. mintGen_ is bumped by anything that
+    // abandons the wait, so a late answer for a job paused or cancelled meanwhile is dropped.
+    bool minting_ = false;
+    quint64 mintGen_ = 0;
+    // #437: a RE-MINTED link resuming a .part. The source is asked for the same item again, and on the imdb
+    // route that can be a different release, whose bytes appended to ours would make a corrupt file that
+    // finishes "successfully". So the size the source now states is compared with the size recorded for the
+    // .part, and a mismatch starts the file over instead of splicing. -1 when there is nothing to compare.
+    qint64 resumeTotal_ = -1;
+    bool identityMismatch_ = false;
 };

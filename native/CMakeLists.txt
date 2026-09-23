@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.315 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.316 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1005,6 +1005,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # a complete thought.
         src/ui/MainWindowJellyfinDownload.cpp
         src/ui/MainWindowSubsonicDownload.cpp   # #193: Subsonic offline downloads, Jellyfin's shape
+        src/ui/MainWindowDownloadRemint.cpp     # #437: an add-on download re-mints its link, never stores it
         # #109: the Request action, the Requests shelf and the request-service settings. Its OWN TU (the
         # #186 direction) - and every submission in this feature happens at exactly one call site in it.
         src/ui/MainWindowRequests.cpp
@@ -2739,6 +2740,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     #
     # NOTHING HERE TALKS TO A SERVER. Every url is a string built from a fixture root; the fixture host is
     # under the reserved .test TLD and no event loop is ever run, so no request is dispatched.
+    # (#437: section 9 is the one exception, and it stays inside the process: real transfers against a
+    # loopback server the probe binds itself on 127.0.0.1.)
     add_executable(probe_jfdownload tools/probe_jfdownload.cpp
         src/core/Jellyfin.cpp            src/core/Jellyfin.h
         src/core/JellyfinDownload.cpp    src/core/JellyfinDownload.h
@@ -2758,7 +2761,10 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_jfdownload PRIVATE src src/core tools)
     # The ini-redirect seam, same macro and same rule as probe_jellyfin's: the stores this probe drives hold
     # TOKENS, so without the redirect a run would write a fixture credential into a settings file.
-    target_compile_definitions(probe_jfdownload PRIVATE EB_JELLYFIN_TEST_SEAM)
+    # #437: section 9 reads the Android backup rules and CloudSync's bundle list from the source tree, to
+    # assert that nothing carrying files off the device carries downloads/queue.json.
+    target_compile_definitions(probe_jfdownload PRIVATE EB_JELLYFIN_TEST_SEAM
+        EB_JFDOWNLOAD_NATIVE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(probe_jfdownload PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from

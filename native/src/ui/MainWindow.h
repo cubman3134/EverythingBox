@@ -2052,6 +2052,10 @@ private:
     // Installs DownloadManager's url minter, restores the "already have it" index and flushes anything the
     // last session queued. Called once, from the constructor's Jellyfin wiring.
     void initJellyfinDownloads();
+    // #437: installs DownloadManager's ASYNCHRONOUS minter, which turns an add-on download's #224 recipe
+    // (DownloadRecipe.h) back into a fresh link through the same routing and the same two resolve calls as
+    // remintAndOpen. Defined in MainWindowDownloadRemint.cpp. Called once, right after the Jellyfin wiring.
+    void initDownloadRemint();
     // Queue ONE item for offline keeping. Asks the owning server for the item's container so the file is
     // named honestly, then enqueues a ref-backed DownloadJob (no url — see DownloadJob::sourceRef).
     void downloadJellyfinItem(const QString& qualifiedId, const QString& title, const QString& thumb);

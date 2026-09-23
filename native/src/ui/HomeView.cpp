@@ -9642,7 +9642,10 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         // would build, and downloading a book's forty parts one file at a time is a separate feature (#214
         // rules it out of this increment by name).
         mgr_->resolveDocumentByQuery(query, wantTitle, catType, [this, it](const AddonManager::DocFind& found) {
-            if (!found.url.isEmpty()) dlEmit(it, found.url, found.mime);
+            // #437: the provider that found the file and ITS id for the release, the identity a resume can
+            // ask again by (the same pair the doc-bridge play hands its Recents recipe, #224).
+            if (!found.url.isEmpty())
+                dlEmit(it, found.url, found.mime, {}, DlMint{ found.providerId, found.releaseId, QString() });
             dlNext();
         });
         return;
@@ -9666,12 +9669,16 @@ void HomeView::dlResolveLeaf(const DlNode& node)
         // The sequence, and the rule that dlNext() runs exactly once per leaf on every one of these paths,
         // live in browse/RemoteLeafResolve.h.
         const QString parentTitle = node.parentTitle, parentType = node.parentType;
-        mgr_->resolveStream(node.addon, it, [this, it, parentTitle, parentType](const QString& url, const QString& mime,
+        const QString viaAddon = node.addon ? node.addon->manifest.id : QString();   // #437, see stage1 below
+        mgr_->resolveStream(node.addon, it, [this, it, parentTitle, parentType, viaAddon](const QString& url, const QString& mime,
                                                                                const StreamHeaders::Headers& headers) {
             browse::RemoteLeafSinks stage1;
             // Only the DIRECT answer carries headers: they were declared for that url. The search below resolves
             // a different url off a file provider, which declares none — exactly as the local bridge emits.
-            stage1.emitFound = [this, it, headers](const QString& u, const QString& m) { dlEmit(it, u, m, headers); };
+            // #437: this url is the answer of THIS addon's /stream for THIS item, so that is what a resume asks.
+            stage1.emitFound = [this, it, headers, viaAddon](const QString& u, const QString& m) {
+                dlEmit(it, u, m, headers, DlMint{ viaAddon, it.id, QString() });
+            };
             stage1.finish    = [this] { dlNext(); };
             stage1.search    = [this, it](const browse::RemoteLeafPlan& plan) {
                 mgr_->resolveDocumentByQuery(plan.query, plan.wantTitle, plan.catalogType,
@@ -9681,7 +9688,10 @@ void HomeView::dlResolveLeaf(const DlNode& node)
                     // the point: a fuzzy hit on the wrong game installs the patch against the wrong dump and
                     // fails much later, somewhere that looks nothing like this.
                     browse::RemoteLeafSinks stage2;
-                    stage2.emitFound = [this, it](const QString& fu, const QString& fm) { dlEmit(it, fu, fm); };
+                    const QString provider = found.providerId, release = found.releaseId;   // #437, as above
+                    stage2.emitFound = [this, it, provider, release](const QString& fu, const QString& fm) {
+                        dlEmit(it, fu, fm, {}, DlMint{ provider, release, QString() });
+                    };
                     stage2.finish    = [this] { dlNext(); };
                     browse::remoteLeafSearchDone(u, m, stage2);
                 });
@@ -9701,9 +9711,26 @@ void HomeView::dlResolveLeaf(const DlNode& node)
 }
 
 void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime,
-                      const StreamHeaders::Headers& headers)
+                      const StreamHeaders::Headers& headers, const DlMint& mint)
 {
     MediaItem m = it; m.url = url; m.mime = mime;
+    // #437: THE IDENTITY THIS URL WAS MINTED BY, AND NO OTHER. MainWindow::enqueueDownload turns it into the
+    // job's #224 recipe through applyRemintRecipe, and a job with a recipe keeps no link in queue.json — so
+    // the recipe must re-ask exactly what answered here. The item's own fields are not that: an item carrying
+    // an imdbStreamId would be re-minted across every stream provider when THIS url came from one addon's
+    // /stream, and a catalog item's addon may have no /stream at all. So all three are replaced by what the
+    // caller says resolved this url. No identity leaves no recipe, and the job keeps its (sealed) link.
+    // `m` goes to enqueueDownload and nowhere else, so nothing that reads these fields for another purpose
+    // sees the change; the MetaCache rows below are written from `it`.
+    m.imdbStreamId = mint.imdbStreamId;
+    if (mint.addonId.isEmpty() || mint.itemId.isEmpty())
+    {
+        m.remintAddonId.clear(); m.remintItemId.clear(); m.sourceAddonId.clear();
+    }
+    else
+    {
+        m.remintAddonId = mint.addonId; m.remintItemId = mint.itemId;
+    }
     // Bound to the url they were declared for, exactly as the play path binds them (#59). The default is
     // empty, so the one caller with no headers to offer — resolveDocumentByQuery, whose callback carries
     // none — keeps the previous behaviour rather than inheriting anything.
@@ -12575,11 +12602,11 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         {
             const QString stremioType = (it.type == QStringLiteral("movie")) ? QStringLiteral("movie")
                                                                               : QStringLiteral("series");
-            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail](const QString& url, const QString& mime,
-                                                                           const StreamHeaders::Headers& headers) {
+            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail, imdb](const QString& url, const QString& mime,
+                                                                                 const StreamHeaders::Headers& headers) {
                 if (!url.isEmpty())
                 {
-                    dlEmit(it, url, mime, headers);
+                    dlEmit(it, url, mime, headers, DlMint{ QString(), QString(), imdb });   // #437: the imdb route
                     // The crawl fetched this item's own /meta to bridge it — save the card for offline too.
                     if (!it.id.isEmpty())
                     {

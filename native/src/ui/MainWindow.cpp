@@ -123,6 +123,7 @@
 #include "../core/HighlightStore.h"   // per-book highlights: the bookmark store's twin (issue #136)
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
+#include "../core/DownloadRecipe.h"        // issue #437: an add-on download keeps its #224 recipe, not its link
 #include "../core/PlayStats.h"
 #include "../core/GamelistStore.h"
 #include "../core/ArchiveRom.h"
@@ -961,6 +962,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // session queued while offline. Immediately after the manager's own wiring, because the minter has to be
     // installed before any restored job can start.
     initJellyfinDownloads();
+    // #437: the add-on download re-minter (a recipe ref -> a fresh link). See MainWindowDownloadRemint.cpp.
+    initDownloadRemint();
     // #109: the request stores' change hooks (the Requests shelf and the settings status line). No network
     // and no submission — see MainWindowRequests.cpp.
     initRequests();
@@ -21012,6 +21015,24 @@ void MainWindow::enqueueDownload(const MediaItem& item)
     // they are bound to a new url, not that this particular copy happened to keep the same one. Same
     // reasoning as the prefer-local and remote-document re-entries.
     j.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, j.url);
+    // #437: NO LINK AT REST WHERE THE SOURCE CAN MINT IT AGAIN. The #224 recipe for what resolved this url
+    // (HomeView::dlEmit names exactly that on the item), computed by the one recipe builder Recents uses,
+    // becomes the job's sourceRef. queue.json then holds four ids, and a resume re-asks the source through
+    // the minter initDownloadRemint installs. The url just resolved rides as `mintedUrl` for the first
+    // transfer only and is never written. No recipe (a pasted link, a source that cannot re-resolve) keeps
+    // the url, sealed at rest — DownloadManager::save and core/UrlAtRest.h.
+    //
+    // NOT an audiobook: a download takes the whole-release link, and the audiobook re-mint (#214's
+    // resolveAudiobookRelease) answers with the FIRST PART's. Re-minting one for the other would resume a
+    // book's .part from a different file. Those keep the sealed link.
+    if (item.type != QStringLiteral("audiobook"))
+    {
+        RecentItem recipe;
+        recipe.path = item.url;              // the recipe is only written for a network link, as for Recents
+        applyRemintRecipe(recipe, item);
+        DownloadRecipe::bindJob(j, { recipe.sourceRoute, recipe.sourceType, recipe.sourceAddonId,
+                                     recipe.sourceItemId });
+    }
     dm_->enqueue(j);
     notify(tr("“%1” added to Downloads. See Settings ▸ Downloads for progress.").arg(item.title), 4000);
     // Names and a count, via the one sanctioned renderer. Built into a local first so the log CALL never

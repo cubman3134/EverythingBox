@@ -1370,10 +1370,14 @@ private:
     void startDownload();              // begin a crawl from the current detail item
     void dlNext();                     // process the next queued node
     void dlResolveLeaf(const DlNode& node); // resolve one leaf's source, then continue
+    // What resolved a download's url, so the job can ask for it again instead of keeping it (#437): the addon
+    // and ITS id for the item (a /stream answer, or the provider + release a document search picked), or an
+    // IMDB stream id (the imdb bridge). Empty = nothing can re-mint it, and the job keeps its sealed link.
+    struct DlMint { QString addonId; QString itemId; QString imdbStreamId; };
     // Queue a resolved file. `headers` is the source's proxyHeaders for `url` — a download is an ordinary
     // HTTP fetch of the stream URL, so a gated source needs them here too (#59).
     void dlEmit(const MediaItem& it, const QString& url, const QString& mime,
-                const StreamHeaders::Headers& headers = {});
+                const StreamHeaders::Headers& headers = {}, const DlMint& mint = DlMint());
     // TMDB->IMDB bridge: when a non-Stremio catalog item (e.g. AIO Catalog) supplies an IMDB stream id via
     // getMeta, Play resolves it through the installed Stremio stream addons. Set in showMeta for the open item.
     QString playImdbId_;              // "tt123" (movie) or "ttShow:s:e" (episode), else empty

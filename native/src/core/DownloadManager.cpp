@@ -4,6 +4,9 @@
 #include "NetHeaderApply.h"
 #include "LogSafeText.h"       // issue #231: the ONE definition of a url as it may be LOGGED
 #include "NetErrorText.h"      // issue #435: what a failed request may say on screen, and in a log
+#include "StoredUrl.h"         // issue #437: the one rule for a stored link that can no longer resume
+#include "UrlAtRest.h"         // issue #437: a resumable link as it may sit in queue.json, per platform
+#include "DownloadRecipe.h"    // issue #437: an add-on download's #224 re-mint recipe, as a sourceRef
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -16,6 +19,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <QUuid>
 
 static QString queuePath() { return AppPaths::dataDir() + QStringLiteral("/downloads/queue.json"); }
@@ -48,10 +52,20 @@ static qint64 contentRangeLength(const QByteArray& v)
     return (isNum && n >= 0) ? n : -1;
 }
 
+// What a failed plain-link job says once its link has lost its query (#437). The remedy it names is the one
+// that works: the item re-resolves a fresh link, and enqueue() de-dups by destination, so that fresh link
+// RESUMES the .part rather than starting a second copy. Retry cannot, which is why it is not offered as one.
+static QString linkDroppedSentence()
+{
+    return DownloadManager::tr("this link can't be used again — start the download again from the item");
+}
+
 DownloadManager::DownloadManager(QObject* parent) : QObject(parent)
 {
     nam_ = new QNetworkAccessManager(this);
-    load();
+    // #437: a queue.json from before the at-rest rules (a plain "url", or a failed job still holding its whole
+    // link) is rewritten in today's shape at once, not at the next change that happens to save.
+    if (load()) save();
     // Anything that was mid-flight when we last quit is now paused; resume the queue.
     for (DownloadJob& j : jobs_)
         if (j.state == DownloadJob::Active) j.state = DownloadJob::Paused;
@@ -94,6 +108,8 @@ void DownloadManager::enqueue(const DownloadJob& in)
             // fresh answer has to win — otherwise the retry re-sends the dead one and fails identically.
             j.url = in.url;
             j.sourceRef = in.sourceRef;   // #110: the durable half; the url above is empty for these
+            j.mintedUrl = in.mintedUrl;   // #437: the link this resolve just minted for that ref, if any
+            j.linkDropped = false;        // #437: a fresh link is exactly what a dropped one was waiting for
             j.requestHeaders = in.requestHeaders;
             j.headerGated = !in.requestHeaders.isEmpty();
             if (j.state == DownloadJob::Failed || j.state == DownloadJob::Paused) { j.state = DownloadJob::Queued; j.error.clear(); }
@@ -111,25 +127,95 @@ void DownloadManager::enqueue(const DownloadJob& in)
 
 void DownloadManager::pump()
 {
-    if (reply_) return;                         // one at a time
+    if (reply_ || minting_) return;             // one at a time — a job waiting for its link holds the slot
     for (int i = 0; i < jobs_.size(); ++i)
-        if (jobs_[i].state == DownloadJob::Queued) { start(i); return; }
+    {
+        if (jobs_[i].state != DownloadJob::Queued) continue;
+        // #437: a recipe job restored before its minter was installed waits for it (setAsyncUrlMinter pumps),
+        // rather than failing for want of a minter and stranding nothing behind it either.
+        if (DownloadRecipe::isRef(jobs_[i].sourceRef) && !asyncMinter_ && jobs_[i].mintedUrl.isEmpty()) continue;
+        start(i);
+        return;
+    }
 }
+
+void DownloadManager::setAsyncUrlMinter(AsyncUrlMinter minter)
+{
+    asyncMinter_ = std::move(minter);
+    pump();
+}
+
+void DownloadManager::failJob(DownloadJob& j, const QString& error)
+{
+    j.state = DownloadJob::Failed;
+    j.error = error;
+    j.mintedUrl.clear();
+    // #437: A PLAIN LINK THAT CAN NO LONGER RESUME LOSES ITS QUERY AND FRAGMENT NOW. Not at the next save,
+    // not when the list is cleared: a token must not outlive the transfer it was issued for, in memory or
+    // in queue.json. StoredUrl::location is the one rule for a stored playback link (#200) — no list of
+    // credential-shaped parameter names, because no such list can be kept. A ref-backed job has no url.
+    if (j.sourceRef.isEmpty() && !j.url.isEmpty())
+    {
+        const QString kept = StoredUrl::location(j.url);
+        if (kept != j.url)
+        {
+            j.url = kept;
+            j.linkDropped = true;
+            // One remedy, said once: a reason that already sends the user back to the item (the header-gated
+            // one does) is not followed by a second sentence saying the same thing.
+            if (error.isEmpty()) j.error = linkDroppedSentence();
+            else if (!error.contains(tr("start the download again from the item")))
+                j.error = tr("%1; %2").arg(error, linkDroppedSentence());
+        }
+    }
+}
+
 
 void DownloadManager::start(int idx)
 {
     DownloadJob& j = jobs_[idx];
+    const bool recipe = DownloadRecipe::isRef(j.sourceRef);
     // A gated job that came back from queue.json has its flag but not its headers (they are deliberately not
     // persisted — see DownloadJob::headerGated). Retrying it would send the request bare and take the 403
     // this whole change exists to stop, and the user would read that as the download being broken twice. Say
     // what actually happened instead; re-downloading the item resolves it afresh and refills the headers.
-    if (j.headerGated && j.requestHeaders.isEmpty())
+    //
+    // …except a RECIPE job (#437), whose re-mint below answers with the headers declared for the link it
+    // mints. That is the very thing this check says a restart loses, so it has nothing to refuse there.
+    if (!recipe && j.headerGated && j.requestHeaders.isEmpty())
     {
-        j.state = DownloadJob::Failed;
-        j.error = tr("this source needs HTTP headers that aren't kept after a restart — start the download "
-                     "again from the item");
+        failJob(j, tr("this source needs HTTP headers that aren't kept after a restart — start the download "
+                      "again from the item"));
         save(); emit changed();
         pump(); // this job is out of the running; don't strand the rest of the queue behind it
+        return;
+    }
+    // #437: AN ADD-ON DOWNLOAD THAT KEPT ITS RECIPE INSTEAD OF ITS LINK. The first transfer uses the link its
+    // resolve already minted (mintedUrl, never persisted). Every later one — a resume after a restart, a
+    // retry — asks the source again, asynchronously, and holds the slot while it waits. The answer is
+    // handed to onMinted, which drops it if the job was paused or cancelled in the meantime.
+    if (recipe)
+    {
+        if (!j.mintedUrl.isEmpty())
+        {
+            const QString fresh = j.mintedUrl;
+            j.mintedUrl.clear();              // one transfer's worth, exactly as a synchronous mint is
+            beginTransfer(idx, fresh);
+            return;
+        }
+        if (!asyncMinter_) return;            // pump() does not start one without; kept for any other caller
+        j.state = DownloadJob::Active;
+        j.requestHeaders.clear();             // declared for the LAST link; the mint brings this one's
+        activeId_ = j.id;
+        minting_ = true;
+        const quint64 gen = ++mintGen_;
+        const QString id = j.id;
+        const QString ref = j.sourceRef;
+        save(); emit changed();
+        QPointer<DownloadManager> self(this);
+        asyncMinter_(ref, [self, gen, id](const QString& url, const StreamHeaders::Headers& headers) {
+            if (self) self->onMinted(gen, id, url, headers);
+        });
         return;
     }
     // A REF-BACKED JOB HAS NO URL AND MINTS ONE HERE, once, for this request (#110). This is the site the
@@ -144,15 +230,45 @@ void DownloadManager::start(int idx)
         {
             // The honest sentence, built from NOTHING about the request. A server that has been removed or
             // signed out is the ordinary case here, and it is a state the user can fix.
-            j.state = DownloadJob::Failed;
-            j.error = tr("the server this was downloaded from isn't set up on this device any more — "
-                         "sign in again and start the download from the item");
+            failJob(j, tr("the server this was downloaded from isn't set up on this device any more — "
+                          "sign in again and start the download from the item"));
             save(); emit changed();
             pump(); // this job is out of the running; don't strand the rest of the queue behind it
             return;
         }
     }
+    beginTransfer(idx, fetchUrl);
+}
 
+// A recipe job's fresh link (#437), or the source's answer that it has none.
+void DownloadManager::onMinted(quint64 gen, const QString& id, const QString& url,
+                               const StreamHeaders::Headers& headers)
+{
+    // Abandoned while it was being asked for: paused, cancelled, or the manager moved on. Nothing to do — in
+    // particular, nothing to start: whatever holds the slot now got it through pump().
+    if (gen != mintGen_ || !minting_ || activeId_ != id) return;
+    minting_ = false;
+    const int idx = indexOf(id);
+    if (idx < 0) { activeId_.clear(); pump(); return; }
+    DownloadJob& j = jobs_[idx];
+    if (url.isEmpty())
+    {
+        activeId_.clear();
+        // Retry is honest here, unlike a dropped plain link: the recipe is intact, and asking again may well
+        // succeed (a debrid release still caching, an add-on briefly unreachable).
+        failJob(j, tr("couldn't get a fresh link for this download — the source may no longer have it; retry, "
+                      "or start it again from the item"));
+        save(); emit changed();
+        pump();
+        return;
+    }
+    j.requestHeaders = headers;   // declared for THIS link (#59); never persisted
+    beginTransfer(idx, url);
+}
+
+void DownloadManager::beginTransfer(int idx, const QString& fetchUrl)
+{
+    DownloadJob& j = jobs_[idx];
     const QString part = j.dest + QStringLiteral(".part");
     QDir().mkpath(QFileInfo(j.dest).absolutePath());
 
@@ -169,7 +285,8 @@ void DownloadManager::start(int idx)
         if (!file_->open(QIODevice::WriteOnly))
         {
             delete file_; file_ = nullptr;
-            j.state = DownloadJob::Failed; j.error = tr("Can't write to the downloads folder.");
+            activeId_.clear();                  // a recipe job held the slot while it was minted (#437)
+            failJob(j, tr("Can't write to the downloads folder."));
             save(); emit changed();
             pump(); // this job is out of the running; don't strand the rest of the queue behind it
             return;
@@ -206,6 +323,10 @@ void DownloadManager::start(int idx)
     bodyExpected_ = -1;
     bodyReceived_ = 0;
     rangeAsked_ = have > 0;
+    // #437: a re-minted link resuming a .part must name the file the .part is a prefix of. The recorded size
+    // is the only fact about that file we kept; onReadyRead compares the 206's stated size against it.
+    resumeTotal_ = (DownloadRecipe::isRef(j.sourceRef) && have > 0 && j.total > 0) ? j.total : -1;
+    identityMismatch_ = false;
     reply_ = NetHeaderApply::get(nam_, rq, j.requestHeaders, fetchUrl, [this](bool allowed, const QUrl& to) {
         if (allowed)
         {
@@ -239,6 +360,20 @@ void DownloadManager::onReadyRead()
         if (code != 206)
         {
             file_->seek(0); file_->resize(0); j.received = 0;
+        }
+        else if (resumeTotal_ > 0)
+        {
+            // #437: a RE-MINTED link continuing our .part. If the file it names is not the size recorded for
+            // the one we hold, it is not that file (the imdb route can pick another release), and appending
+            // its tail to our head would finish "successfully" as a corrupt file. Stop before a byte of it is
+            // written; onFinished starts this download over from the top instead.
+            const qint64 whole = contentRangeLength(reply_->rawHeader("Content-Range"));
+            if (whole >= 0 && whole != resumeTotal_)
+            {
+                identityMismatch_ = true;
+                reply_->abort();                // -> onFinished, now or later; nothing below may run
+                return;
+            }
         }
     }
     noteResponseHead();
@@ -289,6 +424,21 @@ void DownloadManager::noteResponseHead()
 void DownloadManager::onFinished()
 {
     if (!reply_) return;
+    // #437: the re-minted link named a different file than the one our .part belongs to (see onReadyRead).
+    if (identityMismatch_)
+    {
+        identityMismatch_ = false;
+        const qint64 stated = contentRangeLength(reply_->rawHeader("Content-Range"));
+        reply_->deleteLater(); reply_ = nullptr;
+        const int idx = activeIndex();
+        // Paused or cancelled in the same breath: that decision stands, and finishActive honours it.
+        if (idx < 0 || jobs_[idx].state != DownloadJob::Active) { finishActive(false, QString()); return; }
+        dlLog(QStringLiteral("download: the fresh link for %1 names a %2-byte file where %3 bytes were recorded "
+                             "— not the file the .part belongs to; starting it over")
+                  .arg(QFileInfo(jobs_[idx].dest).fileName()).arg(stated).arg(resumeTotal_));
+        restartFromTop(idx, tr("the source now serves a different file for this download"));
+        return;
+    }
     // A transport-level success (NoError) does NOT mean the download is good: an HTTP 404/403/5xx delivers an
     // error page with NoError, and a dropped connection can end "cleanly" mid-file. Treat a >=400 status, or a
     // body shorter than the length THIS RESPONSE advertised, as a failure so we never record a broken file as
@@ -409,15 +559,28 @@ void DownloadManager::onRangeUnsatisfiable()
     dlLog(QStringLiteral("download: the source refused to resume %1 at %2 bytes and reports the file is %3 — "
                          "starting it over")
               .arg(QFileInfo(jobs_[idx].dest).fileName()).arg(have).arg(whole));
+    restartFromTop(idx, tr("the download had to start over"));
+}
+
+void DownloadManager::restartFromTop(int idx, const QString& why)
+{
+    const QString id = jobs_[idx].id;
+    // The link survives this restart, which is not a failure the user sees: finishActive() marks the job
+    // Failed on its way through, and #437's rule would cut the link's query there. Held here and handed back
+    // when the job is queued again, below.
+    const QString url = jobs_[idx].url;
     jobs_[idx].total = 0;                        // it described a file this source does not serve
-    finishActive(false, tr("the download had to start over"), /*discardPart=*/true);
+    finishActive(false, why, /*discardPart=*/true);
     // finishActive() left the job Failed with its .part removed, and pumped. Queue it again so the restart is
     // the app's work and not the user's — a job that has to re-derive its own byte counts is not something to
     // report as a failure and wait on. If another job took the slot in that pump, this one waits its turn.
-    if (indexOf(jobs_[idx].id) == idx && jobs_[idx].state == DownloadJob::Failed)
+    const int i = indexOf(id);
+    if (i >= 0 && jobs_[i].state == DownloadJob::Failed)
     {
-        jobs_[idx].state = DownloadJob::Queued;
-        jobs_[idx].error.clear();
+        jobs_[i].state = DownloadJob::Queued;
+        jobs_[i].error.clear();
+        jobs_[i].url = url;
+        jobs_[i].linkDropped = false;
         save(); emit changed();
         pump();
     }
@@ -433,7 +596,7 @@ void DownloadManager::finishActive(bool ok, const QString& err, bool discardPart
     if (!ok)
     {
         // Keep the .part so a retry resumes. If it was paused/cancelled we've already handled the state.
-        if (j.state == DownloadJob::Active) { j.state = DownloadJob::Failed; j.error = err; }
+        if (j.state == DownloadJob::Active) failJob(j, err);
         if (discardPart) { QFile::remove(j.dest + QStringLiteral(".part")); j.received = 0; }
     }
     else
@@ -449,7 +612,7 @@ void DownloadManager::finishActive(bool ok, const QString& err, bool discardPart
             if (j.total <= 0) j.total = j.received;
             emit jobCompleted(j);
         }
-        else { j.state = DownloadJob::Failed; j.error = tr("Couldn't finalize the file."); }
+        else failJob(j, tr("Couldn't finalize the file."));
     }
     activeId_.clear();
     save(); emit changed();
@@ -460,6 +623,10 @@ void DownloadManager::retry(const QString& id)
 {
     const int i = indexOf(id);
     if (i < 0) return;
+    // #437: a plain link that lost its query when it failed cannot fetch the file again, so Retry says what
+    // can instead of sending a request that would fail the same way (or, worse, fetch an error page).
+    if (jobs_[i].state == DownloadJob::Failed && jobs_[i].linkDropped)
+    { jobs_[i].error = linkDroppedSentence(); emit changed(); return; }
     if (jobs_[i].state == DownloadJob::Failed || jobs_[i].state == DownloadJob::Paused)
     { jobs_[i].state = DownloadJob::Queued; jobs_[i].error.clear(); save(); emit changed(); pump(); }
 }
@@ -475,6 +642,15 @@ void DownloadManager::pauseJob(const QString& id)
         jobs_[i].state = DownloadJob::Paused;   // set before abort so finishActive() doesn't mark it Failed
         reply_->abort();                        // -> onFinished -> finishActive(false); .part is kept
     }
+    else if (jobs_[i].id == activeId_ && minting_)
+    {
+        // #437: paused while its link was being minted. Abandon the answer (mintGen_), give up the slot.
+        jobs_[i].state = DownloadJob::Paused;
+        minting_ = false; ++mintGen_; activeId_.clear();
+        save(); emit changed();
+        pump();
+        return;
+    }
     else if (jobs_[i].state == DownloadJob::Queued) { jobs_[i].state = DownloadJob::Paused; }
     save(); emit changed();
 }
@@ -485,6 +661,10 @@ void DownloadManager::cancel(const QString& id)
     if (i < 0) return;
     const QString part = jobs_[i].dest + QStringLiteral(".part");
     if (jobs_[i].id == activeId_ && reply_) { jobs_[i].state = DownloadJob::Paused; reply_->abort(); }
+    // #437: cancelled while its link was being minted; the answer, when it comes, belongs to nothing.
+    else if (jobs_[i].id == activeId_ && minting_) { minting_ = false; ++mintGen_; activeId_.clear(); }
+    // The record goes with the job, link and all: the remove() and save() below are what "a cancelled job
+    // keeps no link" means, at the same instant the user asked.
     QFile::remove(part);
     jobs_.remove(indexOf(id));
     save(); emit changed();
@@ -512,12 +692,28 @@ void DownloadManager::save() const
     for (const DownloadJob& j : jobs_)
     {
         if (j.state == DownloadJob::Done) continue; // completed jobs live in DownloadsStore; don't persist here
-        arr.append(QJsonObject{
+        // #437: A PLAIN JOB'S LINK, AS IT MAY SIT IN THIS FILE. (A ref-backed job has none; see below.)
+        //   * a job that has FAILED keeps only StoredUrl::location — failJob() already cut it, and this is
+        //     the belt for any future path that sets Failed without going through there;
+        //   * on Windows the link is SEALED with DPAPI (current user) into "urlp" and "url" stays empty, so
+        //     no link of any kind is readable in this file; if sealing fails, nothing is written and the job
+        //     comes back unable to resume, rather than the link going out in the clear;
+        //   * elsewhere it is written as it is, into a file only its owner can read (see the open below).
+        // See core/UrlAtRest.h for why each platform gets what it gets.
+        QString plainUrl, sealedUrl;
+        if (j.sourceRef.isEmpty() && !j.url.isEmpty())
+        {
+            const QString u = j.state == DownloadJob::Failed ? StoredUrl::location(j.url) : j.url;
+            if (UrlAtRest::sealsAtRest()) sealedUrl = UrlAtRest::seal(u);
+            else                          plainUrl = u;
+        }
+        QJsonObject o{
             { QStringLiteral("id"), j.id }, { QStringLiteral("title"), j.title },
             // #110: THE REF, AND FOR A REF-BACKED JOB NO URL AT ALL. `j.url` is already empty for those —
             // this is not a scrub but a belt beside the braces, so that a future site which did assign one
-            // still cannot write it here. A ref is two ids and carries no credential.
-            { QStringLiteral("url"), j.sourceRef.isEmpty() ? j.url : QString() },
+            // still cannot write it here. A ref is two ids and carries no credential. #437's recipe refs
+            // (DownloadRecipe.h) are four ids, and the same rule; `mintedUrl` is never written at all.
+            { QStringLiteral("url"), plainUrl },
             { QStringLiteral("ref"), j.sourceRef },
             { QStringLiteral("dest"), j.dest }, { QStringLiteral("kind"), j.kind }, { QStringLiteral("sysId"), j.sysId }, { QStringLiteral("form"), j.form },
             { QStringLiteral("thumb"), j.thumb }, { QStringLiteral("key"), j.key },
@@ -526,25 +722,49 @@ void DownloadManager::save() const
             { QStringLiteral("gated"), j.headerGated },
             { QStringLiteral("record"), j.record },
             { QStringLiteral("received"), j.received }, { QStringLiteral("total"), j.total },
-            { QStringLiteral("state"), int(j.state == DownloadJob::Active ? DownloadJob::Paused : j.state) } });
+            { QStringLiteral("state"), int(j.state == DownloadJob::Active ? DownloadJob::Paused : j.state) } };
+        // Written only when there is something to say, so a ref-backed job's record (Jellyfin, Subsonic,
+        // Audiobookshelf) is exactly what it was before #437.
+        if (!sealedUrl.isEmpty()) o.insert(QStringLiteral("urlp"), sealedUrl);
+        if (j.linkDropped) o.insert(QStringLiteral("dropped"), true);
+        arr.append(o);
     }
     QDir().mkpath(QFileInfo(queuePath()).absolutePath());
     QFile f(queuePath());
-    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+    // #437: owner-only on POSIX (0600, and an older 0644 file is brought down to it); a plain open on Windows,
+    // where the protection is the seal above.
+    if (UrlAtRest::openRestricted(f)) f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
 
-void DownloadManager::load()
+bool DownloadManager::load()
 {
+    bool rewrite = false;
     QFile f(queuePath());
-    if (!f.open(QIODevice::ReadOnly)) return;
+    if (!f.open(QIODevice::ReadOnly)) return false;
     for (const QJsonValue& v : QJsonDocument::fromJson(f.readAll()).array())
     {
         const QJsonObject o = v.toObject();
         DownloadJob j;
         j.id = o.value(QStringLiteral("id")).toString();
         j.title = o.value(QStringLiteral("title")).toString();
-        j.url = o.value(QStringLiteral("url")).toString();
         j.sourceRef = o.value(QStringLiteral("ref")).toString();   // #110; absent for every older job
+        // #437: the link, sealed ("urlp") or as it is ("url"). A plain "url" on a platform that seals is a
+        // queue.json from before #437 — read ONCE, then written back sealed (the caller saves when this
+        // returns true). A seal that will not open (another Windows account, another machine, a damaged
+        // file) leaves a job that cannot resume, and it says so rather than fetching nothing.
+        const QString sealed = o.value(QStringLiteral("urlp")).toString();
+        bool unreadable = false;
+        if (!sealed.isEmpty())
+        {
+            j.url = UrlAtRest::unseal(sealed);
+            unreadable = j.url.isEmpty();
+        }
+        else
+        {
+            j.url = o.value(QStringLiteral("url")).toString();
+            if (!j.url.isEmpty() && UrlAtRest::sealsAtRest()) rewrite = true;
+        }
+        j.linkDropped = o.value(QStringLiteral("dropped")).toBool();
         j.dest = o.value(QStringLiteral("dest")).toString();
         j.kind = o.value(QStringLiteral("kind")).toString();
         j.sysId = o.value(QStringLiteral("sysId")).toString();
@@ -559,6 +779,26 @@ void DownloadManager::load()
         j.received = o.value(QStringLiteral("received")).toVariant().toLongLong();
         j.total = o.value(QStringLiteral("total")).toVariant().toLongLong();
         j.state = static_cast<DownloadJob::State>(o.value(QStringLiteral("state")).toInt());
+        if (j.sourceRef.isEmpty())
+        {
+            // (An empty link on a plain job is the same case: a seal that failed at save wrote nothing.)
+            if (unreadable || j.url.isEmpty())
+            {
+                j.state = DownloadJob::Failed;
+                j.linkDropped = true;
+                rewrite = true;
+            }
+            // A FAILED job written before #437 still holds its whole link. Cut it now, on the way in, the
+            // same cut failJob() makes the moment a job fails today.
+            else if (j.state == DownloadJob::Failed && !j.url.isEmpty())
+            {
+                failJob(j, QString());
+                if (j.linkDropped) rewrite = true;
+            }
+            // The error is not persisted, so a dropped job's sentence is restored with the flag that says it.
+            if (j.state == DownloadJob::Failed && j.linkDropped) j.error = linkDroppedSentence();
+        }
         if (!j.id.isEmpty() && !j.dest.isEmpty()) jobs_.push_back(j);   // url may be empty: see `ref`
     }
+    return rewrite;
 }
