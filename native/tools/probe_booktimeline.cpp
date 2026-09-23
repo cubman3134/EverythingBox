@@ -22,6 +22,10 @@
 // has one, never a mix — and the exact mapping they give, both ways, at every boundary: the arithmetic a
 // seek on the bar uses to land in the right track at the right offset.
 //
+// AND SINCE #432, THE ARROW STEP: section 10 pins what one arrow press on a book-scale bar does -- a fixed
+// number of BOOK seconds, across a part boundary both ways, clamped at the book's ends, and stopped at the
+// part's edge for a torrent release whose next part would have to be minted.
+//
 // Prints BOOKTIMELINE-OK on success; any failure prints BOOKTIMELINE-FAIL <cond> (line) and exits non-zero.
 #include "BookTimeline.h"
 
@@ -397,6 +401,109 @@ int main(int argc, char** argv)
         CHECK(est.part == 1 && near(est.within, 100.0));
         BookTimeline::Timeline none;
         CHECK(none.land(10.0).part == -1);
+    }
+
+    // ---- 10. ONE ARROW PRESS ON A BOOK-SCALE BAR (#432) ---------------------------------------------
+    // The classic bar's arrow step, on a multi-part book, is a fixed amount of BOOK time: the player's own
+    // skip step, whatever part it starts in and whatever that part's length. Uneven parts (100/200/150 s)
+    // on purpose: a step computed from the PART's length rather than the book's — the defect — moves a
+    // different amount in each of them, and the checks below that expect exactly 30 s would see it.
+    {
+        using BookTimeline::StepRule;
+        const QVector<double> parts = { 100.0, 200.0, 150.0 };
+        BookTimeline::Timeline t;
+        t.seedExact(parts);
+        const double total = t.total();
+        const double step = 30.0;
+        CHECK(total == 450.0);
+
+        // WHICH RULE. A single file (no book-scale bar) keeps the bar's own proportional step, unchanged —
+        // PlayerBarNav's barStep, pinned by probe_playerbar; a book whose parts cost nothing to open may
+        // cross; a torrent release may not (#216).
+        CHECK(BookTimeline::stepRuleFor(false, true)  == StepRule::Proportional);
+        CHECK(BookTimeline::stepRuleFor(false, false) == StepRule::Proportional);
+        CHECK(BookTimeline::stepRuleFor(true, true)   == StepRule::Book);
+        CHECK(BookTimeline::stepRuleFor(true, false)  == StepRule::BookWithinPart);
+
+        // A STEP INSIDE A PART moves exactly the step, in every part, whatever that part's length.
+        CHECK(BookTimeline::stepBook(40.0, +1, step, total, parts) == 70.0);
+        CHECK(BookTimeline::stepBook(40.0, -1, step, total, parts) == 10.0);
+        CHECK(BookTimeline::stepBook(150.0, +1, step, total, parts) == 180.0);    // inside the 200 s part
+        CHECK(BookTimeline::stepBook(150.0, -1, step, total, parts) == 120.0);
+        CHECK(BookTimeline::stepBook(350.0, +1, step, total, parts) == 380.0);    // inside the 150 s part
+        CHECK(BookTimeline::stepBook(350.0, -1, step, total, parts) == 320.0);
+        const BookTimeline::Landing in0 = t.land(BookTimeline::stepBook(40.0, +1, step, total, parts));
+        CHECK(in0.part == 0 && in0.within == 70.0);
+
+        // ACROSS A BOUNDARY, FORWARD: 90 s into part one, plus 30, is 20 s into part two...
+        const double fwd = BookTimeline::stepBook(90.0, +1, step, total, parts);
+        CHECK(fwd == 120.0);
+        const BookTimeline::Landing f = t.land(fwd);
+        CHECK(f.part == 1 && f.within == 20.0);
+        // ...and BACK: 10 s into part two, minus 30, is 80 s into part one.
+        const double back = BookTimeline::stepBook(110.0, -1, step, total, parts);
+        CHECK(back == 80.0);
+        const BookTimeline::Landing b = t.land(back);
+        CHECK(b.part == 0 && b.within == 80.0);
+        // The second boundary, both ways.
+        const BookTimeline::Landing f2 = t.land(BookTimeline::stepBook(290.0, +1, step, total, parts));
+        CHECK(f2.part == 2 && f2.within == 20.0);
+        const BookTimeline::Landing b2 = t.land(BookTimeline::stepBook(310.0, -1, step, total, parts));
+        CHECK(b2.part == 1 && b2.within == 180.0);
+        // Exactly onto a boundary is the top of the later part (land()'s rule).
+        const BookTimeline::Landing on = t.land(BookTimeline::stepBook(70.0, +1, step, total, parts));
+        CHECK(on.part == 1 && on.within == 0.0);
+
+        // HOLDING RIGHT from the top walks the whole book in equal steps and comes to rest at its end:
+        // 15 presses of 30 s is 450 s exactly, and the 16th stays there.
+        double at = 0.0;
+        for (int i = 1; i <= 15; ++i)
+        {
+            const double next = BookTimeline::stepBook(at, +1, step, total, parts);
+            CHECK(next == at + step);
+            at = next;
+        }
+        CHECK(at == total);
+        CHECK(BookTimeline::stepBook(at, +1, step, total, parts) == total);
+        // ...and holding Left walks it back to 0.
+        for (int i = 1; i <= 15; ++i) at = BookTimeline::stepBook(at, -1, step, total, parts);
+        CHECK(at == 0.0);
+
+        // CLAMPED AT 0 AND AT THE END: never negative, never past the book, never wrapping.
+        CHECK(BookTimeline::stepBook(10.0, -1, step, total, parts) == 0.0);
+        CHECK(BookTimeline::stepBook(0.0, -1, step, total, parts) == 0.0);
+        CHECK(BookTimeline::stepBook(440.0, +1, step, total, parts) == total);
+        CHECK(BookTimeline::stepBook(total, +1, step, total, parts) == total);
+        CHECK(BookTimeline::stepBook(-20.0, +1, step, total, parts) == 30.0);      // a negative start is 0
+        CHECK(BookTimeline::stepBook(999.0, -1, step, total, parts) == 420.0);     // past the end is the end
+        CHECK(BookTimeline::stepBook(std::nan(""), +1, step, total, parts) == 30.0);
+        CHECK(BookTimeline::stepBook(40.0, +1, std::nan(""), total, parts) == 40.0);  // no step, no move
+        CHECK(BookTimeline::stepBook(40.0, +1, 0.0, total, parts) == 40.0);
+        CHECK(BookTimeline::stepBook(40.0, +1, -30.0, total, parts) == 40.0);      // the sign is dir's
+        CHECK(BookTimeline::stepBook(40.0, 0, step, total, parts) == 40.0);
+        CHECK(BookTimeline::stepBook(40.0, +5, step, total, parts) == 70.0);       // only dir's sign counts
+        CHECK(BookTimeline::stepBook(40.0, +1, step, 0.0, parts) == 0.0);          // no book, no position
+
+        // A TORRENT BOOK STOPS AT THE PART EDGE (#216): confined to part two (100..300 s), a step inside it
+        // moves the full step, and one that would leave it stops on the edge — and stays there.
+        CHECK(BookTimeline::stepBook(150.0, +1, step, total, parts, 1) == 180.0);
+        CHECK(BookTimeline::stepBook(150.0, -1, step, total, parts, 1) == 120.0);
+        CHECK(BookTimeline::stepBook(290.0, +1, step, total, parts, 1) == 300.0);
+        CHECK(BookTimeline::stepBook(300.0, +1, step, total, parts, 1) == 300.0);
+        CHECK(BookTimeline::stepBook(110.0, -1, step, total, parts, 1) == 100.0);
+        CHECK(BookTimeline::stepBook(100.0, -1, step, total, parts, 1) == 100.0);
+        // The edge it stops on is that part's own end, which the #218 clamp turns into "the end of the part
+        // in hand" — never a position in part three.
+        CHECK(t.positionWithin(1, BookTimeline::stepBook(290.0, +1, step, total, parts, 1)) == 200.0);
+        // The first and last parts' outer edges are the book's.
+        CHECK(BookTimeline::stepBook(10.0, -1, step, total, parts, 0) == 0.0);
+        CHECK(BookTimeline::stepBook(90.0, +1, step, total, parts, 0) == 100.0);
+        CHECK(BookTimeline::stepBook(440.0, +1, step, total, parts, 2) == total);
+        CHECK(BookTimeline::stepBook(310.0, -1, step, total, parts, 2) == 300.0);
+        // A start outside the part (a stale aim) is pulled into it first.
+        CHECK(BookTimeline::stepBook(50.0, +1, step, total, parts, 1) == 130.0);
+        // A part index the list does not have confines nothing.
+        CHECK(BookTimeline::stepBook(90.0, +1, step, total, parts, 7) == 120.0);
     }
 
     if (failures == 0) { std::puts("BOOKTIMELINE-OK"); return 0; }

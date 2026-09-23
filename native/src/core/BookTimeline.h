@@ -380,4 +380,62 @@ private:
     QVector<bool>   measured_;
     bool            exact_ = false;
 };
+
+// ---- ONE ARROW PRESS ON A BOOK-SCALE BAR (issue #432) ----------------------------------------------
+//
+// THE DEFECT. The classic seek bar is 0..1000 permille, and an arrow press moved it by a fixed number of
+// permille that meant "1% of the media's duration" — which, once #218 made the bar span a multi-part book,
+// was 1% of the BOOK's bar applied through a live seek that read it against the PART. What the handle
+// showed and where playback went disagreed, and neither was a fixed amount of listening.
+//
+// THE RULE. On a book-scale bar a press moves the BOOK position by a fixed number of book seconds — the
+// player's own skip step, the one ⏪/⏩ and the themed page's seek verbs use — so a press means the same
+// thing on every surface and on a book of any length. Which rule a press follows is picked by stepRuleFor,
+// and the new position by stepBook; both are pure so probe_booktimeline pins them.
+enum class StepRule
+{
+    Proportional,    // not a book-scale bar (a single file, or a book with no timeline): unchanged, the
+                     // bar's own permille step (PlayerBarNav.h's kSeekStep)
+    Book,            // a book whose part links cost nothing (local files, an Audiobookshelf book): the step
+                     // may cross into the next or previous part
+    BookWithinPart   // a torrent release: crossing means minting the next part's link (#216), so the step
+                     // stops at the edge of the part that is playing, as #218's drag clamp does
+};
+
+inline StepRule stepRuleFor(bool bookScale, bool partsCostNothing)
+{
+    if (!bookScale) return StepRule::Proportional;
+    return partsCostNothing ? StepRule::Book : StepRule::BookWithinPart;
+}
+
+// The book position one press lands on. `bookPos` is where the press starts, in book seconds; `dir` is its
+// direction (only the sign counts); `stepSeconds` is the step in BOOK seconds; `length` is the book's
+// length; `parts` is every part's length in order. `confinePart` is -1 when the step may cross parts
+// (StepRule::Book), else the index of the part the step must stay inside (StepRule::BookWithinPart).
+//
+// Clamped into [0, length], and into that part's own span when confined: holding a direction comes to
+// rest at an end rather than wrapping or running off it. A NaN or negative position is the start; a NaN or
+// non-positive step moves nothing. A confinePart the list does not have confines nothing — the caller only
+// asks for confinement on a ready timeline, so that would be a model with no part to stay inside.
+inline double stepBook(double bookPos, int dir, double stepSeconds, double length,
+                       const QVector<double>& parts, int confinePart = -1)
+{
+    const double len = length > 0.0 ? length : 0.0;          // NaN is "no length" as well
+    double lo = 0.0;
+    double hi = len;
+    if (confinePart >= 0 && confinePart < parts.size())
+    {
+        double off = 0.0;
+        for (int k = 0; k < confinePart; ++k) off += parts.at(k);
+        const double partLen = parts.at(confinePart) > 0.0 ? parts.at(confinePart) : 0.0;
+        if (off > lo) lo = off;
+        if (off + partLen < hi) hi = off + partLen;
+        if (hi < lo) hi = lo;
+    }
+    double p = bookPos >= 0.0 ? bookPos : 0.0;              // NaN and negative are both the start
+    p = p < lo ? lo : (p > hi ? hi : p);
+    const double step = stepSeconds > 0.0 ? stepSeconds : 0.0;
+    const double next = p + (dir > 0 ? step : (dir < 0 ? -step : 0.0));
+    return next < lo ? lo : (next > hi ? hi : next);
+}
 } // namespace BookTimeline

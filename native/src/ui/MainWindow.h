@@ -387,6 +387,13 @@ private:
     // the one real duration that turns bytes into seconds (BookTimeline::secondsFromBytes). Empty for a local
     // book, whose per-file durations the library already knows exactly, so its timeline is seeded outright.
     QVector<double> bookPartBytes_;
+    // #432: where the arrow presses on the classic seek bar have aimed, in BOOK seconds; -1 when no press has
+    // (reset at every press of the slider, and by a drag). Kept exactly rather than read back off the bar,
+    // whose 1000 steps are coarser than one skip step on a long book.
+    double bookAim_ = -1.0;
+    // The part bookCrossSeek has just jumped to and mpv has not yet opened, or -1. A time-pos write before the
+    // file is loaded is dropped, so a seek inside that part moves its start point instead. Cleared by onDuration.
+    int bookCrossPending_ = -1;
     // The one question every display and seek site asks. duration_ > 0 is part of it deliberately: with
     // nothing playing there is no part to be positioned inside, and #217's failure path zeroes duration_
     // precisely so the transport reads 0:00 / 0:00 — a book-scale readout that survived that would put the
@@ -670,6 +677,20 @@ private:
     // nothing, for everything else: the caller then keeps #218's clamp into the part in hand.
     bool absBookPlaying() const;
     bool absBookSeek(double bookSeconds);
+    // The crossing absBookSeek makes, with its guard lifted out: land a point in the book in the part it falls
+    // in, jumping the queue to that part when it is not the one playing. Shared since #432 with a LOCAL book's
+    // arrow step, whose parts are files on this disk and cost nothing to open either. Never for a torrent
+    // release (#216) — the callers decide that.
+    bool bookCrossSeek(double bookSeconds);
+    // #432 (MainWindowBookStep.cpp): the classic seek bar's arrow step on a multi-part book, in BOOK seconds.
+    // bookPartsFree: the playing book's parts cost nothing to open (local files, an Audiobookshelf book).
+    // bookStepKey: one press — answers false for anything that is not a book-scale bar, and the caller keeps
+    // its proportional step. bookStepCommit: the release commits the aim the presses left, answering false
+    // when no press made one. liveSeekNow: the live seek the arrow path makes, book-aware.
+    bool bookPartsFree() const;
+    bool bookStepKey(int delta);
+    bool bookStepCommit();
+    void liveSeekNow();
     // Install the two PlaybackSession seams a server that owns its own progress needs. Called once, at
     // construction, beside the rest of the session wiring.
     void installAbsProgressHooks();

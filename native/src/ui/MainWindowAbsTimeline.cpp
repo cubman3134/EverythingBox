@@ -60,11 +60,23 @@ bool MainWindow::absBookPlaying() const
 bool MainWindow::absBookSeek(double bookSeconds)
 {
     if (!bookScale() || !absBookPlaying()) return false;
+    return bookCrossSeek(bookSeconds);
+}
+
+// THE CROSSING, without the "is this a server book" guard (#432 lifted it out so a LOCAL book's arrow step
+// can land the same way: its parts are files on this disk, and opening one costs nothing either). A torrent
+// release never reaches here — its callers keep #218's clamp, because its next part would have to be minted.
+bool MainWindow::bookCrossSeek(double bookSeconds)
+{
+    if (!bookScale()) return false;
     const BookTimeline::Landing l = bookTimeline_.land(bookSeconds);
     if (l.part < 0 || l.part >= session_->count()) return false;
 
-    // Inside the part in hand: an ordinary seek, exactly what the clamp would have done.
-    if (l.part == session_->currentIndex())
+    // Inside the part in hand: an ordinary seek, exactly what the clamp would have done — once mpv has opened
+    // it. A part this function has only just jumped to has no position yet (mpv drops a time-pos write before
+    // the file is loaded), so a seek inside it moves its START POINT instead, which onDuration applies.
+    const bool here = l.part == session_->currentIndex();
+    if (here && bookCrossPending_ != l.part)
     {
         player_->setPosition(l.within);
         return true;
@@ -76,9 +88,13 @@ bool MainWindow::absBookSeek(double bookSeconds)
     // thrown to the part's top; everywhere else the landing is exact.
     const double len = bookTimeline_.lengthOf(l.part);
     const double within = len > 7.0 ? qMin(l.within, len - 6.0) : l.within;
-    atLog(QStringLiteral("audiobook: seek to %1 s of the book — part %2/%3, %4 s in")
-              .arg(bookSeconds, 0, 'f', 1).arg(l.part + 1).arg(session_->count()).arg(within, 0, 'f', 1));
-    session_->playIndex(l.part);
+    if (!here)
+    {
+        atLog(QStringLiteral("audiobook: seek to %1 s of the book — part %2/%3, %4 s in")
+                  .arg(bookSeconds, 0, 'f', 1).arg(l.part + 1).arg(session_->count()).arg(within, 0, 'f', 1));
+        session_->playIndex(l.part);
+        bookCrossPending_ = l.part;
+    }
     session_->overrideResumeSeek(within);
     return true;
 }

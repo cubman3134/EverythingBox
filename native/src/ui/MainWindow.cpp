@@ -2524,7 +2524,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         leaveBarAdjusting(); stopMusicPlayback(); mediaControls_->hide(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
-    connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
+    // #432: every press starts with no book-step aim — a keyboard Enter and a mouse press both come through here.
+    connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; bookAim_ = -1.0; });
     // A MOUSE press-and-release on the bar releases the slider under us. If the bar was in its Adjusting
     // state, that state is now a lie — arrow steps would call setSliderPosition while onPosition, no longer
     // standing off, overwrites the handle every tick, so the scrub visibly fights playback. Take the state
@@ -2545,12 +2546,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (adjustingBar_ != seek_) return;
         if (duration_ <= 0.0) return;
         liveSeekClock_.restart();
-        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+        liveSeekNow();   // #432: book-aware (MainWindowBookStep.cpp); anything else seeks as it always did
     });
     // Say where the drag is pointing WHILE it is pointing there. onPosition owns this label the rest of the
     // time and stands off while sliderDown_ (so the two never fight); without this the readout froze at the
     // spot playback happened to be at, and a scrub was aimed blind.
     connect(seek_, &QSlider::sliderMoved, this, [this](int permille) {
+        bookAim_ = -1.0;   // #432: a drag has taken over from the arrow presses (theirs move the bar silently)
         if (duration_ <= 0.0) return;
         // #218: on a book-scale bar the handle may not leave the part that is playing, so it STOPS at the
         // part's edge instead of the drag being refused — what the readout says is always what the release
@@ -6128,7 +6130,7 @@ void MainWindow::liveSeek()
     if (!liveSeekClock_.isValid() || liveSeekClock_.elapsed() >= 250)
     {
         liveSeekClock_.restart();
-        player_->setPosition(seek_->sliderPosition() / 1000.0 * duration_);
+        liveSeekNow();
         return;
     }
     liveSeekTimer_->start(250 - int(liveSeekClock_.elapsed()));
@@ -6178,7 +6180,10 @@ bool MainWindow::handlePlayerSliderKey(QSlider* bar, int key)
         {
             // setSliderPosition, not setValue: with the slider held down this is the same move a drag makes,
             // so the existing sliderMoved handler repaints the preview time for free.
-            seek_->setSliderPosition(eb::barStep(seek_->sliderPosition(), delta, eb::kSeekStep, 0, 1000));
+            // #432: ...except on a multi-part book's bar, where a press is the skip step in BOOK seconds
+            // (MainWindowBookStep.cpp). Everything else keeps the bar's own proportional step.
+            if (!bookStepKey(delta))
+                seek_->setSliderPosition(eb::barStep(seek_->sliderPosition(), delta, eb::kSeekStep, 0, 1000));
             liveSeek();
         }
         return true;
@@ -29750,6 +29755,7 @@ void MainWindow::onDuration(double seconds)
 #endif
     // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
     // is essentially the end (treat a near-finished file as "watched" and start it fresh).
+    bookCrossPending_ = -1;   // #432: a part bookCrossSeek jumped to is open now; seeks inside it go straight to mpv
     const double at = session_->takeResumeSeek(); // one-shot
     if (at > 1.0 && at < seconds - 5.0)
         player_->setPosition(at);
@@ -29838,6 +29844,7 @@ void MainWindow::onSeekReleased()
 {
     sliderDown_ = false;
     if (duration_ <= 0.0) return;
+    if (bookStepCommit()) return;   // #432: the arrow presses' exact aim, in book seconds, not the bar's rounding
     // #218: the value is a fraction of the BOOK inside one, so it is turned back into a position in the part
     // that is playing — clamped there, because the only file the player is holding is this part's and the
     // link for any other has to be minted (see BookTimeline.h for why a drag may not do that).
