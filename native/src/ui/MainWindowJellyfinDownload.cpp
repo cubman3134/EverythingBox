@@ -48,15 +48,20 @@
 #include "nav/NavOverlay.h"          // NavMenu / NavConfirm — the nav kit, never a QDialog
 #include "../core/AbsClient.h"         // #197: the minter routes an Audiobookshelf file ref to its own client
 #include "../core/AbsDownload.h"
+#include "../core/AbsServerStore.h"    // #439: a waiting job's server, named
+#include "../addons/AddonManager.h"   // #439: a waiting add-on download's source, named
+#include "../core/DownloadRecipe.h"
 #include "../core/AppPaths.h"
 #include "../core/DownloadManager.h"
 #include "../core/DownloadsStore.h"
 #include "../core/Jellyfin.h"
 #include "../core/JellyfinClient.h"
 #include "../core/JellyfinDownload.h"
+#include "../core/JellyfinServerStore.h"
 #include "../core/OfflineProgress.h"
 #include "../core/Subsonic.h"          // #193: the minter routes a Subsonic ref to its own client
 #include "../core/SubsonicClient.h"
+#include "../core/SubsonicServerStore.h"
 #include "../media/PlaybackSession.h"
 
 #include <QDateTime>
@@ -122,6 +127,40 @@ void MainWindow::initJellyfinDownloads()
     // place to start network requests, and a flush that ran before the server store finished loading would
     // find nothing to flush and clear nothing.
     QTimer::singleShot(0, this, [this] { flushJellyfinProgressQueues(); });
+}
+
+// #439: what a WAITING download is waiting for, in words. Only a job DownloadManager says is waiting gets a
+// name; every other job reads as it always did. The family order is the minter's own (Subsonic, then
+// Audiobookshelf, then Jellyfin), and a server this device still knows is named as the user named it.
+QString MainWindow::downloadWaitingFor(const DownloadJob& j) const
+{
+    if (!dm_ || !dm_->waitingForSource(j)) return QString();
+    const QString& ref = j.sourceRef;
+    if (DownloadRecipe::isRef(ref))
+    {
+        DownloadRecipe::Recipe r;
+        if (addons_ && DownloadRecipe::decode(ref, &r))
+            if (LoadedAddon* src = addons_->sourceById(r.addonId))
+                if (!src->manifest.name.isEmpty()) return src->manifest.name;
+        return tr("the add-on it came from");
+    }
+    if (Subsonic::isQualified(ref))
+    {
+        SubsonicServer s;
+        if (SubsonicServerStore::get(Subsonic::serverOf(ref), s) && !s.name.isEmpty()) return s.name;
+        return tr("the music server");
+    }
+    if (AbsDownload::isFileRef(ref))
+    {
+        AbsServer s;
+        if (AbsServerStore::get(Abs::serverOf(AbsDownload::parseFileRef(ref).qualifiedBookId), s)
+            && !s.name.isEmpty())
+            return s.name;
+        return tr("Audiobookshelf");
+    }
+    JellyfinServer s;
+    if (JellyfinServerStore::get(Jellyfin::serverOf(ref), s) && !s.name.isEmpty()) return s.name;
+    return tr("Jellyfin");
 }
 
 // ---- What this device already has --------------------------------------------------------------------

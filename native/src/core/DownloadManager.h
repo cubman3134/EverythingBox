@@ -7,6 +7,7 @@
 #include "StreamHeaders.h"
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <functional>
@@ -101,8 +102,30 @@ public:
     // A std::function rather than an #include of the Jellyfin client: this class is the generic downloader
     // and knows about HTTP, files and Range. Nothing else about it should have to learn what a media server
     // is, and nothing in it should be able to reach a token store.
-    using UrlMinter = std::function<QString(const QString& sourceRef)>;
-    void setUrlMinter(UrlMinter minter) { minter_ = std::move(minter); }
+    //
+    // ONE SLOT FOR ALL THREE SERVER SOURCES (#439): Jellyfin, Subsonic and Audiobookshelf refs all go to the
+    // one minter MainWindow installs, which routes by the ref's family. So "is this job's minter here yet" is
+    // one question for all three, and a source that is installed but not able to answer YET says so with
+    // Mint::notYet() — distinct from an empty url, which means it CAN'T mint (the server was removed, the
+    // item is gone) and fails the job. Neither "not installed" nor "not yet" fails anything: the job stays
+    // Queued and waits (waitingForSource), and installing the minter or calling sourceReady() starts it.
+    struct Mint
+    {
+        QString url;              // empty (and not notReady): this source can't mint this ref
+        bool notReady = false;    // the source is installed but can't answer yet — wait, don't fail
+        Mint() = default;
+        Mint(const QString& u) : url(u) {}   // implicit: a minter answering with a plain url is the norm
+        static Mint notYet() { Mint m; m.notReady = true; return m; }
+    };
+    using UrlMinter = std::function<Mint(const QString& sourceRef)>;
+    // Installing it pumps the queue (#439): a ref job restored before its minter existed waits for it, and
+    // starts now.
+    void setUrlMinter(UrlMinter minter);
+    // A minter that answered Mint::notYet() can now answer: the jobs it turned away are tried again.
+    void sourceReady();
+    // This Queued job has a ref and nothing that can mint it yet: its minter is not installed, or answered
+    // "not yet". It is WAITING, not failed — the Downloads panel says so, and it starts on its own.
+    bool waitingForSource(const DownloadJob& j) const;
     // THE ASYNCHRONOUS MINTER (#437), for refs only a network round trip can answer: an add-on download's
     // #224 recipe (core/DownloadRecipe.h), re-resolved through the add-on that served it. Owns exactly the
     // refs DownloadRecipe::isRef accepts; every other ref still goes to the synchronous minter above, so a
@@ -174,6 +197,12 @@ private:
     bool rangeAsked_ = false;           // we sent a resume Range, so a 416 is an answer about OUR offset
     UrlMinter minter_;                  // #110: sourceRef -> a fresh url, asked once per start()
     AsyncUrlMinter asyncMinter_;        // #437: a recipe ref -> a fresh url, later
+    // #439: whether the minter that owns this ref is installed — the async one for a recipe ref, the
+    // synchronous one for every other. A plain job has nothing to wait for.
+    bool minterInstalledFor(const QString& sourceRef) const;
+    // #439: ids of Queued jobs whose installed minter answered Mint::notYet(). In memory only — a restart
+    // asks again anyway. Cleared by setUrlMinter() and sourceReady(), and per job when it leaves Queued.
+    QSet<QString> notReady_;
     // A recipe job between start() and its minter's answer. It holds the slot (one download at a time) with
     // no reply yet, so pump(), pause and cancel each have to see it. mintGen_ is bumped by anything that
     // abandons the wait, so a late answer for a job paused or cancelled meanwhile is dropped.

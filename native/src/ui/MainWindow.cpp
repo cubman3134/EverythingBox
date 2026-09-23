@@ -21840,13 +21840,15 @@ static QString humanBytes(qint64 n)
 }
 
 // One line of status text for a job: "Downloading — 612 MB / 1.4 GB (43%)", "Paused — …", "Failed — <reason>".
-static QString downloadStatusText(const DownloadJob& j)
+// `waitingFor` names the source a Queued job is waiting for (#439, MainWindow::downloadWaitingFor), else empty.
+static QString downloadStatusText(const DownloadJob& j, const QString& waitingFor = QString())
 {
     const QString have = humanBytes(j.received);
     const QString tot  = j.total > 0 ? humanBytes(j.total) : QStringLiteral("?");
     const int pct = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
     switch (j.state) {
-        case DownloadJob::Queued:  return MainWindow::tr("Queued");
+        case DownloadJob::Queued:  return waitingFor.isEmpty() ? MainWindow::tr("Queued")
+                                                               : MainWindow::tr("Waiting to reconnect to %1").arg(waitingFor);
         case DownloadJob::Active:  return MainWindow::tr("Downloading — %1 / %2 (%3%)").arg(have, tot).arg(pct);
         case DownloadJob::Paused:  return MainWindow::tr("Paused — %1 / %2").arg(have, tot);
         case DownloadJob::Failed:  return MainWindow::tr("Failed — %1").arg(j.error.isEmpty() ? MainWindow::tr("download stopped") : j.error);
@@ -21888,7 +21890,7 @@ void MainWindow::openDownloadManager()
             if (j.state == DownloadJob::Done || j.state == DownloadJob::Failed) anyFinished = true;
             PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + j.id;
             r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
-            r.value = downloadStatusText(j);
+            r.value = downloadStatusText(j, downloadWaitingFor(j));
             r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
             rows << r;
         }
@@ -21955,7 +21957,7 @@ void MainWindow::openDownloadManager()
             cv->addWidget(bar);
             dlBars_.insert(j.id, bar);
 
-            auto* status = new QLabel(downloadStatusText(j));
+            auto* status = new QLabel(downloadStatusText(j, downloadWaitingFor(j)));
             status->setStyleSheet(QStringLiteral("color:#667085;font-size:14px;border:none;background:transparent;"));
             status->setWordWrap(true);
             cv->addWidget(status);
@@ -22031,7 +22033,7 @@ void MainWindow::updateDownloadRow(const QString& id)
             if (j.id != id) continue;
             PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + id;
             r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
-            r.value = downloadStatusText(j);
+            r.value = downloadStatusText(j, downloadWaitingFor(j));
             r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
             themedPanelHost_->updateRow(QStringLiteral("dl:") + id, r);
             return;
@@ -22045,7 +22047,7 @@ void MainWindow::updateDownloadRow(const QString& id)
         if (QProgressBar* bar = dlBars_.value(id)) {
             if (j.total > 0) { bar->setRange(0, 1000); bar->setValue(int(1000.0 * double(j.received) / double(j.total))); }
         }
-        if (QLabel* s = dlStatus_.value(id)) s->setText(downloadStatusText(j));
+        if (QLabel* s = dlStatus_.value(id)) s->setText(downloadStatusText(j, downloadWaitingFor(j)));
         return;
     }
 }

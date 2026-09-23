@@ -70,6 +70,12 @@ DownloadManager::DownloadManager(QObject* parent) : QObject(parent)
     for (DownloadJob& j : jobs_)
         if (j.state == DownloadJob::Active) j.state = DownloadJob::Paused;
     pump();
+    // #439: a server download that was Queued when we quit is restored BEFORE MainWindow installs the minter
+    // that can sign its link, so it waits here rather than failing. Said once, so a report shows the wait.
+    for (const DownloadJob& j : jobs_)
+        if (waitingForSource(j))
+            dlLog(QStringLiteral("download: %1 waits for its source to be set up — not started, not failed")
+                      .arg(QFileInfo(j.dest).fileName()));
 }
 
 int DownloadManager::indexOf(const QString& id) const
@@ -110,6 +116,7 @@ void DownloadManager::enqueue(const DownloadJob& in)
             j.sourceRef = in.sourceRef;   // #110: the durable half; the url above is empty for these
             j.mintedUrl = in.mintedUrl;   // #437: the link this resolve just minted for that ref, if any
             j.linkDropped = false;        // #437: a fresh link is exactly what a dropped one was waiting for
+            notReady_.remove(j.id);       // #439: a fresh ref is asked afresh
             j.requestHeaders = in.requestHeaders;
             j.headerGated = !in.requestHeaders.isEmpty();
             if (j.state == DownloadJob::Failed || j.state == DownloadJob::Paused) { j.state = DownloadJob::Queued; j.error.clear(); }
@@ -131,17 +138,47 @@ void DownloadManager::pump()
     for (int i = 0; i < jobs_.size(); ++i)
     {
         if (jobs_[i].state != DownloadJob::Queued) continue;
-        // #437: a recipe job restored before its minter was installed waits for it (setAsyncUrlMinter pumps),
-        // rather than failing for want of a minter and stranding nothing behind it either.
-        if (DownloadRecipe::isRef(jobs_[i].sourceRef) && !asyncMinter_ && jobs_[i].mintedUrl.isEmpty()) continue;
+        // #437 / #439: a ref job restored before the minter for its source was installed — or whose minter
+        // said "not yet" — WAITS for it (setUrlMinter, setAsyncUrlMinter and sourceReady pump), rather than
+        // failing for want of a minter. Skipped, not blocking: the jobs behind it still run.
+        if (waitingForSource(jobs_[i])) continue;
         start(i);
         return;
     }
 }
 
+bool DownloadManager::minterInstalledFor(const QString& sourceRef) const
+{
+    if (sourceRef.isEmpty()) return true;
+    return DownloadRecipe::isRef(sourceRef) ? bool(asyncMinter_) : bool(minter_);
+}
+
+bool DownloadManager::waitingForSource(const DownloadJob& j) const
+{
+    // A link already minted for this job (#437's first transfer) needs no minter at all.
+    if (j.state != DownloadJob::Queued || j.sourceRef.isEmpty() || !j.mintedUrl.isEmpty()) return false;
+    return !minterInstalledFor(j.sourceRef) || notReady_.contains(j.id);
+}
+
+void DownloadManager::setUrlMinter(UrlMinter minter)
+{
+    minter_ = std::move(minter);
+    notReady_.clear();
+    emit changed();   // every waiting row's status changes, whether or not it is the one that starts
+    pump();
+}
+
+void DownloadManager::sourceReady()
+{
+    notReady_.clear();
+    emit changed();
+    pump();
+}
+
 void DownloadManager::setAsyncUrlMinter(AsyncUrlMinter minter)
 {
     asyncMinter_ = std::move(minter);
+    emit changed();
     pump();
 }
 
@@ -225,11 +262,25 @@ void DownloadManager::start(int idx)
     QString fetchUrl = j.url;
     if (!j.sourceRef.isEmpty())
     {
-        fetchUrl = minter_ ? minter_(j.sourceRef) : QString();
+        // #439: NOT INSTALLED YET IS NOT "CAN'T MINT". pump() does not start a job whose minter is missing;
+        // this is the belt for any other caller, and it leaves the job Queued rather than failing it.
+        if (!minter_) return;
+        const Mint mint = minter_(j.sourceRef);
+        if (mint.notReady)
+        {
+            // Installed, but its source can't answer yet. Waiting, exactly as if it were not installed:
+            // Queued, no error, and tried again by sourceReady(). The queue moves on meanwhile.
+            notReady_.insert(j.id);
+            emit changed();
+            pump();
+            return;
+        }
+        fetchUrl = mint.url;
         if (fetchUrl.isEmpty())
         {
             // The honest sentence, built from NOTHING about the request. A server that has been removed or
-            // signed out is the ordinary case here, and it is a state the user can fix.
+            // signed out is the ordinary case here, and it is a state the user can fix. Only an INSTALLED
+            // minter that answered can get here (#439): a missing one waits instead.
             failJob(j, tr("the server this was downloaded from isn't set up on this device any more — "
                           "sign in again and start the download from the item"));
             save(); emit changed();
@@ -628,7 +679,11 @@ void DownloadManager::retry(const QString& id)
     if (jobs_[i].state == DownloadJob::Failed && jobs_[i].linkDropped)
     { jobs_[i].error = linkDroppedSentence(); emit changed(); return; }
     if (jobs_[i].state == DownloadJob::Failed || jobs_[i].state == DownloadJob::Paused)
-    { jobs_[i].state = DownloadJob::Queued; jobs_[i].error.clear(); save(); emit changed(); pump(); }
+    {
+        jobs_[i].state = DownloadJob::Queued; jobs_[i].error.clear();
+        notReady_.remove(id);   // #439: asked afresh, like any other start
+        save(); emit changed(); pump();
+    }
 }
 
 void DownloadManager::resumeJob(const QString& id) { retry(id); }
@@ -667,6 +722,7 @@ void DownloadManager::cancel(const QString& id)
     // keeps no link" means, at the same instant the user asked.
     QFile::remove(part);
     jobs_.remove(indexOf(id));
+    notReady_.remove(id);
     save(); emit changed();
     pump();
 }
