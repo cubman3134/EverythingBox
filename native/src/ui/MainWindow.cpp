@@ -155,6 +155,7 @@
 #include "../core/BrandMigration.h"   // mergeProgress re-runs the stored-add-on-id repair after every merge (#58)
 #include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
 #include "../core/PendingPush.h"   // durable pending cloud push + retry policy (issue #34)
+#include "../core/QuitBudget.h"    // issue #442: the exit pushes share one short budget
 #include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
@@ -28157,37 +28158,44 @@ void MainWindow::closeEvent(QCloseEvent* e)
     // Already pushed (or nothing to do)? let the close through.
     if (forceClose_ || !cloud_ || !cloud_->isSignedIn()) { QMainWindow::closeEvent(e); return; }
 
-    // Always save the current state to Drive on exit. Defer the quit until the push finishes; a watchdog
-    // force-closes after a few seconds so a slow/absent network can never trap the app open.
+    // Always try to save the current state to Drive on exit, but quitting never waits on the network for long
+    // (issue #442): the exit pushes share ONE hard budget, QuitBudget::kNetworkMs (1.5 s) for all of them
+    // together, and whatever has not landed by then is abandoned to its durable record. It used to be an 8 s
+    // watchdog, which alone was most of the 10 s a logout's SIGTERM allows.
     e->ignore();
-    auto finishClose = [this] { forceClose_ = true; close(); };
-    QTimer::singleShot(8000, this, [this, finishClose] { if (!forceClose_) finishClose(); });
     statusBar()->showMessage(tr("Saving to Google Drive…"));
 
-    // TWO exit pushes now share this ONE watchdog: the heavy state bundle, and the per-file save flush
-    // (save-sync T5) that pushes whatever the debounce timer had not got to yet — including the battery RAM
-    // retro_->stop() just wrote above. They are independent Drive traffic (Task 3 took saves OUT of the
-    // bundle), so they run concurrently, and the close waits for BOTH: closing on the bundle alone would
-    // start the flush and abandon it mid-upload, losing exactly the saves made this session. The 8 s watchdog
-    // is unchanged and still the hard ceiling, so a stalled network cannot trap the app open.
-    //
-    // Either callback can arrive SYNCHRONOUSLY (flush with an empty dirty set answers inline), so the counter
-    // is set up BEFORE either call, and the completion is POSTED rather than run inline — calling close()
-    // from inside closeEvent() would re-enter this function while `e` is already ignored.
-    auto pending = std::make_shared<int>(2);
-    auto oneDone = [this, pending, finishClose] {
-        if (--*pending > 0) return;
-        QTimer::singleShot(0, this, finishClose);
-    };
-    if (saveSync_) saveSync_->flush([oneDone](bool) { oneDone(); });
-    else           oneDone();
-    cloud_->pushLocal([this, oneDone](bool ok, const QString&) {
-        // #34: the exit push is itself an attempt, so it reports here. A failed exit push is what leaves the
-        // record owed for the NEXT launch to pick up, and a successful one clears whatever was owed — which is
-        // why no separate "retry before exit" step is needed. PendingPush::save() sync()s, so the record is on
-        // disk before the watchdog is allowed to force the process down.
-        recordPushOutcome(ok);
-        oneDone();
+    // TWO exit pushes: the heavy state bundle, and the per-file save flush (save-sync T5) that pushes whatever
+    // the debounce timer had not got to yet — including the battery RAM retro_->stop() just wrote above. They
+    // are independent Drive traffic (Task 3 took saves OUT of the bundle), so they run concurrently under the
+    // one budget. What is left queued when the budget runs out:
+    //   * the bundle: recordPushOutcome(false) marks the push OWED in PendingPush (#34), a synced ini write, so
+    //     the next launch's retry sends it. A push that did land still reports first and clears the record.
+    //   * the save flush: nothing to write. The next launch's full reconcile (startSaveSync) uploads every save
+    //     newer than its synced baseline, which is exactly the set an interrupted flush leaves behind.
+    // QuitFlush posts its completion, so close() never re-enters this function while `e` is already ignored.
+    QVector<QuitBudget::QuitFlush::Job> jobs;
+    if (saveSync_)
+        jobs.push_back({ QStringLiteral("save flush"),
+                         [this](QuitBudget::QuitFlush::Done done) { saveSync_->flush([done](bool ok) { done(ok); }); },
+                         {} });
+    jobs.push_back({ QStringLiteral("settings push"),
+                     [this](QuitBudget::QuitFlush::Done done) {
+                         cloud_->pushLocal([this, done](bool ok, const QString&) {
+                             // #34: the exit push is itself an attempt, so it reports here. A failed exit push is
+                             // what leaves the record owed for the NEXT launch to pick up, and a successful one
+                             // clears whatever was owed. PendingPush::save() sync()s, so the record is on disk.
+                             recordPushOutcome(ok);
+                             done(ok);
+                         });
+                     },
+                     [this] { recordPushOutcome(false); } });
+    QuitBudget::QuitFlush::run(this, QuitBudget::kNetworkMs, jobs, [this](const QStringList& abandoned) {
+        if (!abandoned.isEmpty())
+            mwLog(QStringLiteral("quit: left for the next launch after %1 ms: %2")
+                      .arg(QuitBudget::kNetworkMs).arg(abandoned.join(QStringLiteral(", "))));
+        forceClose_ = true;
+        close();
     });
 }
 

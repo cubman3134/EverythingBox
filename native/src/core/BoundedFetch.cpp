@@ -1,5 +1,6 @@
 #include "BoundedFetch.h"
 #include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
+#include "QuitBudget.h"     // issue #442: the app quitting ends the wait, like the deadline does
 
 #include <QEventLoop>
 #include <QNetworkAccessManager>
@@ -65,7 +66,7 @@ Result get(const QString& url, int timeoutMs, qint64 ceilingBytes)
     });
 
     deadline.start(timeoutMs);
-    loop.exec();
+    const bool quitting = QuitBudget::exec(loop);   // #442: runs on a pool thread the app's exit waits on
 
     r.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
@@ -75,7 +76,7 @@ Result get(const QString& url, int timeoutMs, qint64 ceilingBytes)
     {
         reply->abort();
         r.body.clear();
-        r.error = QStringLiteral("deadline");
+        r.error = quitting ? QStringLiteral("quitting") : QStringLiteral("deadline");
         r.verdict = Result::Failed;
         return r;
     }

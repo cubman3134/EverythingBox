@@ -1,5 +1,6 @@
 #include "AddonContext.h"
 #include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
+#include "../core/QuitBudget.h"    // issue #442: a quit ends the wait below instead of waiting it out
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/BuiltinSecretBlob.h" // the ONE runtime de-obfuscator (shared with the scrobble app key)
@@ -141,6 +142,10 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         return QString();
     }
 
+    // Issue #442: this runs on the global pool, which the app's exit waits on. Once the quit has begun, a fetch
+    // is for a screen that is closing: answer at once, as a failure, and never retry.
+    if (QuitBudget::quitting()) return QString();
+
     const QJsonObject o = QJsonDocument::fromJson(optionsJson.toUtf8()).object();
     const QString method = o.value(QStringLiteral("method")).toString(QStringLiteral("GET")).toUpper();
     const QString url = o.value(QStringLiteral("url")).toString();
@@ -176,7 +181,12 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
         timeout.start(20000);
-        loop.exec();
+        if (QuitBudget::exec(loop))   // the app is quitting: abandon the request, no retry, no log line
+        {
+            reply->abort();
+            reply->deleteLater();
+            return QString();
+        }
 
         const bool finished = reply->isFinished();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -190,7 +200,8 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         lastError = finished ? NetErrorText::logText(reply) : QStringLiteral("timed out");
         reply->abort();
         reply->deleteLater();
-        if (attempt + 1 < kMaxAttempts) QThread::msleep(400 * (attempt + 1)); // 0.4s, then 0.8s backoff
+        if (attempt + 1 < kMaxAttempts && !QuitBudget::quitting())
+            QThread::msleep(400 * (attempt + 1)); // 0.4s, then 0.8s backoff
     }
 
     // All attempts failed transiently. Stream the URL/error (URLs hold percent-encoded bytes like "%3A"
