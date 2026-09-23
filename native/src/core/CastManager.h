@@ -2,8 +2,10 @@
 //   - Chromecast / Google TV: mDNS discovery (_googlecast._tcp) + the CASTV2 protocol over TLS (length-
 //     prefixed protobuf frames carrying JSON messages) to LAUNCH the default media receiver and LOAD a URL.
 //   - DLNA / UPnP MediaRenderers: SSDP discovery (UDP multicast) + SOAP AVTransport (SetAVTransportURI+Play).
-// In both cases the device fetches the media URL itself, so this works for addon/debrid http(s) streams (a
-// local file would need to be served over HTTP first — not supported here).
+// In both cases the device fetches the media URL itself. An addon/debrid http(s) stream already has one; a
+// LOCAL file gets one from castLocalFile (#72), which serves it through CastFileServer for as long as the cast
+// lasts, on the interface that reaches the chosen device, and then hands the device that URL exactly as cast()
+// hands it an http one.
 //
 // #143 lodges here too, and on purpose: an EverythingBox instance is a THIRD kind of playback target, found
 // on the same mDNS socket by the same burst of queries. This class browses for `_everythingbox._tcp` and, when
@@ -17,8 +19,10 @@
 #include <QList>
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QUrl>
 #include "PlayOnDevice.h"
 
+class CastFileServer;
 class QUdpSocket;
 class QSslSocket;
 class QNetworkAccessManager;
@@ -61,6 +65,15 @@ public:
     void cast(const CastDevice& device, const QString& url, const QString& title, const QString& mime);
     void stopCasting();                    // stop the active cast (best-effort)
 
+    // #72: cast a LOCAL file. Starts serving it (CastFileServer) on the one LAN address that reaches `device`,
+    // then casts that URL. Returns false, with castError and nothing listening, when no LAN interface reaches
+    // the device (a public or IPv6 target included) or the file cannot be served. The server stops when the
+    // cast does: stopCasting, a Chromecast session error, a rejected SetAVTransportURI, another cast(), or quit.
+    bool castLocalFile(const CastDevice& device, const QString& filePath, const QString& title);
+    bool isServingFile() const;
+    QString servedFilePath() const;        // "" when not serving
+    QUrl servedUrl() const;                // carries the token: never log it (LogSafeText::url drops it)
+
 signals:
     void devicesChanged();
     void peersChanged();                   // #143: the EverythingBox peer list grew or changed
@@ -89,6 +102,8 @@ private:
     void ccSend(const QString& destId, const QString& ns, const QString& payloadJson);
     void ccOnReadyRead();
     void ccTeardown();
+    void endFileServing();                 // #72: revoke the token and close the file server, if one runs
+    static QString testRendererUrl();      // the EB_UITEST fake-renderer seam (see startDiscovery)
 
     QList<CastDevice> devices_;
     QList<PlayOn::Peer> peers_;            // #143: discovered EverythingBox instances (never this one)
@@ -111,4 +126,7 @@ private:
     QString ccSessionId_;
     QString ccPendingUrl_, ccPendingTitle_, ccPendingMime_;
     QTimer* ccHeartbeat_ = nullptr;
+
+    CastFileServer* files_ = nullptr;      // #72: made on the first local-file cast; between casts it is stopped
+                                           // (no listener, no socket, no token)
 };

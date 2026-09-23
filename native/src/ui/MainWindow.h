@@ -1999,6 +1999,12 @@ private:
     // Set alongside castUrl_ on every path that assigns it, so it can never describe a previous stream.
     bool castHeaderGated_ = false;
     void showCastMenu(QWidget* anchor);           // device picker popup for the cast button
+    // #72, casting a LOCAL file (MainWindowCast.cpp). castLocalPath: the local file mpv loaded, when this is a
+    // video session, else "". castTo: hand the chosen device what is playing (a local file through
+    // CastManager::castLocalFile, else castUrl_). wireLocalFileCasting: once, at construction.
+    QString castLocalPath() const;
+    void castTo(const struct CastDevice& dev);
+    void wireLocalFileCasting();
 
     // Trakt.tv scrobbling: mark movies/episodes watched as you play them. scrobbleImdb_ is the id currently
     // being scrobbled (empty when nothing is).
