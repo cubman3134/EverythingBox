@@ -1407,6 +1407,225 @@ static void sectionNoCarrier()
     CHECK(site.contains(QStringLiteral("DownloadRecipe::bindJob(j,")));
 }
 
+// ---- 10. #439: A REF JOB RESTORED BEFORE ITS MINTER WAITS FOR IT, IT DOES NOT FAIL ------------------------
+// DownloadManager's constructor restores queue.json and pumps it, and MainWindow installs the minter a few
+// lines LATER. A Jellyfin, Subsonic or Audiobookshelf download saved as Queued used to start in that gap with
+// no minter, and fail with "the server this was downloaded from isn't set up" — a failed download the user
+// never touched. There is ONE synchronous minter for all three server sources (MainWindow routes by the ref's
+// family) and one asynchronous one for #437's recipe refs; a job waits for the one that owns its ref. An
+// installed minter that answers Mint::notYet() is waiting too; one that answers "" still FAILS the job.
+static void writeQueue(const QJsonArray& records)
+{
+    QDir().mkpath(QFileInfo(atRestQueuePath()).absolutePath());
+    QFile f(atRestQueuePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QJsonDocument(records).toJson());
+}
+
+static QJsonObject queuedRecord(const QString& key, const QString& ref, const QString& url, const QString& dest,
+                                int state)
+{
+    return QJsonObject{ { QStringLiteral("id"), QStringLiteral("id-") + key },
+                        { QStringLiteral("title"), key },
+                        { QStringLiteral("url"), url },
+                        { QStringLiteral("ref"), ref },
+                        { QStringLiteral("dest"), dest },
+                        { QStringLiteral("kind"), QStringLiteral("audio") },
+                        { QStringLiteral("key"), key },
+                        { QStringLiteral("state"), state } };
+}
+
+static int diskState(const QString& key)
+{
+    const QJsonObject rec = atRestRecord(key);
+    return rec.isEmpty() ? -1 : rec.value(QStringLiteral("state")).toInt();
+}
+
+static void sectionWaitForMinter()
+{
+    QFile::remove(atRestQueuePath());
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads/s10");
+    QDir(dir).removeRecursively();
+    QDir().mkpath(dir);
+
+    FileStub stub;
+    CHECK(stub.port() != 0);
+    const QString base = stub.base();
+    const QString tok = QStringLiteral("t439fixture");
+    const int kQueued = int(DownloadJob::Queued), kPaused = int(DownloadJob::Paused);
+
+    // One ref of each source family, in the shape each client really mints.
+    const QChar us(0x1F);
+    const QString jfRef     = qual(kSrvA, kItem);
+    const QString subRef    = QStringLiteral("sub") + us + QStringLiteral("4f6d2b1e-8a3c-4d5e-9f10-2a3b4c5d6e7f")
+                            + us + QStringLiteral("track") + us + QStringLiteral("tr-439");
+    const QString absRef    = QStringLiteral("absfile:0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9:li_439:9001");
+    const QString pausedRef = qual(kSrvA, kItem2);
+    QString recipeRef;
+    {
+        DownloadJob tmp;
+        tmp.url = base + QStringLiteral("/f/unused.bin");
+        CHECK(DownloadRecipe::bindJob(tmp, DownloadRecipe::Recipe{ QStringLiteral("imdb"), QStringLiteral("movie"),
+                                                                   QString(), QStringLiteral("tt0000439") }));
+        recipeRef = tmp.sourceRef;
+    }
+    CHECK(DownloadRecipe::isRef(recipeRef));
+
+    // THE QUEUE A USER QUIT WITH: a server download of each family waiting its turn, one paused by hand, a
+    // recipe job, and — BEHIND all of them — an ordinary plain-link download.
+    writeQueue(QJsonArray{
+        queuedRecord(QStringLiteral("w-jf"),     jfRef,     QString(), dir + QStringLiteral("/w-jf.bin"),     kQueued),
+        queuedRecord(QStringLiteral("w-sub"),    subRef,    QString(), dir + QStringLiteral("/w-sub.bin"),    kQueued),
+        queuedRecord(QStringLiteral("w-abs"),    absRef,    QString(), dir + QStringLiteral("/w-abs.bin"),    kQueued),
+        queuedRecord(QStringLiteral("w-paused"), pausedRef, QString(), dir + QStringLiteral("/w-paused.bin"), kPaused),
+        queuedRecord(QStringLiteral("w-recipe"), recipeRef, QString(), dir + QStringLiteral("/w-recipe.bin"), kQueued),
+        queuedRecord(QStringLiteral("w-plain"),  QString(), base + QStringLiteral("/f/w-plain.bin"),
+                     dir + QStringLiteral("/w-plain.bin"), kQueued) });
+
+    DownloadManager dm;
+    const QStringList waitingKeys{ QStringLiteral("w-jf"), QStringLiteral("w-sub"), QStringLiteral("w-abs"),
+                                   QStringLiteral("w-recipe") };
+
+    // (a) NO MINTER YET: every ref job is Queued and WAITING — not started, not failed, no error — and says so.
+    for (const QString& k : waitingKeys)
+    {
+        const DownloadJob* p = jobByKey(dm, k);
+        CHECK(p && p->state == DownloadJob::Queued);
+        CHECK(p && p->error.isEmpty());
+        CHECK(p && !p->linkDropped);
+        CHECK(p && dm.waitingForSource(*p));
+    }
+    // The paused one is untouched, and is not "waiting": it waits for a press, not for a source.
+    {
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("w-paused"));
+        CHECK(p && p->state == DownloadJob::Paused && p->error.isEmpty());
+        CHECK(p && !dm.waitingForSource(*p));
+    }
+    // A plain-link job is never waiting — and the waiting jobs AHEAD of it do not strand it: it runs now.
+    CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, QStringLiteral("w-plain"));
+                          return p && p->state == DownloadJob::Done; }));
+    CHECK(fileHolds(dir + QStringLiteral("/w-plain.bin"), fixtureBody(QStringLiteral("w-plain.bin"))));
+    spinUntil([] { return false; }, 150);       // …and nothing else starts on its own meanwhile
+    CHECK(stub.requests().size() == 1);
+    for (const QString& k : waitingKeys)
+    {
+        const DownloadJob* p = jobByKey(dm, k);
+        CHECK(p && p->state == DownloadJob::Queued && dm.waitingForSource(*p));
+        CHECK(diskState(k) == kQueued);          // not written as Failed either
+    }
+    CHECK(diskState(QStringLiteral("w-paused")) == kPaused);
+
+    // (b) THE MINTER ARRIVES — the one slot all three server sources share. Jellyfin's source answers "not yet";
+    // Subsonic's and Audiobookshelf's answer with a link. The Jellyfin job keeps waiting while the others run.
+    QStringList asked;
+    bool jfReady = false;
+    auto urlFor = [base, tok](const QString& name) { return base + QStringLiteral("/f/") + name
+                                                            + QStringLiteral("?token=") + tok; };
+    dm.setUrlMinter([&asked, &jfReady, urlFor, jfRef, subRef, absRef](const QString& r) -> DownloadManager::Mint {
+        asked << r;
+        if (r == jfRef)  return jfReady ? DownloadManager::Mint(urlFor(QStringLiteral("w-jf.bin")))
+                                        : DownloadManager::Mint::notYet();
+        if (r == subRef) return urlFor(QStringLiteral("w-sub.bin"));
+        if (r == absRef) return urlFor(QStringLiteral("w-abs.bin"));
+        return QString();
+    });
+    CHECK(spinUntil([&] {
+        const DownloadJob* s = jobByKey(dm, QStringLiteral("w-sub"));
+        const DownloadJob* a = jobByKey(dm, QStringLiteral("w-abs"));
+        return s && a && s->state == DownloadJob::Done && a->state == DownloadJob::Done; }));
+    CHECK(fileHolds(dir + QStringLiteral("/w-sub.bin"), fixtureBody(QStringLiteral("w-sub.bin"))));
+    CHECK(fileHolds(dir + QStringLiteral("/w-abs.bin"), fixtureBody(QStringLiteral("w-abs.bin"))));
+    {
+        // …each fetched on the link its minter just minted.
+        bool subOnMinted = false, absOnMinted = false;
+        for (const StubRequest& rq : stub.requests())
+        {
+            if (rq.path == QStringLiteral("/f/w-sub.bin") && rq.query == QStringLiteral("token=") + tok) subOnMinted = true;
+            if (rq.path == QStringLiteral("/f/w-abs.bin") && rq.query == QStringLiteral("token=") + tok) absOnMinted = true;
+        }
+        CHECK(subOnMinted);
+        CHECK(absOnMinted);
+    }
+    {
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("w-jf"));
+        CHECK(p && p->state == DownloadJob::Queued && p->error.isEmpty() && dm.waitingForSource(*p));
+        CHECK(diskState(QStringLiteral("w-jf")) == kQueued);
+    }
+    CHECK(asked.count(jfRef) == 1 && asked.count(subRef) == 1 && asked.count(absRef) == 1);
+    CHECK(!asked.contains(pausedRef));
+    CHECK(stub.count(QStringLiteral("/f/w-jf.bin")) == 0);
+    // #437's recipe job still waits for ITS minter — the synchronous one never owns a recipe ref.
+    {
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("w-recipe"));
+        CHECK(p && p->state == DownloadJob::Queued && dm.waitingForSource(*p));
+        CHECK(!asked.contains(recipeRef));
+    }
+
+    // (c) THE SOURCE IS READY: the waiting Jellyfin job is asked again and starts on the minted link.
+    jfReady = true;
+    dm.sourceReady();
+    CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, QStringLiteral("w-jf"));
+                          return p && p->state == DownloadJob::Done; }));
+    CHECK(fileHolds(dir + QStringLiteral("/w-jf.bin"), fixtureBody(QStringLiteral("w-jf.bin"))));
+    CHECK(asked.count(jfRef) == 2);
+
+    // (d) #437 AS BEFORE: its minter installed, the recipe job starts on the re-minted link.
+    QStringList recipeAsked;
+    dm.setAsyncUrlMinter([&recipeAsked, urlFor](const QString& r, DownloadManager::MintDone done) {
+        recipeAsked << r;
+        QTimer::singleShot(0, [done, urlFor] { done(urlFor(QStringLiteral("w-recipe.bin")), {}); });
+    });
+    CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, QStringLiteral("w-recipe"));
+                          return p && p->state == DownloadJob::Done; }));
+    CHECK(recipeAsked == QStringList{ recipeRef });
+    CHECK(fileHolds(dir + QStringLiteral("/w-recipe.bin"), fixtureBody(QStringLiteral("w-recipe.bin"))));
+
+    // (e) The paused job, after all of that: still Paused, never asked for, never fetched.
+    {
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("w-paused"));
+        CHECK(p && p->state == DownloadJob::Paused && p->error.isEmpty());
+        CHECK(!asked.contains(pausedRef));
+        CHECK(stub.count(QStringLiteral("/f/w-paused.bin")) == 0);
+        CHECK(diskState(QStringLiteral("w-paused")) == kPaused);
+    }
+
+    // (f) INSTALLED BUT CAN'T MINT still fails — waiting is only for a minter that isn't there yet. The same
+    // restored job: waiting with no minter, then Failed with the plain sentence once one answers "".
+    writeQueue(QJsonArray{ queuedRecord(QStringLiteral("w-gone"), jfRef, QString(),
+                                        dir + QStringLiteral("/w-gone.bin"), kQueued) });
+    {
+        DownloadManager dm2;
+        const DownloadJob* p = jobByKey(dm2, QStringLiteral("w-gone"));
+        CHECK(p && p->state == DownloadJob::Queued && p->error.isEmpty() && dm2.waitingForSource(*p));
+        int goneAsked = 0;
+        dm2.setUrlMinter([&goneAsked](const QString&) { ++goneAsked; return QString(); });
+        p = jobByKey(dm2, QStringLiteral("w-gone"));
+        CHECK(goneAsked == 1);
+        CHECK(p && p->state == DownloadJob::Failed);
+        CHECK(p && !dm2.waitingForSource(*p));
+        CHECK(p && p->error.startsWith(QStringLiteral("the server this was downloaded from isn't set up on this "
+                                                      "device any more")));
+        CHECK(diskState(QStringLiteral("w-gone")) == int(DownloadJob::Failed));
+        CHECK(stub.count(QStringLiteral("/f/w-gone.bin")) == 0);
+    }
+
+    // (g) THE PANEL SAYS SO. The status line is MainWindow's (not linked here), so read from the source: a
+    // Queued job's text names what it waits for, and every status line the panel draws is asked that question.
+    {
+        const QString mw = QString::fromUtf8(readSource(QStringLiteral("src/ui/MainWindow.cpp")));
+        // Computed first: a quoted literal inside CHECK's stringified condition is asking for trouble on GCC.
+        const bool waitingSentence = mw.contains(QStringLiteral("Waiting to reconnect to %1"))
+                                  && mw.contains(QStringLiteral(".arg(waitingFor)"));
+        CHECK(waitingSentence);
+        CHECK(mw.count(QStringLiteral("downloadStatusText(j, downloadWaitingFor(j))")) == 4);
+        CHECK(!mw.contains(QStringLiteral("downloadStatusText(j)")));
+        const QString jf = QString::fromUtf8(readSource(QStringLiteral("src/ui/MainWindowJellyfinDownload.cpp")));
+        CHECK(jf.contains(QStringLiteral("if (!dm_ || !dm_->waitingForSource(j)) return QString();")));
+    }
+
+    QFile::remove(atRestQueuePath());
+    QDir(dir).removeRecursively();
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -1434,6 +1653,8 @@ int main(int argc, char** argv)
     // starts from an empty queue.json of its own.
     sectionAtRest();
     sectionNoCarrier();
+    // #439, last: it seeds a queue.json of its own and runs transfers over its own loopback server.
+    sectionWaitForMinter();
 
     if (failures) { std::fprintf(stderr, "JFDOWNLOAD-FAIL %d check(s)\n", failures); return 1; }
     std::printf("JFDOWNLOAD-OK\n");

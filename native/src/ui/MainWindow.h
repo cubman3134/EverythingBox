@@ -77,6 +77,7 @@ class SubtitleCache;
 class BingeStore;           // remembered release (bingeGroup) per series — see core/BingeStore.h
 struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
 struct RecentItem;          // one Recents row (see core/RecentStore.h) — remintAndOpen takes it by reference
+struct DownloadJob;         // one download (see core/DownloadManager.h) — downloadWaitingFor takes it (#439)
 // One candidate stream for the "Choose source…" picker (see addons/StremioTranslate.h). Declared, not
 // included: only references to QVector<StreamCandidate> appear here, so the definition is not needed.
 namespace StremioTranslate { struct StreamCandidate; struct SubtitleAddonResult; }
@@ -2056,6 +2057,10 @@ private:
     // (DownloadRecipe.h) back into a fresh link through the same routing and the same two resolve calls as
     // remintAndOpen. Defined in MainWindowDownloadRemint.cpp. Called once, right after the Jellyfin wiring.
     void initDownloadRemint();
+    // #439: the source a Queued download is WAITING for (its minter not installed yet, or not ready), named
+    // for the Downloads panel — the server's own name when this device knows it — or empty when the job is
+    // not waiting. Defined in MainWindowJellyfinDownload.cpp, beside the minter it waits for.
+    QString downloadWaitingFor(const DownloadJob& j) const;
     // Queue ONE item for offline keeping. Asks the owning server for the item's container so the file is
     // named honestly, then enqueues a ref-backed DownloadJob (no url — see DownloadJob::sourceRef).
     void downloadJellyfinItem(const QString& qualifiedId, const QString& title, const QString& thumb);
