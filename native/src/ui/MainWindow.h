@@ -664,6 +664,12 @@ private:
     QString audiobookServerStatusLine() const;
     // The queue index of one entry, or -1. Both hooks below need it and neither may guess.
     int absQueueIndexOf(const QString& identity) const;
+    // #197 (MainWindowAbsTimeline.cpp): is the entry playing RIGHT NOW a part of the Audiobookshelf book this
+    // window opened — and, for such a book, a seek on the book-scale bar that may land in ANOTHER part (the
+    // part links are minted locally, so crossing costs nothing). absBookSeek answers false, having done
+    // nothing, for everything else: the caller then keeps #218's clamp into the part in hand.
+    bool absBookPlaying() const;
+    bool absBookSeek(double bookSeconds);
     // Install the two PlaybackSession seams a server that owns its own progress needs. Called once, at
     // construction, beside the rest of the session wiring.
     void installAbsProgressHooks();

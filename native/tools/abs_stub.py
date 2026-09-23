@@ -15,7 +15,8 @@ same fixture on purpose, so a discrepancy between them is a discrepancy worth lo
 
 Then add http://127.0.0.1:13378 as an audiobook server, with any username and any password: this fixture
 accepts every sign-in and issues one token. NOTHING HERE IS A CREDENTIAL — the token below is the literal
-string "probe-fixture-token-6f3a9c2e" and the audio it serves is silence it generates itself.
+string "probe-fixture-token-6f3a9c2e" and the audio it serves is silence it generates itself (and, for the
+"Three Tones" book, three plain tones — see TONE_TRACKS).
 
 It prints every request it is asked, with the Authorization header REDACTED, and prints the body of every
 progress PATCH — which is the thing worth watching, because "the position reached the server" is the one
@@ -24,6 +25,7 @@ claim in this feature that cannot be seen from inside the app.
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,8 +52,27 @@ CHAPTERS = [
     {"id": 2, "start": 260, "end": 450, "title": "Chapter Three"},
 ]
 
+# THE WHOLE-BOOK POSITION BAR (#197 increment 3), made AUDIBLE. Three 30-second parts, each a different
+# plain tone (220, 330 and 440 Hz), so a listener driving the app can hear which part a seek on the bar
+# landed in — the bar should read 1:30 in total, and a seek to 0:45 should play the MIDDLE tone, 15 seconds
+# in. No server progress is held for it, so a first open starts at the top of part one.
+TONE_TRACKS = [
+    {"index": 1, "startOffset": 0,  "duration": 30, "title": "01 - Low.wav",
+     "contentUrl": "/api/items/li_tones/file/tn_1", "mimeType": "audio/wav"},
+    {"index": 2, "startOffset": 30, "duration": 30, "title": "02 - Middle.wav",
+     "contentUrl": "/api/items/li_tones/file/tn_2", "mimeType": "audio/wav"},
+    {"index": 3, "startOffset": 60, "duration": 30, "title": "03 - High.wav",
+     "contentUrl": "/api/items/li_tones/file/tn_3", "mimeType": "audio/wav"},
+]
+TONE_HZ = {"tn_1": 220.0, "tn_2": 330.0, "tn_3": 440.0}
+TONE_CHAPTERS = [
+    {"id": 0, "start": 0,  "end": 30, "title": "Low"},
+    {"id": 1, "start": 30, "end": 60, "title": "Middle"},
+    {"id": 2, "start": 60, "end": 90, "title": "High"},
+]
 
-def book(item_id, title, author, tracks, series=None, seq=None):
+
+def book(item_id, title, author, tracks, series=None, seq=None, chapters=None):
     md = {"title": title, "authorName": author}
     if series:
         md["seriesName"] = series
@@ -59,7 +80,7 @@ def book(item_id, title, author, tracks, series=None, seq=None):
     return {"id": item_id, "mediaType": "book",
             "media": {"duration": sum(t["duration"] for t in tracks), "numTracks": len(tracks),
                       "coverPath": "/covers/%s.jpg" % item_id, "metadata": md,
-                      "tracks": tracks, "chapters": CHAPTERS}}
+                      "tracks": tracks, "chapters": CHAPTERS if chapters is None else chapters}}
 
 
 LIBRARIES = [{"id": "lib_books", "name": "Books", "mediaType": "book"},
@@ -67,7 +88,8 @@ LIBRARIES = [{"id": "lib_books", "name": "Books", "mediaType": "book"},
 
 BOOKS = [book("li_multi", "The Long Book", "A. Writer", TRACKS, "Chronicles", "2"),
          book("li_one", "One File", "A. Writer", [dict(TRACKS[0], duration=60)]),
-         book("li_other", "Another", "B. Author", [dict(TRACKS[0], duration=90)], "Chronicles", "1")]
+         book("li_other", "Another", "B. Author", [dict(TRACKS[0], duration=90)], "Chronicles", "1"),
+         book("li_tones", "Three Tones", "C. Signal", TONE_TRACKS, chapters=TONE_CHAPTERS)]
 
 PODCAST = {"id": "li_pod", "mediaType": "podcast",
            "media": {"numEpisodes": 2, "coverPath": "/covers/pod.jpg",
@@ -97,6 +119,25 @@ def silence_wav(seconds, rate=1000):
     return hdr + data
 
 
+def tone_wav(seconds, hz, rate=4000):
+    """A real, playable WAV of one plain tone, for the book whose parts have to be told apart by ear.
+
+    Generated for silence_wav's reason, and at a low rate for the same one — only a length and a pitch
+    have to survive, and 4 kHz carries a 440 Hz tone with room to spare at 240 KB for thirty seconds."""
+    key = (seconds, hz, rate)
+    if key not in _TONES:   # built once: a player asks for byte ranges of the same file many times
+        n = int(seconds * rate)
+        amp = 6000
+        data = b"".join(struct.pack("<h", int(amp * math.sin(2.0 * math.pi * hz * i / rate))) for i in range(n))
+        hdr = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + struct.pack(
+            "<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(data))
+        _TONES[key] = hdr + data
+    return _TONES[key]
+
+
+_TONES = {}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -109,7 +150,10 @@ class Handler(BaseHTTPRequestHandler):
         # REDACTED, always. This script prints to a terminal somebody may screenshot, and a fixture token
         # printed here is a habit that transfers to a real one.
         shown = "Bearer <redacted>" if auth else "-"
-        line = "%-6s %-46s auth=%s" % (self.command, self.path, shown)
+        # ...and the same for the token a STREAM url carries in its query: every part the player fetches
+        # arrives as /api/items/<id>/file/<ino>?token=..., and printing that path verbatim printed the token.
+        path = re.sub(r"token=[^&]*", "token=<redacted>", self.path)
+        line = "%-6s %-46s auth=%s" % (self.command, path, shown)
         if body:
             line += "  body=%s" % body.decode("utf-8", "replace")
         print(line, flush=True)
@@ -233,6 +277,8 @@ class Handler(BaseHTTPRequestHandler):
                     for t in src["media"]["tracks"]:
                         if t["contentUrl"].endswith(af):
                             secs = t["duration"]
+                if af in TONE_HZ:
+                    return self._send_media(tone_wav(secs, TONE_HZ[af]), "audio/wav")
                 return self._send_media(silence_wav(secs), "audio/wav")
             if rest.endswith("/cover"):
                 return self._send(None, raw=b"", ctype="image/jpeg")

@@ -118,6 +118,14 @@ public:
     // The session that openSession last landed for this id, or a Session whose `ok` is false.
     Abs::Session session(const QString& qualifiedId) const;
 
+    // A position in part `partIndex` of `qualifiedId`, in THAT BOOK'S OWN TIME — seconds into the whole book
+    // (#197), through that id's own play session. Keyed by the id on purpose, and not by whichever book was
+    // opened last: the final report of a book being LEFT arrives after the next book has been opened, and
+    // reading it through the next book's tracks sent "5 s into part three" to the server as "5 s into the
+    // book". `total`, when given, is set to the book's length if the session knows it. No session for the id,
+    // or no such part: the position comes back unchanged (a single-file item's part 0 is the same number).
+    double bookTime(const QString& qualifiedId, int partIndex, double pos, double* total = nullptr) const;
+
     // The stream url for ONE PART of an open session, minted now. Empty when there is no such session or
     // no such part. CREDENTIAL-BEARING: hand it straight to the player and write it down nowhere.
     QString partStreamUrl(const QString& qualifiedId, int partIndex) const;

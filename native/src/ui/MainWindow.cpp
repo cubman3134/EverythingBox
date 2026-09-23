@@ -2557,6 +2557,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // will do. Clamping in permille rather than in seconds is what makes the write-back idempotent:
         // clamping an already-clamped integer changes nothing, so the sliderMoved this re-emits settles at
         // once instead of ping-ponging against its own rounding.
+        // #197: ...except in an Audiobookshelf book, whose part links are minted locally at no cost: there
+        // the drag is free across the whole book and the readout names the point it is aimed at.
+        if (bookScale() && absBookPlaying())
+        {
+            const double total = bookTimeline_.total();
+            time_->setText(fmtBook(permille / 1000.0 * total) + QStringLiteral(" / ") + fmtBook(total));
+            return;
+        }
         if (bookScale())
         {
             const double total = bookTimeline_.total();
@@ -3048,28 +3056,13 @@ void MainWindow::openAbsItem(const QString& qualifiedId, int startPart)
         // goes in one. An id is credential-free by construction and means the same thing tomorrow.
         item.url   = qualifiedId;
 
-        // THE PART NAMES, which are three things at once and have to be all three: the display row, the
-        // half of the part token that makes it durable, and therefore the thing a resume mark is keyed by.
-        // The server's own track title is used, because it is what the listener is looking at — and it is
-        // DE-DUPLICATED, because two identically named tracks would mint the same token and the queue would
-        // then have two entries whose resume marks were one mark.
-        QSet<QString> used;
-        for (int i = 0; i < s.tracks.size(); ++i)
-        {
-            RemoteAudiobook::Part p;
-            p.id = QString::number(i);
-            QString name = s.tracks.at(i).title.trimmed();
-            if (name.isEmpty()) name = tr("Part %1").arg(i + 1);
-            if (used.contains(name)) name = QStringLiteral("%1 (%2)").arg(name).arg(i + 1);
-            used.insert(name);
-            p.fileName = name;
-            // DELIBERATELY NO SIZE. #218's book-scale position bar is priced out of part SIZES, which a
-            // torrent listing gives and a play session does not — it gives DURATIONS, which are better
-            // information and which that bar cannot yet read. Putting anything else here would be read by
-            // BookTimeline::bytesFromSizeText as a size, so the honest value is nothing: the bar stays
-            // per-part for a multi-file server book, exactly as it does for a release with a missing size.
-            item.bookParts.push_back(p);
-        }
+        // THE PARTS — named by the server's own track titles (de-duplicated, because a part name is also
+        // the half of the part token a resume mark is keyed by) and, since #197, carrying each track's
+        // DURATION. The durations are what give a multi-file server book the whole-book position bar (#218):
+        // openRemoteAudiobook hands them to BookTimeline, which prefers them to part sizes. Still no SIZE —
+        // a play session has none, and anything put there would be read as one. Abs::bookParts is the one
+        // spelling, and probe_absclient drives it against the stub's live /play reply.
+        item.bookParts = Abs::bookParts(s.tracks);
         const QString firstUrl = AbsClient::instance().partStreamUrl(qualifiedId, part);
         if (firstUrl.isEmpty()) { notify(tr("That server gave no link for this part.")); return; }
         // A single-track book takes openRemoteAudiobook's one-part path (openAudioStream), which is right:
@@ -3129,14 +3122,13 @@ void MainWindow::installAbsProgressHooks()
         // IN BOOK TIME. The server tracks one position per item, and the position it wants is the
         // listener's place in the BOOK — a position in part four, reported bare, would send them back four
         // minutes into a fifteen-hour book on every other client they own.
-        double at    = pos;
+        //
+        // Through THIS book's own session (AbsClient::bookTime), never through "the book opened last": the
+        // final report of a book being left fires from the clearQueue of the NEXT open, after openAbsItem has
+        // already installed the next book's tracks — and read through those, it went to the server as a
+        // position in the part rather than in the book (#197 inc 3, seen live on the first drive).
         double total = dur;
-        if (book == absBookId_ && !absTracks_.isEmpty())
-        {
-            const int idx = absQueueIndexOf(identity);
-            if (idx >= 0) at = Abs::absoluteTime(absTracks_, idx, pos);
-            if (absDuration_ > 0.0) total = absDuration_;
-        }
+        const double at = AbsClient::instance().bookTime(book, absQueueIndexOf(identity), pos, &total);
         AbsClient::instance().reportProgress(book, at, total, /*force*/ leaving);
         return true;   // ...and NOTHING is written into our synced resume categories for this id.
     });
@@ -5030,6 +5022,28 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("mediaIsVideo"), session_->mediaIsVideo());
             o.insert(QStringLiteral("musicBackground"), musicPlayingInBackground());
             o.insert(QStringLiteral("nowPlayingTitle"), nowPlayingLabel());
+            // #218 / #197: the book-scale bar as BOTH surfaces draw it — the model's reading, the classic
+            // readout's text, and the four numbers the themed page is handed. A server book's drive asserts on
+            // these; the classic player screenshots black, so they are the evidence on that layout.
+            o.insert(QStringLiteral("bookBar"), bookScale());
+            if (bookScale())
+            {
+                o.insert(QStringLiteral("bookElapsed"),
+                         bookTimeline_.elapsed(session_->currentIndex(), session_->position()));
+                o.insert(QStringLiteral("bookTotal"), bookTimeline_.total());
+            }
+            if (time_) o.insert(QStringLiteral("playerTime"), time_->text());
+#ifdef EB_HAVE_QML
+            if (themedAudioSession_)
+                if (QWidget* ah = themedAudioHost())
+                    if (QQuickItem* ar = ThemeEngine::rootItem(ah))
+                    {
+                        o.insert(QStringLiteral("audioPosition"), ar->property("audioPosition").toDouble());
+                        o.insert(QStringLiteral("audioDuration"), ar->property("audioDuration").toDouble());
+                        o.insert(QStringLiteral("audioPartStart"), ar->property("audioPartStart").toDouble());
+                        o.insert(QStringLiteral("audioPartEnd"), ar->property("audioPartEnd").toDouble());
+                    }
+#endif
         }
 #ifdef EB_HAVE_QML
         // Themed reader host (book / pdf / comic): the chrome strips are opaque QQuickWidgets, so surface the
@@ -8953,6 +8967,10 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     QVector<double> partBytes;
     partBytes.reserve(parts.size());
     bool everySizeKnown = true;
+    // #197: the part DURATIONS, where the source gave them (an Audiobookshelf play session does), collected
+    // in the same loop for the same reason.
+    QVector<double> partSeconds;
+    partSeconds.reserve(parts.size());
     for (const RemoteAudiobook::Part& p : parts)
     {
         const QString token = RemoteAudiobook::partToken(bookKey, p.fileName);
@@ -8963,6 +8981,7 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
         const double bytes = BookTimeline::bytesFromSizeText(p.subtitle);
         partBytes << bytes;
         if (!(bytes > 0.0)) everySizeKnown = false;
+        partSeconds << p.seconds;
     }
     if (queue.isEmpty()) { openAudioStream(firstPartUrl, item.id, item.title, item.thumbnailUrl, item.requestHeaders, &item); return; }
     if (!firstPartUrl.isEmpty()) remoteBookMinted_.insert(queue.first(), firstPartUrl);
@@ -9014,9 +9033,22 @@ void MainWindow::openRemoteAudiobook(const MediaItem& item, const QString& first
     // then reads per-part, exactly as it did before this existed — the same answer, said honestly.
     bookPartBytes_ = everySizeKnown ? partBytes : QVector<double>();
     bookTimelineOn_ = everySizeKnown && queue.size() > 1;
-    if (!everySizeKnown)
-        mwLog(QStringLiteral("audiobook: \"%1\" — the release does not give a size for every part, so the "
-                             "position bar stays per-part").arg(item.title));
+    // #197: ...UNLESS THE SOURCE GAVE EVERY PART'S DURATION, which wins over the sizes (BookTimeline::basisFor
+    // is the one rule). Then there is nothing to wait for: the timeline is exact and whole before a byte has
+    // played, and no byte seed is kept for onDuration to price. A partial duration list is not this branch —
+    // it falls back to the sizes above, never mixed with them.
+    if (queue.size() > 1
+        && BookTimeline::basisFor(int(queue.size()), partSeconds, partBytes) == BookTimeline::Basis::Durations)
+    {
+        bookPartBytes_.clear();
+        bookTimeline_.build(int(queue.size()), partSeconds, partBytes);
+        bookTimelineOn_ = bookTimeline_.ready();
+        mwLog(QStringLiteral("audiobook: \"%1\" — the source gives every part's length, so the position bar "
+                             "spans the whole book (%2 s)").arg(item.title).arg(bookTimeline_.total(), 0, 'f', 1));
+    }
+    if (!bookTimelineOn_)
+        mwLog(QStringLiteral("audiobook: \"%1\" — the release does not give a size or a length for every part, "
+                             "so the position bar stays per-part").arg(item.title));
 
     // No per-track headers: a file provider declares no proxyHeaders, and a header list bound to part one's
     // url would be wrong for every other part by definition (StreamHeaders::forPlayUrl drops them when the
@@ -12734,6 +12766,13 @@ void MainWindow::runThemedAudioTransport(const QString& verb)
         {
             const int i = session_->currentIndex();
             const double book = qBound(0.0, frac, 1.0) * bookTimeline_.total();
+            // #197: a server book's seek may land in another part — absBookSeek goes there.
+            if (absBookSeek(book))
+            {
+                if (QWidget* cur = themedAudioHost())
+                    if (QQuickItem* r = ThemeEngine::rootItem(cur)) r->setProperty("audioPosition", book);
+                return;
+            }
             const double at = bookTimeline_.positionWithin(i, book);
             player_->setPosition(at);
             if (QWidget* cur = themedAudioHost())
@@ -12794,8 +12833,11 @@ void MainWindow::updateThemedAudioProgress()
     const int  bookIdx = bookBar ? session_->currentIndex() : -1;
     r->setProperty("audioPosition", bookBar ? bookTimeline_.elapsed(bookIdx, posSec) : posSec);
     r->setProperty("audioDuration", bookBar ? bookTimeline_.total() : duration_);
-    r->setProperty("audioPartStart", bookPartStart());
-    r->setProperty("audioPartEnd", bookPartEnd());
+    // #197: an Audiobookshelf book's bar is not clamped to the part (see absBookSeek), so the page is given no
+    // span — 0/0 is its own "scrub across the whole bar" signal, over the book's duration.
+    const bool freeBar = bookBar && absBookPlaying();
+    r->setProperty("audioPartStart", freeBar ? 0.0 : bookPartStart());
+    r->setProperty("audioPartEnd", freeBar ? 0.0 : bookPartEnd());
     r->setProperty("audioPaused", themedAudioPaused_);
     r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
     // #85: the chapter ticks and intro/credits bands, as fractions of THIS bar (which inside a book is the
@@ -29802,6 +29844,7 @@ void MainWindow::onSeekReleased()
     if (bookScale())
     {
         const int i = session_->currentIndex();
+        if (absBookSeek(seek_->value() / 1000.0 * bookTimeline_.total())) return;   // #197: may cross parts
         player_->setPosition(bookTimeline_.positionWithin(i, seek_->value() / 1000.0 * bookTimeline_.total()));
         return;
     }

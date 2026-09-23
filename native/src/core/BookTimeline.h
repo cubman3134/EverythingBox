@@ -60,6 +60,35 @@
 // The caller clamps the gesture into the current part's span, for which this file supplies the span
 // (offsetOf / lengthOf) and the arithmetic (positionWithin). The argument lives with the clamp.
 //
+// (A source whose part links cost nothing to mint — an Audiobookshelf book, whose links are built locally
+// from the play session it already holds — has no such reason, and its caller lets the gesture cross. For
+// that caller this file supplies land(): which part a point in the book falls in, and where inside it.)
+//
+// ---- THE THIRD INPUT: PER-PART DURATIONS (issue #197) ----------------------------------------------
+//
+// A torrent listing says how BIG each part is. An Audiobookshelf play session says how LONG each part is,
+// which is better information and needs no measurement at all: the book position is simply
+//
+//     bookPos = durations[0] + … + durations[i-1] + posInPart
+//
+// and it is known before anything plays. So the seed can come from either input, and basisFor() is the
+// ONE rule that picks:
+//
+//   * DURATIONS, when every part has one — they win over sizes even when both are present, because they
+//     are exact and sizes are an estimate that waits for a measurement;
+//   * otherwise SIZES, when every part has one (the #218 path, unchanged);
+//   * otherwise NOTHING, and the book reads per-part.
+//
+// A PARTIAL duration list falls back to sizes rather than being mixed with them. Filling the gaps from a
+// byte estimate would put an estimate and a fact on one timeline with nothing to say which is which, and a
+// total nothing supports is the one outcome #218 says is worse than no total. Zero, negative or NaN is
+// "unknown", the same as absent: an empty part is no part.
+//
+// A DURATION-SEEDED TIMELINE IS EXACT, and measure() leaves it alone. Its lengths came from the same place
+// the source's own positions are measured in — for Audiobookshelf, the server whose book time the progress
+// report is in — so letting mpv's slightly different reading of a streamed file move them would only make
+// the bar and the server disagree by a few milliseconds per part.
+//
 // Nothing here reads Settings, touches the filesystem, knows what a network or a player is, or holds any
 // Qt type but QVector. Every method is a pure function of the state above it, so probe_booktimeline can
 // drive the whole model — including a boundary — with no window and no mpv.
@@ -151,6 +180,49 @@ inline QVector<double> secondsFromBytes(const QVector<double>& bytes, int measur
     return out;
 }
 
+// Which of a book's per-part inputs its timeline is built from (#197). See the header.
+enum class Basis { None, Durations, Sizes };
+
+// One value per part, every one of them positive. The completeness rule BOTH inputs are held to: a list of
+// the wrong length is not a list for this book, and `!(d > 0.0)` is what makes a NaN unknown too.
+inline bool everyPartKnown(const QVector<double>& perPart, int parts)
+{
+    if (parts <= 0 || perPart.size() != parts) return false;
+    for (double d : perPart)
+        if (!(d > 0.0)) return false;
+    return true;
+}
+
+// THE RULE. Durations win when complete; a partial duration list falls back to sizes, never mixed.
+inline Basis basisFor(int parts, const QVector<double>& durations, const QVector<double>& bytes)
+{
+    if (everyPartKnown(durations, parts)) return Basis::Durations;
+    if (everyPartKnown(bytes, parts))     return Basis::Sizes;
+    return Basis::None;
+}
+
+// The per-part seed, from whichever input basisFor() picks. Durations are the seed as they stand, before
+// anything plays. Sizes need the one measured part (secondsFromBytes), so they answer empty until there is
+// one — which is the caller's cue to wait for mpv's first duration, exactly as #218 does.
+inline QVector<double> seedFor(int parts, const QVector<double>& durations, const QVector<double>& bytes,
+                               int measuredIndex, double measuredSeconds)
+{
+    switch (basisFor(parts, durations, bytes))
+    {
+    case Basis::Durations: return durations;
+    case Basis::Sizes:     return secondsFromBytes(bytes, measuredIndex, measuredSeconds);
+    case Basis::None:      break;
+    }
+    return {};
+}
+
+// Where a point in the BOOK falls: the part, and the position inside it. part is -1 for an empty timeline.
+struct Landing
+{
+    int    part = -1;
+    double within = 0.0;
+};
+
 // The book's published timeline: one length per part, and which of them are measurements rather than
 // estimates. Empty (parts() == 0) means there is no book-scale timeline and the caller shows the part.
 class Timeline
@@ -162,6 +234,7 @@ public:
     {
         lengths_.clear();
         measured_.clear();
+        exact_ = false;
         if (lengths.isEmpty()) return;
         for (double d : lengths)
             if (!(d > 0.0)) return;
@@ -169,16 +242,44 @@ public:
         measured_.fill(false, lengths.size());
     }
 
-    void clear() { lengths_.clear(); measured_.clear(); }
+    // Install a seed that is already EXACT — per-part durations from the source itself (#197). Every part
+    // counts as measured, and measure() then leaves the lengths alone: see the header for why. The same
+    // refusal as seed(): an empty list, or one non-positive length, leaves this empty.
+    void seedExact(const QVector<double>& durations)
+    {
+        seed(durations);
+        if (lengths_.isEmpty()) return;
+        measured_.fill(true, lengths_.size());
+        exact_ = true;
+    }
+
+    // THE ONE ENTRY THAT TAKES EITHER INPUT (#197): basisFor() decides, and the timeline is built from
+    // that. Durations seed an exact timeline at once; sizes seed an estimate once a part has been measured
+    // (and leave this empty until then); neither leaves it empty. Index-parallel vectors, `parts` long.
+    void build(int parts, const QVector<double>& durations, const QVector<double>& bytes,
+               int measuredIndex = -1, double measuredSeconds = 0.0)
+    {
+        switch (basisFor(parts, durations, bytes))
+        {
+        case Basis::Durations: seedExact(durations); return;
+        case Basis::Sizes:     seed(secondsFromBytes(bytes, measuredIndex, measuredSeconds)); return;
+        case Basis::None:      break;
+        }
+        clear();
+    }
+
+    void clear() { lengths_.clear(); measured_.clear(); exact_ = false; }
     bool ready() const { return lengths_.size() > 1; }
     int parts() const { return lengths_.size(); }
     bool isMeasured(int i) const { return measured_.value(i, false); }
+    bool exact() const { return exact_; }
 
     // mpv opened part k and said how long it is. See the header for the whole of the policy this is:
     // the fact is published, and the difference it made is taken out of the parts not yet heard.
     void measure(int k, double seconds)
     {
         if (k < 0 || k >= lengths_.size() || !(seconds > 0.0)) return;
+        if (exact_) return;   // the source's own durations are the timeline (#197) — see the header
         const double delta = seconds - lengths_.at(k);
         lengths_[k] = seconds;
         measured_[k] = true;
@@ -249,8 +350,34 @@ public:
         return rel < 0.0 ? 0.0 : (rel > len ? len : rel);
     }
 
+    // WHICH PART a point in the book falls in, and where inside it (#197) — the inverse of elapsed(), for a
+    // caller that may cross a boundary. A point exactly ON a boundary is the START of the later part, not
+    // the end of the earlier one: "45:00" in a book whose second part begins at 45:00 means the top of part
+    // two. Before the book is part 0 at 0; at or past the end is the last part at its end.
+    Landing land(double bookSeconds) const
+    {
+        Landing out;
+        if (lengths_.isEmpty()) return out;
+        const int last = int(lengths_.size()) - 1;
+        double at = 0.0;
+        for (int i = 0; i < last; ++i)
+        {
+            if (bookSeconds < at + lengths_.at(i))
+            {
+                out.part = i;
+                out.within = bookSeconds - at < 0.0 ? 0.0 : bookSeconds - at;
+                return out;
+            }
+            at += lengths_.at(i);
+        }
+        out.part = last;
+        out.within = positionWithin(last, bookSeconds);
+        return out;
+    }
+
 private:
     QVector<double> lengths_;
     QVector<bool>   measured_;
+    bool            exact_ = false;
 };
 } // namespace BookTimeline

@@ -40,6 +40,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "Audiobookshelf.h"
+#include "BookTimeline.h"     // #197: the book-scale bar a server book's track durations now drive
 #include "CoverFetch.h"
 #include "MetaCache.h"
 #include "PlaybackSession.h"
@@ -259,6 +260,16 @@ private:
                    "audioFile":{"duration":1800}},
                   {"id":"ep_new","title":"The latest one","pubDate":"2025-06-01T00:00:00Z",
                    "duration":2400}]}})");
+            return;
+        }
+        // #197: a SECOND book, a single file, so a probe can open two sessions and ask about the first.
+        if (path == QLatin1String("/api/items/li_one/play"))
+        {
+            send(sock, 200, R"({"id":"sess_2","duration":60,"currentTime":0,
+              "libraryItem":{"id":"li_one","media":{"metadata":{"title":"One File"}}},
+              "audioTracks":[{"index":1,"startOffset":0,"duration":60,"title":"one.mp3",
+                              "contentUrl":"/api/items/li_one/file/af_9","mimeType":"audio/mpeg"}],
+              "chapters":[]})");
             return;
         }
         if (path.endsWith(QLatin1String("/play")) || path.contains(QLatin1String("/play/")))
@@ -553,6 +564,57 @@ static void testTimeline()
 
     CHECK(Abs::chaptersForTrack(book, 0.0, 0.0).isEmpty());       // a part with no length has no regions
     CHECK(Abs::chaptersForTrack({}, 0.0, 100.0).isEmpty());
+
+    // ---- THE PARTS THE BOOK PLAYS AS, WITH THEIR DURATIONS (#197) ----------------------------------------
+    // What openAbsItem hands the one multi-file book player. Before #197 each part went with no length at
+    // all, so the position bar had nothing to span the book with and read one track at a time.
+    const QVector<RemoteAudiobook::Part> parts = Abs::bookParts(t);
+    CHECK(parts.size() == 3);
+    CHECK(parts.value(0).seconds == 100.0);
+    CHECK(parts.value(1).seconds == 200.0);
+    CHECK(parts.value(2).seconds == 150.0);
+    CHECK(parts.value(0).id == QStringLiteral("0") && parts.value(2).id == QStringLiteral("2"));
+    CHECK(parts.value(1).fileName == QStringLiteral("02"));
+    // NO SIZE — the subtitle is read as one, and a play session has none to give.
+    for (const RemoteAudiobook::Part& p : parts) CHECK(p.subtitle.isEmpty());
+    QVector<double> secs, sizes;
+    for (const RemoteAudiobook::Part& p : parts)
+    { secs << p.seconds; sizes << BookTimeline::bytesFromSizeText(p.subtitle); }
+    CHECK(BookTimeline::basisFor(parts.size(), secs, sizes) == BookTimeline::Basis::Durations);
+    // THE BAR AND THE SERVER AGREE ABOUT WHERE EVERY PART BEGINS: the durations' running sum is the
+    // session's own startOffset, so a position the bar shows is the position the progress report sends.
+    BookTimeline::Timeline tl;
+    tl.build(parts.size(), secs, sizes);
+    CHECK(tl.ready() && tl.exact() && tl.total() == 450.0);
+    for (int k = 0; k < t.size(); ++k)
+    {
+        CHECK(tl.offsetOf(k) == t.at(k).startOffset);
+        CHECK(tl.elapsed(k, 7.0) == Abs::absoluteTime(t, k, 7.0));
+    }
+    // A seek on the bar and the server's own inverse name the same track and the same offset.
+    for (double T : { 0.0, 50.0, 100.0, 250.0, 299.0, 300.0, 440.0 })
+    {
+        const BookTimeline::Landing l = tl.land(T);
+        CHECK(l.part == Abs::trackAtTime(t, T));
+        CHECK(l.within == Abs::offsetWithinTrack(t, T));
+    }
+
+    // The names: the server's own titles, de-duplicated, with a stand-in for a blank one. A track with no
+    // length leaves the part at 0 — and then the whole SET is declined, not that part guessed.
+    QVector<Abs::Track> odd = t;
+    odd[1].title = QStringLiteral("01");        // the same name as part one
+    odd[2].title = QStringLiteral("  ");
+    odd[2].duration = 0.0;
+    const QVector<RemoteAudiobook::Part> oddParts = Abs::bookParts(odd);
+    CHECK(oddParts.size() == 3);
+    CHECK(oddParts.value(0).fileName == QStringLiteral("01"));
+    CHECK(oddParts.value(1).fileName == QStringLiteral("01 (2)"));
+    CHECK(oddParts.value(2).fileName == QStringLiteral("Part 3"));
+    CHECK(oddParts.value(2).seconds == 0.0);
+    QVector<double> oddSecs;
+    for (const RemoteAudiobook::Part& p : oddParts) oddSecs << p.seconds;
+    CHECK(BookTimeline::basisFor(3, oddSecs, {}) == BookTimeline::Basis::None);
+    CHECK(Abs::bookParts({}).isEmpty());
 }
 
 // ==================================================================================================
@@ -911,6 +973,22 @@ static void testLive(AbsStub& stub, quint16 port)
     CHECK(Abs::trackAtTime(sess.tracks, sess.currentTime) == 1);
     CHECK(Abs::offsetWithinTrack(sess.tracks, sess.currentTime) == 150.0);
 
+    // #197: THE OPEN PATH CARRIES EVERY TRACK'S DURATION off the live /play reply, so a three-file book
+    // arms a book-scale bar of the server's own length before a single byte of audio has arrived.
+    {
+        const QVector<RemoteAudiobook::Part> parts = Abs::bookParts(sess.tracks);
+        QVector<double> secs;
+        for (const RemoteAudiobook::Part& p : parts) secs << p.seconds;
+        CHECK(secs == (QVector<double>{ 100.0, 200.0, 150.0 }));
+        BookTimeline::Timeline tl;
+        tl.build(parts.size(), secs, {});
+        CHECK(tl.ready() && tl.total() == sess.duration);
+        // The server's resume point, read through the bar: part two, 150 s in — the same answer the
+        // resume seed computes from the session, so the bar opens where the listener is.
+        const BookTimeline::Landing l = tl.land(sess.currentTime);
+        CHECK(l.part == 1 && l.within == 150.0);
+    }
+
     const QString url = c.partStreamUrl(book, 1);
     CHECK(url.startsWith(root + QStringLiteral("/api/items/li_multi/file/af_2")));
     CHECK(QUrlQuery(QUrl(url).query()).queryItemValue(QStringLiteral("token"))
@@ -966,6 +1044,47 @@ static void testLive(AbsStub& stub, quint16 port)
         return p && p->path == QStringLiteral("/api/me/progress/li_pod/ep_new");
     }));
 
+    // #197: A SEEK ON THE BOOK-SCALE BAR, reported. The bar lands 45 s into the book as track 0 at 45 s;
+    // what goes to the server is BOOK seconds (the track's startOffset plus the offset in it), never the
+    // position inside the file mpv holds.
+    {
+        BookTimeline::Timeline tl;
+        tl.build(3, { 100.0, 200.0, 150.0 }, {});
+        const BookTimeline::Landing l = tl.land(345.0);             // part three, 45 s in
+        CHECK(l.part == 2 && l.within == 45.0);
+        const double at = Abs::absoluteTime(sess.tracks, l.part, l.within);
+        CHECK(at == 345.0);
+        c.reportProgress(book, at, 450.0, /*force*/ true);
+        CHECK(waitFor([&] { return stub.countOf(QStringLiteral("PATCH"),
+                                                QStringLiteral("/api/me/progress/")) == patches0 + 5; }));
+        const AbsStub::Seen* p = stub.lastOf(QStringLiteral("PATCH"), QStringLiteral("/api/me/progress/li_multi"));
+        CHECK(p && QJsonDocument::fromJson(p->body).object().value(QStringLiteral("currentTime")).toDouble()
+                       == 345.0);
+    }
+
+    // #197: THE BOOK BEING LEFT IS REPORTED IN ITS OWN TIME. Opening the next book lands its session first;
+    // the last report of the one being left fires after that (from the next open's clearQueue). It has to be
+    // converted through ITS OWN tracks — before this, it went through "the book opened last", so leaving
+    // "The Long Book" 5 s into part three for another book told the server 5 s, not 305 s.
+    {
+        const QString single = Abs::qualify(g_serverId, QStringLiteral("li_one"));
+        done = false; Abs::Session one;
+        c.openSession(single, [&](const AbsClient::Result& r, const Abs::Session& s) { done = true; one = s; });
+        CHECK(waitFor([&] { return done; }));
+        CHECK(one.ok && one.tracks.size() == 1 && one.duration == 60.0);
+        double total = 0.0;
+        CHECK(c.bookTime(book, 2, 5.0, &total) == 305.0);        // the first book, opened BEFORE this one
+        CHECK(total == 450.0);
+        CHECK(c.bookTime(book, 1, 150.0) == 250.0);
+        total = 0.0;
+        CHECK(c.bookTime(single, 0, 12.0, &total) == 12.0);      // a single file: part 0 is the book
+        CHECK(total == 60.0);
+        double untouched = 7.0;                                  // no session: the position, unconverted
+        CHECK(c.bookTime(QStringLiteral("abs:nope:li"), 1, 9.0, &untouched) == 9.0 && untouched == 7.0);
+        CHECK(c.bookTime(book, 99, 9.0) == 9.0);                 // no such part: likewise
+        CHECK(c.bookTime(book, -1, 9.0) == 9.0);
+    }
+
     // Reading it back.
     done = false; Abs::Progress got;
     c.fetchProgress(book, [&](const AbsClient::Result& r, const Abs::Progress& p) { done = true; got = p; });
@@ -1008,9 +1127,10 @@ static void testSessionHooks(const QString& scratchIni)
         if (b.isEmpty()) return false;
         int idx = -1;
         for (int i = 0; i < queue.size(); ++i) if (queue.at(i) == id) idx = i;
-        reported.push_back({ b, idx >= 0 ? Abs::absoluteTime(tracks, idx, pos) : pos });
+        // MainWindow's own conversion, through the book's OWN session (the one testLive opened) — #197.
+        double total = dur;
+        reported.push_back({ b, AbsClient::instance().bookTime(b, idx, pos, &total) });
         if (leaving) sawLeaving = true;
-        Q_UNUSED(dur);
         return true;
     });
     // The seed the app computes from the play session's currentTime: 250 -> part 1, 150 in.
@@ -1066,6 +1186,27 @@ static void testSessionHooks(const QString& scratchIni)
         // and the incoming one is the server's — so after a boundary inside a server book this store holds
         // nothing for it at all, which is the whole claim.
         CHECK(rows == 0);
+    }
+
+    // #197: A SEEK ACROSS A PART BOUNDARY, the way MainWindow makes one for a server book — jump the queue
+    // to the part the bar landed in, then place the start inside it. The place wins over the server's "top of
+    // any other part" answer, and the position then reported is in BOOK time: 40 s into part three is 340.
+    {
+        BookTimeline::Timeline tl;
+        QVector<double> secs;
+        for (const RemoteAudiobook::Part& p : Abs::bookParts(tracks)) secs << p.seconds;
+        tl.build(tracks.size(), secs, {});
+        const BookTimeline::Landing l = tl.land(340.0);
+        CHECK(l.part == 2 && l.within == 40.0);
+        session.playIndex(l.part);
+        session.overrideResumeSeek(l.within);
+        CHECK(session.currentIndex() == 2);
+        CHECK(session.takeResumeSeek() == 40.0);
+        session.setPosition(40.0);
+        session.persistResume();
+        CHECK(reported.last().first == book);
+        CHECK(reported.last().second == 340.0);
+        CHECK(reported.last().second == tl.elapsed(l.part, 40.0));   // the bar and the report agree
     }
 
     // Leaving the media forces the last report through, whatever the far side's throttle would have said.
