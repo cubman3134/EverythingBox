@@ -1,4 +1,5 @@
 #include "CastManager.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 
 #include <QUdpSocket>
 #include <QSslSocket>
@@ -276,7 +277,7 @@ void CastManager::dlnaSoap(const QString& action, const QString& xmlBody)
     connect(r, &QNetworkReply::finished, this, [this, r, action] {
         r->deleteLater();
         if (r->error() != QNetworkReply::NoError && action == QStringLiteral("SetAVTransportURI"))
-            emit castError(tr("The device rejected the stream (%1).").arg(r->errorString()));
+            emit castError(tr("The device rejected the stream (%1).").arg(NetErrorText::forReply(r)));
     });
 }
 

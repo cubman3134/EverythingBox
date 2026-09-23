@@ -1,4 +1,5 @@
 #include "AniListTracker.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "TrackerLinks.h"
 #include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with MyAnimeList
 
@@ -173,9 +174,13 @@ void AniListTracker::exchangeCode(const QString& code)
         const anilist::TokenReply r = anilist::parseTokenReply(rep->readAll());
         if (!r.ok)
         {
-            // The EXCEPTION, not the request: rep->errorString() names the transport failure and never the
-            // body we sent. A 200 carrying an error object lands here too, with no token to leak.
-            emit connectError(tr("AniList did not return a token (%1).").arg(rep->errorString()));
+            // The EXCEPTION, not the request — and not rep->errorString() either, which embeds the url (#435).
+            // From the CODE alone (status 0), so a refused sign-in ("access was denied") stays distinct from an
+            // unreachable service. A 200 carrying an error object lands here too, as NoError.
+            emit connectError(tr("AniList did not return a token (%1).")
+                                  .arg(rep->error() == QNetworkReply::NoError
+                                           ? tr("it refused the sign-in")
+                                           : NetErrorText::sentence(rep->error())));
             return;
         }
         storeTokenReply(r);

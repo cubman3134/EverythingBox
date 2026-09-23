@@ -1,4 +1,5 @@
 #include "EmulatorManager.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "NativePorts.h"   // issue #248: record the release tag a native port's install landed on
@@ -455,7 +456,7 @@ void EmulatorManager::fetchArtifactListFrom(const QString& lookupUrl)
                 }
             }
             busy_ = false;
-            emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, reply->errorString()));
+            emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, NetErrorText::forReply(reply)));
             return;
         }
         const QByteArray body = reply->readAll();
@@ -552,7 +553,7 @@ void EmulatorManager::downloadArchive(const QString& url)
         out->write(reply->readAll()); out->close(); delete out;
         const bool ok = reply->error() == QNetworkReply::NoError;
         const bool cancelled = reply->error() == QNetworkReply::OperationCanceledError;
-        const QString es = reply->errorString();
+        const QString es = NetErrorText::forReply(reply);   // #435: never Qt's text, which embeds the url
         reply->deleteLater();
         if (!ok)
         {

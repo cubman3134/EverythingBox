@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "NetHeaderApply.h"
 #include "LogSafeText.h"       // issue #231: the ONE definition of a url as it may be LOGGED
+#include "NetErrorText.h"      // issue #435: what a failed request may say on screen, and in a log
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -303,20 +304,24 @@ void DownloadManager::onFinished()
         { onRangeUnsatisfiable(); return; }
     }
     bool ok = reply_->error() == QNetworkReply::NoError;
-    QString err = ok ? QString() : reply_->errorString();
+    // The reason a user is shown comes from the NetworkError code, the HTTP status and the redirect flag —
+    // NEVER from reply_->errorString() (#435). Qt renders an HTTP failure as "Error transferring <url> -
+    // server replied: …" with the url whole, and a Jellyfin, Subsonic or Audiobookshelf download url is signed
+    // in its query: that string in the Downloads panel was the user's credential on screen.
+    //
     // A hop the origin gate refused arrives here as an abort, and Qt renders that as "Operation canceled" —
-    // the SAME string the user's own Cancel produces, which is both wrong and the end of the trail. Name the
-    // cause instead. Not persisted (save() writes no error), so this is a message and never a stored fact.
+    // the SAME string the user's own Cancel produces, which is both wrong and the end of the trail. The mapper
+    // names the cause instead, ahead of the code. Not persisted (save() writes no error), so this is a message
+    // and never a stored fact.
     //
     // Deliberately not discardPart: the refusal happens on the response head, before any content byte, so a
     // .part from an earlier partial download is still good and a retry can still resume from it.
-    if (!ok && redirectRefused_)
-        err = tr("this source sent the download on to a different site, and the HTTP headers it needs are "
-                 "not sent there");
+    QString err = ok ? QString() : NetErrorText::forReply(reply_, redirectRefused_);
     // An HTTP error body is an error page, not our file — the .part is garbage and must be discarded so a retry
     // starts clean (a connection drop, by contrast, leaves a valid partial we can resume from).
     bool discardPart = false;
-    if (ok && http >= 400) { ok = false; err = tr("the source returned HTTP %1").arg(http); discardPart = true; }
+    if (ok && http >= 400)
+    { ok = false; err = NetErrorText::sentence(QNetworkReply::NoError, http); discardPart = true; }
 
     // The response's own account of itself, taken before the reply goes away. Also the only place a response
     // that delivered no body at all gets read, since that raises no readyRead.
@@ -349,6 +354,19 @@ void DownloadManager::onFinished()
         ok = false;
         err = tr("the download stopped before it finished (%1 of %2 bytes)")
                   .arg(bodyReceived_).arg(bodyExpected_);
+    }
+    // One line per real failure (not a Pause or Cancel, which have already moved the job out of Active), so a
+    // bug report says why. The url through logSafeUrl, Qt's own text through NetErrorText::logText — the same
+    // rule, applied to the url wherever Qt put it. Every value goes in through ONE multi-arg arg(): a url is
+    // full of "%3A"-style escapes that a chained .arg() would read as placeholders.
+    {
+        const int idx = activeIndex();
+        if (!ok && idx >= 0 && jobs_[idx].state == DownloadJob::Active)
+            dlLog(QStringLiteral("download: failed %1 — %2 (network error %3, HTTP %4): %5")
+                      .arg(logSafeUrl(reply_->url().toString()), err, QString::number(int(reply_->error())),
+                           QString::number(http),
+                           reply_->error() == QNetworkReply::NoError ? QStringLiteral("-")
+                                                                     : NetErrorText::logText(reply_)));
     }
     reply_->deleteLater(); reply_ = nullptr;
     finishActive(ok, err, discardPart);

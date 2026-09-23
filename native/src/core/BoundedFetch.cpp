@@ -1,4 +1,5 @@
 #include "BoundedFetch.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 
 #include <QEventLoop>
 #include <QNetworkAccessManager>
@@ -81,7 +82,7 @@ Result get(const QString& url, int timeoutMs, qint64 ceilingBytes)
     if (reply->error() != QNetworkReply::NoError)
     {
         r.body.clear();          // a 4xx still has a body, and it is an error page, not the file
-        r.error = reply->errorString();
+        r.error = NetErrorText::logText(reply.data());   // #435: log-only, and scrubbed as such
         r.verdict = Result::Failed;
         return r;
     }
