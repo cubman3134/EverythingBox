@@ -1,4 +1,5 @@
 #include "AddonManager.h"
+#include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/CatalogMatch.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
@@ -219,7 +220,7 @@ static QByteArray httpGetBlocking(const QUrl& url, const QByteArray& cfgHeader =
     loop.exec();
     QByteArray data;
     if (reply->error() == QNetworkReply::NoError) data = reply->readAll();
-    else if (err) *err = reply->errorString();
+    else if (err) *err = NetErrorText::forReply(reply);
     reply->deleteLater();
     return data;
 }
@@ -1338,10 +1339,10 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
             info.title = http == 404
                 ? tr("Couldn't load this add-on's catalog (HTTP 404). Its URL or access token may be out of date - "
                      "re-add it in Settings ▸ Add-ons.")
-                : tr("Couldn't reach this add-on: %1").arg(reply->errorString());
+                : tr("Couldn't reach this add-on: %1").arg(NetErrorText::forReply(reply));
             cat.title = tr("Unavailable");
             cat.items.push_back(info);
-            streamLog(QStringLiteral("catalog fetch failed (%1): %2").arg(http).arg(reply->errorString()));
+            streamLog(QStringLiteral("catalog fetch failed (%1): %2").arg(http).arg(NetErrorText::logText(reply)));
         }
         emit catalogReady(reqId, cat);
     });
@@ -1383,9 +1384,9 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
             MediaItem info; info.type = QStringLiteral("info");
             info.title = http >= 400
                 ? tr("Couldn't load this (HTTP %1). The add-on or its source may be unavailable — try again shortly.").arg(http)
-                : tr("Couldn't reach the add-on: %1").arg(reply->errorString());
+                : tr("Couldn't reach the add-on: %1").arg(NetErrorText::forReply(reply));
             cat.items.push_back(info);
-            streamLog(QStringLiteral("detail fetch failed (%1): %2").arg(http).arg(reply->errorString()));
+            streamLog(QStringLiteral("detail fetch failed (%1): %2").arg(http).arg(NetErrorText::logText(reply)));
         }
         emit catalogReady(reqId, cat);
     });
@@ -1444,7 +1445,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
     connect(reply, &QNetworkReply::finished, this, [this, reply, infoHash, shortHash, fileIdx, key, bearer, cb] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
-        { streamLog(QStringLiteral("torbox: checkcached error %1: %2").arg(shortHash, reply->errorString())); cb(QString()); return; }
+        { streamLog(QStringLiteral("torbox: checkcached error %1: %2").arg(shortHash, NetErrorText::logText(reply))); cb(QString()); return; }
         const QJsonObject data = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toObject();
         if (data.isEmpty()) { streamLog(QStringLiteral("torbox: %1 not cached").arg(shortHash)); cb(QString()); return; } // can't stream it now
         streamLog(QStringLiteral("torbox: %1 cached -> createtorrent").arg(shortHash));
@@ -1463,7 +1464,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
         connect(cre, &QNetworkReply::finished, this, [this, cre, shortHash, fileIdx, key, bearer, cb] {
             cre->deleteLater();
             if (cre->error() != QNetworkReply::NoError)
-            { streamLog(QStringLiteral("torbox: createtorrent error %1: %2").arg(shortHash, cre->errorString())); cb(QString()); return; }
+            { streamLog(QStringLiteral("torbox: createtorrent error %1: %2").arg(shortHash, NetErrorText::logText(cre))); cb(QString()); return; }
             const QJsonObject cd = QJsonDocument::fromJson(cre->readAll()).object().value(QStringLiteral("data")).toObject();
             const QString torrentId = QString::number(cd.value(QStringLiteral("torrent_id")).toVariant().toLongLong());
             if (torrentId.isEmpty() || torrentId == QStringLiteral("0")) { streamLog(QStringLiteral("torbox: no torrent_id %1").arg(shortHash)); cb(QString()); return; }
@@ -1481,7 +1482,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
             connect(mre, &QNetworkReply::finished, this, [this, mre, torrentId, fileIdx, key, cb] {
                 mre->deleteLater();
                 if (mre->error() != QNetworkReply::NoError)
-                { streamLog(QStringLiteral("torbox: mylist error %1: %2").arg(torrentId, mre->errorString())); cb(QString()); return; }
+                { streamLog(QStringLiteral("torbox: mylist error %1: %2").arg(torrentId, NetErrorText::logText(mre))); cb(QString()); return; }
                 const QJsonValue dv = QJsonDocument::fromJson(mre->readAll()).object().value(QStringLiteral("data"));
                 const QJsonObject td = dv.isArray() ? dv.toArray().first().toObject() : dv.toObject(); // id-> object or [object]
                 const QJsonArray files = td.value(QStringLiteral("files")).toArray();
@@ -1514,7 +1515,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                 connect(dre, &QNetworkReply::finished, this, [dre, cb] {
                     dre->deleteLater();
                     if (dre->error() != QNetworkReply::NoError)
-                    { streamLog(QStringLiteral("torbox: requestdl error: %1").arg(dre->errorString())); cb(QString()); return; }
+                    { streamLog(QStringLiteral("torbox: requestdl error: %1").arg(NetErrorText::logText(dre))); cb(QString()); return; }
                     const QJsonValue d = QJsonDocument::fromJson(dre->readAll()).object().value(QStringLiteral("data"));
                     const QString url = d.toString();
                     streamLog(url.isEmpty() ? QStringLiteral("torbox: requestdl returned no url") : QStringLiteral("torbox: GOT stream url"));
@@ -1572,7 +1573,7 @@ void AddonManager::listStremioStreams(const MediaItem& item,
             reply->deleteLater();
             if (reply->error() == QNetworkReply::NoError)
                 (*blocks)[pi] = StremioTranslate::parseStreams(reply->readAll(), maxRowsPerAddon);
-            else streamLog(QStringLiteral("stremio: stream request error: %1").arg(reply->errorString()));
+            else streamLog(QStringLiteral("stremio: stream request error: %1").arg(NetErrorText::logText(reply)));
             if (--*pending != 0) return; // wait for every provider
 
             // Each provider's block arrived already sorted and capped; the CONCATENATION is not, so order the
@@ -1648,7 +1649,7 @@ void AddonManager::listStremioSubtitles(const QString& type, const QString& id, 
             reply->deleteLater();
             if (reply->error() == QNetworkReply::NoError)
                 (*blocks)[pi] = StremioTranslate::parseSubtitlesResponse(reply->readAll());
-            else streamLog(QStringLiteral("stremio: subtitle request error: %1").arg(reply->errorString()));
+            else streamLog(QStringLiteral("stremio: subtitle request error: %1").arg(NetErrorText::logText(reply)));
             if (--*pending != 0) return; // wait for every provider
 
             QVector<StremioTranslate::SubtitleAddonResult> all;
@@ -1690,7 +1691,7 @@ void AddonManager::downloadSubtitleFile(const QString& url, const QString& lang,
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            streamLog(QStringLiteral("stremio: subtitle download failed (%1)").arg(reply->errorString()));
+            streamLog(QStringLiteral("stremio: subtitle download failed (%1)").arg(NetErrorText::logText(reply)));
             cb(QString());
             return;
         }
@@ -1831,7 +1832,7 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
             const QJsonObject data = QJsonDocument::fromJson(bre->readAll()).object().value(QStringLiteral("data")).toObject();
             for (auto it = data.begin(); it != data.end(); ++it) cached.insert(it.key().toLower());
         }
-        else streamLog(QStringLiteral("torbox: batch checkcached error: %1").arg(bre->errorString()));
+        else streamLog(QStringLiteral("torbox: batch checkcached error: %1").arg(NetErrorText::logText(bre)));
         streamLog(QStringLiteral("torbox: %1 candidate(s) cached").arg(cached.size()));
 
         // First candidate in preference order that is playable now — an instant url or a cached hash, whichever
@@ -2032,8 +2033,8 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& w
             else if (http >= 400)
                 why = tr("it rejected the request (HTTP %1)").arg(http);
             else
-                why = reply->errorString(); // connection refused / timed out / DNS - Qt's message is already clear
-            streamLog(QStringLiteral("doc-bridge: search error: %1 (http %2%3)").arg(reply->errorString())
+                why = NetErrorText::forReply(reply); // connection refused / timed out / DNS - our words, never Qt's (#435)
+            streamLog(QStringLiteral("doc-bridge: search error: %1 (http %2%3)").arg(NetErrorText::logText(reply))
                           .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
             cb({ QString(), QString(), why, false, {}, false });
             return;
@@ -2339,8 +2340,8 @@ void AddonManager::resolveChapterInSeries(LoadedAddon* prov, const MediaItem& se
             else if (http >= 400)
                 why = tr("it rejected the request (HTTP %1)").arg(http);
             else
-                why = reply->errorString();
-            streamLog(QStringLiteral("doc-bridge: drill detail error: %1 (http %2%3)").arg(reply->errorString())
+                why = NetErrorText::forReply(reply);
+            streamLog(QStringLiteral("doc-bridge: drill detail error: %1 (http %2%3)").arg(NetErrorText::logText(reply))
                           .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
             cb({ QString(), QString(), why, false, {}, false });
             return;
@@ -2634,7 +2635,7 @@ void AddonManager::requestChapters(LoadedAddon* src, const QString& type, const 
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError)
             {
-                streamLog(QStringLiteral("chapters: fetch failed: %1").arg(reply->errorString()));
+                streamLog(QStringLiteral("chapters: fetch failed: %1").arg(NetErrorText::logText(reply)));
                 deliver({});
                 return;
             }
@@ -2677,7 +2678,7 @@ void AddonManager::requestPages(LoadedAddon* src, const QString& type, const QSt
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError)
             {
-                streamLog(QStringLiteral("pages: fetch failed: %1").arg(reply->errorString()));
+                streamLog(QStringLiteral("pages: fetch failed: %1").arg(NetErrorText::logText(reply)));
                 cb({});
                 return;
             }
@@ -2883,7 +2884,7 @@ void AddonManager::addRemoteSource(const QString& url)
     connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
-        { emit remoteSourceResult(false, tr("Couldn't reach that addon: %1").arg(reply->errorString())); return; }
+        { emit remoteSourceResult(false, tr("Couldn't reach that addon: %1").arg(NetErrorText::forReply(reply))); return; }
 
         const QByteArray data = reply->readAll();
         auto built = buildRemoteAddon(base, data); // validates (Stremio or our own)

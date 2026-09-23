@@ -16,6 +16,7 @@
 #include "AppPaths.h"
 #include "BingeStore.h"
 #include "DownloadManager.h"
+#include "NetErrorText.h"
 #include "NetHeaderApply.h"
 #include "StreamHeaders.h"
 
@@ -1814,6 +1815,172 @@ int main(int argc, char** argv)
         CHECK(s.rangeStart == body.size(),
               "…and it really did ask to resume from the end, so the 416 is the answer to that and not to "
               "some request that never carried a Range");
+    }
+
+    // ------------------------------------------------- 24. a failed download never shows its url (#435)
+    // A job's failure reason used to be QNetworkReply::errorString(), and for an HTTP error Qt renders that as
+    // "Error transferring <url> - server replied: …" with the url whole. A Jellyfin, Subsonic or
+    // Audiobookshelf download url is SIGNED in its query, so a 404 on one put the credential in the Downloads
+    // panel. Three real failures, over a real event loop, each against a url whose query carries two fixture
+    // secrets: a port nothing listens on, a 404, and a body that stops short of its own Content-Length. The
+    // job's message must hold no part of the url, and the log line each failure writes must hold neither
+    // secret. The 404's path has an encoded space in it, because Qt prints that url DECODED, and a space is
+    // exactly where a prose scan for urls stops reading one.
+    {
+        const int before = failures;
+
+        // The table first. EVERY NetworkError code Qt 6 defines, each rendered with no HTTP status: none may
+        // carry anything shaped like a url or a credential. Listed out rather than looped over a numeric range,
+        // because the enum has gaps and a range would pass codes Qt never produces.
+        const QList<QNetworkReply::NetworkError> codes{
+            QNetworkReply::NoError,
+            QNetworkReply::ConnectionRefusedError, QNetworkReply::RemoteHostClosedError,
+            QNetworkReply::HostNotFoundError, QNetworkReply::TimeoutError, QNetworkReply::OperationCanceledError,
+            QNetworkReply::SslHandshakeFailedError, QNetworkReply::TemporaryNetworkFailureError,
+            QNetworkReply::NetworkSessionFailedError, QNetworkReply::BackgroundRequestNotAllowedError,
+            QNetworkReply::TooManyRedirectsError, QNetworkReply::InsecureRedirectError,
+            QNetworkReply::UnknownNetworkError,
+            QNetworkReply::ProxyConnectionRefusedError, QNetworkReply::ProxyConnectionClosedError,
+            QNetworkReply::ProxyNotFoundError, QNetworkReply::ProxyTimeoutError,
+            QNetworkReply::ProxyAuthenticationRequiredError, QNetworkReply::UnknownProxyError,
+            QNetworkReply::ContentAccessDenied, QNetworkReply::ContentOperationNotPermittedError,
+            QNetworkReply::ContentNotFoundError, QNetworkReply::AuthenticationRequiredError,
+            QNetworkReply::ContentReSendError, QNetworkReply::ContentConflictError, QNetworkReply::ContentGoneError,
+            QNetworkReply::UnknownContentError,
+            QNetworkReply::ProtocolUnknownError, QNetworkReply::ProtocolInvalidOperationError,
+            QNetworkReply::ProtocolFailure,
+            QNetworkReply::InternalServerError, QNetworkReply::OperationNotImplementedError,
+            QNetworkReply::ServiceUnavailableError, QNetworkReply::UnknownServerError };
+        bool tableClean = true, tableFilled = true;
+        for (QNetworkReply::NetworkError c : codes)
+        {
+            const QString s = NetErrorText::sentence(c);
+            if (s.trimmed().isEmpty()) tableFilled = false;
+            for (const QString& bad : { QStringLiteral("http"), QStringLiteral("?"), QStringLiteral("token"),
+                                        QStringLiteral("api_key"), QStringLiteral("="), QStringLiteral("://") })
+                if (s.contains(bad, Qt::CaseInsensitive)) tableClean = false;
+        }
+        CHECK(tableFilled, "435: every NetworkError code has a sentence");
+        CHECK(tableClean, "435: no sentence in the table holds http, ?, token, api_key, = or ://");
+
+        using NE = QNetworkReply;
+        const auto has = [](NE::NetworkError c, const char* word) {
+            return NetErrorText::sentence(c).contains(QLatin1String(word), Qt::CaseInsensitive);
+        };
+        CHECK(has(NE::ConnectionRefusedError, "refused"), "435: connection refused -> 'refused'");
+        CHECK(has(NE::HostNotFoundError, "could not be found"), "435: host not found -> 'could not be found'");
+        CHECK(has(NE::TimeoutError, "too long"), "435: timed out -> 'too long'");
+        CHECK(has(NE::SslHandshakeFailedError, "TLS/SSL"), "435: TLS/SSL failed -> 'TLS/SSL'");
+        CHECK(has(NE::ProxyConnectionRefusedError, "proxy") && has(NE::UnknownProxyError, "proxy"),
+              "435: proxy errors -> 'proxy'");
+        CHECK(has(NE::ContentNotFoundError, "not found"), "435: content not found -> 'not found'");
+        CHECK(has(NE::ContentAccessDenied, "denied") && has(NE::AuthenticationRequiredError, "denied"),
+              "435: access denied and auth required -> 'denied'");
+        CHECK(has(NE::OperationCanceledError, "cancelled by you"), "435: cancelled -> 'cancelled by you'");
+        CHECK(has(NE::ProtocolFailure, "unknown network error") && has(NE::UnknownContentError, "unknown network error"),
+              "435: the fallback is the unknown-network-error sentence");
+        // A sign-in screen keeps "wrong password" apart from "can't reach it", through the codes alone.
+        CHECK(NetErrorText::sentence(NE::AuthenticationRequiredError) != NetErrorText::sentence(NE::ConnectionRefusedError)
+                  && NetErrorText::sentence(NE::AuthenticationRequiredError) != NetErrorText::sentence(NE::HostNotFoundError),
+              "435: refused-sign-in and cannot-reach stay two different sentences");
+        // The two sentences DownloadManager already had are kept.
+        CHECK(NetErrorText::sentence(NE::ContentNotFoundError, 404) == QStringLiteral("the source returned HTTP 404"),
+              "435: an HTTP status >= 400 keeps its existing sentence");
+        CHECK(NetErrorText::sentence(NE::OperationCanceledError, 0, true).contains(QStringLiteral("different site")),
+              "435: a refused redirect keeps its existing sentence, ahead of the cancel it arrives as");
+
+        const QString downloads = AppPaths::dataDir() + QStringLiteral("/downloads");
+        CHECK(QDir().mkpath(downloads), "435: the probe's own downloads folder");
+        QFile::remove(downloads + QStringLiteral("/queue.json"));
+        const QString logPath = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
+        QFile::remove(logPath);   // this section's lines only, so a hit cannot come from another section
+
+        // Fixture values, never printed: every assertion below reports its own description and nothing else.
+        const QByteArray secretA = "PROBE435KEYVALUE";
+        const QByteArray secretB = "PROBE435SIGVALUE";
+        const QString query = QStringLiteral("?api_key=") + QString::fromLatin1(secretA)
+                            + QStringLiteral("&t=") + QString::fromLatin1(secretB);
+
+        // A port nothing listens on: bind one, note it, let it go.
+        quint16 deadPort = 0;
+        {
+            QTcpServer probe;
+            CHECK(probe.listen(QHostAddress::LocalHost, 0), "435: a free loopback port to refuse on");
+            deadPort = probe.serverPort();
+        }
+
+        const QByteArray cutBody = QByteArray(40000, 'Q');
+        Loopback s;
+        CHECK(s.start(), "435: the failing server is listening");
+        s.pieces = [&cutBody](const QByteArray& path) -> QList<QByteArray> {
+            if (path.startsWith("/dl/cut435"))
+                return { "HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(cutBody.size())
+                         + "\r\nConnection: close\r\n\r\n" + cutBody.left(15000) };
+            return { QByteArray("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") };
+        };
+
+        struct Case { QString file; QString url; QString what; };
+        const QList<Case> cases{
+            { QStringLiteral("refused435.bin"),
+              QStringLiteral("http://127.0.0.1:%1/dl/refused435.bin").arg(deadPort) + query,
+              QStringLiteral("a refused port") },
+            { QStringLiteral("missing435.bin"),
+              s.url(QStringLiteral("/dl/my%20missing435.bin")) + query, QStringLiteral("a 404") },
+            { QStringLiteral("cut435.bin"),
+              s.url(QStringLiteral("/dl/cut435.bin")) + query, QStringLiteral("a mid-body close") },
+        };
+
+        DownloadManager dm;
+        for (const Case& c : cases)
+        {
+            DownloadJob j;
+            j.title = c.file;
+            j.url   = c.url;
+            j.dest  = downloads + QStringLiteral("/") + c.file;
+            j.kind  = QStringLiteral("video");
+            dm.enqueue(j);
+        }
+        for (const Case& c : cases)
+        {
+            const QByteArray what = c.what.toUtf8();
+            CHECK(settle(dm, c.file), (QByteArray("435: ") + what + " reaches a terminal state").constData());
+            const DownloadJob* j = jobFor(dm, c.file);
+            CHECK(j && j->state == DownloadJob::Failed, (QByteArray("435: ") + what + " fails").constData());
+            const QString msg = j ? j->error : QString();
+            CHECK(!msg.isEmpty(), (QByteArray("435: ") + what + " gives a reason").constData());
+            bool clean = !msg.contains(QString::fromLatin1(secretA)) && !msg.contains(QString::fromLatin1(secretB));
+            for (const QString& part : { QStringLiteral("api_key"), QStringLiteral("127.0.0.1"),
+                                         QString::number(deadPort), QString::number(s.srv.serverPort()),
+                                         QStringLiteral("/dl"), QStringLiteral("435"), QStringLiteral("missing"),
+                                         QStringLiteral("://"), QStringLiteral("http:"), QStringLiteral("?"),
+                                         QStringLiteral("=") })
+                if (msg.contains(part)) clean = false;
+            CHECK(clean, (QByteArray("435: ") + what + "'s visible message holds no part of its url").constData());
+        }
+        // Which sentence, not merely a clean one: an empty-but-clean or constant message would pass the above.
+        {
+            const DownloadJob* r = jobFor(dm, QStringLiteral("refused435.bin"));
+            const DownloadJob* m = jobFor(dm, QStringLiteral("missing435.bin"));
+            const DownloadJob* c = jobFor(dm, QStringLiteral("cut435.bin"));
+            CHECK(r && r->error.contains(QStringLiteral("refused")), "435: the refused port says the connection was refused");
+            CHECK(m && m->error.contains(QStringLiteral("HTTP 404")), "435: the 404 says HTTP 404");
+            CHECK(c && c->error.contains(QStringLiteral("closed")), "435: the mid-body close says the connection closed");
+        }
+
+        // The log: one failure line per job, and no secret anywhere in the file.
+        QFile lf(logPath);
+        const QByteArray log = lf.open(QIODevice::ReadOnly) ? lf.readAll() : QByteArray();
+        CHECK(!log.contains(secretA) && !log.contains(secretB), "435: neither secret reaches stream_debug.log");
+        CHECK(!log.contains("api_key"), "435: …nor the name of the query parameter that carried one");
+        for (const Case& c : cases)
+        {
+            bool found = false;
+            for (const QByteArray& line : log.split('\n'))
+                if (line.contains("download: failed") && line.contains(c.file.toUtf8())) found = true;
+            CHECK(found, (QByteArray("435: ") + c.what.toUtf8()
+                          + " writes a failure line naming its file, so the scan above is not vacuous").constData());
+        }
+        std::printf("issue435 failed-download checks: %d failed\n", failures - before);
     }
 
     // ------------------------------------------------- issue #80: configure page + install-link classification

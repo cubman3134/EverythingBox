@@ -1,4 +1,5 @@
 #include "StreamResolver.h"
+#include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/AppBrand.h"
 #include "../core/NetHeaderApply.h"
 
@@ -228,7 +229,7 @@ void StreamResolver::resolve(const QString& src, const QString& title, const Str
         if (reply->error() != QNetworkReply::NoError)
         {
             // Couldn't fetch the manifest text (auth, headers, live-only) - let libmpv try the URL itself.
-            srLog(QStringLiteral("m3u: fetch failed (%1) -> player").arg(reply->errorString()));
+            srLog(QStringLiteral("m3u: fetch failed (%1) -> player").arg(NetErrorText::logText(reply)));
             emit playDirect(src, title, headers);
             return;
         }

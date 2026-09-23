@@ -1,4 +1,5 @@
 #include "CoreManager.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppPaths.h"
 
 #include <QCoreApplication>
@@ -109,7 +110,7 @@ QString CoreManager::ensureCore(const QString& coreName, QString* error,
 
     if (reply->error() != QNetworkReply::NoError)
     {
-        const QString err = reply->errorString();
+        const QString err = NetErrorText::forReply(reply);   // #435: never Qt's text, which embeds the url
         reply->deleteLater();
         if (error) *error = QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName, err);
         return QString();
@@ -200,7 +201,7 @@ public:
         connect(reply, &QNetworkReply::finished, this, [this, reply] {
             if (reply->error() != QNetworkReply::NoError)
             {
-                finish(QString(), QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName_, reply->errorString()));
+                finish(QString(), QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName_, NetErrorText::forReply(reply)));
             }
             else
             {

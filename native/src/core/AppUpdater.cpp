@@ -1,4 +1,5 @@
 #include "AppUpdater.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "ArchiveRom.h"
 
@@ -52,6 +53,15 @@ bool isThisPlatformAsset(const QString& name)
 }
 } // namespace
 
+// Why a request failed, in our words and never Qt's (#435). Nothing in this file aborts a request, so an
+// OperationCanceledError here is always the transfer timeout firing — a timeout, not the user cancelling.
+static QString updaterReason(const QNetworkReply* reply)
+{
+    if (reply && reply->error() == QNetworkReply::OperationCanceledError)
+        return NetErrorText::sentence(QNetworkReply::TimeoutError);
+    return NetErrorText::forReply(reply);
+}
+
 AppUpdater::AppUpdater(QObject* parent) : QObject(parent) {}
 
 QString AppUpdater::currentVersion() { return QCoreApplication::applicationVersion(); }
@@ -69,7 +79,7 @@ void AppUpdater::checkForUpdate()
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            emit checkFailed(reply->errorString());
+            emit checkFailed(updaterReason(reply));
             return;
         }
         const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
@@ -126,7 +136,7 @@ void AppUpdater::downloadAndApply()
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            emit applyFailed(tr("Download failed: %1").arg(reply->errorString()));
+            emit applyFailed(tr("Download failed: %1").arg(updaterReason(reply)));
             return;
         }
         const QByteArray body = reply->readAll();

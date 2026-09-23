@@ -1,4 +1,5 @@
 #include "RegistryBrowser.h"
+#include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/DecorationInstall.h"   // #187: zip -> bezels/<system>/<packId>/
@@ -768,7 +769,7 @@ bool RegistryBrowser::fetchToBuffer(const QString& url, qint64 maxBytes, QByteAr
     }
     if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
     {
-        if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
+        if (error) *error = reply->isFinished() ? NetErrorText::forReply(reply) : QStringLiteral("timed out");
         reply->abort(); reply->deleteLater();
         return false;
     }

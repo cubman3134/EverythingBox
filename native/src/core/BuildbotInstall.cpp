@@ -1,4 +1,5 @@
 #include "BuildbotInstall.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "CustomCoreInstall.h"
 #include "../libretro/CoreInspect.h"
 
@@ -226,7 +227,7 @@ public:
             else if (tooLarge_)
                 error = tr("The download was larger than %1 MiB, so it was stopped.").arg(maxBytes_ / (1024 * 1024));
             else if (reply->error() != QNetworkReply::NoError)
-                error = reply->errorString();
+                error = NetErrorText::forReply(reply);   // #435: never Qt's text, which embeds the url
             else if (http != 0 && (http < 200 || http > 299))
                 error = tr("The server answered HTTP %1.").arg(http);
             else

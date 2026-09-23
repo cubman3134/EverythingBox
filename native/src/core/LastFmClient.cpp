@@ -1,4 +1,5 @@
 #include "LastFmClient.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "BuiltinSecretBlob.h"
 #include "Settings.h"
@@ -43,7 +44,9 @@ QString failureMessage(QNetworkReply* reply, int httpStatus, const QJsonObject& 
     const QString said = body.value(QStringLiteral("message")).toString().trimmed();
     if (!said.isEmpty()) return said;
     if (httpStatus > 0) return QObject::tr("Last.fm answered %1.").arg(httpStatus);
-    return reply ? reply->errorString() : QObject::tr("Could not reach Last.fm.");
+    // A transport failure: from the CODE, never errorString(), which embeds the url (#435) — and a Last.fm
+    // GET carries api_key and the session key in its query.
+    return reply ? NetErrorText::sentence(reply->error()) : QObject::tr("Could not reach Last.fm.");
 }
 
 int statusOf(QNetworkReply* r)

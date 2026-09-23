@@ -1,4 +1,5 @@
 #include "TraktClient.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "Settings.h"
@@ -111,7 +112,7 @@ void TraktClient::connectAccount()
                                   QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(r, &QNetworkReply::finished, this, [this, r] {
         r->deleteLater();
-        if (r->error() != QNetworkReply::NoError) { emit connectError(tr("Couldn't reach Trakt (%1).").arg(r->errorString())); return; }
+        if (r->error() != QNetworkReply::NoError) { emit connectError(tr("Couldn't reach Trakt (%1).").arg(NetErrorText::sentence(r->error()))); return; }
         const QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
         const QString code = o.value(QStringLiteral("device_code")).toString();
         const QString userCode = o.value(QStringLiteral("user_code")).toString();

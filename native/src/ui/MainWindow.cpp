@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/AppBrand.h"
 #include "../core/NetHeaderApply.h"
 #include "Notifier.h"
@@ -9778,7 +9779,7 @@ bool registryFetchToBuffer(QNetworkAccessManager* nam, const QString& url, qint6
     }
     if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
     {
-        if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
+        if (error) *error = reply->isFinished() ? NetErrorText::forReply(reply) : QStringLiteral("timed out");
         reply->abort(); reply->deleteLater();
         return false;
     }
@@ -16749,8 +16750,8 @@ void MainWindow::openPcGame(const MediaItem& item)
         part->close();
         if (reply->error() != QNetworkReply::NoError)
         {
-            mwLog(QStringLiteral("pcgame: download failed \"%1\": %2").arg(item.title, reply->errorString()));
-            const QString e = tr("Couldn't download “%1”: %2").arg(item.title, reply->errorString());
+            mwLog(QStringLiteral("pcgame: download failed \"%1\": %2").arg(item.title, NetErrorText::logText(reply)));
+            const QString e = tr("Couldn't download “%1”: %2").arg(item.title, NetErrorText::forReply(reply));
             statusBar()->showMessage(e, kFeedbackLong);
             notify(e, kFeedbackLong);
             part->remove();
@@ -20793,8 +20794,8 @@ void MainWindow::streamReplyToFile(QNetworkReply* reply, const QString& partPath
         if (reply->error() != QNetworkReply::NoError)
         {
             QFile::remove(partPath);
-            mwLog(QStringLiteral("%1: FAILED \"%2\": %3").arg(logTag, title, reply->errorString()));
-            done(false, tr("Couldn't download “%1”: %2").arg(title, reply->errorString()));
+            mwLog(QStringLiteral("%1: FAILED \"%2\": %3").arg(logTag, title, NetErrorText::logText(reply)));
+            done(false, tr("Couldn't download “%1”: %2").arg(title, NetErrorText::forReply(reply)));
             return;
         }
         // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the

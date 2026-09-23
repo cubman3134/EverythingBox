@@ -1,4 +1,5 @@
 #include "SubtitleFetcher.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "Settings.h"
 #include "SubtitleHash.h"
 
@@ -250,7 +251,7 @@ void SubtitleFetcher::ensureLogin(std::function<void(bool)> done)
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            emit log(QStringLiteral("subs: login failed (%1)").arg(reply->errorString()));
+            emit log(QStringLiteral("subs: login failed (%1)").arg(NetErrorText::logText(reply)));
             done(false);
             return;
         }
@@ -274,7 +275,7 @@ void SubtitleFetcher::searchQuery(const QString& query, const QString& lang,
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            emit log(QStringLiteral("subs: search failed (%1)").arg(reply->errorString()));
+            emit log(QStringLiteral("subs: search failed (%1)").arg(NetErrorText::logText(reply)));
             done(0);
             return;
         }
@@ -310,7 +311,7 @@ void SubtitleFetcher::searchCandidates(const QString& query,
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
-            emit log(QStringLiteral("subs: search failed (%1)").arg(reply->errorString()));
+            emit log(QStringLiteral("subs: search failed (%1)").arg(NetErrorText::logText(reply)));
             done({});
             return;
         }
@@ -360,7 +361,7 @@ void SubtitleFetcher::download(qint64 fileId, const QString& lang,
             // A 401 means the token expired: drop it so the next fetch re-logs in.
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             if (code == 401 || code == 403) token_.clear();
-            emit log(QStringLiteral("subs: download request failed (%1)").arg(reply->errorString()));
+            emit log(QStringLiteral("subs: download request failed (%1)").arg(NetErrorText::logText(reply)));
             done(QString());
             return;
         }
@@ -388,7 +389,7 @@ void SubtitleFetcher::download(qint64 fileId, const QString& lang,
             dl->deleteLater();
             if (dl->error() != QNetworkReply::NoError)
             {
-                emit log(QStringLiteral("subs: subtitle download failed (%1)").arg(dl->errorString()));
+                emit log(QStringLiteral("subs: subtitle download failed (%1)").arg(NetErrorText::logText(dl)));
                 done(QString());
                 return;
             }

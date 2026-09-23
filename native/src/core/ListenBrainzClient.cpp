@@ -1,4 +1,5 @@
 #include "ListenBrainzClient.h"
+#include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "Settings.h"
 
@@ -34,8 +35,8 @@ QString failureMessage(QNetworkReply* reply, int httpStatus, const QByteArray& b
     const QString said = o.value(QStringLiteral("error")).toString().trimmed();
     if (!said.isEmpty()) return said;
     if (httpStatus > 0) return QObject::tr("The service answered %1.").arg(httpStatus);
-    // A transport failure: Qt's message describes the SOCKET (host not found, timed out), not the request.
-    return reply ? reply->errorString() : QObject::tr("Could not reach the service.");
+    // A transport failure, from the CODE: Qt's own message can embed the url (#435).
+    return reply ? NetErrorText::sentence(reply->error()) : QObject::tr("Could not reach the service.");
 }
 
 ScrobbleResult::Outcome outcomeFor(int httpStatus, QNetworkReply::NetworkError err)

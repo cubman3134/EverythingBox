@@ -1,4 +1,5 @@
 #include "AddonContext.h"
+#include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/BuiltinSecretBlob.h" // the ONE runtime de-obfuscator (shared with the scrobble app key)
@@ -186,7 +187,7 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
 
         // Transient failure: remember it but stay quiet - a later attempt usually recovers. We only log
         // once, below, if every attempt is exhausted (so a recovered retry doesn't look like an error).
-        lastError = finished ? reply->errorString() : QStringLiteral("timed out");
+        lastError = finished ? NetErrorText::logText(reply) : QStringLiteral("timed out");
         reply->abort();
         reply->deleteLater();
         if (attempt + 1 < kMaxAttempts) QThread::msleep(400 * (attempt + 1)); // 0.4s, then 0.8s backoff
@@ -194,7 +195,7 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
 
     // All attempts failed transiently. Stream the URL/error (URLs hold percent-encoded bytes like "%3A"
     // that a chained .arg() would mistake for a "%3" placeholder and corrupt).
-    qWarning().noquote() << QStringLiteral("[addon:%1]").arg(id_) << method << url
+    qWarning().noquote() << QStringLiteral("[addon:%1]").arg(id_) << method << LogSafeText::url(url)   // #435: the query can be the key
                          << QStringLiteral("failed after %1 attempts:").arg(kMaxAttempts) << lastError;
     return out; // hand back the last body (may carry the server's 5xx error JSON)
 }
