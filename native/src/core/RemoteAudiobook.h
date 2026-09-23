@@ -102,6 +102,11 @@ struct Part
     // that puts something else here costs the book its book-scale bar and nothing else, which is the
     // fallback the issue asks for. Still never routed on: nothing is fetched, opened or keyed by it.
     QString subtitle;
+    // HOW LONG the part is, in seconds, when the source says so (#197) — an Audiobookshelf play session
+    // gives every track's duration. 0 for "not given", which is every other source in this tree. Better
+    // information than the size above, and needing no measurement: BookTimeline::basisFor prefers a
+    // complete set of these over a complete set of sizes, and never mixes a partial set with them.
+    double seconds = 0.0;
 
     bool isValid() const { return !id.isEmpty() && !fileName.isEmpty(); }
 };

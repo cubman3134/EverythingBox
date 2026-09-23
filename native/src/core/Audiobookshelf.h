@@ -67,6 +67,8 @@
 // Nothing else. In particular there is no function here that renders a request, and `logSafeUrl` is what
 // the caller uses if it must name one at all.
 #pragma once
+#include "RemoteAudiobook.h"   // RemoteAudiobook::Part — what bookParts() hands the one book player (#214)
+
 #include <QByteArray>
 #include <QJsonObject>
 #include <QString>
@@ -307,6 +309,19 @@ double offsetWithinTrack(const QVector<Track>& tracks, double absolute);
 // the listener is in has to be in the list or the sleep timer cannot find it, and a chapter that begins in
 // the previous file is still the chapter they are listening to.
 QVector<Chapter> chaptersForTrack(const QVector<Chapter>& chapters, double trackStart, double trackDuration);
+
+// THE PARTS A SERVER BOOK PLAYS AS — the rows openAbsItem hands the one multi-file book player, index for
+// index with the session's tracks. Each part's `id` is its track index (what partStreamUrl mints from) and
+// its name is the server's own track title, which is three things at once: the display row, the half of
+// the part token that makes it durable, and so the key a resume mark would be filed under. It is therefore
+// DE-DUPLICATED — two identically named tracks would mint one token, and the queue would have two entries
+// whose marks were one mark.
+//
+// AND EACH PART CARRIES ITS DURATION (#197). A play session gives every track's length, and that is what
+// lets the book-scale position bar (#218) span the whole book: BookTimeline takes the durations as an exact
+// seed, where a torrent release has to wait for a measurement to price its part sizes. No SIZE is set —
+// the subtitle is read as one (BookTimeline::bytesFromSizeText), and there is none to give.
+QVector<RemoteAudiobook::Part> bookParts(const QVector<Track>& tracks);
 
 // ==================================================================================================
 // When to tell the server

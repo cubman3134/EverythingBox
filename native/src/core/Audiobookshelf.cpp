@@ -1,8 +1,10 @@
 #include "Audiobookshelf.h"
 
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
+#include <QSet>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -508,6 +510,29 @@ QVector<Abs::Chapter> Abs::chaptersForTrack(const QVector<Chapter>& chapters, do
         r.end   = std::min(trackDuration, c.end - trackStart);
         if (r.end <= r.start) continue;
         out.push_back(r);
+    }
+    return out;
+}
+
+QVector<RemoteAudiobook::Part> Abs::bookParts(const QVector<Track>& tracks)
+{
+    QVector<RemoteAudiobook::Part> out;
+    out.reserve(tracks.size());
+    QSet<QString> used;
+    for (int i = 0; i < tracks.size(); ++i)
+    {
+        RemoteAudiobook::Part p;
+        p.id = QString::number(i);
+        QString name = tracks.at(i).title.trimmed();
+        // "MainWindow" is the context this string was translated under when it was spelled there.
+        if (name.isEmpty()) name = QCoreApplication::translate("MainWindow", "Part %1").arg(i + 1);
+        if (used.contains(name)) name = QStringLiteral("%1 (%2)").arg(name).arg(i + 1);
+        used.insert(name);
+        p.fileName = name;
+        // The server's length for this track, as it stands. A zero or a missing one is left at 0 — "not
+        // given" — and BookTimeline::basisFor then declines the whole set rather than guessing that part.
+        p.seconds = tracks.at(i).duration > 0.0 ? tracks.at(i).duration : 0.0;
+        out.push_back(p);
     }
     return out;
 }

@@ -51,6 +51,11 @@ is what the player navigates — including on a book split into many files, wher
 and the file that is open is only part of it. "Sleep at the end of this chapter" therefore means the real
 end of the real chapter.
 
+**The position bar is the whole book's.** On a book split into many files, the bar and the time readout
+show your place in the *book* and its full length — not the part that happens to be playing — because the
+server says how long every part is. Dragging or clicking the bar goes to that point in the book, moving to
+another part when that is where the point falls.
+
 ## Your position
 
 Your listening position belongs to the server:
@@ -71,9 +76,6 @@ This is the first increment of the feature. Not yet supported:
 
 * **downloading for offline listening** — a server book needs the server;
 * **following a podcast** so new episodes appear on their own;
-* **the book-scale position bar** for a *multi-file* server book: the bar and the time readout show your
-  place in the part that is playing, not in the whole book. (A single-file book is unaffected, and the
-  chapter list is the whole book's either way.);
 * **ebooks** held in an Audiobookshelf library — EverythingBox reads books through its own reading library
   and OPDS instead;
 * **Audiobookshelf's admin surface** — users, library scans, and anything else that changes the server.

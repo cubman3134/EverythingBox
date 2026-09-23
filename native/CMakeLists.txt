@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.310 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.311 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -987,6 +987,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowOpenFail.cpp                      # issue #239: the persistent failed-open state's MainWindow members, same rule
         src/ui/MainWindowThemes.cpp                        # issue #91: the theme browser's update/remove/zip members, same rule
         src/ui/MainWindowTrackFavorite.cpp                 # issue #297: the classic menus' Favorite verb on a track row, same rule
+        src/ui/MainWindowAbsTimeline.cpp                   # issue #197: a server book's whole-book bar may seek across parts, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.

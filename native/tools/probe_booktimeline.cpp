@@ -17,6 +17,11 @@
 //   3. NO SIZES, NO TOTAL. A release that does not say how big its parts are gets today's per-part
 //      display, not a total that had to be invented.
 //
+// AND SINCE #197, A THIRD INPUT: per-part DURATIONS (an Audiobookshelf play session's tracks). Section 9
+// pins the rule that picks between them — durations when every part has one, else sizes when every part
+// has one, never a mix — and the exact mapping they give, both ways, at every boundary: the arithmetic a
+// seek on the bar uses to land in the right track at the right offset.
+//
 // Prints BOOKTIMELINE-OK on success; any failure prints BOOKTIMELINE-FAIL <cond> (line) and exits non-zero.
 #include "BookTimeline.h"
 
@@ -257,6 +262,141 @@ int main(int argc, char** argv)
         u.measure(0, 1831.0);
         CHECK(near(u.total(), 5506.0));
         CHECK(near(u.lengthOf(0), 1831.0));
+    }
+
+    // ---- 9. PER-PART DURATIONS (#197): the exact seed, and the rule that picks it ------------------
+    {
+        using BookTimeline::Basis;
+        const double MB = 1024.0 * 1024.0;
+        const QVector<double> durs  = { 100.0, 200.0, 150.0 };    // the stub server's three tracks
+        const QVector<double> bytes = { 10 * MB, 20 * MB, 30 * MB };
+
+        // THE RULE. Durations win when complete — even beside a complete set of sizes, because they are
+        // exact and the sizes are an estimate still waiting for a measurement.
+        CHECK(BookTimeline::basisFor(3, durs, {}) == Basis::Durations);
+        CHECK(BookTimeline::basisFor(3, durs, bytes) == Basis::Durations);
+        // THE SIZES FALLBACK, UNCHANGED: no durations at all is exactly the #218 torrent release.
+        CHECK(BookTimeline::basisFor(3, {}, bytes) == Basis::Sizes);
+        // A PARTIAL duration list falls back to the sizes, never mixed with them...
+        CHECK(BookTimeline::basisFor(3, { 100.0, 0.0, 150.0 }, bytes) == Basis::Sizes);
+        CHECK(BookTimeline::basisFor(3, { 100.0, 200.0 }, bytes) == Basis::Sizes);             // one short
+        CHECK(BookTimeline::basisFor(3, { 100.0, 200.0, 150.0, 9.0 }, bytes) == Basis::Sizes); // one over
+        // ...and zero, negative and NaN are "unknown", the same as absent.
+        CHECK(BookTimeline::basisFor(3, { 100.0, -5.0, 150.0 }, bytes) == Basis::Sizes);
+        CHECK(BookTimeline::basisFor(3, { 100.0, std::nan(""), 150.0 }, bytes) == Basis::Sizes);
+        CHECK(BookTimeline::basisFor(3, { 0.0, 0.0, 0.0 }, bytes) == Basis::Sizes);
+        // Neither complete: no book-scale timeline at all.
+        CHECK(BookTimeline::basisFor(3, { 100.0, 0.0, 150.0 }, {}) == Basis::None);
+        CHECK(BookTimeline::basisFor(3, { 100.0, 0.0, 150.0 }, { 10 * MB, 0.0, 30 * MB }) == Basis::None);
+        CHECK(BookTimeline::basisFor(3, {}, {}) == Basis::None);
+        CHECK(BookTimeline::basisFor(0, {}, {}) == Basis::None);
+
+        // THE SEED each basis gives. Durations are the seed as they stand, before anything has played.
+        CHECK(BookTimeline::seedFor(3, durs, bytes, -1, 0.0) == durs);
+        // Sizes need the one measured part, and answer nothing until there is one...
+        CHECK(BookTimeline::seedFor(3, {}, bytes, -1, 0.0).isEmpty());
+        // ...and then EXACTLY what #218 always computed.
+        CHECK(BookTimeline::seedFor(3, { 100.0, 0.0, 150.0 }, bytes, 0, 600.0)
+              == BookTimeline::secondsFromBytes(bytes, 0, 600.0));
+        CHECK(BookTimeline::seedFor(3, { 100.0, 0.0, 150.0 }, {}, 0, 600.0).isEmpty());
+
+        // build(): the one entry that takes either input.
+        BookTimeline::Timeline t;
+        t.build(3, durs, bytes);
+        CHECK(t.ready());
+        CHECK(t.exact());
+        CHECK(t.parts() == 3);
+        CHECK(t.total() == 450.0);
+        // bookPos = sum(durations[0..i-1]) + posInPart, exactly — no estimate anywhere in it.
+        CHECK(t.offsetOf(0) == 0.0);
+        CHECK(t.offsetOf(1) == 100.0);
+        CHECK(t.offsetOf(2) == 300.0);
+        CHECK(t.elapsed(1, 150.0) == 250.0);
+        CHECK(t.elapsed(2, 40.0) == 340.0);
+
+        // BOTH WAYS, AT EVERY BOUNDARY AND AT THE ENDS.
+        for (int k = 0; k < 3; ++k)
+        {
+            const double off = t.offsetOf(k);
+            const double len = t.lengthOf(k);
+            CHECK(t.elapsed(k, 0.0) == off);                           // a part's top is its offset
+            CHECK(t.elapsed(k, len) == off + len);                     // ...and its end, the next one's top
+            const BookTimeline::Landing top = t.land(off);             // ON the boundary: the LATER part
+            CHECK(top.part == k && top.within == 0.0);
+            const BookTimeline::Landing mid = t.land(off + len / 2.0);
+            CHECK(mid.part == k && near(mid.within, len / 2.0, 1e-9));
+            if (k > 0)
+            {
+                // A hair before the boundary is still the EARLIER part, at its very end.
+                const BookTimeline::Landing before = t.land(off - 0.001);
+                CHECK(before.part == k - 1 && near(before.within, t.lengthOf(k - 1) - 0.001, 1e-9));
+            }
+        }
+        const BookTimeline::Landing start = t.land(0.0);
+        CHECK(start.part == 0 && start.within == 0.0);
+        const BookTimeline::Landing beforeStart = t.land(-30.0);          // before the book: its top
+        CHECK(beforeStart.part == 0 && beforeStart.within == 0.0);
+        const BookTimeline::Landing end = t.land(450.0);                  // the very end: last part, its end
+        CHECK(end.part == 2 && end.within == 150.0);
+        const BookTimeline::Landing past = t.land(99999.0);               // past it: the same, never nothing
+        CHECK(past.part == 2 && past.within == 150.0);
+        // THE ROUND TRIP. Every point in the book lands somewhere that reads back as that same point.
+        for (double T = 0.0; T <= 450.0; T += 12.5)
+        {
+            const BookTimeline::Landing l = t.land(T);
+            CHECK(l.part >= 0 && near(t.elapsed(l.part, l.within), T, 1e-9));
+        }
+
+        // THE LIVE DRIVE'S BOOK: three 30-second tracks, a seek to 45 s lands in track 2 at 15 s.
+        BookTimeline::Timeline tones;
+        tones.build(3, { 30.0, 30.0, 30.0 }, {});
+        CHECK(tones.ready() && tones.total() == 90.0);
+        const BookTimeline::Landing at45 = tones.land(45.0);
+        CHECK(at45.part == 1 && at45.within == 15.0);
+        const BookTimeline::Landing at75 = tones.land(75.0);
+        CHECK(at75.part == 2 && at75.within == 15.0);
+
+        // AN EXACT TIMELINE IS NOT MOVED BY mpv. The server's lengths are the book time its progress is in;
+        // a streamed file read a few milliseconds long must not pull the bar off that.
+        tones.measure(0, 30.04);
+        CHECK(tones.lengthOf(0) == 30.0);
+        CHECK(tones.total() == 90.0);
+        CHECK(tones.isMeasured(1));
+
+        // ...but a timeline seeded the #218 way afterwards (a torrent book played next) is NOT exact, and
+        // absorbs a measurement exactly as it always did.
+        tones.seed({ 600.0, 600.0 });
+        CHECK(!tones.exact());
+        tones.measure(0, 630.0);
+        CHECK(near(tones.lengthOf(0), 630.0) && near(tones.total(), 1200.0));
+
+        // THE FALLBACK, THROUGH build(). A partial duration list beside complete sizes is the SIZES
+        // timeline — nothing until one part is measured, then the very lengths #218 gave.
+        BookTimeline::Timeline partial;
+        partial.build(3, { 100.0, 0.0, 150.0 }, bytes);
+        CHECK(!partial.ready());
+        partial.build(3, { 100.0, 0.0, 150.0 }, bytes, 0, 600.0);
+        BookTimeline::Timeline sizes;
+        sizes.seed(BookTimeline::secondsFromBytes(bytes, 0, 600.0));
+        CHECK(partial.ready() && !partial.exact());
+        CHECK(partial.parts() == 3);
+        for (int k = 0; k < 3; ++k) CHECK(partial.lengthOf(k) == sizes.lengthOf(k));
+        CHECK(near(partial.total(), 3600.0));
+        // ...a zero-duration list with no sizes is no timeline (the per-part display, as before #197)...
+        BookTimeline::Timeline zero;
+        zero.build(3, { 0.0, 0.0, 0.0 }, {});
+        CHECK(!zero.ready() && zero.parts() == 0);
+        // ...and build() over a timeline that was ready clears it rather than leaving the old book standing.
+        BookTimeline::Timeline reused;
+        reused.build(3, durs, {});
+        reused.build(3, {}, {});
+        CHECK(!reused.ready() && !reused.exact());
+
+        // land() on an ESTIMATED timeline is the same arithmetic, and on an empty one it names no part.
+        const BookTimeline::Landing est = sizes.land(700.0);
+        CHECK(est.part == 1 && near(est.within, 100.0));
+        BookTimeline::Timeline none;
+        CHECK(none.land(10.0).part == -1);
     }
 
     if (failures == 0) { std::puts("BOOKTIMELINE-OK"); return 0; }

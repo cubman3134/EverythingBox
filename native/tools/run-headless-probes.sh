@@ -4075,10 +4075,26 @@ else
   [ "$(printf '%s\n' "$rb_nps" | grep -c 'bookTimelineOn_ = false')" -ge 1 ] \
     || rb_note "notePlaybackStart does not take the book-scale timeline down. It is a claim about what is playing; the next film would inherit the book's length."
   # BOTH SURFACES. A change on one only is half the feature, and the two halves are these lines.
-  [ "$(grep -c -F 'r->setProperty("audioPartStart", bookPartStart());' "$rb_mwt")" -eq 1 ] \
+  [ "$(grep -c -F 'r->setProperty("audioPartStart", freeBar ? 0.0 : bookPartStart());' "$rb_mwt")" -eq 1 ] \
     || rb_note "the themed audio page is not told which part of the book is playing, so its bar has no span to clamp a drag into and the gesture would silently seek somewhere else."
   [ "$(grep -c -F 'fmtBook(bookTimeline_.elapsed(bookIdx, seconds))' "$rb_mwt")" -eq 1 ] \
     || rb_note "the CLASSIC player's readout does not show the book-scale elapsed time: the themed page would say 6:12:44 of a book while the same playback reads 45:53 on the other surface."
+  # #197: A SERVER BOOK (Audiobookshelf) GETS THE SAME BAR, from its tracks' DURATIONS. BookTimeline.h and
+  # probe_booktimeline pin the rule (durations win when complete, a partial list falls back to sizes) and
+  # probe_absclient pins Abs::bookParts against the live stub; what neither can see is the wiring -- the
+  # open path handing the durations over, the opener reading them into the model, and both commit paths
+  # letting such a book's seek cross into the part it lands in (its links are minted locally, so the
+  # #216 cost that forbids the crossing for a torrent release does not exist for it).
+  [ "$(grep -c -F 'item.bookParts = Abs::bookParts(s.tracks);' "$rb_mwt")" -eq 1 ] \
+    || rb_note "openAbsItem does not build its parts through Abs::bookParts: a server book's track durations never reach the book timeline (#197), and its bar reads one track at a time again."
+  [ "$(grep -c -F 'partSeconds << p.seconds;' "$rb_mwt")" -eq 1 ] \
+    && [ "$(grep -c -F 'bookTimeline_.build(int(queue.size()), partSeconds, partBytes);' "$rb_mwt")" -eq 1 ] \
+    || rb_note "openRemoteAudiobook does not read the parts' durations into the book timeline (#197): a multi-file Audiobookshelf book shows the part, not the book."
+  [ "$(grep -c -F 'if (absBookSeek(' "$rb_mwt")" -ge 2 ] \
+    || rb_note "the classic slider's commit and the themed seek verb do not both offer a server book's seek to absBookSeek (#197): one surface would land in the right track and the other would clamp into the part that is playing."
+  RB_AT="$HERE/../src/ui/MainWindowAbsTimeline.cpp"
+  [ -f "$RB_AT" ] && [ "$(sed -E 's://.*$::' "$RB_AT" | grep -c -F 'session_->overrideResumeSeek(within);')" -eq 1 ] \
+    || rb_note "absBookSeek no longer places the start inside the part it jumps to (#197): a seek to the middle of another track would play that track from its top."
   # THE DRAG MAY NOT LEAVE THE PART. Crossing one means minting its link -- a fresh resolve of the whole
   # release, and #216 is the issue of one of those taking 65 seconds and coming back with nothing. Both
   # commit paths clamp, because the verb channel is reachable from more than the page.
