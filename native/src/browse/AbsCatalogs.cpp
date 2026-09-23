@@ -88,6 +88,30 @@ MediaItem absServersRow(int count)
                         QObject::tr("%n server(s)", "", count));
 }
 
+MediaItem absDownloadedRow(int count)
+{
+    return syntheticRow(kAbsDownloadedType, kAbsDownloadedPrefix, QString(), /*expandable*/ true,
+                        QObject::tr("Downloaded books"),
+                        QObject::tr("%n on this device", "", count));
+}
+
+MediaCatalog absDownloadedCatalog(const QVector<DownloadedItem>& downloads)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Downloaded books");
+    cat.hasMore = false;
+    for (const DownloadedItem& d : downloads)
+    {
+        // Ours only, and a BOOK only: the key is the qualified id the server's own book row carries, which is
+        // what makes this row drill into the same book level and play through the same door.
+        const Abs::Ref r = Abs::parse(d.key);
+        if (!r.ok || r.isEpisode()) continue;
+        cat.items.push_back(syntheticRow(kAbsBookType, kAbsBookPrefix, d.key, /*expandable*/ true,
+                                         d.title.isEmpty() ? QObject::tr("Untitled") : d.title,
+                                         QObject::tr("On this device"), d.thumb));
+    }
+    return cat;
+}
+
 MediaCatalog absServersCatalog(const QStringList& ids, const QStringList& names, const QStringList& urls,
                                const QVector<bool>& enabled)
 {
@@ -251,7 +275,8 @@ MediaCatalog absBooksCatalog(const QString& title, const QString& serverId,
 // One book
 // ==================================================================================================
 MediaCatalog absBookCatalog(const QString& qualifiedItemId, const Abs::Item& item,
-                            const QVector<Abs::Track>& tracks, int chapterCount, const AbsCoverFn& cover)
+                            const QVector<Abs::Track>& tracks, int chapterCount, const AbsCoverFn& cover,
+                            bool downloaded)
 {
     MediaCatalog cat;
     cat.title = item.title.isEmpty() ? QObject::tr("Audiobook") : item.title;
@@ -268,6 +293,22 @@ MediaCatalog absBookCatalog(const QString& qualifiedItemId, const Abs::Item& ite
                                                    : QString(),
                                                fmtBookDuration(int(item.duration)) }),
                                      coverFor(qualifiedItemId, cover)));
+
+    // #197: THE DOWNLOAD VERB, second, where a person who has just decided to keep the book looks for it —
+    // and never above Play, which is the thing most presses on this level are for. One row whose meaning
+    // follows the state: a book already on this device offers to REMOVE the copy (the server's is never
+    // touched), and says so, because "Download" on a book that is downloaded could only toast.
+    if (downloaded)
+        cat.items.push_back(syntheticRow(kAbsRemoveDlType, kAbsRemoveDlPrefix, qualifiedItemId,
+                                         /*expandable*/ false, QObject::tr("Remove download"),
+                                         QObject::tr("On this device — plays without the server")));
+    else
+        cat.items.push_back(syntheticRow(kAbsDownloadType, kAbsDownloadPrefix, qualifiedItemId,
+                                         /*expandable*/ false, QObject::tr("Download for offline"),
+                                         tracks.size() > 1
+                                             ? QObject::tr("All %n file(s), to play without the server", "",
+                                                           int(tracks.size()))
+                                             : QObject::tr("To play without the server")));
 
     for (int i = 0; i < tracks.size(); ++i)
     {

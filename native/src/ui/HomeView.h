@@ -634,6 +634,10 @@ signals:
     // contract as the two signals above and for the same reason — the KEY travels, never a link: the link
     // for a part is minted at the moment the app reaches it (core/RemoteAudiobook.h is the argument).
     void playAbsRequested(const QString& qualifiedId, int startPart);
+    // #197: the book level's download verb row — keep this book on the device, or remove the copy that is
+    // here. The KEY travels, as above; MainWindow owns the download manager and the confirmation.
+    void downloadAbsRequested(const QString& qualifiedId);
+    void removeAbsDownloadRequested(const QString& qualifiedId);
     // #193 increment 2: the MOUSE route to the queue verbs — a right-click on a music row in the classic
     // grid. Carries the items_ row rather than the target, because the menu it opens is a nav-kit NavMenu
     // (a nested event loop) that MainWindow owns, and MainWindow re-asks for the target on the far side.

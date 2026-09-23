@@ -1,4 +1,5 @@
 #include "AbsClient.h"
+#include "AbsDownload.h"   // #197: a download job's file ref, which downloadUrlFor mints from
 #include "AppBrand.h"
 #include "CoverFetch.h"
 #include "MetaCache.h"
@@ -11,6 +12,9 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
+
+#include <algorithm>
+#include <memory>
 
 namespace {
 
@@ -84,7 +88,8 @@ AbsClient::ServerCache& AbsClient::cacheFor(const QString& serverId)
 // One request
 // ==================================================================================================
 void AbsClient::request(const AbsServer& srv, const QString& path, const QByteArray& verb,
-                        const QByteArray& body, std::function<void(const QByteArray&, const Result&)> then)
+                        const QByteArray& body, std::function<void(const QByteArray&, const Result&)> then,
+                        int timeoutMs)
 {
     const QString root = Abs::normalizeRoot(srv.url, srv.allowPlainHttp);
     if (root.isEmpty())
@@ -105,13 +110,16 @@ void AbsClient::request(const AbsServer& srv, const QString& path, const QByteAr
     // SAME ORIGIN. A redirect to another host would carry this Authorization header to a server the user
     // never configured.
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+    if (timeoutMs > 0) req.setTransferTimeout(timeoutMs);
 
     QNetworkReply* reply = verb.isEmpty() ? nam_->get(req)
                                           : nam_->sendCustomRequest(req, verb, body);
-    connect(reply, &QNetworkReply::finished, this, [reply, then] {
+    const QString serverId = srv.id;   // empty for a sign-in draft, which has no queue to flush
+    connect(reply, &QNetworkReply::finished, this, [this, reply, then, serverId] {
         reply->deleteLater();
         Result r;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        r.status = status;
         if (reply->error() != QNetworkReply::NoError)
         {
             // Note what is NOT read here: reply->errorString(). See the header.
@@ -120,11 +128,28 @@ void AbsClient::request(const AbsServer& srv, const QString& path, const QByteAr
             r.auth    = (status == 401 || status == 403);
             r.message = transportMessage(reply->error());
             then(QByteArray(), r);
+            noteAnswer(serverId, r);
             return;
         }
         r.ok = true;
         then(reply->readAll(), r);
+        noteAnswer(serverId, r);
     });
+}
+
+// ==================================================================================================
+// Reachability (#197): "when the server can be reached again" is the first request that succeeds after one
+// that found nobody there.
+// ==================================================================================================
+void AbsClient::noteAnswer(const QString& serverId, const Result& r)
+{
+    if (serverId.isEmpty()) return;
+    // NOTHING ANSWERED — a refused connection, a timeout, a host that is not there. An HTTP error is an answer
+    // and says the server is up, so it does not count.
+    if (!r.ok && r.status == 0) { ++unanswered_; unreachable_.insert(serverId); return; }
+    if (!r.ok) return;
+    // Back. Whatever this device kept for it while it was away is owed now.
+    if (unreachable_.remove(serverId)) flushOfflineProgress(serverId);
 }
 
 // ==================================================================================================
@@ -417,6 +442,7 @@ void AbsClient::openSession(const QString& qualifiedId, Opened done)
             return;
         }
         sessions_.insert(qualifiedId, s);
+        localBooks_.remove(qualifiedId);   // #197: the server's session now, not a download's
         if (done) done(res, s);
     });
 }
@@ -446,6 +472,9 @@ QString AbsClient::partStreamUrl(const QString& qualifiedId, int partIndex) cons
 {
     const Abs::Session s = sessions_.value(qualifiedId);
     if (!s.ok || partIndex < 0 || partIndex >= s.tracks.size()) return QString();
+    // #197: A DOWNLOADED BOOK'S PART IS ITS FILE. The local session's "content url" is the absolute path the
+    // manifest names (AbsDownload::localSession), so there is no server to ask and no token to attach.
+    if (localBooks_.contains(qualifiedId)) return s.tracks.at(partIndex).contentUrl;
     const Abs::Ref ref = Abs::parse(qualifiedId);
     AbsServer srv;
     if (!ref.ok || !AbsServerStore::get(ref.serverId, srv)) return QString();
@@ -472,6 +501,24 @@ void AbsClient::reportProgress(const QString& qualifiedId, double currentTime, d
     // otherwise both pass the gate and send two PATCHes for one position.
     last.ever = true; last.pos = currentTime; last.atMs = now;
 
+    // #197: A BOOK PLAYING FROM ITS DOWNLOAD KEEPS THE REPORT FIRST, then tries to send it. Kept, because the
+    // whole point of the download is that the server may not be there; kept FIRST, because a report that only
+    // reached the queue when its request failed would be lost to a process that ended before the failure
+    // arrived. The queue holds one position per book (AbsProgressQueue::latestPerBook), so listening for an
+    // hour offline is one row, not three hundred and sixty. Delivered, it stays as the book's last known
+    // position, marked sent.
+    if (localBooks_.contains(qualifiedId))
+    {
+        AbsProgressQueue::Entry e;
+        e.qualifiedId = qualifiedId;
+        e.position    = std::max(0.0, currentTime);
+        e.duration    = duration;
+        e.whenMs      = now;
+        AbsProgressQueue::put(e);
+        sendKept(e, nullptr);
+        return;
+    }
+
     const QByteArray body = QJsonDocument(Abs::progressBody(currentTime, duration))
                                 .toJson(QJsonDocument::Compact);
     request(srv, Abs::progressPath(ref.itemId, ref.episodeId), QByteArray("PATCH"), body,
@@ -482,7 +529,151 @@ void AbsClient::reportProgress(const QString& qualifiedId, double currentTime, d
     });
 }
 
-void AbsClient::fetchProgress(const QString& qualifiedId, GotProgress done)
+// ==================================================================================================
+// Offline listening (#197)
+// ==================================================================================================
+// How long a request made on a downloaded book's behalf may take. A book on this disk plays whether or not
+// the server answers, so nothing here is worth waiting long for: the position decision at open, a kept report
+// and the flush's per-book check are all bounded, and an unanswered one leaves everything queued.
+static constexpr int kOfflineBudgetMs = 6000;
+
+void AbsClient::sendKept(const AbsProgressQueue::Entry& e, std::function<void(const Result&)> done)
+{
+    const Abs::Ref ref = Abs::parse(e.qualifiedId);
+    AbsServer srv;
+    if (!ref.ok || !AbsServerStore::get(ref.serverId, srv))
+    {
+        if (done) done(Result{ false, false, tr("That audiobook server is no longer set up.") });
+        return;
+    }
+    const QByteArray body = QJsonDocument(Abs::progressBody(e.position, e.duration)).toJson(QJsonDocument::Compact);
+    request(srv, Abs::progressPath(ref.itemId, ref.episodeId), QByteArray("PATCH"), body,
+            [e, done](const QByteArray&, const Result& res) {
+        // DELIVERED: the kept entry is now only the last known position. Marked by ITS OWN timestamp, so a
+        // newer report kept while this one was in flight stays owed.
+        if (res.ok) AbsProgressQueue::markSent(e.qualifiedId, e.whenMs);
+        if (done) done(res);
+    }, kOfflineBudgetMs);
+}
+
+void AbsClient::adoptLocalSession(const QString& qualifiedId, const Abs::Session& s)
+{
+    if (!Abs::isQualified(qualifiedId) || !s.ok) return;
+    sessions_.insert(qualifiedId, s);
+    localBooks_.insert(qualifiedId);
+}
+
+QString AbsClient::downloadUrlFor(const QString& fileRef) const
+{
+    const AbsDownload::FileRef ref = AbsDownload::parseFileRef(fileRef);
+    if (!ref.ok) return QString();
+    AbsServer srv;
+    if (!AbsServerStore::get(Abs::serverOf(ref.qualifiedBookId), srv)) return QString();
+    const QString root = Abs::normalizeRoot(srv.url, srv.allowPlainHttp);
+    if (root.isEmpty()) return QString();
+    // Minted HERE, for one request, and returned to DownloadManager::start — which puts it into a
+    // QNetworkRequest and nowhere else (DownloadJob::sourceRef says why).
+    return Abs::fileDownloadUrl(root, ref.itemId, ref.ino, srv.token);
+}
+
+void AbsClient::resolveOpenPosition(const QString& qualifiedId, int timeoutMs, Picked done)
+{
+    fetchProgress(qualifiedId, [this, qualifiedId, done](const Result& r, const Abs::Progress& p) {
+        // ANSWERED means an HTTP answer of any kind: a 404 is "this user has never opened it", which is a
+        // statement the rule can use. Only no answer at all leaves the decision to this device.
+        const bool answered = r.status > 0;
+        AbsProgressQueue::Entry local;
+        const bool have = AbsProgressQueue::entryFor(qualifiedId, &local);
+        const AbsProgressQueue::OpenPick pick = AbsProgressQueue::pickOnOpen(answered, p, have ? &local : nullptr);
+        if (pick.flushFirst)
+        {
+            // THIS DEVICE'S POSITION IS NEWER THAN THE SERVER'S: send it before it is used, so the server —
+            // and every other device — hears it first.
+            emit offlineNote(QStringLiteral("absoffline: %1 — this device's position (%2 s) is newer than the "
+                                            "server's; sending it first, then opening there")
+                                 .arg(qualifiedId).arg(local.position, 0, 'f', 1));
+            sendKept(local, nullptr);
+        }
+        else if (pick.from == AbsProgressQueue::From::Server)
+        {
+            // The server's answer wins, and becomes this device's last known position for an offline open.
+            AbsProgressQueue::adoptServer(qualifiedId, p);
+            emit offlineNote(QStringLiteral("absoffline: %1 — opening at the server's position (%2 s)")
+                                 .arg(qualifiedId).arg(p.currentTime, 0, 'f', 1));
+        }
+        else
+        {
+            emit offlineNote(QStringLiteral("absoffline: %1 — the server did not answer; opening at %2 s from "
+                                            "this device")
+                                 .arg(qualifiedId).arg(pick.position, 0, 'f', 1));
+        }
+        if (done) done(pick);
+    }, timeoutMs);
+}
+
+void AbsClient::flushOfflineProgress(const QString& serverId, std::function<void()> done)
+{
+    if (serverId.isEmpty() || flushing_.contains(serverId)) { if (done) done(); return; }
+    const QVector<AbsProgressQueue::Entry> rows = AbsProgressQueue::unsent(serverId);
+    if (rows.isEmpty()) { if (done) done(); return; }
+    flushing_.insert(serverId);
+
+    // ONE BOOK AT A TIME, IN ORDER, EACH GATED ON WHAT THE SERVER ALREADY KNOWS — every step is two round
+    // trips, and a loop firing them all at once would apply the answers in whatever order they came back.
+    // The step holds itself only through the callbacks in flight (weak here, strong there), so a finished or
+    // abandoned flush leaves nothing alive behind it.
+    auto step = std::make_shared<std::function<void(int)>>();
+    std::weak_ptr<std::function<void(int)>> weak = step;
+    *step = [this, serverId, rows, weak, done](int i) {
+        const auto self = weak.lock();
+        if (!self) return;
+        if (i >= int(rows.size()))
+        {
+            flushing_.remove(serverId);
+            if (done) done();
+            return;
+        }
+        const QString id = rows.at(i).qualifiedId;
+        fetchProgress(id, [this, serverId, id, i, self, done](const Result& r, const Abs::Progress& p) {
+            if (r.status == 0)
+            {
+                // NOBODY THERE. Nothing is decided and nothing is dropped: everything left stays owed.
+                flushing_.remove(serverId);
+                emit offlineNote(QStringLiteral("absoffline: server %1 not reachable; kept positions stay queued")
+                                     .arg(serverId));
+                if (done) done();
+                return;
+            }
+            // RE-READ: a newer report may have been kept while this step was in flight, and it is the one owed.
+            AbsProgressQueue::Entry now;
+            if (!AbsProgressQueue::entryFor(id, &now) || now.sent) { (*self)(i + 1); return; }
+            if (!AbsProgressQueue::localIsNewer(now, p))
+            {
+                // The server moved on since this was kept (another device, later): it wins, and nothing is sent.
+                AbsProgressQueue::adoptServer(id, p);
+                emit offlineNote(QStringLiteral("absoffline: %1 — the server's position is newer; kept %2 s "
+                                                "dropped, nothing sent").arg(id).arg(now.position, 0, 'f', 1));
+                (*self)(i + 1);
+                return;
+            }
+            sendKept(now, [this, serverId, id, now, i, self, done](const Result& res) {
+                if (!res.ok && res.status == 0)
+                {
+                    flushing_.remove(serverId);
+                    if (done) done();
+                    return;
+                }
+                emit offlineNote(QStringLiteral("absoffline: %1 — flushed the position kept offline (%2 s)%3")
+                                     .arg(id).arg(now.position, 0, 'f', 1)
+                                     .arg(res.ok ? QString() : QStringLiteral(" — the server refused it")));
+                (*self)(i + 1);
+            });
+        }, kOfflineBudgetMs);
+    };
+    (*step)(0);
+}
+
+void AbsClient::fetchProgress(const QString& qualifiedId, GotProgress done, int timeoutMs)
 {
     const Abs::Ref ref = Abs::parse(qualifiedId);
     AbsServer srv;
@@ -497,7 +688,7 @@ void AbsClient::fetchProgress(const QString& qualifiedId, GotProgress done)
         // A 404 here means "this user has never opened that item", which is an ANSWER and not a failure —
         // readProgress carries it as `found == false` and the caller starts at the top of the book.
         if (done) done(res, res.ok ? Abs::readProgress(body) : Abs::Progress{});
-    });
+    }, timeoutMs);
 }
 
 // ==================================================================================================

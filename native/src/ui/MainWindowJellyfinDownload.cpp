@@ -46,6 +46,8 @@
 
 #include "FeedbackPolicy.h"          // kFeedbackShort / kFeedbackLong
 #include "nav/NavOverlay.h"          // NavMenu / NavConfirm — the nav kit, never a QDialog
+#include "../core/AbsClient.h"         // #197: the minter routes an Audiobookshelf file ref to its own client
+#include "../core/AbsDownload.h"
 #include "../core/AppPaths.h"
 #include "../core/DownloadManager.h"
 #include "../core/DownloadsStore.h"
@@ -110,8 +112,12 @@ void MainWindow::initJellyfinDownloads()
     // other ref-backed job is a Jellyfin one. Both mint at request time and neither result is kept.
     dm_->setUrlMinter([](const QString& sourceRef) {
         if (Subsonic::isQualified(sourceRef)) return SubsonicClient::instance().downloadUrlFor(sourceRef);
+        // #197: one FILE of an Audiobookshelf book, signed by AbsClient from the saved server's token.
+        if (AbsDownload::isFileRef(sourceRef)) return AbsClient::instance().downloadUrlFor(sourceRef);
         return JellyfinClient::instance().downloadUrlFor(sourceRef);
     });
+    // #197: the Audiobookshelf half — a finished file that completes its book, and the positions kept offline.
+    initAbsDownloads();
     // Anything the last session queued and could not deliver. Deferred a turn: the constructor is not a
     // place to start network requests, and a flush that ran before the server store finished loading would
     // find nothing to flush and clear nothing.

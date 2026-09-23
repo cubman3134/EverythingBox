@@ -16,6 +16,7 @@
 //   open a book               POST /api/items/<id>/play               -> Abs::readPlaySession
 //   the user's position       GET  /api/me/progress/<id>              -> Abs::readProgress
 //   ...and report it        PATCH /api/me/progress/<id>
+//   one file, for keeps       GET  /api/items/<id>/file/<ino>/download (#197; minted, see downloadUrlFor)
 //
 // The cache is per server and per session, and is NOT persisted: a stale library list is worse than a
 // fetch, the fetch is one request, and a persisted copy of somebody's library is a second copy of it on
@@ -33,13 +34,15 @@
 // The two exceptions are forced and are both handled the way #200 settled: the STREAM url and the COVER
 // url take `?token=`, because mpv is handed a url and MetaCache fetches one. Neither is ever stored — the
 // stream url is minted at the moment a part is reached (RemoteAudiobook.h is the whole argument) and the
-// cover's BYTES are stored while its url is not.
+// cover's BYTES are stored while its url is not. (#197 adds a third of the same kind: a file's DOWNLOAD url,
+// minted by DownloadManager's minter at the top of each start() and never written down — AbsDownload.h.)
 //
 // Even so there is no call to errorString() anywhere in this file. Transport failures are rendered from
 // the NetworkError enum into fixed sentences of our own, and everything else is the server's own words.
 // Requests use SameOriginRedirectPolicy: a redirect to another host would carry the Authorization header —
 // and, for a stream, the query — to a server the user never configured.
 #pragma once
+#include "AbsProgressQueue.h"   // #197: the store-and-forward queue a downloaded book reports through
 #include "AbsServerStore.h"
 #include "Audiobookshelf.h"
 
@@ -67,6 +70,10 @@ public:
         bool    ok = false;
         bool    auth = false;   // the server refused the TOKEN: retrying changes nothing, re-adding does
         QString message;        // our transport sentence, or the server's own. Never a url.
+        // The HTTP status the server ANSWERED with, or 0 when nothing answered at all (#197). The one fact
+        // store-and-forward turns on: a 404 is the server saying "never heard of it", which is an answer, and
+        // a refused connection is nobody there — and `ok` is false for both.
+        int     status = 0;
     };
     using Done = std::function<void(const Result&)>;
 
@@ -128,7 +135,41 @@ public:
 
     // The stream url for ONE PART of an open session, minted now. Empty when there is no such session or
     // no such part. CREDENTIAL-BEARING: hand it straight to the player and write it down nowhere.
+    //
+    // For a book opened FROM ITS DOWNLOAD (#197, adoptLocalSession) this is the part's FILE on this disk: the
+    // same door, the same index, and nothing to sign.
     QString partStreamUrl(const QString& qualifiedId, int partIndex) const;
+
+    // ---- Offline listening (#197) ----------------------------------------------------------------------
+    // Hold `s` — a session built from a downloaded book's manifest (AbsDownload::localSession) — as this id's
+    // session, and remember that the book is playing FROM DISK. Everything a streamed book asks of its session
+    // (the part a position falls in, a position in the book, the part to open) is then answered by the local
+    // copy, and its position reports go through the store-and-forward queue (AbsProgressQueue.h). A later
+    // openSession for the same id (the download was removed) takes the book back to the server.
+    void adoptLocalSession(const QString& qualifiedId, const Abs::Session& s);
+    bool isLocalSession(const QString& qualifiedId) const { return localBooks_.contains(qualifiedId); }
+    // How many requests this session found NOBODY at (no HTTP answer at all). For probe_absclient, which has
+    // to know a report really failed before it brings its fixture server back.
+    int unansweredCount() const { return unanswered_; }
+
+    // The url one DownloadManager job fetches, for a FILE REF (AbsDownload::fileRef) — minted NOW from the
+    // saved server and its token, and handed straight to the request. Empty when the ref is not ours or its
+    // server is no longer set up (the job then fails with a sentence, never a url). CREDENTIAL-BEARING.
+    QString downloadUrlFor(const QString& fileRef) const;
+
+    // WHERE A DOWNLOADED BOOK OPENS (AbsProgressQueue::pickOnOpen is the rule). Asks the server for its
+    // position with a short budget and decides: the server's position, unless this device holds a newer unsent
+    // one — which is then SENT FIRST and used. A server that does not answer in `timeoutMs` leaves this
+    // device's last known position. `done` always fires, exactly once.
+    using Picked = std::function<void(const AbsProgressQueue::OpenPick&)>;
+    void resolveOpenPosition(const QString& qualifiedId, int timeoutMs, Picked done);
+
+    // Send every UNSENT position this device holds for one server, oldest first, each gated on what the
+    // server already knows (AbsProgressQueue::localIsNewer — a kept position never rewinds a newer one). An
+    // unreachable server ends the flush with everything still queued. Called at startup, and on its own by
+    // the first request that SUCCEEDS against a server a request had found unreachable — "when the server can
+    // be reached again" is exactly that moment. `done` fires when the flush has finished or given up.
+    void flushOfflineProgress(const QString& serverId, std::function<void()> done = nullptr);
 
     // ---- Progress --------------------------------------------------------------------------------------
     // Tell the server where the listener is. Throttled through Abs::shouldReport — the hook this rides
@@ -147,7 +188,9 @@ public:
     // deciding whether to show a progress bar); the ordinary play path takes it off the play session, which
     // carries it, so opening a book costs ONE request rather than two.
     using GotProgress = std::function<void(const Result&, const Abs::Progress&)>;
-    void fetchProgress(const QString& qualifiedId, GotProgress done);
+    // `timeoutMs` > 0 bounds the request (a downloaded book deciding where to open must not wait on a server
+    // that is not coming back); 0 leaves it to the transport.
+    void fetchProgress(const QString& qualifiedId, GotProgress done, int timeoutMs = 0);
 
     // ---- Art -------------------------------------------------------------------------------------------
     // Fetch this item's cover into MetaCache (keyed on the qualified id) if it is not already there. No-op
@@ -167,6 +210,8 @@ signals:
     // A server's cache changed (a fetch landed). The browse surface repopulates the level it is standing
     // in — the same way onAudiobookLibraryChanged handles a finished local scan.
     void cacheChanged(const QString& serverId);
+    // One line about the offline-progress queue (#197) for the host's log: ids and seconds, never a url.
+    void offlineNote(const QString& line);
 
 private:
     explicit AbsClient(QObject* parent = nullptr);
@@ -198,7 +243,12 @@ private:
 
     // ONE request builder. `body` empty means GET; otherwise the verb is `verb` with that JSON body.
     void request(const AbsServer& srv, const QString& path, const QByteArray& verb, const QByteArray& body,
-                 std::function<void(const QByteArray&, const Result&)> then);
+                 std::function<void(const QByteArray&, const Result&)> then, int timeoutMs = 0);
+    // Every request's outcome, per server: nothing answered marks it unreachable; the first success after
+    // that flushes what this device kept for it (#197).
+    void noteAnswer(const QString& serverId, const Result& r);
+    // PATCH one kept position, bypassing the listening throttle; `done(res)` after the reply.
+    void sendKept(const AbsProgressQueue::Entry& e, std::function<void(const Result&)> done);
 
     QNetworkAccessManager*          nam_ = nullptr;
     QHash<QString, ServerCache>     caches_;
@@ -211,6 +261,10 @@ private:
     // token. CoverFetch.h has the rule.
     QSet<QString>                   coverMissing_;
     QHash<QString, QVector<Done>>   waiting_;     // the callbacks a coalesced fetch still owes
+    QSet<QString>                   localBooks_;  // #197: ids whose session is a DOWNLOAD's (adoptLocalSession)
+    QSet<QString>                   unreachable_; // #197: servers the last request found nobody at
+    QSet<QString>                   flushing_;    // #197: servers a flush is walking right now
+    int                             unanswered_ = 0;   // #197: requests that got no answer (see unansweredCount)
 };
 
 // ==================================================================================================

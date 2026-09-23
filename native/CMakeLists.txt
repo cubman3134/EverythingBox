@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.313 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.314 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -782,6 +782,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/AbsServerStore.cpp      src/core/AbsServerStore.h        # saved servers, device-local
         src/core/AbsClient.cpp           src/core/AbsClient.h             # the fetches, the cache, AbsSupply
         src/browse/AbsCatalogs.cpp       src/browse/AbsCatalogs.h         # the thirteen browse levels
+        # #197 OFFLINE LISTENING: a server book downloaded as ordinary DownloadManager jobs (one per file, the
+        # token minted per request, never stored), recorded as one Downloaded book, played from disk through
+        # the one prefer-local rule, with its positions kept and sent later (store-and-forward).
+        src/core/AbsDownload.cpp         src/core/AbsDownload.h
+        src/core/AbsProgressQueue.cpp    src/core/AbsProgressQueue.h
+        src/core/PreferLocal.h                                             # the #417 rule, shared by both families
         # ONE LIBRARY ACROSS SOURCES (#194): the local library and every music server as ONE set of artists
         # and albums. MusicId is the pure identity half (normalisers, the MusicBrainz ground truth, the
         # confidence rule and the manual override store) and is what probe_musicid drives; MusicMerge folds
@@ -988,6 +994,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowThemes.cpp                        # issue #91: the theme browser's update/remove/zip members, same rule
         src/ui/MainWindowTrackFavorite.cpp                 # issue #297: the classic menus' Favorite verb on a track row, same rule
         src/ui/MainWindowAbsTimeline.cpp                   # issue #197: a server book's whole-book bar may seek across parts, same rule
+        src/ui/MainWindowAbsDownload.cpp                   # issue #197: a server book downloaded for offline listening, same rule
         src/ui/MainWindowBookStep.cpp                      # issue #432: the classic seek bar's arrow step on a multi-part book, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
@@ -2304,6 +2311,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # stores + their deps: Settings (deviceId) needs FormFactor; FavoritesStore's one-time list() migration
     # references RecentStore/DownloadsStore; every store is namespaced by ProfileStore.
     add_executable(probe_cloudmerge tools/probe_cloudmerge.cpp
+        # #197: the Audiobookshelf offline-progress queue's key builder, pinned device-local like #110's.
+        src/core/AbsProgressQueue.cpp src/core/AbsProgressQueue.h
+        src/core/Audiobookshelf.cpp   src/core/Audiobookshelf.h
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
         src/core/ItemMarks.cpp       src/core/ItemMarks.h
@@ -3382,6 +3392,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/AbsClient.cpp        src/core/AbsClient.h
         src/browse/AbsCatalogs.cpp    src/browse/AbsCatalogs.h
         src/core/RemoteAudiobook.h    src/core/NaturalOrder.h   # the part token this queue is built from
+        # #197 offline listening: the download plan, the manifest and the removal rule; the store-and-forward
+        # queue; and the REAL DownloadManager + Downloads store, so a book is fetched through the one url minter
+        # against the stub and the credential scan reads the queue file the manager actually writes.
+        src/core/AbsDownload.cpp      src/core/AbsDownload.h
+        src/core/AbsProgressQueue.cpp src/core/AbsProgressQueue.h
+        src/core/PreferLocal.h
+        src/core/DownloadManager.cpp  src/core/DownloadManager.h
+        src/core/DownloadsStore.cpp   src/core/DownloadsStore.h
         src/core/MetaCache.cpp        src/core/MetaOverrides.cpp src/core/MetaCache.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/ResumeStore.cpp      src/core/ResumeStore.h
