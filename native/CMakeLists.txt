@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.318 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.319 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -829,6 +829,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/QuitSignals.cpp  src/core/QuitSignals.h   # SIGTERM/SIGINT/SIGHUP -> the window's close, once (#409)
+        src/core/QuitBudget.h                               # the exit waits on the pool and the network for a bounded time (#442)
         src/core/RemoteApi.cpp    src/core/RemoteApi.h     # pure remote-control request parse + command router (#76)
         src/core/RemoteServer.cpp src/core/RemoteServer.h  # off-by-default local HTTP remote (QTcpServer) driving the app (#76)
         src/core/FileDrop.cpp     src/core/FileDrop.h      # LAN file drop: destinations, names, resumable landing (#115)
@@ -4050,6 +4051,18 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/QuitSignals.cpp src/core/QuitSignals.h)
     target_include_directories(probe_quitsignals PRIVATE src src/core)
     target_link_libraries(probe_quitsignals PRIVATE Qt6::Core)
+
+    # The quit budget (issue #442): a quit ends every add-on fetch waiting on the thread pool, the pool gets a
+    # bounded wait and a stuck task cannot hold the exit, and the exit pushes share one 1.5 s budget and leave what
+    # did not land owed in PendingPush. The stalled network is a loopback server that never answers. AddonContext
+    # and BoundedFetch are the REAL units whose waits held the app open; PendingPush is the durable record.
+    add_executable(probe_quitbudget tools/probe_quitbudget.cpp
+        src/core/QuitBudget.h
+        src/addons/AddonContext.cpp src/addons/AddonContext.h
+        src/core/BoundedFetch.cpp src/core/BoundedFetch.h
+        src/core/PendingPush.cpp src/core/PendingPush.h)
+    target_include_directories(probe_quitbudget PRIVATE src src/core src/addons ${EB_SECRETS_GEN_DIR})
+    target_link_libraries(probe_quitbudget PRIVATE Qt6::Core Qt6::Network)
 
     # The video player's touch gesture recogniser (issue #162): the half-screen split, the thirds, the seek
     # arithmetic and its cancel-by-returning rule, the OS edge band, the double-tap window, the long-press

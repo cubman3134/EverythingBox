@@ -43,9 +43,10 @@
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 #include "core/QuitSignals.h"  // issue #409: SIGTERM/SIGINT/SIGHUP close the window instead of being dropped
+#include "core/QuitBudget.h"   // issue #442: the exit waits on the thread pool for a bounded time, never a fetch
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.318";
+static constexpr const char* kAppVersion = "0.6.319";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -215,6 +216,11 @@ int main(int argc, char** argv)
 #endif
 
     EBPerfApp app(argc, argv);
+    // Issue #442. Declared right here so it is destroyed after the window and before the QApplication, whose
+    // destructor waits on the global thread pool with no limit. aboutToQuit ends every add-on fetch the pool is
+    // waiting on (QuitBudget.h); the gate then gives the pool a bounded wait once the event loop has returned.
+    QuitBudget::ExitGate exitGate;
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [] { QuitBudget::begin(); });
     // EB_NO_SYSPROXY=1 (diagnostics): skip Windows system-proxy resolution for outgoing requests. Used to
     // attribute per-request GUI stalls to the synchronous WPAD/WinHTTP proxy query Qt runs per reply.
     if (qEnvironmentVariableIntValue("EB_NO_SYSPROXY") == 1)
@@ -538,5 +544,7 @@ int main(int argc, char** argv)
     QTimer::singleShot(0, [] { PerfTrace::end(QStringLiteral("startup.total")); });
     window.raise();
     window.activateWindow(); // foreground + keyboard focus so arrow keys work without a click first
-    return app.exec();
+    const int rc = app.exec();
+    exitGate.drain(rc);   // #442: bounded, and before the window's objects go
+    return rc;
 }

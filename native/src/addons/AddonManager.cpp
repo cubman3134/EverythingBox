@@ -1,5 +1,6 @@
 #include "AddonManager.h"
 #include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
+#include "../core/QuitBudget.h"    // issue #442: a quit ends a blocking fetch on a pool thread
 #include "../core/CatalogMatch.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
@@ -217,7 +218,15 @@ static QByteArray httpGetBlocking(const QUrl& url, const QByteArray& cfgHeader =
     QEventLoop loop;
     QNetworkReply* reply = nam.get(rq);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
+    // Issue #442: chapter and page lists reach this from QtConcurrent, on the pool the app's exit waits on, and
+    // this wait has no timeout of its own. A quit ends it and the request is abandoned.
+    if (QuitBudget::exec(loop) && !reply->isFinished())
+    {
+        reply->abort();
+        reply->deleteLater();
+        if (err) *err = QObject::tr("The app is closing.");
+        return QByteArray();
+    }
     QByteArray data;
     if (reply->error() == QNetworkReply::NoError) data = reply->readAll();
     else if (err) *err = NetErrorText::forReply(reply);
