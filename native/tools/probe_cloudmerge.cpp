@@ -57,6 +57,7 @@
 #include "CloudSync.h"
 #include "JellyfinDownload.h"   // issue #110: the download-cap keys, asked through their own builders
 #include "OfflineProgress.h"     // issue #110: the store-and-forward queue key, same reason     // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "AbsProgressQueue.h"    // issue #197: the Audiobookshelf offline-progress queue key, same reason
 #include "Scrobble.h"      // #192: the carve-out is asserted through the writer's own prefixes
 #include "PlayOnDevice.h"  // #143: ...and through PlayOn::tokenKey, the "Play on device" token writer
 #include "ScrobbleQueue.h" // ...and through the real key builders, not hand-typed literals
@@ -953,6 +954,15 @@ int main(int argc, char** argv)
                   OfflineProgress::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == true);
         CHECK(CloudSync::isPerItemStoreKey(
                   OfflineProgress::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == false);
+        // audiobookshelf/<profile>/offlineprogress/<serverId> (#197): the positions a DOWNLOADED Audiobookshelf
+        // book was listened to at while its server could not be reached, kept for that server. Device-local for
+        // #110's two reasons (a claim about listening THIS install did; synced, two installs would flush the same
+        // rows), and it holds no credential — asserted through the queue's own key builder, so a rename of the
+        // prefix cannot leave this gate green while the writer moves out from under it.
+        CHECK(CloudSync::isDeviceLocalKey(
+                  AbsProgressQueue::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == true);
+        CHECK(CloudSync::isPerItemStoreKey(
+                  AbsProgressQueue::queueKey(QStringLiteral("0123456789abcdef0123456789abcdef"))) == false);
         // playon/* (issue #143): the "Play on device" pairing tokens. A token is minted by ANOTHER device for
         // THIS one and authorises starting playback on that peer -- synced, it would both put a credential in
         // a zip on somebody's Drive and hand every install on the account the right to take over a device it

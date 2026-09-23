@@ -36,18 +36,24 @@
 //   8. THE TOKEN NEVER LANDS — the byte scan described above.
 #include "AbsCatalogs.h"
 #include "AbsClient.h"
+#include "AbsDownload.h"      // #197: the download plan, the manifest, the removal rule
+#include "AbsProgressQueue.h" // #197: the store-and-forward queue
 #include "AbsServerStore.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "Audiobookshelf.h"
 #include "BookTimeline.h"     // #197: the book-scale bar a server book's track durations now drive
 #include "CoverFetch.h"
+#include "DownloadManager.h"  // #197: the REAL manager, driven through the one url minter
+#include "DownloadsStore.h"
 #include "MetaCache.h"
 #include "PlaybackSession.h"
+#include "PreferLocal.h"      // #197: the one prefer-local rule, asked by name
 #include "RemoteAudiobook.h"
 #include "ResumeStore.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QDirIterator>
@@ -103,6 +109,24 @@ public:
     QByteArray coverBytes;
     int hungAbandoned = 0;   // hung cover requests the CLIENT gave up on - which only its own timeout does
 
+    // #197, offline listening. goOffline() STOPS LISTENING — the server switched off, exactly as the client
+    // meets it: a refused connection and no HTTP status at all (not a connection accepted and dropped, which Qt
+    // quietly RESENDS once the server is back, and which no real stopped server does). `progressOf` is what
+    // GET /api/me/progress/<item> answers for an item ("404" = never heard of it); an item not listed gets the
+    // fixed answer every earlier test reads. `downloadFailures` makes that many file downloads answer 503.
+    bool offline = false;
+    int  refused = 0;
+    QHash<QString, QByteArray> progressOf;
+    int  downloadFailures = 0;
+    void goOffline() { offline = true; port_ = serverPort(); close(); }
+    bool goOnline() { offline = false; return isListening() || listen(QHostAddress::LocalHost, port_); }
+    quint16 port_ = 0;
+    // The bytes the stub serves for one file: distinct per inode, so a probe can tell part two from part three.
+    static QByteArray fileBytes(const QString& ino)
+    {
+        return QByteArray("ABSFILE-") + ino.toUtf8() + QByteArray(64, char('a' + (ino.size() % 26)));
+    }
+
     explicit AbsStub(QObject* parent = nullptr) : QTcpServer(parent) {}
 
     int coverAsks(const QString& itemId) const
@@ -129,6 +153,7 @@ protected:
     {
         auto* sock = new QTcpSocket(this);
         sock->setSocketDescriptor(handle);
+        if (offline) { ++refused; sock->abort(); sock->deleteLater(); return; }   // #197: nobody home
         connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
             sock->setProperty("buf", sock->property("buf").toByteArray() + sock->readAll());
             QByteArray buf = sock->property("buf").toByteArray();
@@ -235,7 +260,15 @@ private:
             // Tracks fed OUT OF ORDER on purpose, plus one with no contentUrl, plus a zero-length chapter.
             send(sock, 200, R"({"id":"li_multi","mediaType":"book",
               "media":{"duration":450,"numTracks":3,
-                "metadata":{"title":"The Long Book","authorName":"A. Writer"},
+                "metadata":{"title":"The Long Book","authorName":"A. Writer","narratorName":"N. Reader"},
+                "audioFiles":[
+                  {"index":2,"ino":"9002","duration":200,"mimeType":"audio/mpeg",
+                   "metadata":{"filename":"02 - Two.mp3","ext":".mp3"}},
+                  {"index":1,"ino":"9001","duration":100,"mimeType":"audio/mpeg",
+                   "metadata":{"filename":"01 - One.mp3","ext":".mp3"}},
+                  {"index":4,"ino":"9004","duration":10,"exclude":true,"metadata":{"filename":"cover.txt"}},
+                  {"index":3,"ino":"9003","duration":150,"mimeType":"audio/mpeg",
+                   "metadata":{"filename":"03 - Three.mp3","ext":".mp3"}}],
                 "tracks":[
                   {"index":2,"startOffset":100,"duration":200,"title":"02 - Two.mp3",
                    "contentUrl":"/api/items/li_multi/file/af_2","mimeType":"audio/mpeg"},
@@ -294,6 +327,15 @@ private:
         if (path.startsWith(QLatin1String("/api/me/progress/")))
         {
             if (method == QLatin1String("PATCH")) { send(sock, 200, "{\"ok\":true}"); return; }
+            // #197: an item with a scripted answer, including "never heard of it".
+            const QString item = path.section(QLatin1Char('/'), 4, 4);
+            if (progressOf.contains(item))
+            {
+                const QByteArray b = progressOf.value(item);
+                if (b == "404") send(sock, 404, "Not Found", "text/plain");
+                else send(sock, 200, b);
+                return;
+            }
             send(sock, 200, "{\"libraryItemId\":\"li_multi\",\"currentTime\":250,\"duration\":450,"
                             "\"progress\":0.5555,\"isFinished\":false}");
             return;
@@ -317,6 +359,14 @@ private:
                     connect(sock, &QTcpSocket::disconnected, this, [this] { ++hungAbandoned; });
                     return;
             }
+        }
+        // #197: ONE FILE, FOR KEEPS — /api/items/<id>/file/<ino>/download, the route a download is minted for.
+        if (path.startsWith(QLatin1String("/api/items/")) && path.contains(QLatin1String("/file/"))
+            && path.endsWith(QLatin1String("/download")))
+        {
+            if (downloadFailures > 0) { --downloadFailures; send(sock, 503, "Service Unavailable", "text/plain"); return; }
+            send(sock, 200, fileBytes(path.section(QLatin1Char('/'), 5, 5)), "audio/mpeg");
+            return;
         }
         if (path.contains(QLatin1String("/file/")))  { send(sock, 200, "AUDIOBYTES", "audio/mpeg"); return; }
         send(sock, 404, "{}");
@@ -755,14 +805,37 @@ static void testLevels()
     // ONE BOOK: the verb first, then the parts, keyed by their PLACE in the book.
     const QString bookKey = Abs::qualify(sid, QStringLiteral("li_multi"));
     const MediaCatalog bc = browse::absBookCatalog(bookKey, b, fixtureTracks(), 3);
-    CHECK(bc.items.size() == 4);
+    CHECK(bc.items.size() == 5);
     CHECK(bc.items.at(0).type == QLatin1String(browse::kAbsPlayBookType));
     CHECK(browse::absKeyOf(bc.items.at(0).mime, browse::kAbsPlayBookPrefix) == bookKey);
     CHECK(bc.items.at(0).subtitle.contains(QStringLiteral("3")));    // the chapter count is on the verb
-    CHECK(bc.items.at(1).type == QLatin1String(browse::kAbsPartType));
-    const QString pkey = browse::absKeyOf(bc.items.at(1).mime, browse::kAbsPartPrefix);
+    // #197: the download verb is SECOND — below Play, above the parts — and names the book by its key.
+    CHECK(bc.items.at(1).type == QLatin1String(browse::kAbsDownloadType));
+    CHECK(browse::absKeyOf(bc.items.at(1).mime, browse::kAbsDownloadPrefix) == bookKey);
+    CHECK(browse::isAbsType(bc.items.at(1).type) && !bc.items.at(1).expandable);
+    // ...and once the book is on this device it offers to REMOVE the copy instead.
+    {
+        const MediaCatalog dl = browse::absBookCatalog(bookKey, b, fixtureTracks(), 3, {}, /*downloaded*/ true);
+        CHECK(dl.items.size() == 5 && dl.items.at(1).type == QLatin1String(browse::kAbsRemoveDlType));
+        CHECK(browse::absKeyOf(dl.items.at(1).mime, browse::kAbsRemoveDlPrefix) == bookKey);
+    }
+    // #197: the DOWNLOADED BOOKS door and level — one book row per whole downloaded server book, keyed by the
+    // same qualified id (so it drills into the same book level); another family's "audio" row is not ours.
+    {
+        DownloadedItem mine;  mine.key = bookKey; mine.title = QStringLiteral("The Long Book");
+        mine.kind = QStringLiteral("audio"); mine.path = QStringLiteral("C:/dl/book.json");
+        DownloadedItem other; other.key = QStringLiteral("sub") + QChar(0x1F) + QStringLiteral("x");
+        other.kind = QStringLiteral("audio"); other.path = QStringLiteral("C:/dl/x.mp3");
+        const MediaCatalog dc = browse::absDownloadedCatalog({ other, mine });
+        CHECK(dc.items.size() == 1 && dc.items.at(0).type == QLatin1String(browse::kAbsBookType));
+        CHECK(browse::absKeyOf(dc.items.at(0).mime, browse::kAbsBookPrefix) == bookKey);
+        const MediaItem door = browse::absDownloadedRow(1);
+        CHECK(door.type == QLatin1String(browse::kAbsDownloadedType) && browse::isAbsType(door.type) && door.expandable);
+    }
+    CHECK(bc.items.at(2).type == QLatin1String(browse::kAbsPartType));
+    const QString pkey = browse::absKeyOf(bc.items.at(2).mime, browse::kAbsPartPrefix);
     CHECK(browse::absKeyHead(pkey) == bookKey && browse::absKeyTail(pkey) == QStringLiteral("0"));
-    CHECK(browse::absKeyTail(browse::absKeyOf(bc.items.at(3).mime, browse::kAbsPartPrefix))
+    CHECK(browse::absKeyTail(browse::absKeyOf(bc.items.at(4).mime, browse::kAbsPartPrefix))
           == QStringLiteral("2"));
     // A book with NO chapter list says nothing rather than "0 chapters", which reads as a broken file.
     CHECK(!browse::absBookCatalog(bookKey, b, fixtureTracks(), 0).items.at(0).subtitle
@@ -1610,6 +1683,507 @@ static void testBrokenStoredCovers382(AbsStub& stub)
     }
 }
 
+// ==================================================================================================
+// #197 — OFFLINE LISTENING: A SERVER BOOK DOWNLOADED, PLAYED FROM DISK, ITS POSITIONS KEPT AND SENT LATER
+// ==================================================================================================
+// Every assertion below is about one of the decisions the feature is judged on:
+//
+//   * THE PLAN — every audio file of the item, in the SERVER'S order (its `index`, not the array's), the
+//     excluded one dropped, each with its length and its place in the book, the chapters kept, and the one
+//     Downloaded row it ends as keyed by the qualified book id.
+//   * THE CREDENTIAL — no token in a job, a manifest, the manager's queue file, the Downloads store or the
+//     offline queue. The link is minted per request by the ONE url minter, and a retry mints it again.
+//   * THE LOCAL COPY WINS AT OPEN — through PreferLocal, the rule a Subsonic track already plays from disk by.
+//   * THE QUEUE — one position per book, the latest; flushed when the server answers again; the server wins
+//     on open unless this device's kept report is newer than the server's lastUpdate, both ways.
+//   * REMOVAL — the files, the row and the kept position go; the server is not asked anything.
+
+static QString absDownloadsDir() { return AppPaths::dataDir() + QStringLiteral("/downloads"); }
+
+// The expanded item the stub serves for li_multi, read through the real reader.
+static Abs::ItemDetail fixtureItemWithFiles()
+{
+    return Abs::readItem(R"({"id":"li_multi","mediaType":"book",
+      "media":{"duration":450,"numTracks":3,
+        "metadata":{"title":"The Long Book","authorName":"A. Writer","narratorName":"N. Reader"},
+        "audioFiles":[
+          {"index":2,"ino":"9002","duration":200,"metadata":{"filename":"02 - Two.mp3","ext":".mp3"}},
+          {"index":1,"ino":"9001","duration":100,"metadata":{"filename":"01 - One.mp3","ext":".mp3"}},
+          {"index":4,"ino":"9004","duration":10,"exclude":true,"metadata":{"filename":"cover.txt"}},
+          {"index":3,"ino":"9003","duration":150,"metadata":{"filename":"03 - Three.mp3","ext":".mp3"}}],
+        "chapters":[
+          {"id":0,"start":0,"end":80,"title":"Chapter One"},
+          {"id":1,"start":80,"end":260,"title":"Chapter Two"},
+          {"id":2,"start":260,"end":260,"title":"Zero"},
+          {"id":3,"start":260,"end":450,"title":"Chapter Three"}]}})");
+}
+
+static void testDownloadPlan197()
+{
+    const QString sid = QStringLiteral("3f2a-server-a");
+    const QString book = Abs::qualify(sid, QStringLiteral("li_multi"));
+    const Abs::ItemDetail d = fixtureItemWithFiles();
+    CHECK(d.ok && d.files.size() == 3);                               // the excluded file is not part of the book
+
+    // ---- The file ref: three ids and no credential, never mistaken for a book ----------------------
+    const QString ref = AbsDownload::fileRef(book, QStringLiteral("9002"));
+    CHECK(ref == QStringLiteral("absfile:3f2a-server-a:li_multi:9002"));
+    const AbsDownload::FileRef fr = AbsDownload::parseFileRef(ref);
+    CHECK(fr.ok && fr.qualifiedBookId == book && fr.itemId == QStringLiteral("li_multi") && fr.ino == QStringLiteral("9002"));
+    CHECK(!Abs::isQualified(ref));                                    // the id router never takes a file for a book
+    CHECK(!AbsDownload::isFileRef(book));
+    CHECK(AbsDownload::fileRef(Abs::qualifyEpisode(sid, QStringLiteral("li_pod"), QStringLiteral("ep")),
+                               QStringLiteral("1")).isEmpty());      // an episode is not downloaded by this
+    CHECK(AbsDownload::fileRef(book, QStringLiteral("a/b")).isEmpty());
+
+    // ---- The plan: every file, in the server's order, with its length and its place in the book ------
+    const AbsDownload::Plan plan = AbsDownload::planFor(book, d);
+    CHECK(plan.ok && plan.qualifiedId == book);
+    CHECK(plan.title == QStringLiteral("The Long Book") && plan.author == QStringLiteral("A. Writer")
+          && plan.narrator == QStringLiteral("N. Reader"));
+    CHECK(plan.files.size() == 3);
+    CHECK(plan.files.value(0).ino == QStringLiteral("9001") && plan.files.value(1).ino == QStringLiteral("9002")
+          && plan.files.value(2).ino == QStringLiteral("9003"));
+    CHECK(plan.files.value(0).duration == 100.0 && plan.files.value(1).duration == 200.0
+          && plan.files.value(2).duration == 150.0);
+    CHECK(plan.files.value(0).startOffset == 0.0 && plan.files.value(1).startOffset == 100.0
+          && plan.files.value(2).startOffset == 300.0);
+    CHECK(plan.files.value(0).localName == QStringLiteral("01 - One.mp3"));
+    CHECK(plan.duration == 450.0);
+    CHECK(plan.chapters.size() == 3);                                 // the chapters are kept (zero-length dropped)
+    CHECK(plan.folderName.contains(QStringLiteral("li_multi")));      // two servers' copies never share a folder
+    CHECK(!AbsDownload::planFor(Abs::qualifyEpisode(sid, QStringLiteral("li_multi"), QStringLiteral("e")), d).ok);
+
+    // A reply with no file list falls back to the tracks, whose contentUrl ends in the same inode — and a
+    // track the download route cannot name (the old "/s/item/<path>" shape) makes the plan unusable, not partial.
+    {
+        Abs::ItemDetail t = d;
+        t.files.clear();
+        t.tracks.clear();
+        t.tracks.push_back({ 1, QStringLiteral("a.mp3"), QStringLiteral("/audiobookshelf/api/items/li_multi/file/77"),
+                             0.0, 60.0, QString() });
+        t.tracks.push_back({ 2, QStringLiteral("b.mp3"), QStringLiteral("/api/items/li_multi/file/78"), 60.0, 30.0,
+                             QString() });
+        const AbsDownload::Plan fb = AbsDownload::planFor(book, t);
+        // A server name with no ordinal of its own gets one, so the folder sorts in the book's order.
+        CHECK(fb.files.value(0).localName == QStringLiteral("01 - a.mp3"));
+        CHECK(fb.ok && fb.files.size() == 2 && fb.files.value(0).ino == QStringLiteral("77")
+              && fb.files.value(1).ino == QStringLiteral("78") && fb.files.value(1).startOffset == 60.0);
+        t.tracks.push_back({ 3, QStringLiteral("c.mp3"), QStringLiteral("/s/item/li_multi/c.mp3"), 90.0, 5.0, QString() });
+        CHECK(!AbsDownload::planFor(book, t).ok);
+    }
+
+    // ---- The jobs: one per file, in order, each an id and never a url -------------------------------
+    const QVector<DownloadJob> jobs = AbsDownload::jobsFor(plan, QStringLiteral("/dl"), QString());
+    CHECK(jobs.size() == 3);
+    for (int i = 0; i < jobs.size(); ++i)
+    {
+        const DownloadJob& j = jobs.at(i);
+        CHECK(j.url.isEmpty());                                        // THE line the credential design is about
+        CHECK(j.sourceRef == AbsDownload::fileRef(book, plan.files.value(i).ino));
+        CHECK(j.key == j.sourceRef);
+        CHECK(!j.record);                                              // a file is a means; the BOOK is recorded
+        CHECK(j.kind == QStringLiteral("audio"));
+        CHECK(j.dest == AbsDownload::folderFor(plan, QStringLiteral("/dl")) + QLatin1Char('/') + plan.files.value(i).localName);
+        for (const QString& f : { j.title, j.sourceRef, j.dest, j.key, j.thumb })
+            CHECK(!f.contains(QLatin1String(kToken)) && !f.contains(QStringLiteral("token=")));
+    }
+
+    // ---- The manifest: what the book keeps, and the session it plays as offline ------------------------
+    const QByteArray mj = AbsDownload::manifestJson(plan, QStringLiteral("cover.jpg"));
+    CHECK(!mj.contains(kToken) && !mj.contains("token") && !mj.contains("http"));
+    QTemporaryDir tmp;
+    const QString mpath = tmp.path() + QStringLiteral("/book.json");
+    { QFile f(mpath); CHECK(f.open(QIODevice::WriteOnly)); f.write(mj); }
+    const AbsDownload::Manifest m = AbsDownload::readManifest(mpath);
+    CHECK(m.ok && m.plan.qualifiedId == book && m.plan.files.size() == 3 && m.plan.chapters.size() == 3);
+    CHECK(m.plan.narrator == QStringLiteral("N. Reader") && m.coverFile == tmp.path() + QStringLiteral("/cover.jpg"));
+    CHECK(!AbsDownload::isComplete(m));                                // nothing on disk yet
+    const Abs::Session ls = AbsDownload::localSession(m);
+    CHECK(ls.ok && ls.tracks.size() == 3 && ls.chapters.size() == 3 && ls.duration == 450.0);
+    CHECK(ls.tracks.value(1).contentUrl == tmp.path() + QLatin1Char('/') + plan.files.value(1).localName);
+    CHECK(ls.tracks.value(2).startOffset == 300.0 && ls.tracks.value(2).duration == 150.0);
+    // THE WHOLE-BOOK BAR, OFFLINE: the parts a downloaded book plays as carry every duration, so BookTimeline
+    // takes them as the exact seed — the same answer the server's play session gives online.
+    const QVector<RemoteAudiobook::Part> parts = Abs::bookParts(ls.tracks);
+    QVector<double> secs;
+    for (const RemoteAudiobook::Part& p : parts) secs << p.seconds;
+    CHECK(secs == (QVector<double>{ 100.0, 200.0, 150.0 }));
+    CHECK(BookTimeline::basisFor(3, secs, {}) == BookTimeline::Basis::Durations);
+    // A manifest naming a file outside its folder is not a book.
+    {
+        const QString bad = tmp.path() + QStringLiteral("/bad.json");
+        QFile f(bad); CHECK(f.open(QIODevice::WriteOnly));
+        f.write(QByteArray(mj).replace("01 - One.mp3", "../../evil.mp3"));
+        f.close();
+        CHECK(!AbsDownload::readManifest(bad).ok);
+    }
+
+    // ---- The one Downloaded row ---------------------------------------------------------------------
+    const DownloadedItem rec = AbsDownload::recordFor(m, mpath);
+    CHECK(rec.key == book && rec.kind == QStringLiteral("audio") && rec.title == QStringLiteral("The Long Book"));
+    CHECK(QFileInfo(rec.path).fileName() == QStringLiteral("book.json"));
+}
+
+// ---- The queue's rules, with no store and no socket --------------------------------------------------
+static void testQueueRules197()
+{
+    using Q = AbsProgressQueue::Entry;
+    const QString a = QStringLiteral("abs:s:li_a"), b = QStringLiteral("abs:s:li_b");
+    // ONE PER BOOK, THE LATEST. Three reports for A (one arriving late and older) and one for B.
+    QVector<Q> q;
+    q = AbsProgressQueue::latestPerBook(q, Q{ a, 10.0, 450.0, 1000, false });
+    q = AbsProgressQueue::latestPerBook(q, Q{ b, 70.0, 90.0, 1500, false });
+    q = AbsProgressQueue::latestPerBook(q, Q{ a, 30.0, 450.0, 3000, false });
+    q = AbsProgressQueue::latestPerBook(q, Q{ a, 20.0, 450.0, 2000, false });   // late, and older: ignored
+    CHECK(q.size() == 2);
+    CHECK(q.value(0).qualifiedId == a && q.value(0).position == 30.0 && q.value(0).whenMs == 3000);
+    CHECK(q.value(1).qualifiedId == b && q.value(1).position == 70.0);
+
+    // THE COMPARISON: newer than the server's lastUpdate, strictly; a server that never heard is older.
+    Abs::Progress srv; srv.found = true; srv.currentTime = 50.0; srv.lastUpdateMs = 2000;
+    CHECK(AbsProgressQueue::localIsNewer(Q{ a, 80.0, 0, 3000, false }, srv));
+    CHECK(!AbsProgressQueue::localIsNewer(Q{ a, 80.0, 0, 1000, false }, srv));
+    CHECK(!AbsProgressQueue::localIsNewer(Q{ a, 80.0, 0, 2000, false }, srv));   // the same instant is the server's
+    CHECK(AbsProgressQueue::localIsNewer(Q{ a, 80.0, 0, 1, false }, Abs::Progress{}));
+
+    // THE OPEN RULE, both ways and without a server.
+    const Q newer{ a, 80.0, 450.0, 3000, false }, older{ a, 80.0, 450.0, 1000, false }, sentNewer{ a, 80.0, 450.0, 3000, true };
+    AbsProgressQueue::OpenPick p = AbsProgressQueue::pickOnOpen(true, srv, &newer);
+    CHECK(p.from == AbsProgressQueue::From::Local && p.position == 80.0 && p.flushFirst);     // newer local wins
+    p = AbsProgressQueue::pickOnOpen(true, srv, &older);
+    CHECK(p.from == AbsProgressQueue::From::Server && p.position == 50.0 && !p.flushFirst);   // the server wins
+    p = AbsProgressQueue::pickOnOpen(true, srv, &sentNewer);
+    CHECK(p.from == AbsProgressQueue::From::Server && p.position == 50.0);                    // nothing owed
+    p = AbsProgressQueue::pickOnOpen(true, srv, nullptr);
+    CHECK(p.from == AbsProgressQueue::From::Server && p.position == 50.0);
+    p = AbsProgressQueue::pickOnOpen(false, Abs::Progress{}, &older);
+    CHECK(p.from == AbsProgressQueue::From::Local && p.position == 80.0 && !p.flushFirst);    // no server: kept
+    p = AbsProgressQueue::pickOnOpen(false, Abs::Progress{}, nullptr);
+    CHECK(p.from == AbsProgressQueue::From::Start && p.position == 0.0);
+    p = AbsProgressQueue::pickOnOpen(true, Abs::Progress{}, &older);                           // "never heard of it"
+    CHECK(p.from == AbsProgressQueue::From::Local && p.flushFirst);
+
+    // lastUpdate is READ off the server's answer.
+    CHECK(Abs::readProgress(R"({"currentTime":12,"duration":450,"lastUpdate":1668330152157})").lastUpdateMs
+          == Q_INT64_C(1668330152157));
+}
+
+// ---- The store: per server, one row per book, device-local key ----------------------------------------
+static void testQueueStore197()
+{
+    const QString a = Abs::qualify(QStringLiteral("q197-srv"), QStringLiteral("li_a"));
+    const QString b = Abs::qualify(QStringLiteral("q197-srv"), QStringLiteral("li_b"));
+    AbsProgressQueue::remove(a); AbsProgressQueue::remove(b);
+    for (int i = 1; i <= 3; ++i)
+        AbsProgressQueue::put({ a, 10.0 * i, 450.0, 1000 + i, false });
+    AbsProgressQueue::put({ b, 5.0, 90.0, 999, false });
+    CHECK(AbsProgressQueue::pending(QStringLiteral("q197-srv")).size() == 2);      // one row per BOOK
+    AbsProgressQueue::Entry e;
+    CHECK(AbsProgressQueue::entryFor(a, &e) && e.position == 30.0 && !e.sent);        // the latest
+    CHECK(AbsProgressQueue::unsent(QStringLiteral("q197-srv")).value(0).qualifiedId == b);  // oldest report first
+    CHECK(AbsProgressQueue::serversWithUnsent().contains(QStringLiteral("q197-srv")));
+    AbsProgressQueue::markSent(a, 1002);                                               // not the latest: stays owed
+    CHECK(AbsProgressQueue::entryFor(a, &e) && !e.sent);
+    AbsProgressQueue::markSent(a, 1003);
+    CHECK(AbsProgressQueue::entryFor(a, &e) && e.sent && e.position == 30.0);         // kept, as last known
+    CHECK(AbsProgressQueue::queueKey(QStringLiteral("q197-srv")).startsWith(QStringLiteral("audiobookshelf/")));
+    AbsProgressQueue::remove(a); AbsProgressQueue::remove(b);
+    CHECK(!AbsProgressQueue::entryFor(a, nullptr));
+    CHECK(!AbsProgressQueue::serversWithUnsent().contains(QStringLiteral("q197-srv")));
+}
+
+// ---- LIVE: download a book through the real DownloadManager against the stub ---------------------------
+static QString g_dlManifest;   // the downloaded book's manifest, for the removal test
+
+static void testDownloadLive197(AbsStub& stub)
+{
+    const QString book = Abs::qualify(g_serverId, QStringLiteral("li_multi"));
+    AbsClient& c = AbsClient::instance();
+    bool done = false; bool ok = false;
+    c.fetchItem(book, [&](const AbsClient::Result& r) { done = true; ok = r.ok; });
+    CHECK(waitFor([&] { return done; }) && ok);
+    const AbsDownload::Plan plan = AbsDownload::planFor(book, c.item(book));
+    CHECK(plan.ok && plan.files.size() == 3);
+    if (!plan.ok) return;
+
+    const QString folder = AbsDownload::folderFor(plan, absDownloadsDir());
+    QDir(folder).removeRecursively();
+    CHECK(QDir().mkpath(folder));
+    g_dlManifest = folder + QStringLiteral("/book.json");
+    { QFile f(g_dlManifest); CHECK(f.open(QIODevice::WriteOnly)); f.write(AbsDownload::manifestJson(plan, QString())); }
+    DownloadsStore::remove(book);
+
+    // THE REAL MANAGER, WITH THE MINTER THE APP INSTALLS for this family, counting how often it is asked.
+    // Scoped, so its queue.json is the one the credential scan below reads.
+    int mints = 0;
+    int recorded = 0;
+    {
+        DownloadManager dm;
+        dm.setUrlMinter([&](const QString& ref) {
+            if (!AbsDownload::isFileRef(ref)) return QString();   // another probe's leftover job: not ours
+            ++mints;
+            return AbsClient::instance().downloadUrlFor(ref);
+        });
+        QObject::connect(&dm, &DownloadManager::jobCompleted, [&](const DownloadJob& j) {
+            DownloadedItem rec;
+            if (AbsDownload::completedBook(j, &rec)) { DownloadsStore::add(rec); ++recorded; }
+        });
+        // RE-MINT ON RESUME: the first file's first attempt answers 503. The job fails holding its REF, and
+        // what the manager persists for it then is the ref and no url; the retry asks the minter again.
+        stub.downloadFailures = 1;
+        const int before = stub.countOf(QStringLiteral("GET"), QStringLiteral("/api/items/li_multi/file/"));
+        const QVector<DownloadJob> jobs = AbsDownload::jobsFor(plan, absDownloadsDir(), QString());
+        // THE SCRUB, against a server that IS set up (so a signed link could be minted): every job is an id.
+        CHECK(jobs.size() == 3);
+        for (const DownloadJob& j : jobs)
+        {
+            CHECK(j.url.isEmpty() && AbsDownload::isFileRef(j.sourceRef));
+            for (const QString& f : { j.url, j.title, j.sourceRef, j.dest, j.key, j.thumb })
+                CHECK(!f.contains(QLatin1String(kToken)));
+        }
+        for (const DownloadJob& j : jobs) dm.enqueue(j);
+        CHECK(waitFor([&] {
+            int settled = 0;
+            for (const DownloadJob& j : dm.jobs())
+                if (AbsDownload::isFileRef(j.sourceRef)
+                    && (j.state == DownloadJob::Failed || j.state == DownloadJob::Done)) ++settled;
+            return settled == 3;
+        }, 8000));
+        int failed = 0; QString failedId;
+        for (const DownloadJob& j : dm.jobs())
+            if (AbsDownload::isFileRef(j.sourceRef) && j.state == DownloadJob::Failed) { ++failed; failedId = j.id; }
+        CHECK(failed == 1);
+        CHECK(recorded == 0);                                           // a book with a file missing is not a book
+        {
+            QFile q(AppPaths::dataDir() + QStringLiteral("/downloads/queue.json"));
+            CHECK(q.open(QIODevice::ReadOnly));
+            const QByteArray qb = q.readAll();
+            CHECK(!qb.contains(kToken) && !qb.contains("token="));   // the failed job holds its ref, not a link
+            CHECK(qb.contains(AbsDownload::fileRef(book, QStringLiteral("9001")).toUtf8()));
+        }
+        const int mintsBeforeRetry = mints;
+        dm.retry(failedId);
+        CHECK(waitFor([&] { return recorded == 1; }, 8000));
+        CHECK(mints == mintsBeforeRetry + 1);                           // RE-MINTED for the retry, not replayed
+        CHECK(mints == 4);                                              // three files, one of them twice
+        // What the stub was asked: the DOWNLOAD route, each file by its inode, the token in the query of a url
+        // that exists only inside the request.
+        QStringList asked;
+        for (const AbsStub::Seen& s : stub.seen)
+            if (s.method == QStringLiteral("GET") && s.path.contains(QStringLiteral("/download")))
+                asked << s.path;
+        CHECK(stub.countOf(QStringLiteral("GET"), QStringLiteral("/api/items/li_multi/file/")) - before == 4);
+        CHECK(asked.size() >= 4);
+        for (const QString& a : asked.mid(asked.size() - 4))
+        {
+            CHECK(a.startsWith(QStringLiteral("/api/items/li_multi/file/90")) && a.contains(QStringLiteral("/download?")));
+            CHECK(QUrlQuery(QUrl(a).query()).queryItemValue(QStringLiteral("token")) == QLatin1String(kToken));
+        }
+        // Every file is on disk, whole, in the book's order.
+        for (int i = 0; i < plan.files.size(); ++i)
+        {
+            QFile f(folder + QLatin1Char('/') + plan.files.value(i).localName);
+            CHECK(f.open(QIODevice::ReadOnly) && f.readAll() == AbsStub::fileBytes(plan.files.value(i).ino));
+        }
+        for (const DownloadJob& j : dm.jobs()) if (AbsDownload::isFileRef(j.sourceRef)) dm.removeJob(j.id);
+    }
+
+    // ONE ordinary Downloaded book, keyed by the qualified id — and no row for any single file.
+    int rows = 0;
+    for (const DownloadedItem& d : DownloadsStore::list())
+    {
+        if (d.key == book) { ++rows; CHECK(d.path == QFileInfo(g_dlManifest).absoluteFilePath() && d.kind == QStringLiteral("audio")); }
+        CHECK(!AbsDownload::isFileRef(d.key));
+    }
+    CHECK(rows == 1);
+
+    // ---- OPENING PREFERS THE LOCAL COPY: the one rule, behind this family's gate ------------------------
+    const QString local = AbsDownload::localManifest(book, DownloadsStore::list());
+    CHECK(local == QFileInfo(g_dlManifest).absoluteFilePath());
+    CHECK(local == PreferLocal::localCopy(book, DownloadsStore::list(), {}));          // literally that rule
+    {
+        // A row keyed by something that is NOT a qualified id is never looked up by this family's gate.
+        DownloadedItem stray; stray.path = local; stray.key = QStringLiteral("C:/x/book.json");
+        CHECK(AbsDownload::localManifest(stray.key, { stray }).isEmpty());
+    }
+    const AbsDownload::Manifest m = AbsDownload::readManifest(local);
+    CHECK(m.ok && AbsDownload::isComplete(m));
+    const Abs::Session ls = AbsDownload::localSession(m);
+    c.adoptLocalSession(book, ls);
+    CHECK(c.isLocalSession(book));
+    const QString part2 = c.partStreamUrl(book, 1);                    // the SAME door a streamed part comes through
+    CHECK(part2 == folder + QLatin1Char('/') + plan.files.value(1).localName);
+    CHECK(!part2.contains(QStringLiteral("http")) && !part2.contains(QLatin1String(kToken)));
+    CHECK(c.bookTime(book, 2, 5.0) == 305.0);                          // a position in part three, in the BOOK
+    // A copy that has lost a file is not a book, and would not be opened from disk.
+    {
+        const QString p3 = folder + QLatin1Char('/') + plan.files.value(2).localName;
+        const QString aside = p3 + QStringLiteral(".aside");
+        CHECK(QFile::rename(p3, aside));
+        CHECK(!AbsDownload::isComplete(AbsDownload::readManifest(local)));
+        CHECK(QFile::rename(aside, p3));
+    }
+}
+
+// ---- LIVE: kept offline, flushed when the server answers again ----------------------------------------
+static QVector<QJsonObject> patchesFor(const AbsStub& stub, const QString& item, int from)
+{
+    QVector<QJsonObject> out;
+    for (int i = from; i < stub.seen.size(); ++i)
+        if (stub.seen.at(i).method == QStringLiteral("PATCH")
+            && stub.seen.at(i).path.startsWith(QStringLiteral("/api/me/progress/") + item))
+            out << QJsonDocument::fromJson(stub.seen.at(i).body).object();
+    return out;
+}
+
+static void testFlush197(AbsStub& stub)
+{
+    const QString book = Abs::qualify(g_serverId, QStringLiteral("li_multi"));
+    AbsClient& c = AbsClient::instance();
+    CHECK(c.isLocalSession(book));                                     // opened from disk (testDownloadLive197)
+    AbsProgressQueue::remove(book);
+
+    // THE SERVER IS OFF. Two reports: the listener at 120 s, then a seek to 180 s. Neither gets through.
+    stub.goOffline();
+    const int u0 = c.unansweredCount();
+    c.reportProgress(book, 120.0, 450.0, /*force*/ true);
+    CHECK(waitFor([&] { return c.unansweredCount() > u0; }, 10000));
+    AbsProgressQueue::Entry e;
+    CHECK(AbsProgressQueue::entryFor(book, &e) && !e.sent && e.position == 120.0);
+    c.reportProgress(book, 180.0, 450.0, /*force*/ true);
+    CHECK(waitFor([&] { return c.unansweredCount() > u0 + 1; }, 10000));
+    QCoreApplication::processEvents();
+    CHECK(AbsProgressQueue::pending(g_serverId).size() == 1);         // ONE row for the book: the latest
+    CHECK(AbsProgressQueue::entryFor(book, &e) && !e.sent && e.position == 180.0);
+
+    // THE SERVER IS BACK, and knows only an older position. The next request that SUCCEEDS — browsing, here —
+    // flushes the kept position: one PATCH, the latest one, and the entry is then sent.
+    CHECK(stub.goOnline());
+    stub.progressOf.insert(QStringLiteral("li_multi"),
+                           R"({"currentTime":40,"duration":450,"isFinished":false,"lastUpdate":1000})");
+    const int mark = stub.seen.size();
+    bool done = false;
+    c.fetchLibraries(g_serverId, [&](const AbsClient::Result&) { done = true; });
+    CHECK(waitFor([&] { return done; }));
+    CHECK(waitFor([&] { return !patchesFor(stub, QStringLiteral("li_multi"), mark).isEmpty(); }));
+    CHECK(waitFor([&] { AbsProgressQueue::Entry x; return AbsProgressQueue::entryFor(book, &x) && x.sent; }));
+    const QVector<QJsonObject> sent = patchesFor(stub, QStringLiteral("li_multi"), mark);
+    CHECK(sent.size() == 1);
+    CHECK(sent.value(0).value(QStringLiteral("currentTime")).toDouble() == 180.0);   // not 120: only the latest
+    CHECK(sent.value(0).value(QStringLiteral("duration")).toDouble() == 450.0);
+    // ...and it asked FIRST (a kept position never rewinds a newer one): the GET came before the PATCH.
+    int getAt = -1, patchAt = -1;
+    for (int i = mark; i < stub.seen.size(); ++i)
+    {
+        const AbsStub::Seen& s = stub.seen.at(i);
+        if (!s.path.startsWith(QStringLiteral("/api/me/progress/li_multi"))) continue;
+        if (s.method == QStringLiteral("GET") && getAt < 0) getAt = i;
+        if (s.method == QStringLiteral("PATCH") && patchAt < 0) patchAt = i;
+    }
+    CHECK(getAt >= 0 && patchAt > getAt);
+
+    // A kept position OLDER than what the server now holds is dropped at the flush, and nothing is sent.
+    stub.goOffline();
+    const int u1 = c.unansweredCount();
+    c.reportProgress(book, 60.0, 450.0, /*force*/ true);
+    CHECK(waitFor([&] { return c.unansweredCount() > u1; }, 10000));
+    CHECK(AbsProgressQueue::entryFor(book, &e) && !e.sent && e.position == 60.0);
+    CHECK(stub.goOnline());
+    stub.progressOf.insert(QStringLiteral("li_multi"),
+                           QByteArray(R"({"currentTime":400,"duration":450,"isFinished":false,"lastUpdate":)")
+                               + QByteArray::number(QDateTime::currentMSecsSinceEpoch() + 60000) + "}");
+    const int mark2 = stub.seen.size();
+    done = false;
+    c.fetchLibraries(g_serverId, [&](const AbsClient::Result&) { done = true; });
+    CHECK(waitFor([&] { return done; }));
+    CHECK(waitFor([&] { AbsProgressQueue::Entry x; return AbsProgressQueue::entryFor(book, &x) && x.sent; }));
+    CHECK(patchesFor(stub, QStringLiteral("li_multi"), mark2).isEmpty());
+    CHECK(AbsProgressQueue::entryFor(book, &e) && e.position == 400.0);   // the server's, now the last known
+}
+
+// ---- LIVE: where a downloaded book opens — the server wins, unless this device's report is newer ---------
+static void testOpenRule197(AbsStub& stub)
+{
+    const QString book = Abs::qualify(g_serverId, QStringLiteral("li_multi"));
+    AbsClient& c = AbsClient::instance();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    auto open = [&](AbsProgressQueue::OpenPick* out) {
+        bool done = false;
+        c.resolveOpenPosition(book, 3000, [&](const AbsProgressQueue::OpenPick& p) { *out = p; done = true; });
+        return waitFor([&] { return done; }, 10000);
+    };
+
+    // NEWER LOCAL: kept at `now`, the server last heard a minute ago. Sent FIRST, then used.
+    AbsProgressQueue::remove(book);
+    AbsProgressQueue::put({ book, 222.0, 450.0, now, false });
+    stub.progressOf.insert(QStringLiteral("li_multi"),
+                           QByteArray(R"({"currentTime":50,"duration":450,"lastUpdate":)") + QByteArray::number(now - 60000) + "}");
+    int mark = stub.seen.size();
+    AbsProgressQueue::OpenPick p;
+    CHECK(open(&p));
+    CHECK(p.from == AbsProgressQueue::From::Local && p.position == 222.0 && p.flushFirst);
+    CHECK(waitFor([&] { return !patchesFor(stub, QStringLiteral("li_multi"), mark).isEmpty(); }));
+    CHECK(patchesFor(stub, QStringLiteral("li_multi"), mark).value(0).value(QStringLiteral("currentTime")).toDouble() == 222.0);
+    CHECK(waitFor([&] { AbsProgressQueue::Entry x; return AbsProgressQueue::entryFor(book, &x) && x.sent; }));
+
+    // THE SERVER WINS: kept a minute ago, the server heard just now. The server's position; nothing sent.
+    AbsProgressQueue::remove(book);
+    AbsProgressQueue::put({ book, 99.0, 450.0, now - 60000, false });
+    stub.progressOf.insert(QStringLiteral("li_multi"),
+                           QByteArray(R"({"currentTime":333,"duration":450,"lastUpdate":)") + QByteArray::number(now) + "}");
+    mark = stub.seen.size();
+    CHECK(open(&p));
+    CHECK(p.from == AbsProgressQueue::From::Server && p.position == 333.0 && !p.flushFirst);
+    QCoreApplication::processEvents();
+    CHECK(patchesFor(stub, QStringLiteral("li_multi"), mark).isEmpty());
+    AbsProgressQueue::Entry e;
+    CHECK(AbsProgressQueue::entryFor(book, &e) && e.sent && e.position == 333.0);   // the server's, kept
+
+    // NO SERVER: the last known position this device holds.
+    stub.goOffline();
+    CHECK(open(&p));
+    CHECK(p.from == AbsProgressQueue::From::Local && p.position == 333.0 && !p.flushFirst);
+    CHECK(stub.goOnline());
+    stub.progressOf.remove(QStringLiteral("li_multi"));
+}
+
+// ---- Removal: the files, the row and the kept position go; the server is not asked ---------------------
+static void testRemoval197(AbsStub& stub)
+{
+    const QString book = Abs::qualify(g_serverId, QStringLiteral("li_multi"));
+    CHECK(!g_dlManifest.isEmpty() && QFileInfo::exists(g_dlManifest));
+    CHECK(AbsProgressQueue::entryFor(book, nullptr));
+    const QString folder = QFileInfo(g_dlManifest).absolutePath();
+
+    // A row pointing OUTSIDE the downloads folder is refused before anything is touched.
+    QTemporaryDir outside;
+    const QString foreign = outside.path() + QStringLiteral("/book.json");
+    { QFile f(foreign); CHECK(f.open(QIODevice::WriteOnly)); f.write("{}"); }
+    CHECK(AbsDownload::removeBook(book, foreign, absDownloadsDir()) == AbsDownload::Removal::RefusedOutsideDownloads);
+    CHECK(QFileInfo::exists(foreign));
+    CHECK(AbsProgressQueue::entryFor(book, nullptr));                  // ...and nothing else went either
+
+    const int mark = stub.seen.size();
+    CHECK(AbsDownload::removeBook(book, g_dlManifest, absDownloadsDir()) == AbsDownload::Removal::Removed);
+    CHECK(!QDir(folder).exists());
+    CHECK(AbsDownload::localManifest(book, DownloadsStore::list()).isEmpty());
+    CHECK(!AbsProgressQueue::entryFor(book, nullptr));                 // the kept position went with the files
+    QCoreApplication::processEvents();
+    CHECK(stub.seen.size() == mark);                                    // the server's copy: not a word to it
+    // A second removal is "already gone", not an error.
+    CHECK(AbsDownload::removeBook(book, g_dlManifest, absDownloadsDir()) == AbsDownload::Removal::AlreadyGone);
+}
+
+// The offline queue and the Downloads store hold no credential, whatever was written above.
+static void testQueueHoldsNoToken197()
+{
+    QSettings ini(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
+    for (const QString& k : ini.allKeys())
+        if (k.contains(QStringLiteral("offlineprogress")) || k.contains(QStringLiteral("downloads")))
+            CHECK(!ini.value(k).toString().contains(QLatin1String(kToken)));
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 4 && std::strcmp(argv[1], "cover-session") == 0)
@@ -1639,6 +2213,15 @@ int main(int argc, char** argv)
     testSessionHooks(scratchIni);
     testCoverAnswers376(stub);   // before the token sweep, so the sweep covers what the covers wrote
     testBrokenStoredCovers382(stub);
+    // #197, offline listening — before the token sweep, so the sweep covers every file the download wrote.
+    testDownloadPlan197();
+    testQueueRules197();
+    testQueueStore197();
+    testDownloadLive197(stub);
+    testFlush197(stub);
+    testOpenRule197(stub);
+    testRemoval197(stub);
+    testQueueHoldsNoToken197();
     testTokenNeverLands(stub, scratchIni);
 
     // The saved server goes at the end rather than in a destructor: the scan above has to run while the row

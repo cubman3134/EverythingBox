@@ -21,13 +21,22 @@ string "probe-fixture-token-6f3a9c2e" and the audio it serves is silence it gene
 It prints every request it is asked, with the Authorization header REDACTED, and prints the body of every
 progress PATCH — which is the thing worth watching, because "the position reached the server" is the one
 claim in this feature that cannot be seen from inside the app.
+
+OFFLINE LISTENING (#197). Every book also lists its `audioFiles` (each with the inode the download route is
+keyed by), the stub answers GET /api/items/<id>/file/<ino>/download with the same bytes it streams, and a
+position it holds carries `lastUpdate` (ms), stamped when a PATCH arrives — the one fact the app's
+store-and-forward queue weighs its own kept position against. To take the server "offline", stop this
+process; to bring it back, start it again. `--progress-file` keeps what it holds across that restart, so a
+position flushed after the restart can be seen to land on top of what the server held before it.
 """
 import argparse
 import json
 import math
+import os
 import re
 import struct
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = "probe-fixture-token-6f3a9c2e"
@@ -72,14 +81,31 @@ TONE_CHAPTERS = [
 ]
 
 
-def book(item_id, title, author, tracks, series=None, seq=None, chapters=None):
+def audio_files(tracks):
+    """The book's FILE LIST, the way a real Audiobookshelf lists it under media.audioFiles: one entry per file,
+    named by its inode (here: the last segment of the track's contentUrl), with its index, length and name.
+    What a download is planned from (#197)."""
+    out = []
+    for t in tracks:
+        name = t["title"]
+        ext = "." + name.rsplit(".", 1)[1] if "." in name else ""
+        out.append({"index": t["index"], "ino": t["contentUrl"].rsplit("/", 1)[1], "duration": t["duration"],
+                    "mimeType": t.get("mimeType", "audio/wav"), "exclude": False,
+                    "metadata": {"filename": name, "ext": ext}})
+    return out
+
+
+def book(item_id, title, author, tracks, series=None, seq=None, chapters=None, narrator=None):
     md = {"title": title, "authorName": author}
+    if narrator:
+        md["narratorName"] = narrator
     if series:
         md["seriesName"] = series
         md["sequence"] = seq
     return {"id": item_id, "mediaType": "book",
             "media": {"duration": sum(t["duration"] for t in tracks), "numTracks": len(tracks),
                       "coverPath": "/covers/%s.jpg" % item_id, "metadata": md,
+                      "audioFiles": audio_files(tracks),
                       "tracks": tracks, "chapters": CHAPTERS if chapters is None else chapters}}
 
 
@@ -89,7 +115,7 @@ LIBRARIES = [{"id": "lib_books", "name": "Books", "mediaType": "book"},
 BOOKS = [book("li_multi", "The Long Book", "A. Writer", TRACKS, "Chronicles", "2"),
          book("li_one", "One File", "A. Writer", [dict(TRACKS[0], duration=60)]),
          book("li_other", "Another", "B. Author", [dict(TRACKS[0], duration=90)], "Chronicles", "1"),
-         book("li_tones", "Three Tones", "C. Signal", TONE_TRACKS, chapters=TONE_CHAPTERS)]
+         book("li_tones", "Three Tones", "C. Signal", TONE_TRACKS, chapters=TONE_CHAPTERS, narrator="D. Voice")]
 
 PODCAST = {"id": "li_pod", "mediaType": "podcast",
            "media": {"numEpisodes": 2, "coverPath": "/covers/pod.jpg",
@@ -243,7 +269,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/me/progress/"):
             key = self.path[len("/api/me/progress/"):]
             try:
-                PROGRESS[key.split("/")[0]] = json.loads(body or b"{}")
+                p = json.loads(body or b"{}")
+                # WHEN the server heard it: the Media Progress schema's lastUpdate, in ms (#197).
+                p["lastUpdate"] = int(time.time() * 1000)
+                PROGRESS[key.split("/")[0]] = p
+                save_progress()
             except ValueError:
                 pass
             print("    >>> the server now holds %s" % json.dumps(PROGRESS), flush=True)
@@ -270,7 +300,11 @@ class Handler(BaseHTTPRequestHandler):
             if "/file/" in rest:
                 # A real, openable file: silence as long as the track claims to be, so the player's
                 # duration, the chapter list and the position bar all have something true to work with.
+                # The DOWNLOAD route (#197) answers with the same bytes the stream does.
                 item, _, af = rest.partition("/file/")
+                if af.endswith("/download"):
+                    af = af[:-len("/download")]
+                    print("    >>> download of %s file %s" % (item, af), flush=True)
                 src = next((b for b in BOOKS if b["id"] == item), None)
                 secs = 60
                 if src:
@@ -294,10 +328,27 @@ class Handler(BaseHTTPRequestHandler):
         return self._send({}, 404)
 
 
+_PROGRESS_FILE = None
+
+
+def save_progress():
+    if _PROGRESS_FILE:
+        with open(_PROGRESS_FILE, "w") as f:
+            json.dump(PROGRESS, f)
+
+
 def main():
+    global _PROGRESS_FILE
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=13378)
+    ap.add_argument("--progress-file", default=None,
+                    help="keep the positions this server holds across a restart (#197's offline drive)")
     args = ap.parse_args()
+    _PROGRESS_FILE = args.progress_file
+    if _PROGRESS_FILE and os.path.exists(_PROGRESS_FILE):
+        with open(_PROGRESS_FILE) as f:
+            PROGRESS.update(json.load(f))
+        print("restored the positions held before the restart: %s" % json.dumps(PROGRESS), flush=True)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("fixture Audiobookshelf on http://127.0.0.1:%d  (any username, any password)" % args.port,
           flush=True)

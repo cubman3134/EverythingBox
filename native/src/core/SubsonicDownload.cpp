@@ -1,4 +1,5 @@
 #include "SubsonicDownload.h"
+#include "PreferLocal.h"   // the one prefer-local rule (#417), shared with Audiobookshelf downloads (#197)
 #include "Subsonic.h"
 
 #include <QFileInfo>
@@ -140,20 +141,17 @@ QVector<MusicLibrary::IndexTrack> SubsonicDownload::albumBatch(const QVector<Mus
 QString SubsonicDownload::localCopy(const QString& qualifiedTrackId, const QVector<DownloadedItem>& downloads,
                                     const std::function<bool(const QString&)>& exists)
 {
-    if (!isSubsonicTrack(qualifiedTrackId)) return QString();
-    for (const DownloadedItem& d : downloads)
-        if (d.key == qualifiedTrackId && !d.path.isEmpty() && (exists ? exists(d.path) : QFileInfo::exists(d.path)))
-            return d.path;
-    return QString();
+    // The rule itself is PreferLocal's (#197 moved it there so an Audiobookshelf book asks the same one); what
+    // is Subsonic's is the gate: only a qualified TRACK id is ever looked up.
+    return PreferLocal::localCopy(isSubsonicTrack(qualifiedTrackId) ? qualifiedTrackId : QString(), downloads, exists);
 }
 
 QString SubsonicDownload::preferLocal(const QString& qualifiedTrackId, const QVector<DownloadedItem>& downloads,
                                       const std::function<bool(const QString&)>& exists,
                                       const std::function<QString()>& otherwise)
 {
-    const QString local = localCopy(qualifiedTrackId, downloads, exists);
-    if (!local.isEmpty()) return local;
-    return otherwise ? otherwise() : QString();
+    return PreferLocal::prefer(isSubsonicTrack(qualifiedTrackId) ? qualifiedTrackId : QString(), downloads, exists,
+                               otherwise);
 }
 
 QString SubsonicDownload::openEntry(const QString& entry, const QString& identity,

@@ -24,6 +24,9 @@
 //   _absbook        absbook:abs:<sid>:<itemId>                         one book: play it, or its parts
 //   _absplaybook    absplaybook:abs:<sid>:<itemId>                     PLAY (an action row, not a level)
 //   _abspart        abspart:abs:<sid>:<itemId><US><index>              PLAY, starting at that part
+//   _absdownloaded  absdownloaded:                                     the books ON THIS DEVICE (#197, one door)
+//   _absdownload    absdownload:abs:<sid>:<itemId>                     DOWNLOAD the book for offline (#197)
+//   _absremovedl    absremovedl:abs:<sid>:<itemId>                     REMOVE that download (#197)
 //   _abspodcast     abspodcast:abs:<sid>:<itemId>                      one podcast's episodes
 //   _absepisode     absepisode:abs:<sid>:<itemId>#<episodeId>          PLAY that episode
 //
@@ -31,7 +34,10 @@
 // character, so a leading underscore is what makes a row DRILL on the themed layouts rather than open the
 // per-leaf Play/Favourite/Add-to-playlist chooser. These rows are all either levels or verbs of their own,
 // and none of them is a file the chooser's Play could hand to a player — a part is a name that has to be
-// minted (RemoteAudiobook.h), and the chooser's Download and Favourite have nothing to act on.
+// minted (RemoteAudiobook.h), and the chooser's Download and Favourite have nothing to act on. So a book's
+// Download is a VERB ROW of its own on the book level (#197), beside "Play book": the same row, the same
+// dispatch (HomeView::activateAbsItem), on both layouts — and, once the book is on this device, the row
+// becomes "Remove download".
 //
 // A key may contain ':' (every qualified id does) and 0x1F (the composite keys above), so every reader
 // takes the key as "everything after the prefix" — absKeyOf — and never as a colon-separated field. That
@@ -39,6 +45,7 @@
 #pragma once
 #include "../addons/AddonModels.h"     // MediaCatalog / MediaItem
 #include "../core/Audiobookshelf.h"    // the payloads these render
+#include "../core/DownloadsStore.h"    // #197: DownloadedItem, what the downloaded-books level lists
 
 #include <QString>
 #include <QStringList>
@@ -71,6 +78,9 @@ namespace browse
     inline const char* kAbsPartType       = "_abspart";
     inline const char* kAbsPodcastType    = "_abspodcast";
     inline const char* kAbsEpisodeType    = "_absepisode";
+    inline const char* kAbsDownloadedType = "_absdownloaded"; // #197
+    inline const char* kAbsDownloadType   = "_absdownload";   // #197
+    inline const char* kAbsRemoveDlType   = "_absremovedl";   // #197
 
     inline const char* kAbsServersPrefix    = "absservers:";
     inline const char* kAbsAddServerPrefix  = "absaddserver:";
@@ -86,6 +96,9 @@ namespace browse
     inline const char* kAbsPartPrefix       = "abspart:";
     inline const char* kAbsPodcastPrefix    = "abspodcast:";
     inline const char* kAbsEpisodePrefix    = "absepisode:";
+    inline const char* kAbsDownloadedPrefix = "absdownloaded:";
+    inline const char* kAbsDownloadPrefix   = "absdownload:";
+    inline const char* kAbsRemoveDlPrefix   = "absremovedl:";
 
     // The join for a COMPOSITE key (a library plus a series, a book plus a part number). 0x1F, the same
     // character AudiobookLibrary's book keys and Subsonic's qualified ids use, because it cannot occur in
@@ -119,6 +132,18 @@ namespace browse
     // ---- The door onto the whole feature, shown on the Audiobooks root ------------------------------------
     // One row, keyless, like "Music Servers" and "Book Servers". `count` is how many servers are saved.
     MediaItem absServersRow(int count);
+
+    // ---- #197: the books downloaded from any server, on the Audiobooks root -------------------------------
+    // The door ("Downloaded books", shown only when there is at least one) and its level: one BOOK row per
+    // downloaded server book, keyed by its qualified id exactly as a server's own book row is — so it drills
+    // into the same book level (Play book, Remove download, the parts), which renders from the download's
+    // manifest when the server cannot be asked. This is the way to a downloaded book with the server off
+    // and nothing cached: every other Audiobookshelf level needs the server to draw itself.
+    //
+    // `downloads` is DownloadsStore's list; rows whose key is not a qualified Audiobookshelf id are not ours
+    // and are skipped (a Subsonic track is "audio" too). Each row's picture is the download's own cover.
+    MediaItem absDownloadedRow(int count);
+    MediaCatalog absDownloadedCatalog(const QVector<DownloadedItem>& downloads);
 
     // ---- Level 1: the saved servers ----------------------------------------------------------------------
     // One row per server plus, ALWAYS LAST AND ALWAYS PRESENT, the add row — with none saved that row is the
@@ -169,9 +194,12 @@ namespace browse
     // The chapter COUNT is on the play row rather than a chapter list of its own: chapters are what the
     // PLAYER navigates (that is the whole point of reading the server's list), and a second, browsable
     // chapter list would be a second place to press play with a different meaning.
+    //
+    // #197: the SECOND row is the book's download verb — "Download for offline", or "Remove download" when
+    // `downloaded` (a copy is on this device). A podcast has no such row: episodes are not downloaded by this.
     MediaCatalog absBookCatalog(const QString& qualifiedItemId, const Abs::Item& item,
                                 const QVector<Abs::Track>& tracks, int chapterCount,
-                                const AbsCoverFn& cover = {});
+                                const AbsCoverFn& cover = {}, bool downloaded = false);
 
     // ---- A podcast's episodes ----------------------------------------------------------------------------
     // Newest first, which is what a podcast is read in and what every podcast client does. The server sends

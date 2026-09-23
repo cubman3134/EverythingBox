@@ -2243,6 +2243,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::playMusicAlbumRequested, this, &MainWindow::openMusicAlbum);
     connect(home_, &HomeView::playAudiobookRequested, this, &MainWindow::openAudiobook);   // #139
     connect(home_, &HomeView::playAbsRequested, this, &MainWindow::openAbsItem);          // #197
+    connect(home_, &HomeView::downloadAbsRequested, this, &MainWindow::downloadAbsBook);  // #197 offline
+    connect(home_, &HomeView::removeAbsDownloadRequested, this, &MainWindow::removeAbsDownload);
     connect(home_, &HomeView::playMusicQueueRequested, this, &MainWindow::openMusicQueue);
     // #193 inc 2: right-click a music row in the classic grid -> the nav-kit queue verbs. DIRECT, not queued:
     // this arrives from a QListWidget's own context-menu signal (no live QML delegate, so no issue #28), and
@@ -3006,6 +3008,10 @@ void MainWindow::openAbsItem(const QString& qualifiedId, int startPart)
 {
     const Abs::Ref ref = Abs::parse(qualifiedId);
     if (!ref.ok) return;
+    // #197: A BOOK ON THIS DISK PLAYS FROM THIS DISK — asked first, through the one prefer-local rule, before
+    // any socket is opened (MainWindowAbsDownload.cpp). With the server switched off this is the only way the
+    // book opens at all; with it on, the server still decides WHERE (AbsProgressQueue.h has the rule).
+    if (openAbsDownloaded(qualifiedId, startPart)) return;
     statusBar()->showMessage(tr("Opening…"), 4000);
     AbsClient::instance().openSession(qualifiedId, [this, qualifiedId, startPart]
                                       (const AbsClient::Result& r, const Abs::Session& s) {
@@ -3015,63 +3021,77 @@ void MainWindow::openAbsItem(const QString& qualifiedId, int startPart)
             notify(r.message.isEmpty() ? tr("Couldn't open that from the audiobook server.") : r.message);
             return;
         }
-        // THE STATE THE REST OF THIS FEATURE READS. Set before anything plays, and never cleared: every
-        // reader below guards on "is the entry playing RIGHT NOW one of this book's", so a stale copy left
-        // by a book finished an hour ago cannot answer for the film that is playing instead. That guard is
-        // cheaper and safer than a clear on every play sink, which is a list that would be one sink short
-        // the first time somebody added a new one.
-        absBookId_   = qualifiedId;
-        absTracks_   = s.tracks;
-        absChapters_ = s.chapters;
-        absDuration_ = s.duration > 0.0 ? s.duration
-                                        : Abs::absoluteTime(s.tracks, s.tracks.size() - 1,
-                                                            s.tracks.isEmpty() ? 0.0
-                                                                               : s.tracks.last().duration);
-
-        // WHERE TO BEGIN. An explicit part (somebody pressed part twelve) starts at its top; otherwise the
-        // server's own position decides both the part and the offset within it. #83's rule, and #197's:
-        // for a server's own item the server's position wins, including over a local mark.
-        int    part   = startPart;
-        double within = 0.0;
-        if (part < 0)
-        {
-            part   = qMax(0, Abs::trackAtTime(s.tracks, s.currentTime));
-            within = Abs::offsetWithinTrack(s.tracks, s.currentTime);
-        }
-        absSeedPart_   = part;
-        absSeedWithin_ = within;
-
-        const Abs::ItemDetail d = AbsClient::instance().item(qualifiedId);
-        MediaItem item;
-        item.id    = qualifiedId;          // the BOOK KEY every part token is built from, and the Recents id
-        // THE BOOK'S NAME, in the order the three sources are trustworthy. The expanded item is only
-        // cached when the listener BROWSED here; a re-open from Recents arrives with nothing fetched, and
-        // falling straight through to the first track's file name is how a re-opened book came back called
-        // "01 - One.mp3" on the first live drive of this feature — a Recents row that renamed itself.
-        item.title = d.ok && !d.item.title.isEmpty() ? d.item.title
-                   : !s.title.isEmpty()              ? s.title
-                   : (s.tracks.isEmpty() ? tr("Audiobook") : s.tracks.first().title);
-        item.type  = QStringLiteral("audiobook");
-        item.thumbnailUrl = AbsClient::instance().coverPath(qualifiedId);
-        // The Recents row's path. The QUALIFIED ID and not the stream url, which carries the token: a
-        // Recents row is written to the ini, and #200 is the issue about what happens when a signed link
-        // goes in one. An id is credential-free by construction and means the same thing tomorrow.
-        item.url   = qualifiedId;
-
-        // THE PARTS — named by the server's own track titles (de-duplicated, because a part name is also
-        // the half of the part token a resume mark is keyed by) and, since #197, carrying each track's
-        // DURATION. The durations are what give a multi-file server book the whole-book position bar (#218):
-        // openRemoteAudiobook hands them to BookTimeline, which prefers them to part sizes. Still no SIZE —
-        // a play session has none, and anything put there would be read as one. Abs::bookParts is the one
-        // spelling, and probe_absclient drives it against the stub's live /play reply.
-        item.bookParts = Abs::bookParts(s.tracks);
-        const QString firstUrl = AbsClient::instance().partStreamUrl(qualifiedId, part);
-        if (firstUrl.isEmpty()) { notify(tr("That server gave no link for this part.")); return; }
-        // A single-track book takes openRemoteAudiobook's one-part path (openAudioStream), which is right:
-        // there is no queue to build and no boundary to cross. Its resume still comes from the server,
-        // because the hook below keys on the identity rather than on which path opened it.
-        openRemoteAudiobook(item, firstUrl, /*startIndexOverride*/ part);
+        // The server's own position arrives on the same reply — #83's rule, and #197's: for a server's own
+        // item the server's position wins, including over a local mark.
+        startAbsBook(qualifiedId, s, startPart, s.currentTime, QString());
     });
+}
+
+// Start a book whose play session is in hand — the server's (openAbsItem) or a download's (#197,
+// openAbsDownloaded, where the "session" is the book's manifest and every part is a file on this disk). One
+// body for both, because everything below is a question about the SESSION and not about where it came from:
+// the same parts, the same whole-book bar, the same chapter list and the same progress hooks.
+void MainWindow::startAbsBook(const QString& qualifiedId, const Abs::Session& s, int startPart, double bookPos,
+                              const QString& fallbackThumb)
+{
+    // THE STATE THE REST OF THIS FEATURE READS. Set before anything plays, and never cleared: every
+    // reader below guards on "is the entry playing RIGHT NOW one of this book's", so a stale copy left
+    // by a book finished an hour ago cannot answer for the film that is playing instead. That guard is
+    // cheaper and safer than a clear on every play sink, which is a list that would be one sink short
+    // the first time somebody added a new one.
+    absBookId_   = qualifiedId;
+    absTracks_   = s.tracks;
+    absChapters_ = s.chapters;
+    absDuration_ = s.duration > 0.0 ? s.duration
+                                    : Abs::absoluteTime(s.tracks, s.tracks.size() - 1,
+                                                        s.tracks.isEmpty() ? 0.0
+                                                                           : s.tracks.last().duration);
+
+    // WHERE TO BEGIN. An explicit part (somebody pressed part twelve) starts at its top; otherwise
+    // `bookPos` decides both the part and the offset within it — the server's own position for a streamed
+    // book (#83's rule, and #197's: for a server's own item the server's position wins, including over a local
+    // mark), and for a downloaded one whatever AbsProgressQueue::pickOnOpen decided.
+    int    part   = startPart;
+    double within = 0.0;
+    if (part < 0)
+    {
+        part   = qMax(0, Abs::trackAtTime(s.tracks, bookPos));
+        within = Abs::offsetWithinTrack(s.tracks, bookPos);
+    }
+    absSeedPart_   = part;
+    absSeedWithin_ = within;
+
+    const Abs::ItemDetail d = AbsClient::instance().item(qualifiedId);
+    MediaItem item;
+    item.id    = qualifiedId;          // the BOOK KEY every part token is built from, and the Recents id
+    // THE BOOK'S NAME, in the order the three sources are trustworthy. The expanded item is only
+    // cached when the listener BROWSED here; a re-open from Recents arrives with nothing fetched, and
+    // falling straight through to the first track's file name is how a re-opened book came back called
+    // "01 - One.mp3" on the first live drive of this feature — a Recents row that renamed itself.
+    item.title = d.ok && !d.item.title.isEmpty() ? d.item.title
+               : !s.title.isEmpty()              ? s.title
+               : (s.tracks.isEmpty() ? tr("Audiobook") : s.tracks.first().title);
+    item.type  = QStringLiteral("audiobook");
+    item.thumbnailUrl = AbsClient::instance().coverPath(qualifiedId);
+    if (item.thumbnailUrl.isEmpty()) item.thumbnailUrl = fallbackThumb;   // #197: a download's own cover
+    // The Recents row's path. The QUALIFIED ID and not the stream url, which carries the token: a
+    // Recents row is written to the ini, and #200 is the issue about what happens when a signed link
+    // goes in one. An id is credential-free by construction and means the same thing tomorrow.
+    item.url   = qualifiedId;
+
+    // THE PARTS — named by the server's own track titles (de-duplicated, because a part name is also
+    // the half of the part token a resume mark is keyed by) and, since #197, carrying each track's
+    // DURATION. The durations are what give a multi-file server book the whole-book position bar (#218):
+    // openRemoteAudiobook hands them to BookTimeline, which prefers them to part sizes. Still no SIZE —
+    // a play session has none, and anything put there would be read as one. Abs::bookParts is the one
+    // spelling, and probe_absclient drives it against the stub's live /play reply.
+    item.bookParts = Abs::bookParts(s.tracks);
+    const QString firstUrl = AbsClient::instance().partStreamUrl(qualifiedId, part);
+    if (firstUrl.isEmpty()) { notify(tr("That server gave no link for this part.")); return; }
+    // A single-track book takes openRemoteAudiobook's one-part path (openAudioStream), which is right:
+    // there is no queue to build and no boundary to cross. Its resume still comes from the server,
+    // because the hook below keys on the identity rather than on which path opened it.
+    openRemoteAudiobook(item, firstUrl, /*startIndexOverride*/ part);
 }
 
 // The chapter list everything that asks about chapters should be reading.
@@ -9138,8 +9158,12 @@ void MainWindow::playRemoteBookPart(const QString& token)
             reportBookPartUnavailable(tr("That part of the audiobook can't be fetched from the server."));
             return;
         }
-        mwLog(QStringLiteral("audiobook: %1 \"%2\" — minted from the audiobook server, playing %3")
-                  .arg(where, RemoteAudiobook::fileNameOfToken(token), logSafeUrl(url)));
+        mwLog(QStringLiteral("audiobook: %1 \"%2\" — %3, playing %4")
+                  .arg(where, RemoteAudiobook::fileNameOfToken(token),
+                       AbsClient::instance().isLocalSession(absBook)   // #197: a downloaded book's part is a file
+                           ? QStringLiteral("from its download on this device")
+                           : QStringLiteral("minted from the audiobook server"),
+                       logSafeUrl(url)));
         player_->play(url, {}, session_->titles().value(at));
         return;
     }

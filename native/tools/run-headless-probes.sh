@@ -4095,6 +4095,22 @@ else
   RB_AT="$HERE/../src/ui/MainWindowAbsTimeline.cpp"
   [ -f "$RB_AT" ] && [ "$(sed -E 's://.*$::' "$RB_AT" | grep -c -F 'session_->overrideResumeSeek(within);')" -eq 1 ] \
     || rb_note "absBookSeek no longer places the start inside the part it jumps to (#197): a seek to the middle of another track would play that track from its top."
+  # #197 OFFLINE LISTENING. probe_absclient pins the download plan, the credential scrub, the store-and-forward
+  # queue and the open rule against its stub; what it cannot see is the wiring -- openAbsItem asking for the
+  # downloaded copy (the one prefer-local rule) BEFORE it opens a socket, the one url minter routing a file
+  # ref to the Audiobookshelf client, and that half being wired at all.
+  rb_oai="$(awk '/^void MainWindow::openAbsItem/,/^}/' "$rb_mwt")"
+  rb_oad="$(printf '%s\n' "$rb_oai" | grep -n -F 'if (openAbsDownloaded(qualifiedId, startPart)) return;' | head -1 | cut -d: -f1)"
+  rb_oas="$(printf '%s\n' "$rb_oai" | grep -n -F 'AbsClient::instance().openSession(' | head -1 | cut -d: -f1)"
+  [ -n "$rb_oad" ] && [ -n "$rb_oas" ] && [ "$rb_oad" -lt "$rb_oas" ] \
+    || rb_note "openAbsItem does not ask for the downloaded copy before it opens the server's session (#197): a downloaded book would need the server to play, which is the one thing a download is for."
+  RB_AD="$HERE/../src/ui/MainWindowAbsDownload.cpp"
+  [ -f "$RB_AD" ] && [ "$(sed -E 's://.*$::' "$RB_AD" | grep -c -F 'AbsDownload::localManifest(qualifiedId, DownloadsStore::list())')" -ge 1 ] \
+    || rb_note "the downloaded-book open no longer asks the one prefer-local rule (AbsDownload::localManifest, which is PreferLocal) (#197): a second copy of that rule is how two doors come to disagree about which file a book plays from."
+  RB_JD="$HERE/../src/ui/MainWindowJellyfinDownload.cpp"
+  [ "$(sed -E 's://.*$::' "$RB_JD" | grep -c -F 'if (AbsDownload::isFileRef(sourceRef)) return AbsClient::instance().downloadUrlFor(sourceRef);')" -eq 1 ] \
+    && [ "$(sed -E 's://.*$::' "$RB_JD" | grep -c -F 'initAbsDownloads();')" -eq 1 ] \
+    || rb_note "the one url minter does not route an Audiobookshelf file ref to AbsClient, or the Audiobookshelf download half is not wired (#197): every book download would fail at its first byte, or finish without ever becoming a Downloaded book."
   # #432: AN ARROW PRESS ON A BOOK-SCALE BAR IS THE SKIP STEP IN BOOK SECONDS. BookTimeline::stepRuleFor and
   # stepBook hold the rule and the arithmetic and probe_booktimeline pins them (inside a part, across a boundary
   # both ways, both ends, a torrent release stopping at the part edge); what it cannot see is the wiring -- the

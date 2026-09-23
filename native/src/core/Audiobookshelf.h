@@ -140,6 +140,13 @@ QString itemPath(const QString& itemId);                           // GET, expan
 QString playPath(const QString& itemId, const QString& episodeId); // POST -> a play session
 QString progressPath(const QString& itemId, const QString& episodeId); // GET / PATCH
 QString coverPath(const QString& itemId);                          // GET (token in the query)
+// GET one of the item's FILES, as a download (#197, offline listening). The server's own route is
+// `GET /api/items/:id/file/:fileid/download` (audiobookshelf server/routers/ApiRouter.js), handled by
+// LibraryItemController.downloadLibraryFile: the same file `/file/:fileid` streams, but LOGGED as a
+// download and refused with 403 to a user without the download permission — which is the honest answer
+// to "may this account take a copy", where the streaming route would hand the bytes over regardless.
+// `ino` is the file's inode as the item's `media.audioFiles[].ino` gives it.
+QString fileDownloadPath(const QString& itemId, const QString& ino);
 
 // The login body. The password appears HERE and nowhere else in the codebase's own data: it is built at
 // the moment of the request out of what the user just typed, and the caller holds no copy.
@@ -156,6 +163,11 @@ QJsonObject progressBody(double currentTime, double duration);
 // stored, logged, or written into a queue — see RemoteAudiobook.h, whose whole argument is this one.
 QString streamUrl(const QString& root, const QString& contentUrl, const QString& token);
 QString coverUrl(const QString& root, const QString& itemId, const QString& token);
+// The download url for one file (#197). The token rides the QUERY for the stream url's reason: this url is
+// handed to DownloadManager, which is given a url and no headers that survive a restart. Audiobookshelf reads
+// the token from either place (its JWT strategy takes the Bearer header OR `?token=`). CREDENTIAL-BEARING: it
+// is minted by DownloadManager's url minter at the top of every start() and never stored — AbsDownload.h.
+QString fileDownloadUrl(const QString& root, const QString& itemId, const QString& ino, const QString& token);
 
 // ==================================================================================================
 // The payloads
@@ -228,6 +240,21 @@ struct Track
 // One chapter, in BOOK time — Audiobookshelf's chapter list spans the whole item, not one file.
 struct Chapter { double start = 0.0; double end = 0.0; QString title; };
 
+// One AUDIO FILE of a book, as the expanded item's `media.audioFiles[]` lists it (#197, offline listening).
+// Not the same thing as a Track: a track is what a play session STREAMS (its contentUrl is a route the server
+// may spell several ways), and a file is what exists on the server's disk, named by its inode — which is
+// what the download route is keyed by. Read in the server's `index` order; a file the server marks
+// `exclude` is not part of the book and is dropped here, exactly as the server drops it from its tracks.
+struct AudioFile
+{
+    int     index = 0;
+    QString ino;           // the file's inode: the one key /api/items/<id>/file/<ino>/download accepts
+    QString fileName;      // metadata.filename — the name on the server's disk, for the local copy's name
+    QString ext;           // metadata.ext, with its dot (".mp3"), or empty
+    double  duration = 0.0;
+    QString mimeType;
+};
+
 // The expanded item: its own row, its files and chapters, plus (for a podcast) its episodes. Read from
 // GET /api/items/<id>?expanded=1.
 //
@@ -243,6 +270,7 @@ struct ItemDetail
     QVector<Track>   tracks;
     QVector<Chapter> chapters;
     QVector<Episode> episodes;
+    QVector<AudioFile> files;   // #197: the book's audio files, index order, excluded ones dropped
 };
 ItemDetail readItem(const QByteArray& body);
 
@@ -273,6 +301,10 @@ struct Progress
     double currentTime = 0.0;
     double duration = 0.0;
     bool   finished = false;
+    // WHEN the server last heard where the listener is — `lastUpdate`, ms since the epoch, in the server's
+    // clock (the Media Progress schema). 0 when absent. It is what the store-and-forward queue (#197) weighs a
+    // position this device kept offline against: AbsProgressQueue.h has the rule.
+    qint64 lastUpdateMs = 0;
 };
 Progress readProgress(const QByteArray& body);
 

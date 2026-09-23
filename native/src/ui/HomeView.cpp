@@ -98,6 +98,7 @@
 #include "../browse/AudiobookCatalogs.h" // issue #139: the Authors/Narrators/Series browse over the books
 #include "../browse/AbsCatalogs.h"       // issue #197: the Audiobookshelf browse levels
 #include "../core/AbsClient.h"           // ...and the client those levels read
+#include "../core/AbsDownload.h"         // #197: is this server book downloaded (the book level's verb row)
 #include "../core/AbsServerStore.h"      // ...and the saved servers behind it
 #include "../core/AudiobookLibrary.h"    // ...and the index those builders render
 #include "../core/MusicArt.h"            // keyedCover: the ONE picture rule, shared by albums and books
@@ -2673,6 +2674,21 @@ void HomeView::selectAudiobooks()
     populateAudiobooks();
 }
 
+// #197: the Downloads rows that are WHOLE downloaded server books — each asked through the one prefer-local
+// rule (a row whose files have gone is not offered) and its manifest's completeness.
+static QVector<DownloadedItem> absDownloadedBooks()
+{
+    QVector<DownloadedItem> out;
+    const QVector<DownloadedItem> all = DownloadsStore::list();
+    for (const DownloadedItem& d : all)
+    {
+        if (!Abs::isQualified(d.key)) continue;
+        const QString manifest = AbsDownload::localManifest(d.key, all);
+        if (!manifest.isEmpty() && AbsDownload::isComplete(AbsDownload::readManifest(manifest))) out.push_back(d);
+    }
+    return out;
+}
+
 void HomeView::populateAudiobooks()
 {
     MediaCatalog cat = browse::audiobookRootCatalog(AudiobookLibrary::index(), audiobookEmptyNote(),
@@ -2685,6 +2701,10 @@ void HomeView::populateAudiobooks()
     // is an answer to "there is nothing here", so somebody whose entire collection is on a server must not
     // land on a sentence about choosing a folder with the thing they actually want below it.
     const int servers = AbsServerStore::list().size();
+    // #197: the server books on THIS device, right after the servers door — the one way to them with the
+    // server off and nothing cached. Only when there is at least one, and only whole books (the one rule).
+    const int downloaded = int(browse::absDownloadedCatalog(absDownloadedBooks()).items.size());
+    if (downloaded > 0) cat.items.insert(0, browse::absDownloadedRow(downloaded));
     if (servers > 0) cat.items.insert(0, browse::absServersRow(servers));
     showSyntheticCatalog(cat);
 }
@@ -2963,6 +2983,16 @@ void HomeView::populateAbsLevel(const QString& type, const QString& key)
         render();
     };
 
+    // ---- #197: the downloaded books — no request, the Downloads store and the disk ---------------------------
+    if (type == QLatin1String(browse::kAbsDownloadedType))
+    {
+        MediaCatalog cat = browse::absDownloadedCatalog(absDownloadedBooks());
+        if (cat.items.isEmpty())
+            cat = browse::absNoteCatalog(title, tr("No audiobooks from a server are downloaded on this device."));
+        showSyntheticCatalog(cat);
+        return;
+    }
+
     // ---- The saved servers ---------------------------------------------------------------------------
     if (type == QLatin1String(browse::kAbsServersType))
     {
@@ -3090,10 +3120,37 @@ void HomeView::populateAbsLevel(const QString& type, const QString& key)
                 showSyntheticCatalog(browse::absEpisodesCatalog(key, d.item, d.episodes, absCover()));
                 return;
             }
+            // #197: whether a copy is on this device decides the download row's verb — asked through the
+            // one prefer-local rule (AbsDownload::localManifest), the same question the open path asks.
+            const bool downloaded = !AbsDownload::localManifest(key, DownloadsStore::list()).isEmpty();
             showSyntheticCatalog(browse::absBookCatalog(key, d.item, d.tracks, d.chapters.size(),
-                                                        absCover()));
+                                                        absCover(), downloaded));
         };
         if (c.itemLoaded(key)) { render(); return; }
+        // #197: A DOWNLOADED BOOK DRAWS ITSELF FROM ITS MANIFEST when this session has not fetched it — the same
+        // rows (Play book, Remove download, the parts with their lengths), with no request, so the level works
+        // with the server off. Asked through the one prefer-local rule, as the open path asks.
+        if (type == QLatin1String(browse::kAbsBookType))
+        {
+            const QString manifest = AbsDownload::localManifest(key, DownloadsStore::list());
+            const AbsDownload::Manifest m = manifest.isEmpty() ? AbsDownload::Manifest{}
+                                                               : AbsDownload::readManifest(manifest);
+            if (m.ok)
+            {
+                Abs::Item it;
+                it.id = Abs::itemOf(key);
+                it.title = m.plan.title;
+                it.author = m.plan.author;
+                it.narrator = m.plan.narrator;
+                it.duration = m.plan.duration;
+                const QString cover = m.coverFile;
+                showSyntheticCatalog(browse::absBookCatalog(key, it, AbsDownload::localSession(m).tracks,
+                                                            int(m.plan.chapters.size()),
+                                                            [cover](const QString&) { return cover; },
+                                                            /*downloaded*/ true));
+                return;
+            }
+        }
         fetchThen([this, key, render, landed](int gen) {
             AbsClient::instance().fetchItem(key, [this, gen, render, landed](const AbsClient::Result& r) {
                 landed(gen, r, render);
@@ -3148,6 +3205,18 @@ bool HomeView::activateAbsItem(const MediaItem& it)
         { emit playAbsRequested(browse::absKeyHead(key), browse::absKeyTail(key).toInt()); return true; }
     if (it.type == QLatin1String(browse::kAbsEpisodeType))
         { emit playAbsRequested(key, -1); return true; }
+    // #197: the book's download verb. Both open a nav-kit card or a notice on the far side, so both are
+    // queued past this activation — the deferPastQmlEmission discipline (#28 / #211), as the add row above.
+    if (it.type == QLatin1String(browse::kAbsDownloadType))
+    {
+        QMetaObject::invokeMethod(this, [this, key] { emit downloadAbsRequested(key); }, Qt::QueuedConnection);
+        return true;
+    }
+    if (it.type == QLatin1String(browse::kAbsRemoveDlType))
+    {
+        QMetaObject::invokeMethod(this, [this, key] { emit removeAbsDownloadRequested(key); }, Qt::QueuedConnection);
+        return true;
+    }
 
     openAbsLevel(it.type, key, it.title);
     return true;

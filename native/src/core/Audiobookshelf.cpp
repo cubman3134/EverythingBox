@@ -160,6 +160,12 @@ QString Abs::coverPath(const QString& itemId)
     return QStringLiteral("/api/items/") + itemId + QStringLiteral("/cover");
 }
 
+QString Abs::fileDownloadPath(const QString& itemId, const QString& ino)
+{
+    if (itemId.isEmpty() || ino.isEmpty()) return QString();
+    return QStringLiteral("/api/items/") + itemId + QStringLiteral("/file/") + ino + QStringLiteral("/download");
+}
+
 QJsonObject Abs::loginBody(const QString& username, const QString& password)
 {
     QJsonObject o;
@@ -208,6 +214,17 @@ QString Abs::coverUrl(const QString& root, const QString& itemId, const QString&
 {
     if (root.isEmpty() || itemId.isEmpty()) return QString();
     QUrl u(root + coverPath(itemId));
+    QUrlQuery q;
+    if (!token.isEmpty()) q.addQueryItem(QStringLiteral("token"), token);
+    u.setQuery(q);
+    return u.toString();
+}
+
+QString Abs::fileDownloadUrl(const QString& root, const QString& itemId, const QString& ino, const QString& token)
+{
+    const QString path = fileDownloadPath(itemId, ino);
+    if (root.isEmpty() || path.isEmpty()) return QString();
+    QUrl u(root + path);
     QUrlQuery q;
     if (!token.isEmpty()) q.addQueryItem(QStringLiteral("token"), token);
     u.setQuery(q);
@@ -417,6 +434,30 @@ Abs::ItemDetail Abs::readItem(const QByteArray& body)
         d.episodes.push_back(ep);
     }
     if (!d.episodes.isEmpty()) { d.item.isPodcast = true; d.item.episodeCount = d.episodes.size(); }
+
+    // #197: THE FILES, for a download. `media.audioFiles` is the book's file list (the Book schema); each
+    // carries the inode the download route is keyed by, its own length and its name on the server's disk.
+    for (const QJsonValue& v : arrayOf(media, { QStringLiteral("audioFiles") }))
+    {
+        const QJsonObject f = v.toObject();
+        if (f.value(QStringLiteral("exclude")).toBool()) continue;   // not part of the book, by the server's word
+        AudioFile af;
+        af.index    = f.value(QStringLiteral("index")).toInt(d.files.size() + 1);
+        // A string in the schema; read a number too, because an inode written as a JSON number by some
+        // server version would otherwise be silently lost and the whole file with it.
+        const QJsonValue ino = f.value(QStringLiteral("ino"));
+        af.ino      = ino.isString() ? ino.toString()
+                    : ino.isDouble() ? QString::number(qint64(ino.toDouble())) : QString();
+        const QJsonObject meta = f.value(QStringLiteral("metadata")).toObject();
+        af.fileName = meta.value(QStringLiteral("filename")).toString();
+        af.ext      = meta.value(QStringLiteral("ext")).toString();
+        af.duration = num(f.value(QStringLiteral("duration")));
+        af.mimeType = f.value(QStringLiteral("mimeType")).toString();
+        if (af.ino.isEmpty()) continue;   // nothing the download route could be asked for
+        d.files.push_back(af);
+    }
+    std::stable_sort(d.files.begin(), d.files.end(),
+                     [](const AudioFile& a, const AudioFile& b) { return a.index < b.index; });
     return d;
 }
 
@@ -454,6 +495,7 @@ Abs::Progress Abs::readProgress(const QByteArray& body)
     p.currentTime = num(o.value(QStringLiteral("currentTime")));
     p.duration    = num(o.value(QStringLiteral("duration")));
     p.finished    = o.value(QStringLiteral("isFinished")).toBool();
+    p.lastUpdateMs = qint64(num(o.value(QStringLiteral("lastUpdate"))));   // #197: when the server heard it
     return p;
 }
 

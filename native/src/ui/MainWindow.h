@@ -642,6 +642,23 @@ private:
     // session the server answers with CARRIES its own resume position, so seeding a resume from the server
     // costs no request this open did not already have.
     void openAbsItem(const QString& qualifiedId, int startPart);
+    // The body both opens share once a session is in hand — the server's play session, or a download's
+    // manifest (#197). `bookPos` is where in the BOOK to begin when `startPart` is -1.
+    void startAbsBook(const QString& qualifiedId, const Abs::Session& s, int startPart, double bookPos,
+                      const QString& fallbackThumb);
+    // ---- #197, offline listening (MainWindowAbsDownload.cpp) ----------------------------------------------
+    // Keep this book on the device: every audio file of it through DownloadManager, one job per file, ending as
+    // ONE ordinary Downloaded book keyed by its qualified id. The token never enters a job (AbsDownload.h).
+    void downloadAbsBook(const QString& qualifiedId);
+    // Remove the downloaded copy — its files, its Downloads row and its offline-progress entry — after a
+    // nav-kit confirmation. The server's copy is not touched.
+    void removeAbsDownload(const QString& qualifiedId);
+    // TRUE when the book has a downloaded copy and it has been opened FROM DISK (the one prefer-local rule);
+    // false leaves openAbsItem to the server. Where it opens is AbsProgressQueue::pickOnOpen's decision.
+    bool openAbsDownloaded(const QString& qualifiedId, int startPart);
+    // The minter's other half and the book's completion: wired once from initJellyfinDownloads, beside the
+    // minter every ref-backed job shares, plus the startup flush of positions kept offline last session.
+    void initAbsDownloads();
     // The chapter list the player should be navigating: the SERVER'S, rebased onto the part that is open,
     // when an Audiobookshelf book is playing; mpv's own otherwise. One reader, because the sleep timer, the
     // per-book speed memory and the segment stack each ask this question and three answers would be three
