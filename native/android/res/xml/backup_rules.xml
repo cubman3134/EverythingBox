@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto Backup rules for Android 11 and older (API <= 30), read through android:fullBackupContent.
+     Issue #437: downloads/queue.json holds a resumable download's link, and on Android that link is kept as it
+     is (there is no platform secret store the app links; see native/src/core/UrlAtRest.h). With
+     android:allowBackup="true" and no rules, Auto Backup copies EVERY file under the app's files/ dir to the
+     user's cloud backup - queue.json included - so the one file the app keeps a link in left the device.
+     Excluded here and ONLY here: everything else keeps backing up exactly as before (an exclude-only rule
+     set means "all but these"). data_extraction_rules.xml is the same rule for Android 12 and later. -->
+<full-backup-content>
+    <exclude domain="file" path="downloads/queue.json" />
+</full-backup-content>

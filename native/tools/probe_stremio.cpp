@@ -16,6 +16,7 @@
 #include "AppPaths.h"
 #include "BingeStore.h"
 #include "DownloadManager.h"
+#include "UrlAtRest.h"          // #437: how a resumable link sits in queue.json on this platform
 #include "NetErrorText.h"
 #include "NetHeaderApply.h"
 #include "StreamHeaders.h"
@@ -1275,11 +1276,16 @@ int main(int argc, char** argv)
         // only by the restore-side check further down, and this line named something it did not test.
         CHECK(onDisk.contains("\"gated\":true"),
               "the value-free flag IS written, as a flag and not merely as part of the file name");
-        CHECK(onDisk.contains("127.0.0.1"), "…and the url is — the two of them are the whole record");
+        // …and the url is, as #437 lets it sit at rest: sealed with DPAPI on Windows (so not readable here at
+        // all), as it is in an owner-only file elsewhere. Either way the restart below gets it back whole.
+        CHECK(UrlAtRest::sealsAtRest() ? (onDisk.contains("\"urlp\":\"dpapi1:") && !onDisk.contains("127.0.0.1"))
+                                       : onDisk.contains("127.0.0.1"),
+              "…and the url is (sealed at rest on Windows, #437) — the two of them are the whole record");
 
         {
             DownloadManager restored;    // a restart: load() from the queue.json above
             CHECK(restored.jobs().size() == 1, "the job comes back");
+            CHECK(restored.jobs().at(0).url == url, "…with its url, unsealed on the way back in (#437)");
             CHECK(restored.jobs().at(0).headerGated, "…still flagged");
             CHECK(restored.jobs().at(0).requestHeaders.isEmpty(),
                   "…and with no headers, because they were never written");

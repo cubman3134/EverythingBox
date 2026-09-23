@@ -15,6 +15,8 @@
 //
 // NO NETWORK, AND NO REAL SERVER. Every url here is built from a fixture root and compared as a string;
 // nothing is sent. The socket half (JellyfinClient) is not linked at all.
+// (Section 9, #437, is the one exception and stays inside this process: it runs real transfers against a
+// loopback server it binds itself on 127.0.0.1, because what it asserts is what a transfer leaves behind.)
 //
 // NO CREDENTIAL IS EVER PRINTED. The fixture token is compared and searched for, never written to stdout or
 // stderr — including inside a failing CHECK, which is why every credential section asserts on a boolean
@@ -28,24 +30,39 @@
 // Prints JFDOWNLOAD-OK on success; any failure prints JFDOWNLOAD-FAIL <cond> and exits non-zero.
 #include "AppPaths.h"
 #include "DownloadManager.h"
+#include "DownloadRecipe.h"   // #437: an add-on download's re-mint recipe, as a job's sourceRef
 #include "DownloadsStore.h"
 #include "Jellyfin.h"
 #include "JellyfinDownload.h"
 #include "JellyfinServerStore.h"
 #include "OfflineProgress.h"
+#include "UrlAtRest.h"        // #437: a resumable link as it may sit in queue.json
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
 #include <QString>
 #include <QStringList>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTimer>
+#include <QUrl>
 #include <QVector>
 
 #include <cstdio>
+#include <functional>
+#include <memory>
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -779,6 +796,617 @@ static void sectionRemoveAfterWatched()
     DownloadsStore::remove(refFail);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// 9. A DOWNLOAD LINK AT REST (issue #437) — every other download's url, and where queue.json may go
+// ---------------------------------------------------------------------------------------------------------
+// §3 is about the Jellyfin family, which never had a url to keep. This is about everything else: a job whose
+// url came from an add-on (a debrid link, a stream link with a key in its query) and used to be written into
+// queue.json as it was. The rules, each asserted against the REAL manager over a REAL loopback transfer:
+//
+//   (a) a job whose source can mint the link again keeps a RECIPE and no url, and resumes through the minter
+//       (DownloadRecipe.h + DownloadManager::setAsyncUrlMinter);
+//   (b) a resumable plain job round-trips: on Windows its stored field is not the plaintext and unseals back
+//       to it (DPAPI); elsewhere the file is its owner's alone (0600);
+//   (c) an old plaintext "url" is read once and written back in today's shape;
+//   (d) a job that fails, or is cancelled, loses its query and fragment at once;
+//   (e) a re-minted link that names a different file starts the download over instead of splicing;
+//   (f) a ref-backed job (Jellyfin/Subsonic/Audiobookshelf) is exactly what it was;
+//   (g) nothing that carries files off the device carries queue.json.
+//
+// NO REAL SERVER: every url is 127.0.0.1 on a port this process bound. The fixture tokens are compared and
+// searched for, never printed — the same rule as §3.
+
+// Distinct per case, so a hit names the case. Fixtures, not credentials; still never printed.
+static const char* kTokA = "t437aaa0c0ffee11";
+static const char* kTokB = "t437bbb0c0ffee22";
+static const char* kTokC = "t437ccc0c0ffee33";
+static const char* kTokD = "t437ddd0c0ffee44";
+static const char* kTokE = "t437eee0c0ffee55";
+static const char* kTokF = "t437fff0c0ffee66";
+static const char* kTokG = "t437ggg0c0ffee77";
+
+// The bytes a fixture file holds: deterministic per name, and "other.bin" a DIFFERENT SIZE from the rest,
+// which is what (e) needs.
+static QByteArray fixtureBody(const QString& name)
+{
+    const int n = name == QStringLiteral("other.bin") ? 150000 : 200000;
+    QByteArray b(n, '\0');
+    const uint seed = qHash(name);
+    for (int i = 0; i < n; ++i) b[i] = char((i * 31 + int(seed % 251)) & 0xff);
+    return b;
+}
+
+// A loopback HTTP/1.1 file server, one response per connection.
+//   GET /f/<name>     200 with the whole file, or 206 from the offset a "Range: bytes=N-" names. A name
+//                     starting "hold-" answers its FIRST un-ranged request with half the body and then HOLDS
+//                     the connection open — a transfer caught in the middle, for Pause and Cancel to find.
+//   GET /gone/<name>  404.
+// Every request is recorded as (path, query, ranged) so a case can ask what was actually fetched.
+struct StubRequest { QString path; QString query; bool ranged = false; };
+class FileStub
+{
+public:
+    FileStub()
+    {
+        server_.listen(QHostAddress::LocalHost, 0);
+        QObject::connect(&server_, &QTcpServer::newConnection, &server_, [this] {
+            while (QTcpSocket* s = server_.nextPendingConnection())
+            {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [this, s, buf] {
+                    buf->append(s->readAll());
+                    const int end = buf->indexOf("\r\n\r\n");
+                    if (end < 0) return;
+                    const QByteArray head = buf->left(end);
+                    buf->clear();
+                    answer(s, head);
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+    }
+    quint16 port() const { return server_.serverPort(); }
+    QString base() const { return QStringLiteral("http://127.0.0.1:%1").arg(port()); }
+    const QVector<StubRequest>& requests() const { return requests_; }
+    int count(const QString& path) const
+    {
+        int n = 0;
+        for (const StubRequest& r : requests_) if (r.path == path) ++n;
+        return n;
+    }
+
+private:
+    void answer(QTcpSocket* s, const QByteArray& head)
+    {
+        const QList<QByteArray> lines = head.split('\n');
+        const QList<QByteArray> first = lines.value(0).trimmed().split(' ');
+        const QUrl target(QString::fromLatin1(first.value(1)));
+        StubRequest rq;
+        rq.path = target.path();
+        rq.query = target.query();
+        qint64 from = -1;
+        for (const QByteArray& l : lines)
+        {
+            const QByteArray t = l.trimmed();
+            if (t.toLower().startsWith("range: bytes="))
+            {
+                const QByteArray spec = t.mid(13);
+                from = spec.left(spec.indexOf('-')).toLongLong();
+                rq.ranged = true;
+            }
+        }
+        requests_.push_back(rq);
+
+        if (rq.path.startsWith(QStringLiteral("/gone/")))
+        {
+            s->write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            s->disconnectFromHost();
+            return;
+        }
+        const QString name = rq.path.section(QLatin1Char('/'), -1);
+        const QByteArray body = fixtureBody(name);
+        if (from > 0 && from < body.size())
+        {
+            const QByteArray tail = body.mid(int(from));
+            s->write("HTTP/1.1 206 Partial Content\r\nContent-Length: " + QByteArray::number(tail.size())
+                     + "\r\nContent-Range: bytes " + QByteArray::number(from) + "-"
+                     + QByteArray::number(body.size() - 1) + "/" + QByteArray::number(body.size())
+                     + "\r\nConnection: close\r\n\r\n");
+            s->write(tail);
+            s->disconnectFromHost();
+            return;
+        }
+        s->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size())
+                 + "\r\nConnection: close\r\n\r\n");
+        if (name.startsWith(QStringLiteral("hold-")) && !held_.contains(name))
+        {
+            held_.insert(name);
+            s->write(body.left(body.size() / 2));    // ...and hold: the transfer is now in the middle
+            return;
+        }
+        s->write(body);
+        s->disconnectFromHost();
+    }
+
+    QTcpServer server_;
+    QVector<StubRequest> requests_;
+    QSet<QString> held_;
+};
+
+// Run the event loop until `cond` holds, or `ms` passes. Returns whether it held.
+static bool spinUntil(const std::function<bool()>& cond, int ms = 10000)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!cond())
+    {
+        if (t.elapsed() > ms) return false;
+        QEventLoop loop;                               // wait, delivering events, a few ms at a time
+        QTimer::singleShot(5, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    return true;
+}
+
+static const DownloadJob* jobByKey(const DownloadManager& dm, const QString& key)
+{
+    for (const DownloadJob& j : dm.jobs()) if (j.key == key) return &j;
+    return nullptr;
+}
+
+static QString atRestQueuePath() { return AppPaths::dataDir() + QStringLiteral("/downloads/queue.json"); }
+
+static QByteArray atRestQueueBytes()
+{
+    QFile f(atRestQueuePath());
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+static QJsonObject atRestRecord(const QString& key)
+{
+    for (const QJsonValue& v : QJsonDocument::fromJson(atRestQueueBytes()).array())
+        if (v.toObject().value(QStringLiteral("key")).toString() == key) return v.toObject();
+    return QJsonObject();
+}
+
+static bool fileHolds(const QString& path, const QByteArray& want)
+{
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) && f.readAll() == want;
+}
+
+// The owner-only rule, POSIX only (on Windows the protection is the seal, and Qt's permission bits there
+// describe a read-only attribute, not who may read the file).
+static bool ownerOnly(const QString& path)
+{
+#ifdef Q_OS_WIN
+    Q_UNUSED(path);
+    return true;
+#else
+    const QFileDevice::Permissions p = QFileInfo(path).permissions();
+    const QFileDevice::Permissions others = QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup
+                                          | QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther;
+    return (p & others) == 0 && (p & QFileDevice::ReadOwner) && (p & QFileDevice::WriteOwner);
+#endif
+}
+
+static void sectionAtRest()
+{
+    // A clean queue: §3's Jellyfin jobs are not this section's, and a restored one would start on construction.
+    QFile::remove(atRestQueuePath());
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads/s9");
+    QDir(dir).removeRecursively();
+    QDir().mkpath(dir);
+
+    FileStub stub;
+    CHECK(stub.port() != 0);
+    const QString base = stub.base();
+    const qint64 half = fixtureBody(QStringLiteral("x")).size() / 2;
+
+    // ---- (b) a plain resumable job round-trips ------------------------------------------------------------
+    const QString tokA = QString::fromLatin1(kTokA);
+    const QString urlA = base + QStringLiteral("/f/hold-plain.bin?token=") + tokA + QStringLiteral("#frag");
+    {
+        DownloadManager dm;
+        DownloadJob j;
+        j.title = QStringLiteral("Plain");
+        j.url = urlA;
+        j.dest = dir + QStringLiteral("/hold-plain.bin");
+        j.kind = QStringLiteral("video");
+        j.key = QStringLiteral("k-plain");
+        dm.enqueue(j);
+        CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, j.key); return p && p->received >= half; }));
+        const DownloadJob* p = jobByKey(dm, j.key);
+        if (p) dm.pauseJob(p->id);
+        CHECK(p && p->state == DownloadJob::Paused);
+
+        const QByteArray bytes = atRestQueueBytes();
+        const QJsonObject rec = atRestRecord(j.key);
+        const bool fileHoldsTokA = bytes.contains(tokA.toUtf8());
+        if (UrlAtRest::sealsAtRest())
+        {
+            // WINDOWS: the stored field is not the plaintext, and it unseals back to exactly the link.
+            CHECK(!fileHoldsTokA);
+            CHECK(!bytes.contains("token="));
+            CHECK(!bytes.contains("hold-plain.bin?"));
+            CHECK(rec.value(QStringLiteral("url")).toString().isEmpty());
+            const QString sealed = rec.value(QStringLiteral("urlp")).toString();
+            CHECK(sealed.startsWith(QStringLiteral("dpapi1:")));
+            const bool unsealsToTheLink = UrlAtRest::unseal(sealed) == urlA;
+            CHECK(unsealsToTheLink);
+            // …and a seal that is not ours does not open as one.
+            CHECK(UrlAtRest::unseal(QStringLiteral("dpapi1:AAAA")).isEmpty());
+            CHECK(UrlAtRest::unseal(QStringLiteral("dpapi9:") + sealed.mid(7)).isEmpty());
+        }
+        else
+        {
+            // ELSEWHERE: kept as it is (no secret store is linked), in a file only its owner can read.
+            CHECK(fileHoldsTokA);
+            CHECK(!rec.contains(QStringLiteral("urlp")));
+        }
+        CHECK(ownerOnly(atRestQueuePath()));
+    }
+    {
+        // A RESTART, then Resume: the link comes back and the .part is continued, not restarted.
+        DownloadManager dm;
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("k-plain"));
+        CHECK(p && p->state == DownloadJob::Paused);
+        const bool linkRestored = p && p->url == urlA;
+        CHECK(linkRestored);
+        if (p) dm.resumeJob(p->id);
+        CHECK(spinUntil([&] { const DownloadJob* q = jobByKey(dm, QStringLiteral("k-plain"));
+                              return q && q->state == DownloadJob::Done; }));
+        CHECK(fileHolds(dir + QStringLiteral("/hold-plain.bin"), fixtureBody(QStringLiteral("hold-plain.bin"))));
+        CHECK(stub.count(QStringLiteral("/f/hold-plain.bin")) == 2);
+        const bool resumedRanged = !stub.requests().isEmpty() && stub.requests().last().ranged
+                                && stub.requests().last().query == QStringLiteral("token=") + tokA;
+        CHECK(resumedRanged);
+    }
+
+    // ---- (d) a failed job loses its query and fragment AT ONCE ---------------------------------------------
+    const QString tokB = QString::fromLatin1(kTokB);
+    {
+        DownloadManager dm;
+        DownloadJob j;
+        j.title = QStringLiteral("Gone");
+        j.url = base + QStringLiteral("/gone/fail.bin?token=") + tokB + QStringLiteral("#frag");
+        j.dest = dir + QStringLiteral("/fail.bin");
+        j.kind = QStringLiteral("video");
+        j.key = QStringLiteral("k-fail");
+        dm.enqueue(j);
+        CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, j.key); return p && p->state == DownloadJob::Failed; }));
+        const DownloadJob* p = jobByKey(dm, j.key);
+        // In memory, not only on disk: the token must not outlive the transfer it was issued for.
+        CHECK(p && p->url == base + QStringLiteral("/gone/fail.bin"));
+        CHECK(p && p->linkDropped);
+        CHECK(p && p->error.contains(QStringLiteral("start the download again from the item")));
+        const QByteArray bytes = atRestQueueBytes();
+        const bool fileHoldsTokB = bytes.contains(tokB.toUtf8());
+        CHECK(!fileHoldsTokB);
+        CHECK(!bytes.contains("token="));
+        CHECK(atRestRecord(j.key).value(QStringLiteral("dropped")).toBool());
+        // Retry cannot help a link without its query: it says so, and sends nothing.
+        const int asked = stub.count(QStringLiteral("/gone/fail.bin"));
+        if (p) dm.retry(p->id);
+        p = jobByKey(dm, j.key);
+        CHECK(p && p->state == DownloadJob::Failed);
+        CHECK(stub.count(QStringLiteral("/gone/fail.bin")) == asked);
+        // Starting it again from the item (a fresh enqueue of the same destination) is the way back.
+        DownloadJob again = j;
+        again.url = base + QStringLiteral("/gone/fail.bin?token=") + tokB;
+        dm.enqueue(again);
+        p = jobByKey(dm, j.key);
+        CHECK(p && !p->linkDropped);
+        CHECK(spinUntil([&] { const DownloadJob* q = jobByKey(dm, j.key); return q && q->state == DownloadJob::Failed; }));
+        CHECK(stub.count(QStringLiteral("/gone/fail.bin")) == asked + 1);
+    }
+    {
+        // …and a restart reads the dropped job back as dropped, with its sentence (the error text itself is
+        // not persisted; the flag is, and the sentence comes back with it).
+        DownloadManager dm;
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("k-fail"));
+        CHECK(p && p->state == DownloadJob::Failed && p->linkDropped);
+        CHECK(p && p->url == base + QStringLiteral("/gone/fail.bin"));
+        CHECK(p && p->error.contains(QStringLiteral("start the download again from the item")));
+        if (p) dm.removeJob(p->id);
+    }
+
+    // ---- (d) a cancelled job's link goes with it, at once -------------------------------------------------
+    const QString tokC = QString::fromLatin1(kTokC);
+    {
+        DownloadManager dm;
+        DownloadJob j;
+        j.title = QStringLiteral("Cancelled");
+        j.url = base + QStringLiteral("/f/hold-cancel.bin?token=") + tokC;
+        j.dest = dir + QStringLiteral("/hold-cancel.bin");
+        j.kind = QStringLiteral("video");
+        j.key = QStringLiteral("k-cancel");
+        dm.enqueue(j);
+        CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, j.key); return p && p->received > 0; }));
+        const bool heldWhileActive = UrlAtRest::sealsAtRest() || atRestQueueBytes().contains(tokC.toUtf8());
+        CHECK(heldWhileActive);   // (the POSIX file does hold it while it can resume: that is rule (b))
+        if (const DownloadJob* p = jobByKey(dm, j.key)) dm.cancel(p->id);
+        CHECK(jobByKey(dm, j.key) == nullptr);
+        const bool fileHoldsTokC = atRestQueueBytes().contains(tokC.toUtf8());
+        CHECK(!fileHoldsTokC);
+        CHECK(!QFileInfo::exists(j.dest + QStringLiteral(".part")));
+    }
+
+    // ---- (c) an old plaintext queue.json migrates on load ---------------------------------------------------
+    const QString tokD = QString::fromLatin1(kTokD);
+    const QString tokE = QString::fromLatin1(kTokE);
+    const QString urlD = base + QStringLiteral("/f/mig.bin?token=") + tokD;
+    {
+        QJsonArray old;
+        old.append(QJsonObject{ { QStringLiteral("id"), QStringLiteral("m-paused") },
+                                { QStringLiteral("title"), QStringLiteral("Old paused") },
+                                { QStringLiteral("url"), urlD },
+                                { QStringLiteral("ref"), QString() },
+                                { QStringLiteral("dest"), dir + QStringLiteral("/mig.bin") },
+                                { QStringLiteral("kind"), QStringLiteral("video") },
+                                { QStringLiteral("key"), QStringLiteral("k-mig") },
+                                { QStringLiteral("state"), int(DownloadJob::Paused) } });
+        old.append(QJsonObject{ { QStringLiteral("id"), QStringLiteral("m-failed") },
+                                { QStringLiteral("title"), QStringLiteral("Old failed") },
+                                { QStringLiteral("url"), base + QStringLiteral("/gone/old.bin?token=") + tokE },
+                                { QStringLiteral("ref"), QString() },
+                                { QStringLiteral("dest"), dir + QStringLiteral("/old.bin") },
+                                { QStringLiteral("kind"), QStringLiteral("video") },
+                                { QStringLiteral("key"), QStringLiteral("k-old") },
+                                { QStringLiteral("state"), int(DownloadJob::Failed) } });
+        QFile f(atRestQueuePath());
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(QJsonDocument(old).toJson(QJsonDocument::Compact));
+        f.close();
+#ifndef Q_OS_WIN
+        // A pre-#437 file was created with the process umask — world-readable on a typical desktop.
+        QFile::setPermissions(atRestQueuePath(), QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                               | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+#endif
+    }
+    {
+        DownloadManager dm;
+        const DownloadJob* paused = jobByKey(dm, QStringLiteral("k-mig"));
+        const DownloadJob* failed = jobByKey(dm, QStringLiteral("k-old"));
+        const bool pausedKeepsItsLink = paused && paused->url == urlD && paused->state == DownloadJob::Paused;
+        CHECK(pausedKeepsItsLink);
+        CHECK(failed && failed->url == base + QStringLiteral("/gone/old.bin"));
+        CHECK(failed && failed->linkDropped && failed->state == DownloadJob::Failed);
+        CHECK(failed && failed->error.contains(QStringLiteral("start the download again from the item")));
+        // Rewritten AT ONCE, by the constructor — not at whatever change next happens to save.
+        const QByteArray bytes = atRestQueueBytes();
+        const bool fileHoldsTokD = bytes.contains(tokD.toUtf8());
+        const bool fileHoldsTokE = bytes.contains(tokE.toUtf8());
+        CHECK(!fileHoldsTokE);
+        if (UrlAtRest::sealsAtRest())
+        {
+            CHECK(!fileHoldsTokD);
+            const bool migratedSealed = UrlAtRest::unseal(atRestRecord(QStringLiteral("k-mig"))
+                                                              .value(QStringLiteral("urlp")).toString()) == urlD;
+            CHECK(migratedSealed);
+        }
+        else
+        {
+            CHECK(fileHoldsTokD);
+        }
+        CHECK(ownerOnly(atRestQueuePath()));
+        dm.removeJob(QStringLiteral("m-paused"));
+        dm.removeJob(QStringLiteral("m-failed"));
+    }
+
+    // ---- (a) a re-mintable job stores no url, and resumes through the minter -------------------------------
+    const QString tokF = QString::fromLatin1(kTokF);
+    const QString tokG = QString::fromLatin1(kTokG);
+    const DownloadRecipe::Recipe recipe{ QStringLiteral("direct"), QStringLiteral("movie"),
+                                         QStringLiteral("org.fixture.provider"), QStringLiteral("meta:Rml4dHVyZQ") };
+    const QString ref = DownloadRecipe::encode(recipe);
+    {
+        // The ref is the four ids, readable back, and refuses anything shaped like a link.
+        CHECK(DownloadRecipe::isRef(ref));
+        DownloadRecipe::Recipe back;
+        CHECK(DownloadRecipe::decode(ref, &back));
+        CHECK(back.route == recipe.route && back.type == recipe.type && back.addonId == recipe.addonId
+              && back.itemId == recipe.itemId);
+        const DownloadRecipe::Recipe episode{ QStringLiteral("imdb"), QStringLiteral("series"), QString(),
+                                              QStringLiteral("tt0000001:2:3") };
+        DownloadRecipe::Recipe epBack;
+        CHECK(DownloadRecipe::decode(DownloadRecipe::encode(episode), &epBack) && epBack.itemId == episode.itemId);
+        CHECK(DownloadRecipe::encode({ QStringLiteral("direct"), QStringLiteral("movie"), QStringLiteral("a"),
+                                       QStringLiteral("https://h/x?token=y") }).isEmpty());
+        CHECK(DownloadRecipe::encode({ QStringLiteral("direct"), QStringLiteral("movie"), QStringLiteral("a"),
+                                       QStringLiteral("id?token=y") }).isEmpty());
+        CHECK(DownloadRecipe::encode({ QStringLiteral("direct"), QStringLiteral("movie"), QString(),
+                                       QStringLiteral("meta:x") }).isEmpty());   // direct names its addon
+        CHECK(!DownloadRecipe::decode(QStringLiteral("jf:0123:abcd"), nullptr));
+    }
+    const QString urlF = base + QStringLiteral("/f/hold-remint.bin?token=") + tokF;
+    QString remintId;
+    {
+        DownloadManager dm;
+        int asked = 0;
+        dm.setAsyncUrlMinter([&asked](const QString&, DownloadManager::MintDone done) { ++asked; done(QString(), {}); });
+        DownloadJob j;
+        j.title = QStringLiteral("Re-mintable");
+        j.url = urlF;
+        j.dest = dir + QStringLiteral("/hold-remint.bin");
+        j.kind = QStringLiteral("video");
+        j.key = QStringLiteral("k-remint");
+        // THE SITE's half: MainWindow::enqueueDownload binds exactly like this.
+        CHECK(DownloadRecipe::bindJob(j, recipe));
+        CHECK(j.url.isEmpty() && j.sourceRef == ref);
+        dm.enqueue(j);
+        CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, j.key); return p && p->received >= half; }));
+        // The first transfer used the link the resolve had already minted: the source was not asked again.
+        CHECK(asked == 0);
+        const DownloadJob* p = jobByKey(dm, j.key);
+        CHECK(p && p->url.isEmpty() && p->mintedUrl.isEmpty());
+        if (p) { remintId = p->id; dm.pauseJob(p->id); }
+        const QByteArray bytes = atRestQueueBytes();
+        const bool fileHoldsTokF = bytes.contains(tokF.toUtf8());
+        CHECK(!fileHoldsTokF);
+        CHECK(!bytes.contains("hold-remint.bin?"));
+        const QJsonObject rec = atRestRecord(j.key);
+        CHECK(rec.value(QStringLiteral("ref")).toString() == ref);
+        CHECK(rec.value(QStringLiteral("url")).toString().isEmpty());
+        CHECK(!rec.contains(QStringLiteral("urlp")));     // not sealed: there is nothing to seal
+    }
+    {
+        // A restart. The job waits for its minter; installed, the minter is asked with the REF and answers
+        // later (a real re-mint is a network round trip); the fresh link resumes the .part.
+        DownloadManager dm;
+        const DownloadJob* p = jobByKey(dm, QStringLiteral("k-remint"));
+        CHECK(p && p->state == DownloadJob::Paused && p->url.isEmpty() && p->sourceRef == ref);
+        QStringList refsAsked;
+        const QString urlG = base + QStringLiteral("/f/hold-remint.bin?token=") + tokG;
+        dm.setAsyncUrlMinter([&refsAsked, urlG](const QString& r, DownloadManager::MintDone done) {
+            refsAsked << r;
+            QTimer::singleShot(0, [done, urlG] { done(urlG, {}); });
+        });
+        dm.resumeJob(remintId);
+        CHECK(spinUntil([&] { const DownloadJob* q = jobByKey(dm, QStringLiteral("k-remint"));
+                              return q && q->state == DownloadJob::Done; }));
+        CHECK(refsAsked == QStringList{ ref });
+        CHECK(fileHolds(dir + QStringLiteral("/hold-remint.bin"), fixtureBody(QStringLiteral("hold-remint.bin"))));
+        const bool resumedOnTheFreshLink = !stub.requests().isEmpty() && stub.requests().last().ranged
+                                        && stub.requests().last().query == QStringLiteral("token=") + tokG;
+        CHECK(resumedOnTheFreshLink);
+        const bool fileHoldsTokG = atRestQueueBytes().contains(tokG.toUtf8());
+        CHECK(!fileHoldsTokG);
+    }
+
+    // ---- (e) a re-minted link naming a DIFFERENT file starts over ------------------------------------------
+    {
+        const DownloadRecipe::Recipe other{ QStringLiteral("imdb"), QStringLiteral("movie"), QString(),
+                                            QStringLiteral("tt0000002") };
+        DownloadJob j;
+        j.title = QStringLiteral("Another release");
+        j.url = base + QStringLiteral("/f/hold-first.bin?token=") + tokF;
+        j.dest = dir + QStringLiteral("/swap.bin");
+        j.kind = QStringLiteral("video");
+        j.key = QStringLiteral("k-swap");
+        CHECK(DownloadRecipe::bindJob(j, other));
+        QString swapId;
+        {
+            DownloadManager dm;
+            dm.enqueue(j);
+            CHECK(spinUntil([&] { const DownloadJob* p = jobByKey(dm, j.key); return p && p->received >= half; }));
+            if (const DownloadJob* p = jobByKey(dm, j.key)) { swapId = p->id; dm.pauseJob(p->id); }
+        }
+        DownloadManager dm;
+        int asked = 0;
+        const QString otherUrl = base + QStringLiteral("/f/other.bin?token=") + tokG;
+        dm.setAsyncUrlMinter([&asked, otherUrl](const QString&, DownloadManager::MintDone done) {
+            ++asked;
+            done(otherUrl, {});
+        });
+        dm.resumeJob(swapId);
+        CHECK(spinUntil([&] { const DownloadJob* q = jobByKey(dm, j.key); return q && q->state == DownloadJob::Done; }));
+        // Not a splice of two files: the whole of the one the source now serves, fetched from the top.
+        CHECK(fileHolds(dir + QStringLiteral("/swap.bin"), fixtureBody(QStringLiteral("other.bin"))));
+        CHECK(asked == 2);                                          // the resume, then the restart
+        CHECK(stub.count(QStringLiteral("/f/other.bin")) == 2);    // a ranged ask, then the whole file
+    }
+
+    // ---- (f) a ref-backed job is exactly what it was --------------------------------------------------------
+    {
+        DownloadManager dm;
+        QStringList syncAsked;
+        int asyncAsked = 0;
+        dm.setUrlMinter([&syncAsked](const QString& r) { syncAsked << r; return QString(); });
+        dm.setAsyncUrlMinter([&asyncAsked](const QString&, DownloadManager::MintDone done) {
+            ++asyncAsked;
+            done(QString(), {});
+        });
+        DownloadJob j;
+        j.title = QStringLiteral("Server film");
+        j.sourceRef = qual(kSrvA, kItem2);
+        j.dest = dir + QStringLiteral("/server.mkv");
+        j.kind = QStringLiteral("video");
+        j.key = j.sourceRef;
+        dm.enqueue(j);
+        // The SYNCHRONOUS minter, as before; never the recipe one.
+        CHECK(syncAsked == QStringList{ j.sourceRef });
+        CHECK(asyncAsked == 0);
+        const DownloadJob* p = jobByKey(dm, j.key);
+        CHECK(p && p->state == DownloadJob::Failed && !p->linkDropped);
+        CHECK(p && p->error.startsWith(QStringLiteral("the server this was downloaded from isn't set up")));
+        const QJsonObject rec = atRestRecord(j.key);
+        CHECK(rec.value(QStringLiteral("ref")).toString() == j.sourceRef);
+        CHECK(rec.contains(QStringLiteral("url")) && rec.value(QStringLiteral("url")).toString().isEmpty());
+        CHECK(!rec.contains(QStringLiteral("urlp")));
+        CHECK(!rec.contains(QStringLiteral("dropped")));
+        if (p) dm.removeJob(p->id);
+    }
+
+    QDir(dir).removeRecursively();
+}
+
+// (g) NOTHING THAT CARRIES FILES OFF THE DEVICE CARRIES queue.json. Read from the source tree, because each
+// carrier is configuration or a list of paths rather than behaviour a headless run can exercise:
+//   * Android Auto Backup and device-to-device transfer (android:allowBackup="true", no rules until #437,
+//     so the whole files/ dir — queue.json included — went to the user's cloud backup);
+//   * CloudSync's settings bundle, which zips named data-folder subdirectories;
+//   * any other source that names the file at all.
+static QByteArray readSource(const QString& rel)
+{
+    QFile f(QStringLiteral(EB_JFDOWNLOAD_NATIVE_DIR) + QLatin1Char('/') + rel);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+static void sectionNoCarrier()
+{
+    // The rules name the file by its path under the data folder, which is where the manager keeps it.
+    CHECK(QDir(AppPaths::dataDir()).relativeFilePath(atRestQueuePath()) == QStringLiteral("downloads/queue.json"));
+    const QByteArray exclude = "<exclude domain=\"file\" path=\"downloads/queue.json\" />";
+
+    const QByteArray manifest = readSource(QStringLiteral("android/AndroidManifest.xml"));
+    CHECK(!manifest.isEmpty());
+    CHECK(manifest.contains("android:fullBackupContent=\"@xml/backup_rules\""));
+    CHECK(manifest.contains("android:dataExtractionRules=\"@xml/data_extraction_rules\""));
+    const QByteArray legacy = readSource(QStringLiteral("android/res/xml/backup_rules.xml"));
+    CHECK(legacy.count(exclude) == 1);
+    CHECK(legacy.contains("<full-backup-content>"));
+    CHECK(!legacy.contains("<include"));   // exclude-only: everything else backs up as before
+    const QByteArray modern = readSource(QStringLiteral("android/res/xml/data_extraction_rules.xml"));
+    CHECK(modern.count(exclude) == 2);
+    const int cloud = modern.indexOf("<cloud-backup>"), transfer = modern.indexOf("<device-transfer>");
+    CHECK(cloud >= 0 && transfer > cloud);
+    CHECK(modern.indexOf(exclude, cloud) < transfer && modern.indexOf(exclude, transfer) > transfer);
+    CHECK(!modern.contains("<include"));
+
+    // CloudSync's bundle: every directory it zips is one of the two it has always zipped.
+    const QString cloudSync = QString::fromUtf8(readSource(QStringLiteral("src/core/CloudSync.cpp")));
+    CHECK(!cloudSync.isEmpty());
+    const QRegularExpression call(QStringLiteral("zipAddDir\\(z,[^;]*QStringLiteral\\(\"([^\"]*)\"\\)\\s*[,)]"));
+    QStringList zipped;
+    for (auto m = call.globalMatch(cloudSync); m.hasNext();) zipped << m.next().captured(1);
+    zipped.removeDuplicates();
+    zipped.sort();
+    CHECK(zipped == (QStringList{ QStringLiteral("addons"), QStringLiteral("themes") }));
+
+    // No source but the manager names the file: a new carrier would have to.
+    QStringList namers;
+    QDirIterator it(QStringLiteral(EB_JFDOWNLOAD_NATIVE_DIR) + QStringLiteral("/src"),
+                    { QStringLiteral("*.cpp"), QStringLiteral("*.h") }, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString path = it.next();
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly) && f.readAll().contains("queue.json\"")) namers << QFileInfo(path).fileName();
+    }
+    CHECK(namers == QStringList{ QStringLiteral("DownloadManager.cpp") });
+
+    // (a)'s SITE. bindJob is held to account above against the real manager; this pins that the add-on
+    // download site still calls it with the recipe Recents uses, since MainWindow cannot be linked here.
+    const QString mw = QString::fromUtf8(readSource(QStringLiteral("src/ui/MainWindow.cpp")));
+    const int at = mw.indexOf(QStringLiteral("void MainWindow::enqueueDownload(const MediaItem& item)"));
+    const int end = at < 0 ? -1 : mw.indexOf(QStringLiteral("dm_->enqueue(j);"), at);
+    CHECK(at >= 0 && end > at);
+    const QString site = (at >= 0 && end > at) ? mw.mid(at, end - at) : QString();
+    CHECK(site.contains(QStringLiteral("applyRemintRecipe(recipe, item);")));
+    CHECK(site.contains(QStringLiteral("DownloadRecipe::bindJob(j,")));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -802,6 +1430,10 @@ int main(int argc, char** argv)
     // LAST, and deliberately after the credential scan in §3: this is the only section that creates and
     // destroys real files, and §3 walks the whole data dir asserting what is in it.
     sectionRemoveAfterWatched();
+    // #437, after everything above: §9 runs real transfers over a loopback server with an event loop, and
+    // starts from an empty queue.json of its own.
+    sectionAtRest();
+    sectionNoCarrier();
 
     if (failures) { std::fprintf(stderr, "JFDOWNLOAD-FAIL %d check(s)\n", failures); return 1; }
     std::printf("JFDOWNLOAD-OK\n");

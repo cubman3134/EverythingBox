@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ (API >= 31) backup and device-to-device transfer rules, read through
+     android:dataExtractionRules. Issue #437: see backup_rules.xml beside this file - the same single
+     exclusion, for BOTH ways an Android device carries app data off itself: the cloud backup and a
+     device-to-device transfer. Exclude-only, so nothing else changes. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="downloads/queue.json" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="downloads/queue.json" />
+    </device-transfer>
+</data-extraction-rules>
