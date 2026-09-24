@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.319 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.320 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -678,6 +678,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TrickplayIdleWalk.cpp src/core/TrickplayIdleWalk.h
         src/core/LibraryScanActivity.h # "a library scan is running" -- one of that predicate's inputs
         src/core/CastManager.cpp  src/core/CastManager.h
+        src/core/CastFileServer.cpp src/core/CastFileServer.h # #72: a local file served for the length of its cast
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
         src/core/SingleFlight.h   # ensureValidToken's one-refresh-many-waiters queue (probe_trakt §12)
@@ -980,6 +981,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowTimelineMarks.cpp
         src/ui/TimelineMarks.h   # the pure time -> pixel geometry both bars lay their marks out with
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowCast.cpp                          # casting a local file: the MainWindow half (#72)
         src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
@@ -4063,6 +4065,20 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PendingPush.cpp src/core/PendingPush.h)
     target_include_directories(probe_quitbudget PRIVATE src src/core src/addons ${EB_SECRETS_GEN_DIR})
     target_link_libraries(probe_quitbudget PRIVATE Qt6::Core Qt6::Network)
+
+    # Casting a local file (issue #72): the on-demand, single-file HTTP server a Chromecast or DLNA renderer
+    # fetches from, over a real loopback socket with a generated fixture -- the Content-Type table, the range
+    # arithmetic (206/416, multi-range -> 200), the token path and every path that must be 404, GET/HEAD-only,
+    # the bind rule and the interface choice over FAKE interface lists, revoke and stop, and a quit with a
+    # download in flight inside the #442 budget. CastManager comes along so castLocalFile is driven against a
+    # fake DLNA renderer on loopback: the url it is handed serves the file, and stopCasting closes it.
+    add_executable(probe_castserver tools/probe_castserver.cpp
+        src/core/CastFileServer.cpp src/core/CastFileServer.h
+        src/core/CastManager.cpp    src/core/CastManager.h
+        src/core/PlayOnDevice.cpp   src/core/PlayOnDevice.h
+        src/core/QuitBudget.h)
+    target_include_directories(probe_castserver PRIVATE src src/core)
+    target_link_libraries(probe_castserver PRIVATE Qt6::Core Qt6::Network)
 
     # The video player's touch gesture recogniser (issue #162): the half-screen split, the thirds, the seek
     # arithmetic and its cancel-by-returning rule, the OS edge band, the double-tap window, the long-press

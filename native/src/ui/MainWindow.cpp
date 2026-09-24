@@ -81,6 +81,7 @@
 #include "../core/SubtitleCache.h"
 #include "../core/BingeStore.h"
 #include "../core/CastManager.h"
+#include "../core/CastFileServer.h"   // #72: CastServe::offerFor, what the cast picker may offer
 #include "../core/TraktClient.h"
 #include "../core/AniListTracker.h"  // issue #156: the AniList tracker (increment 1)
 #include "../core/MyAnimeListTracker.h"  // ...and MyAnimeList behind the same seam (increment 2)
@@ -732,6 +733,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         notify(tr("Casting to %1.").arg(name), 4000); });
     connect(castMgr_, &CastManager::castError, this, [this](const QString& msg) { notify(msg, kFeedbackLong); });
     connect(castMgr_, &CastManager::castStopped, this, [this] { notify(tr("Stopped casting."), 3000); });
+    wireLocalFileCasting();   // #72 (MainWindowCast.cpp)
 
     subFetcher_ = new SubtitleFetcher(this);
     connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
@@ -17365,12 +17367,14 @@ void MainWindow::showCastMenu(QWidget* anchor)
     // and resolve their own stream, so they work for sources a Chromecast cannot be given at all.
     playOnAddCastMenuRows(&menu);
 
-    if (castUrl_.isEmpty() || !(castUrl_.startsWith(QStringLiteral("http"))))
+    // #72: a local video file is castable too — CastManager serves it for the length of the cast.
+    const CastServe::Offer offer = CastServe::offerFor(castUrl_, castHeaderGated_, castLocalPath());
+    if (offer == CastServe::Offer::NothingCastable)
     {
         QAction* n = menu.addAction(tr("Nothing castable is playing"));
         n->setEnabled(false);
     }
-    else if (castHeaderGated_)
+    else if (offer == CastServe::Offer::HeaderGated)
     {
         // Same limit as the external player: the device fetches the URL itself, and the headers its host
         // requires cannot travel in a cast request. Say so rather than offering a cast that ends in a black
@@ -17389,14 +17393,11 @@ void MainWindow::showCastMenu(QWidget* anchor)
     {
         const QString icon = d.type == CastDevice::Chromecast ? QStringLiteral("📺  ") : QStringLiteral("📡  ");
         QAction* a = menu.addAction(icon + d.name);
-        const bool ready = !castUrl_.isEmpty() && castUrl_.startsWith(QStringLiteral("http"))
-                           && !castHeaderGated_;   // the device cannot carry this source's headers
+        // HeaderGated stays disabled: the device cannot carry this source's headers.
+        const bool ready = offer == CastServe::Offer::RemoteUrl || offer == CastServe::Offer::LocalFile;
         a->setEnabled(ready);
         const CastDevice dev = d;
-        connect(a, &QAction::triggered, this, [this, dev] {
-            player_->stop();                         // hand playback to the device; free the local decoder
-            castMgr_->cast(dev, castUrl_, castTitle_, castMime_);
-        });
+        connect(a, &QAction::triggered, this, [this, dev] { castTo(dev); });   // MainWindowCast.cpp
     }
 
     const QSize sh = menu.sizeHint();

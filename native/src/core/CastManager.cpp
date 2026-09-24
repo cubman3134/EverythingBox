@@ -1,4 +1,6 @@
 #include "CastManager.h"
+#include "CastFileServer.h" // issue #72: a local file is served for the length of its cast
+#include "LogSafeText.h"    // ...and its URL is logged without the token
 #include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 
 #include <QUdpSocket>
@@ -16,6 +18,9 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QCoreApplication>
+#include <QFileInfo>
+#include <QtDebug>
 
 namespace {
 constexpr const char* kSsdpAddr = "239.255.255.250";
@@ -85,9 +90,13 @@ QString xmlEscape(const QString& s)
 CastManager::CastManager(QObject* parent) : QObject(parent)
 {
     nam_ = new QNetworkAccessManager(this);
+    // #72 / #442: quitting ends any local-file serving at once (CastFileServer also stops itself on quit; this
+    // one runs first, since it was connected first, so the stop is logged).
+    if (QCoreApplication::instance())
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] { endFileServing(); });
 }
 
-CastManager::~CastManager() { ccTeardown(); }
+CastManager::~CastManager() { ccTeardown(); endFileServing(); }
 
 void CastManager::addOrUpdate(const CastDevice& d)
 {
@@ -105,8 +114,24 @@ void CastManager::addOrUpdate(const CastDevice& d)
     emit devicesChanged();
 }
 
+// A TEST SEAM, and only that. With EB_UITEST=1 and EB_CAST_TEST_RENDERER set to a LOOPBACK device-description
+// url, discovery is that one description and nothing else: no SSDP or mDNS query leaves the machine, so a live
+// check of casting against a fake renderer touches no other device on the network. Ignored unless both are set
+// and the url's host is a loopback address, so it cannot point a real session anywhere.
+QString CastManager::testRendererUrl()
+{
+    if (qEnvironmentVariableIntValue("EB_UITEST") != 1) return QString();
+    const QString v = qEnvironmentVariable("EB_CAST_TEST_RENDERER");
+    const QUrl u(v);
+    if (v.isEmpty() || !u.isValid() || u.scheme() != QStringLiteral("http")) return QString();
+    if (!QHostAddress(u.host()).isLoopback()) return QString();
+    return v;
+}
+
 void CastManager::startDiscovery()
 {
+    const QString fake = testRendererUrl();
+    if (!fake.isEmpty()) { fetchDlnaDescription(fake); return; }
     // Devices persist across calls (addOrUpdate dedups), so re-issuing queries just refreshes/extends the list
     // rather than wiping it — callers can prime discovery when playback starts and again when the menu opens.
     if (!ssdp_)
@@ -277,7 +302,10 @@ void CastManager::dlnaSoap(const QString& action, const QString& xmlBody)
     connect(r, &QNetworkReply::finished, this, [this, r, action] {
         r->deleteLater();
         if (r->error() != QNetworkReply::NoError && action == QStringLiteral("SetAVTransportURI"))
+        {
+            endFileServing();   // #72: the renderer will never fetch it, so nothing should be serving it
             emit castError(tr("The device rejected the stream (%1).").arg(NetErrorText::forReply(r)));
+        }
     });
 }
 
@@ -414,6 +442,7 @@ void CastManager::ccConnectAndLoad(const CastDevice& d, const QString& url, cons
     connect(cc_, &QSslSocket::readyRead, this, &CastManager::ccOnReadyRead);
     connect(cc_, &QSslSocket::sslErrors, cc_, [this](const QList<QSslError>&) { if (cc_) cc_->ignoreSslErrors(); });
     connect(cc_, &QAbstractSocket::errorOccurred, this, [this] {
+        endFileServing();   // #72: the session is over, so the file it was fetching stops being served
         emit castError(tr("Couldn't reach the Chromecast."));
         casting_ = false; emit castStopped();
     });
@@ -506,6 +535,8 @@ void CastManager::ccTeardown()
 // ---------------------------------------------------------------- dispatch ----
 void CastManager::cast(const CastDevice& device, const QString& url, const QString& title, const QString& mime)
 {
+    // #72: any other cast replaces a local-file cast, and the file stops being served the moment it does.
+    if (files_ && files_->isServing() && QUrl(url) != files_->url()) endFileServing();
     active_ = device;
     castingName_ = device.name;
     if (device.type == CastDevice::Chromecast)
@@ -537,6 +568,7 @@ void CastManager::cast(const CastDevice& device, const QString& url, const QStri
 
 void CastManager::stopCasting()
 {
+    endFileServing();   // #72: first, so the token is dead before the device is even told to stop
     if (active_.type == CastDevice::Chromecast) ccTeardown();
     else if (!active_.controlUrl.isEmpty())
         dlnaSoap(QStringLiteral("Stop"), QStringLiteral(
@@ -545,4 +577,58 @@ void CastManager::stopCasting()
     casting_ = false;
     castingName_.clear();
     emit castStopped();
+}
+
+// ---------------------------------------------------------------- casting a local file (#72) ----
+// Everything is checked BEFORE anything is touched: a target no LAN interface reaches, or a file that is not
+// there, leaves a cast already running exactly as it was.
+bool CastManager::castLocalFile(const CastDevice& device, const QString& filePath, const QString& title)
+{
+    const QFileInfo fi(filePath);
+    const QString name = fi.fileName();
+    const QHostAddress target(device.host);
+    const QHostAddress bind = CastServe::chooseBindAddress(CastServe::systemInterfaces(), target,
+                                                           CastServe::routeHintFor(target));
+    if (bind.isNull())
+    {
+        qInfo().noquote() << QStringLiteral("cast: no LAN interface reaches %1; not serving \"%2\"")
+                                 .arg(device.name, name);
+        emit castError(tr("No network connection here reaches %1, so this file can't be cast to it.")
+                           .arg(device.name));
+        return false;
+    }
+    if (!fi.isFile() || !fi.isReadable())
+    {
+        qInfo().noquote() << QStringLiteral("cast: \"%1\" is not a readable file; not serving it").arg(name);
+        emit castError(tr("This file can't be read, so it can't be cast."));
+        return false;
+    }
+    if (!files_) files_ = new CastFileServer(this);
+    QString err;
+    if (!files_->serve(fi.absoluteFilePath(), bind, &err))
+    {
+        endFileServing();
+        qInfo().noquote() << QStringLiteral("cast: couldn't serve \"%1\": %2").arg(name, err);
+        emit castError(tr("Couldn't share this file with %1 (%2).").arg(device.name, err));
+        return false;
+    }
+    const QUrl url = files_->url();
+    // The url carries the token, so only its log-safe form is written: scheme://host:port/…/<file name>.
+    qInfo().noquote() << QStringLiteral("cast: serving \"%1\" to %2 at %3")
+                             .arg(name, device.name, LogSafeText::url(url.toString()));
+    cast(device, url.toString(QUrl::FullyEncoded), title.isEmpty() ? fi.completeBaseName() : title,
+         QString::fromLatin1(CastServe::contentTypeFor(name)));
+    return true;
+}
+
+bool CastManager::isServingFile() const { return files_ && files_->isServing(); }
+QString CastManager::servedFilePath() const { return isServingFile() ? files_->filePath() : QString(); }
+QUrl CastManager::servedUrl() const { return isServingFile() ? files_->url() : QUrl(); }
+
+void CastManager::endFileServing()
+{
+    if (!files_ || !files_->isListening()) return;
+    const QString name = QFileInfo(files_->filePath()).fileName();
+    files_->stop();   // synchronous: the token is dead and the port closed when this returns
+    qInfo().noquote() << QStringLiteral("cast: stopped serving \"%1\"").arg(name);
 }
