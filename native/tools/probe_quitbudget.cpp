@@ -6,9 +6,10 @@
 //
 // What this probe pins:
 //   A. POOL FETCHES END ON QUIT. Three add-on http calls (AddonContext::httpGet, the call that held the app open)
-//      and one BoundedFetch::get are in flight on a pool, each connected to the stalled server. begin() plus
-//      drain() leave the pool idle inside QuitBudget::kPoolMs. Every call answered as a failure, none retried
-//      (the server saw no new connection afterwards), and a task still queued never started.
+//      and one BoundedFetch::get are in flight on a pool, each connected to the stalled server. drain(), which
+//      begins the quit itself, leaves the pool idle inside QuitBudget::kPoolMs. Every call answered as a
+//      failure, none retried (the server saw no new connection afterwards), and a task still queued never
+//      started.
 //      A loop armed after the quit began is never entered.
 //   B. THE QUIT NETWORK BUDGET. QuitFlush runs a fast job and a job stalled on the server under one budget. The
 //      completion arrives once, POSTED (never inline from run()), no later than the decided 1.5 s budget plus
@@ -18,6 +19,11 @@
 //   C. THE EXIT GATE. In a child process, a pool task that ignores every cancel (a 30 s sleep) cannot hold the
 //      exit: ExitGate::drain gives up after kPoolMs and the gate ends the process with the event loop's code.
 //      With an idle pool the gate stands aside and the process returns normally.
+//   D. THE DRAIN ORDER (#445). The pool's queue is cleared BEFORE the quit frees its threads, so a task still
+//      queued at the exit never starts. Section A caught it only by luck (once, on CI), so D loops it: 200
+//      times through ExitGate::drain, and 200 more with main.cpp's aboutToQuit begin(pool) first. The #442
+//      order (begin, then clear) lets a queued task start on every one of the 200 iterations; this order on
+//      none.
 // What it cannot see: that main.cpp and MainWindow::closeEvent use these. The release workflow's #409 SIGTERM
 // check and the Windows close-to-exit timings in the #442 report are the end-to-end evidence for that.
 //
@@ -44,6 +50,7 @@
 #include <QTcpSocket>
 #include <QThread>
 #include <QThreadPool>
+#include <QTimer>
 
 #include <atomic>
 #include <cstdio>
@@ -84,6 +91,78 @@ static void pumpUntil(const std::function<bool()>& done, int maxMs)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         QThread::msleep(5);
     }
+}
+
+// ---- D: the drain order (#445) -----------------------------------------------------------------------------
+// Every pool thread is busy with a task that only the quit can end, and more tasks wait in the queue behind them.
+// Most of the busy tasks wait on a Guard-armed loop, like a fetch does. A few poll QuitBudget::quitting(), like
+// AddonContext does between attempts; they see the flag the moment begin() sets it, before begin() has finished
+// posting to the loops, and they free their threads at once. So if the quit begins before the queue is cleared,
+// a freed thread takes a queued task almost every time. Cleared first, the queue is empty before anything can
+// end, and no queued task can ever start, however the threads are scheduled.
+static constexpr int kOrderingIterations = 200;
+static constexpr int kGuardedTasks       = 6;
+static constexpr int kPollingTasks       = 2;
+static constexpr int kQueuedTasks        = 8;
+static constexpr int kTaskFallbackMs     = 5000;   // a task the quit never reaches still ends, so the probe fails
+                                                   // instead of hanging
+
+static void quietQuitLog(QtMsgType type, const QMessageLogContext&, const QString& msg)
+{
+    if (msg.startsWith(QStringLiteral("quit: thread pool idle"))) return;   // one per iteration: noise
+    std::fprintf(stderr, "%s%s\n", type == QtInfoMsg ? "" : "warning: ", qPrintable(msg));
+}
+
+// One quit sequence on a fresh pool, through the app's own exit path. With `hookFirst` the quit begins the way
+// aboutToQuit begins it in the app, before the gate drains. Returns how many queued tasks started.
+static int orderingIteration(bool hookFirst)
+{
+    QuitBudget::resetForTesting();
+    QThreadPool pool;
+    pool.setMaxThreadCount(kGuardedTasks + kPollingTasks);
+    std::atomic<int> busy{ 0 }, queuedRan{ 0 };
+    for (int i = 0; i < kGuardedTasks; ++i)
+        pool.start([&] {
+            QEventLoop loop;
+            QTimer::singleShot(kTaskFallbackMs, &loop, &QEventLoop::quit);
+            const QuitBudget::Guard guard(loop);
+            ++busy;
+            if (!guard.quitting()) loop.exec();
+        });
+    for (int i = 0; i < kPollingTasks; ++i)
+        pool.start([&] {
+            ++busy;
+            QElapsedTimer t;
+            t.start();
+            while (!QuitBudget::quitting() && t.elapsed() < kTaskFallbackMs) QThread::yieldCurrentThread();
+        });
+    for (int i = 0; i < kQueuedTasks; ++i)
+        pool.start([&] { ++queuedRan; });   // every thread is taken: these wait in the queue
+
+    QElapsedTimer t;
+    t.start();
+    while (busy < kGuardedTasks + kPollingTasks && t.elapsed() < kTaskFallbackMs) QThread::yieldCurrentThread();
+    CHECK(busy == kGuardedTasks + kPollingTasks);
+    CHECK(queuedRan == 0);
+
+    if (hookFirst) QuitBudget::begin(&pool);   // main.cpp's aboutToQuit hook, with the global pool
+    {
+        QuitBudget::ExitGate gate;
+        gate.drain(9, &pool);   // a gate that failed to drain would end the probe with code 9 as it goes
+        CHECK(gate.drained());
+    }
+    pool.waitForDone();
+    return queuedRan.load();
+}
+
+static int orderingRuns(int iterations, bool hookFirst)
+{
+    const QtMessageHandler previous = qInstallMessageHandler(quietQuitLog);
+    int leaked = 0;
+    for (int i = 0; i < iterations; ++i)
+        if (orderingIteration(hookFirst) > 0) ++leaked;
+    qInstallMessageHandler(previous);
+    return leaked;
 }
 
 // ---- C: the child process ----------------------------------------------------------------------------------
@@ -156,8 +235,7 @@ int main(int argc, char** argv)
 
         QElapsedTimer t;
         t.start();
-        QuitBudget::begin();
-        const bool drained = QuitBudget::drain(&pool, QuitBudget::kPoolMs);
+        const bool drained = QuitBudget::drain(&pool, QuitBudget::kPoolMs);   // begins the quit itself (#445)
         const qint64 ms = t.elapsed();
         std::printf("A: pool drained=%d in %lld ms (budget %d ms)\n", drained ? 1 : 0, (long long)ms,
                     QuitBudget::kPoolMs);
@@ -184,6 +262,20 @@ int main(int argc, char** argv)
         CHECK(QuitBudget::exec(late));
         CHECK(lt.elapsed() < 100);
         pool.waitForDone(60000);   // RED builds only: let a stuck fetch give up before the pool is destroyed
+    }
+
+    // ---- D: the drain order, looped (#445) -------------------------------------------------------------------
+    {
+        QElapsedTimer t;
+        t.start();
+        const int leaked = orderingRuns(kOrderingIterations, false);
+        std::printf("D: exit gate drain, %d iterations in %lld ms: %d let a queued task start\n",
+                    kOrderingIterations, (long long)t.restart(), leaked);
+        CHECK(leaked == 0);
+        const int hookLeaked = orderingRuns(kOrderingIterations, true);
+        std::printf("D: aboutToQuit hook, then exit gate drain, %d iterations in %lld ms: %d let a queued task "
+                    "start\n", kOrderingIterations, (long long)t.elapsed(), hookLeaked);
+        CHECK(hookLeaked == 0);
     }
 
     // ---- B: the quit network budget -------------------------------------------------------------------------

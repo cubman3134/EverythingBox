@@ -46,7 +46,7 @@
 #include "core/QuitBudget.h"   // issue #442: the exit waits on the thread pool for a bounded time, never a fetch
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.320";
+static constexpr const char* kAppVersion = "0.6.321";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -220,7 +220,9 @@ int main(int argc, char** argv)
     // destructor waits on the global thread pool with no limit. aboutToQuit ends every add-on fetch the pool is
     // waiting on (QuitBudget.h); the gate then gives the pool a bounded wait once the event loop has returned.
     QuitBudget::ExitGate exitGate;
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, [] { QuitBudget::begin(); });
+    // #445: begin(pool) drops the global pool's queued tasks before the quit frees its threads, so nothing queued
+    // behind the catalog fetches starts inside the exit window.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [] { QuitBudget::begin(QThreadPool::globalInstance()); });
     // EB_NO_SYSPROXY=1 (diagnostics): skip Windows system-proxy resolution for outgoing requests. Used to
     // attribute per-request GUI stalls to the synchronous WPAD/WinHTTP proxy query Qt runs per reply.
     if (qEnvironmentVariableIntValue("EB_NO_SYSPROXY") == 1)

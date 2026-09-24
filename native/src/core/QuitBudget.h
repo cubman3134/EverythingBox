@@ -13,7 +13,8 @@
 //   * begin() marks the process as quitting. It runs on aboutToQuit. Every synchronous network wait that can run
 //     on a pool thread arms its loop with a Guard (or calls exec() below); begin() ends each armed loop at once,
 //     and the caller then abandons its request instead of retrying. Nothing is sent on the strength of it: the
-//     work was a fetch for a screen that is closing.
+//     work was a fetch for a screen that is closing. Ending those waits frees pool threads, so the pool's queue
+//     is cleared BEFORE the quit begins (issue #445): begin(pool) and drain() do both, in that order.
 //   * ExitGate is the pool's timeout. After the event loop ends, main() drains the global pool: tasks that have
 //     not started are dropped, and the running ones get kPoolMs to notice the cancel and return. A task that
 //     still has not returned when the window has been torn down is abandoned to the process exit: settings
@@ -88,6 +89,16 @@ inline void begin()
         QMetaObject::invokeMethod(loop, &QEventLoop::quit, Qt::QueuedConnection);
 }
 
+// The same, for a pool whose threads the quit is about to free (issue #445). The pool's queued tasks are dropped
+// FIRST: begin() ends the pool's waits, and a thread that comes free while the queue still holds work starts the
+// next task at once, inside the exit's short window, where ExitGate may end the process under it. Cleared first,
+// a freed thread can only return. The aboutToQuit hook calls this with the global pool.
+inline void begin(QThreadPool* pool)
+{
+    if (pool) pool->clear();
+    begin();
+}
+
 // Probes only: a probe runs several quit sequences in one process.
 inline void resetForTesting() { detail::state().quitting.store(false, std::memory_order_release); }
 
@@ -132,12 +143,14 @@ inline bool exec(QEventLoop& loop)
     return quitting();
 }
 
-// Cancel the pool's queued tasks and wait at most `budgetMs` for the running ones. True when the pool is idle.
+// The pool's exit, in the only safe order (issue #445): drop the queued tasks, then begin the quit, which ends the
+// running tasks' waits, then wait at most `budgetMs` for them. Callers do not call begin() first; drain() does
+// it. A begin() that already ran (the aboutToQuit hook) is harmless: the queue is cleared again and begin() is
+// idempotent. True when the pool is idle.
 inline bool drain(QThreadPool* pool, int budgetMs)
 {
-    if (!pool) return true;
-    pool->clear();
-    return pool->waitForDone(budgetMs);
+    begin(pool);
+    return !pool || pool->waitForDone(budgetMs);
 }
 
 // The global pool's bounded wait, and its fallback. Declared in main() right after the QApplication, so it is
@@ -152,12 +165,11 @@ public:
     // Call when the event loop has returned, before the window is destroyed.
     void drain(int exitCode, QThreadPool* pool = QThreadPool::globalInstance())
     {
-        begin();
         pool_ = pool;
         code_ = exitCode;
         QElapsedTimer t;
         t.start();
-        drained_ = QuitBudget::drain(pool, kPoolMs);
+        drained_ = QuitBudget::drain(pool, kPoolMs);   // clears the queue, THEN begins the quit (#445)
         if (drained_)
             qInfo().noquote() << QStringLiteral("quit: thread pool idle after %1 ms").arg(t.elapsed());
         else
