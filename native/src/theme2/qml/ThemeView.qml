@@ -196,6 +196,10 @@ Item {
     // never sounding together (updateBackgroundMusic ducks the shuffle for a live audio session) and they mean
     // opposite things — one is the wallpaper, the other is what you chose to listen to.
     property string backgroundTrack: ""
+    // Watch together's room indicator (#86), host-set by MainWindow::refreshWatchTogetherIndicator from the ONE
+    // summary the classic transport row paints too: "2 watching · 1 is buffering · Waiting for Sam to catch
+    // up". "" whenever this machine is not in a room, which is also the element's cue to draw nothing.
+    property string watchTogetherLine: ""
     property bool catLoading: false // host-set: the selected category's column is fetching (XMB shows a spinner)
     // Shared UI motion duration for theme transitions (XMB category slide / drill push). Host-fed from
     // kUiFadeMs in native/src/ui/FeedbackPolicy.h — that header owns the canonical value; this default only

@@ -392,6 +392,18 @@ public:
     // verb has to be handed BY VALUE (a row index is only meaningful against the browseRowMap_ that produced
     // it, and the verb is dispatched a turn later).
     QString themedLeafId(int themedIndex) const;
+    // Watch together (#86) on the detail view. The themed row's "watchtogether" verb carries the item by its
+    // TITLE for the menu row and by its ID for the check that the page is still showing it when the menu
+    // returns (the menu is a nested loop; a row index is not an identity across one).
+    QString themedLeafTitle(int themedIndex) const;
+    // Where the detail pill/button gets its label: "Watch together…", or "Play this for everyone" while this
+    // machine hosts a room. A source rather than a stored string because the room lives in MainWindow and the
+    // label must be whatever it is at the moment the page is built.
+    void setWatchTogetherLabelSource(std::function<QString()> source) { wtLabelSource_ = std::move(source); }
+    void refreshWatchTogetherLabel();   // re-read the source into the classic button (a room opened or closed)
+    // The classic detail page's Play for the item it is showing, IF it is still showing that item. The
+    // watch-together menu runs its nested loop between the press and this call.
+    bool playDetailItemIfShowing(const QString& itemId);
     // A row from items_ as the PROVIDERS gave it — the pre-correction copy when it carries a correction,
     // else the row itself. Anything that WRITES a row into the scrape cache must use this: the cache is the
     // scraped layer that the correction composites over on every read, so saving the composited row would
@@ -538,6 +550,9 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // The classic detail page's "Watch together…" (#86). MainWindow opens the room menu with this item
+    // preselected or, while it hosts a room, plays it for everyone.
+    void watchTogetherRequested(const MediaItem& item);
     // A press that DIED BEFORE ANY BYTES (issue #239): no source resolved, so nothing was ever opened and
     // no player was involved. This view has already said so in its own toast — what it cannot do is make the
     // failure outlive that toast, because the store, the detail-page banner and the row marker are all
@@ -1304,6 +1319,9 @@ private:
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
     QPushButton* sourceBtn_ = nullptr;
+    QPushButton* wtBtn_ = nullptr;        // "Watch together…" (#86): playable video leaves only
+    std::function<QString()> wtLabelSource_;
+    QString watchTogetherLabel() const;   // wtLabelSource_'s answer, or "Watch together…" when none is set
     // ---- #239, the classic half of "this did not open" ---------------------------------------------------
     // The banner (top of the detail text column, above whatever the theme ordered) and the two verbs the
     // failure earns. "Choose another source…" is NOT a third button: sourceBtn_ above already is it, and it

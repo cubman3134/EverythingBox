@@ -188,6 +188,42 @@
       "replace": "    if (!me) return false;",
       "count": 1,
       "expect": "killed"
+    },
+    {
+      "name": "the-indicator-stops-counting-who-is-buffering",
+      "//": "#86 room indicator. The buffering badge is a COUNT, and the count is what says whether anybody is buffering at all. With the increment gone the badge never appears, while the notice (built from a separate list) still names the staller: a room that says it is waiting for Sam with nothing on screen saying anybody stalled.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "        ++s.buffering;",
+      "replace": "        ;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "wait-for-everyone-names-nobody",
+      "//": "#86 room indicator. Under 'wait for everyone' the notice is the one line that says WHO the film stopped for. Dropped, the indicator shows a badge and a paused film with no name.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (policy == BufferPolicy::WaitForEveryone && !stalled.isEmpty())",
+      "replace": "    if (false && policy == BufferPolicy::WaitForEveryone && !stalled.isEmpty())",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "keep-going-names-the-staller-too",
+      "//": "#86 room indicator. The other half of the same rule: under 'keep going' the film is not waiting, so a name would claim the room is holding for somebody it is not.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (policy == BufferPolicy::WaitForEveryone && !stalled.isEmpty())",
+      "replace": "    if (!stalled.isEmpty())",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "an-unresolved-participant-counts-as-buffering",
+      "//": "#86 room indicator. Somebody who could not get the film is not watching it, so their stale stall flag holds nobody -- the same rule Room::anyoneBuffering applies to the wait itself.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "        if (!p.resolved) { ++s.unresolved; continue; }   // not watching, so not stalling anybody",
+      "replace": "        if (!p.resolved) { ++s.unresolved; }",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

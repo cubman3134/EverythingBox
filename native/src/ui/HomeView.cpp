@@ -877,6 +877,25 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     sourceBtn_->installEventFilter(this);
     arl->addWidget(sourceBtn_);
 
+    // "Watch together…" (#86): the room menu with THIS item preselected — beside Play and Choose source,
+    // because it is a way of playing it. While this machine hosts a room it reads "Play this for everyone" and
+    // does exactly that. Revealed with Play, on video leaves only (watchTogetherOfferedFor).
+    wtBtn_ = new QPushButton(tr("👥  Watch together…"), actionRow_);
+    wtBtn_->setObjectName(QStringLiteral("detailWatchTogether"));
+    wtBtn_->setCursor(Qt::PointingHandCursor);
+    wtBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E3F4F4;border:2px solid #2E9C9C;border-radius:6px;"
+        "padding:6px 14px;color:#11504F;font-weight:bold;}"
+        "QPushButton:hover{background:#CDEBEB;}"
+        "QPushButton:focus{background:#B2E0E0;border-color:#1F7676;}"));
+    wtBtn_->setVisible(false);
+    connect(wtBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        emit watchTogetherRequested(stack_.last().item);
+    });
+    wtBtn_->installEventFilter(this);
+    arl->addWidget(wtBtn_);
+
     // "Romhacks…": what hacks exist for this game. Only on a retro game leaf — a hack is a patch for a
     // specific ROM, so it means nothing on a film, and nothing on a PC game either.
     romhackBtn_ = new QPushButton(tr("🧩  Romhacks…"), actionRow_);
@@ -8716,7 +8735,7 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
         // three. The row is walked in its real left-to-right order instead, so every visible action is
         // reachable and a button added later is reachable by construction.
         const QVector<QWidget*> actionRowBtns{ retryBtn_, dismissBtn_, playBtn_, favBtn_, downloadBtn_,
-                                               sourceBtn_, pcFixBtn_, manualBtn_ };
+                                               sourceBtn_, wtBtn_, pcFixBtn_, manualBtn_ };
         if (actionRowBtns.contains(static_cast<QWidget*>(obj)))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
@@ -11561,6 +11580,45 @@ QString HomeView::currentLevelSystemId() const
     return QString();
 }
 
+// Does this leaf, once it plays, play as VIDEO? The shape half of the themed row's external-player gate, lifted
+// out so "Watch together…" (#86) asks the same question on both layouts: audio, readers and games stay out,
+// because a room keeps a FILM in step. Whether the leaf plays at all is the caller's half (gates.play, plus the
+// themed row's direct-open leaves).
+static bool videoShapedLeaf(const MediaItem& it, bool readable)
+{
+    static const QSet<QString> kVideoTypes = {
+        QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"),
+        QStringLiteral("episode"), QStringLiteral("video"), QStringLiteral("link") };
+    const bool audioish = it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("audio")
+                          || it.mime.toLower().startsWith(QStringLiteral("audio/"));
+    return !readable && !audioish && it.type != QStringLiteral("game")
+           && (kVideoTypes.contains(it.type) || it.mime.toLower().startsWith(QStringLiteral("video/")));
+}
+
+QString HomeView::watchTogetherLabel() const
+{
+    const QString l = wtLabelSource_ ? wtLabelSource_() : QString();
+    return l.isEmpty() ? tr("Watch together…") : l;
+}
+
+void HomeView::refreshWatchTogetherLabel()
+{
+    if (wtBtn_) wtBtn_->setText(QStringLiteral("👥  ") + watchTogetherLabel());
+}
+
+QString HomeView::themedLeafTitle(int themedIndex) const
+{
+    if (themedIndex < 0 || themedIndex >= browseRowMap_.size()) return QString();
+    return items_[browseRowMap_[themedIndex]].title;
+}
+
+bool HomeView::playDetailItemIfShowing(const QString& itemId)
+{
+    if (stack_.isEmpty() || !stack_.last().detail || stack_.last().item.id != itemId) return false;
+    playDetailItem();
+    return true;
+}
+
 QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
 {
     QVariantMap out;
@@ -11736,18 +11794,18 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
     //     when the default is the built-in player (the Stremio hand-off case).
     //   * "Play with built-in player" — the alternative, shown only when the default IS an external player
     //     (available()), so you can override a single item back to built-in.
-    static const QSet<QString> kVideoTypes = {
-        QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"),
-        QStringLiteral("episode"), QStringLiteral("video"), QStringLiteral("link") };
-    const bool audioish = it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("audio")
-                          || it.mime.toLower().startsWith(QStringLiteral("audio/"));
-    const bool isVideoLeaf = (gates.play || directOpen) && !gates.readable && !audioish
-                             && it.type != QStringLiteral("game")
-                             && (kVideoTypes.contains(it.type) || it.mime.toLower().startsWith(QStringLiteral("video/")));
-    if (isVideoLeaf && !ProfileStore::current().restricted)
+    const bool isVideoLeaf = (gates.play || directOpen || bridgedStream) && videoShapedLeaf(it, gates.readable);
+    if (isVideoLeaf && (gates.play || directOpen) && !ProfileStore::current().restricted)
     {
         if (ExternalPlayer::anyTarget()) verbs << QStringLiteral("external"); // one-off, any default
         if (ExternalPlayer::available()) verbs << QStringLiteral("builtin");  // alternative, default IS external
+    }
+    // "Watch together…" (#86), the themed twin of the classic wtBtn_: offered wherever this row offers Play on
+    // a video leaf. Its LABEL is the room's state — "Play this for everyone" while this machine hosts one.
+    if (isVideoLeaf)
+    {
+        verbs << QStringLiteral("watchtogether");
+        out.insert(QStringLiteral("watchLabel"), watchTogetherLabel());
     }
     // Library-management verbs (hidden / completion status / tags) on any REAL media item — gated off the
     // synthetic folder/marker rows (type starting '_'), which carry no marks key. These act on the item's marks
@@ -12404,6 +12462,12 @@ void HomeView::requestMeta(const MediaItem& item)
     // "Choose source…" only where there is a list of releases to choose from (a Stremio-resolved leaf). A
     // bridged leaf can't be known yet — its stream id arrives with /meta — so showMeta reveals that case.
     if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
+    // "Watch together…" (#86) with Play, on a video leaf; a bridged leaf is revealed with its Play in showMeta.
+    if (wtBtn_)
+    {
+        wtBtn_->setText(QStringLiteral("👥  ") + watchTogetherLabel());
+        wtBtn_->setVisible(gates.play && videoShapedLeaf(item, gates.readable));
+    }
     // Romhacks are a retro-ROM idea: a patch targets one dump of one game. PC games are excluded by
     // retroSystemFor (their system is "pc"), and anything that is not a game has no system at all.
     if (romhackBtn_) romhackBtn_->setVisible(!retroSystemFor(item, browseConsoleName()).isEmpty());
@@ -12855,6 +12919,12 @@ void HomeView::showMetaComposited(const MediaDetail& d)
                 MediaItem probe = stack_.last().item;
                 probe.imdbStreamId = d.imdbStreamId;
                 sourceBtn_->setVisible(canChooseStreamSource(probe));
+            }
+            // ...and Watch together (#86), which goes wherever a video Play goes.
+            if (wtBtn_)
+            {
+                wtBtn_->setText(QStringLiteral("👥  ") + watchTogetherLabel());
+                wtBtn_->setVisible(videoShapedLeaf(stack_.last().item, false));
             }
         }
     }

@@ -1,5 +1,6 @@
 #include "WatchTogether.h"
 
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -49,6 +50,10 @@ namespace
     }
 
     double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // The indicator's words, under one translation context. Plurals are spelled out in the code rather than
+    // left to %n, because an untranslated build has no plural rules and "1 are buffering" is what it would say.
+    QString wtText(const char* s) { return QCoreApplication::translate("WatchTogether", s); }
 }
 
 namespace WatchTogether
@@ -674,6 +679,61 @@ bool recordSafe(const QVariantMap& record)
     for (auto it = record.constBegin(); it != record.constEnd(); ++it)
         if (looksLikeCredential(it.value().toString())) return false;
     return true;
+}
+
+// ---- 8. the room indicator -------------------------------------------------------------------------------
+
+IndicatorSummary indicatorSummary(bool inRoom, const QString& code, const QString& selfId,
+                                  const QList<Participant>& people, BufferPolicy policy)
+{
+    IndicatorSummary s;
+    if (!inRoom) return s;
+    s.visible = true;
+    s.watching = int(people.size());
+
+    // Who is stalled, in the room's own order (host first, then join order), so the name a notice leads with
+    // does not reshuffle from one tick to the next. This machine is "you": a guest reading "Waiting for Alex"
+    // about themselves would go looking for somebody else's problem.
+    QStringList stalled;
+    for (const Participant& p : people)
+    {
+        if (!p.resolved) { ++s.unresolved; continue; }   // not watching, so not stalling anybody
+        if (!p.buffering) continue;
+        ++s.buffering;
+        const QString name = p.name.trimmed();
+        if (!selfId.isEmpty() && p.id == selfId) stalled << wtText("you");
+        else stalled << (name.isEmpty() ? wtText("someone") : name);
+    }
+
+    if (s.watching <= 1)
+        s.count = code.isEmpty() ? wtText("Just you") : wtText("Just you — room %1").arg(code);
+    else
+        s.count = wtText("%1 watching").arg(s.watching);
+    if (s.buffering == 1)     s.bufferingBadge = wtText("1 is buffering");
+    else if (s.buffering > 1) s.bufferingBadge = wtText("%1 are buffering").arg(s.buffering);
+    if (s.unresolved > 0)     s.unresolvedBadge = wtText("%1 couldn't play it").arg(s.unresolved);
+
+    // Only a room that WAITS has somebody it is waiting for. Under "keep going" the film carries on and the
+    // badge alone says someone is behind; naming them would read as the room holding for them when it is not.
+    if (policy == BufferPolicy::WaitForEveryone && !stalled.isEmpty())
+    {
+        QString who;
+        if (stalled.size() == 1) who = stalled.first();
+        else who = wtText("%1 and %2").arg(QStringList(stalled.mid(0, stalled.size() - 1)).join(QStringLiteral(", ")),
+                                            stalled.last());
+        s.notice = wtText("Waiting for %1 to catch up").arg(who);
+    }
+
+    QStringList parts;
+    for (const QString& part : { s.count, s.bufferingBadge, s.unresolvedBadge, s.notice })
+        if (!part.isEmpty()) parts << part;
+    s.line = parts.join(QStringLiteral(" · "));
+    return s;
+}
+
+IndicatorSummary indicatorSummary(const Room& room)
+{
+    return indicatorSummary(room.active(), room.code(), room.selfId(), room.participants(), room.bufferPolicy());
 }
 
 }   // namespace WatchTogether

@@ -3586,6 +3586,7 @@ tp_note() { echo "  $1"; tp_fail=1; }
 TP_HOSTS=(
   "$HERE/../src/ui/MainWindow.cpp"
   "$HERE/../src/ui/MainWindowTimelineMarks.cpp"
+  "$HERE/../src/ui/MainWindowWatchTogether.cpp"
   "$HERE/../src/theme2/ThemeEngine.cpp"
   "$HERE/../src/theme2/ThemedPanelHost.cpp"
   "$HERE/../src/theme2/ThemePickerHost.cpp"
@@ -3598,6 +3599,7 @@ TP_ROOTS=(
   'MainWindow.cpp:rr'
   'MainWindow.cpp:dr'
   'MainWindowTimelineMarks.cpp:r'
+  'MainWindowWatchTogether.cpp:r'
   'ThemeEngine.cpp:r'
   'ThemeEngine.cpp:root'
 )
@@ -4518,6 +4520,45 @@ else
   else
     echo "FAIL: catalogue tab keys + absorbed music shelf - a catalogue can share a built-in tab's key, or a merged shelf keeps a second tab."; fail=1
   fi
+fi
+echo
+# Watch together's detail-view entry point (#86). The path from the detail view's action to the room menu runs
+# through a deferral and two nested loops, and nothing headless can press a pill, so the wiring is pinned as
+# source: both layouts' actions reach watchTogetherFromDetail with a play bound to the ITEM (by its id, checked
+# again when the menu returns), that reaches showWatchTogetherMenu WITH the item, and the menu's host row and
+# "Play this for everyone" row both play the preselected item. The indicator's words are probe_watchtogether's.
+echo "=== watch together: detail-view entry point ==="
+wd_fail=0
+wd_note() { echo "  $1"; wd_fail=1; }
+wd_has() { [ "$(grep -cE -- "$1" "$2")" != "0" ]; }
+wd_mw="$HERE/../src/ui/MainWindow.cpp"
+wd_wt="$HERE/../src/ui/MainWindowWatchTogether.cpp"
+wd_hv="$HERE/../src/ui/HomeView.cpp"
+wd_ar="$HERE/../src/theme2/qml/elements/ActionRow.qml"
+wd_has 'verbs << QStringLiteral\("watchtogether"\)' "$wd_hv" \
+  || wd_note "HomeView's themed detail row no longer offers the \"watchtogether\" verb."
+wd_has 'verb === "watchtogether"' "$wd_ar" \
+  || wd_note "ActionRow.qml draws no label for the \"watchtogether\" verb, so the pill would read as its raw verb."
+wd_has 'emit watchTogetherRequested\(stack_\.last\(\)\.item\)' "$wd_hv" \
+  || wd_note "the classic detail page's Watch together button no longer emits the item the page is showing."
+wd_has 'else if \(verb == QStringLiteral\("watchtogether"\)\)' "$wd_mw" \
+  || wd_note "runThemedDetailAction has no \"watchtogether\" branch, so the themed pill does nothing."
+wd_has 'watchTogetherFromDetail\(title, \[this, id\]' "$wd_mw" \
+  || wd_note "the themed verb no longer hands watchTogetherFromDetail a play bound to the item's id."
+wd_has 'home_->themedLeafId\(themedDetailIndex_\) == id\)' "$wd_mw" \
+  || wd_note "the themed verb's play no longer checks the page still shows the item after the menu's nested loop."
+wd_has 'watchTogetherFromDetail\(title, \[this, id\] \{ if \(home_\) home_->playDetailItemIfShowing\(id\)' "$wd_wt" \
+  || wd_note "the classic button no longer hands watchTogetherFromDetail a play bound to the item's id."
+wd_has '^    showWatchTogetherMenu\(itemTitle, playItem\);' "$wd_wt" \
+  || wd_note "watchTogetherFromDetail no longer opens showWatchTogetherMenu WITH the item."
+wd_has 'case 0: +if \(watchTogetherHost\(\) && playItem\) playItem\(\);' "$wd_wt" \
+  || wd_note "hosting from the detail view no longer plays the preselected item once the room is open."
+wd_has 'case 3: +if \(playItem\) playItem\(\); else watchTogetherShareCurrent\(\);' "$wd_wt" \
+  || wd_note "\"Play this for everyone\" from the detail view no longer targets the preselected item."
+if [ "$wd_fail" -eq 0 ]; then
+  echo "PASS: watch together detail-view entry point (both layouts reach showWatchTogetherMenu with the page's item)"
+else
+  echo "FAIL: watch together detail-view entry point - the detail action no longer reaches the room menu with its item."; fail=1
 fi
 echo
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data

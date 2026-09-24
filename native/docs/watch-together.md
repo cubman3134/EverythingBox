@@ -9,7 +9,20 @@ internet it uses the same relay online netplay already uses.
 
 ## Starting one
 
-**Settings ▸ General ▸ Watch together ▸ "Watch together…"** on both layouts.
+**"Watch together…" on a film's page**, on both layouts: a pill in the themed detail view's action row
+and a button beside Play on the classic detail page, wherever that page offers Play on something that plays
+as video. It opens the room menu with that film already chosen:
+
+- **Host a room for "…"** opens the room and starts the film here. A host that starts something shares it,
+  so the film is the room's the moment it loads, and whoever joins lands where you are in it.
+- **Play this for everyone** is what the same action says, and does straight away, while you are hosting a
+  room: the film you are looking at replaces whatever the room was watching, for everyone.
+
+A guest's copy of the action opens the ordinary room menu (Who's watching, Leave), because what the room
+plays is the host's choice.
+
+The same menu, without a film chosen, is at **Settings ▸ General ▸ Watch together ▸ "Watch together…"** on
+both layouts:
 
 - **Host a room** mints a code — five characters from the same alphabet netplay's rooms use, with
   no ambiguous `0`/`O` or `1`/`I`, because these get read aloud. You are then asked whether the
@@ -23,6 +36,34 @@ without ending the film, and a film is exactly when the participant list is wort
 Start playing something and the host's room follows it. If you host while something is already
 playing, the guest is handed it the moment they arrive: they get *what* is playing and *where you
 are in it* in one go, so a join in progress needs no second press from either of you.
+
+## Seeing the room
+
+While you are in a room the player says so, in the transport row beside the time: how many of you are
+watching and, when it matters, what is holding things up.
+
+| The room | What the indicator says |
+| --- | --- |
+| nobody has joined yet | Just you — room K7Q2M |
+| two of you, in step | 2 watching |
+| three, one stalled, "wait for everyone" | 3 watching · 1 is buffering · Waiting for Sam to catch up |
+| the same, "keep going" | 3 watching · 1 is buffering |
+| your own stream stalled | … · Waiting for you to catch up |
+| one could not get the film | 2 watching · 1 couldn't play it |
+
+The name appears only when the room is actually *waiting*. Under "keep going" the film carries on, so the
+badge says somebody is behind without implying that everyone is holding for them. Somebody who could not
+play the film is not counted as buffering, for the reason they cannot hold the room: they are not watching
+it.
+
+The indicator sits in the transport row, so it comes and goes with the rest of the controls. A room that
+*starts* stalling brings the controls up by itself, since that is exactly when someone wants to know why the
+picture stopped. Themed video plays under the same controls; on the themed audio now-playing page the same
+line sits under the track status. Both surfaces paint one summary (`WatchTogether::indicatorSummary`), so
+they cannot word the room differently. **W** still opens the full menu, with each person's state.
+
+A guest does not know which stall policy the host chose; the protocol does not carry it. A guest's
+indicator names whoever it is waiting for by the room's default, "wait for everyone".
 
 ## What actually crosses the wire
 
