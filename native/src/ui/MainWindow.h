@@ -885,8 +885,23 @@ private:
     int    wtStalledTicks_ = 0;
     double wtSentPos_ = -1.0;           // host: the position last broadcast, for seek detection
 
-    void showWatchTogetherMenu();                              // reachable from Settings on BOTH layouts
-    void watchTogetherHost();
+    // Reachable from Settings on BOTH layouts, from W during playback, and from the detail view with the page's
+    // item PRESELECTED (`itemTitle` names it in the host row; `playItem` plays it on this machine, which a
+    // host's room then shares on load).
+    void showWatchTogetherMenu(const QString& itemTitle = QString(), const std::function<void()>& playItem = {});
+    // The detail view's "Watch together…" / "Play this for everyone" (#86), on both layouts.
+    void watchTogetherFromDetail(const QString& itemTitle, const std::function<void()>& playItem);
+    QString watchTogetherDetailLabel() const;                  // that action's label, which is the room's state
+    // Once, at construction: the classic overlay's room indicator (beside the time readout in the transport
+    // row) and the detail view's label source.
+    void watchTogetherInstallEntryPoints();
+    // Repaint the room indicator on both layouts from WatchTogether::indicatorSummary.
+    void refreshWatchTogetherIndicator();
+    class QLabel* wtIndicator_ = nullptr;
+    QString wtIndicatorLine_;                                  // what the indicator last said ("" = hidden)
+    bool wtIndicatorAttention_ = false;                        // someone is buffering / could not play it
+    bool wtHosting_ = false;                                   // the detail label's state, for its refresh edge
+    bool watchTogetherHost();                                  // false when the user backed out
     void watchTogetherJoin();
     void watchTogetherLeave();
     void watchTogetherShowRoom();                              // who is watching, and what each is doing

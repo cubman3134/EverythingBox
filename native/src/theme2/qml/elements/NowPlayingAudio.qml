@@ -51,6 +51,8 @@ Item {
     readonly property var markBands: (host && host.audioMarkBands) ? host.audioMarkBands : []
     readonly property bool paused: !!(host && host.audioPaused)
     readonly property real spd: host ? host.audioSpeed : 1.0
+    // Watch together (#86): the room line under the status line, while this machine is in a room.
+    readonly property string roomLine: (host && host.watchTogetherLine) ? host.watchTogetherLine : ""
 
     // Theme-tunable accents (each with a sensible default so a bare view still reads well).
     readonly property color accent:   T.val(el, "accent", "#E07A2E")
@@ -165,6 +167,14 @@ Item {
                 return page.paused ? "Paused" : "Now playing"
             }
             color: page.accent; font.pixelSize: page.h3; font.bold: true
+        }
+        Text {
+            objectName: "wtRoomLine"
+            width: parent.width
+            visible: page.roomLine.length > 0
+            text: "\ud83d\udc65  " + page.roomLine
+            color: page.fgDim; font.pixelSize: page.h3
+            elide: Text.ElideRight; maximumLineCount: 1
         }
     }
 

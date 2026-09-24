@@ -46,7 +46,7 @@
 #include "core/QuitBudget.h"   // issue #442: the exit waits on the thread pool for a bounded time, never a fetch
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.321";
+static constexpr const char* kAppVersion = "0.6.323";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.

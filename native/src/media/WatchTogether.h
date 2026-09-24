@@ -291,4 +291,40 @@ namespace WatchTogether
     // Every value in a record must survive looksLikeCredential. The probe asserts this against a Room that
     // was deliberately handed a signed url.
     bool recordSafe(const QVariantMap& record);
+
+    // ---- 8. the room indicator --------------------------------------------------------------------------
+
+    // What the player overlay shows while this machine is in a room: the one answer both layouts draw (the
+    // classic transport row and the themed now-playing status line), so the two cannot word the room
+    // differently. Pure, so probe_watchtogether pins the whole text table; the callers only paint `line`.
+    //
+    //   count       "Just you — room K7Q2M" while nobody has joined (the code is what you still need), else
+    //               "2 watching"
+    //   buffering   "1 is buffering" / "2 are buffering" — resolved participants only: somebody who could not
+    //               get the film is not watching it, so their stale stall flag is not a stall (anyoneBuffering's
+    //               own rule)
+    //   unresolved  "1 couldn't play it" / "2 couldn't play it"
+    //   notice      under "wait for everyone" only, WHO the room is waiting for: "Waiting for Sam to catch up",
+    //               "Waiting for you to catch up", "Waiting for Sam and Alex to catch up". "Keep going" names
+    //               nobody — the film is not waiting, so there is no one to wait for.
+    //   line        the non-empty parts joined with " · ", which is what a surface draws
+    //
+    // Not in a room: visible is false and every string is empty.
+    struct IndicatorSummary
+    {
+        bool    visible = false;
+        int     watching = 0;          // participants in the room, this machine included
+        int     buffering = 0;         // resolved participants whose stream has stalled
+        int     unresolved = 0;        // participants who could not get the item
+        QString count;
+        QString bufferingBadge;        // empty when nobody is buffering
+        QString unresolvedBadge;       // empty when everybody resolved it
+        QString notice;                // empty unless the room is WAITING on somebody
+        QString line;
+    };
+
+    IndicatorSummary indicatorSummary(bool inRoom, const QString& code, const QString& selfId,
+                                      const QList<Participant>& people, BufferPolicy policy);
+    // The same, read off a live Room.
+    IndicatorSummary indicatorSummary(const Room& room);
 }

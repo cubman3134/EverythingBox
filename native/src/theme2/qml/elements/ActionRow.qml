@@ -115,6 +115,10 @@ Item {
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "external") return { label: "🔗  Open in external player",         color: "#7C5CFF", textColor: "#FFFFFF" }
         if (verb === "builtin")  return { label: "🖥  Play with built-in player",       color: "#E7EBF2", textColor: "#33405A" }
+        // Watch together (#86). The label is the room's state, supplied by the host: "Play this for everyone" while
+        // this machine hosts a room, "Watch together…" otherwise.
+        if (verb === "watchtogether") return { label: "👥  " + (sel && sel.watchLabel ? sel.watchLabel : "Watch together…"),
+                                               color: "#E3F4F4", textColor: "#11504F" }
         if (verb === "hide")     return { label: (hidden ? "🙈  Unhide" : "🙈  Hide"),
                                           color: (hidden ? "#D8C7E8" : "#E7EBF2"), textColor: "#33405A" }
         if (verb === "status")   return { label: "◐  " + statusLabel(completion),

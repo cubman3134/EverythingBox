@@ -33,6 +33,8 @@
 #include <QSet>
 #include <QString>
 
+#include <functional>
+
 namespace PlayOn
 {
     // ---- 1. the advertisement -----------------------------------------------------------------------------
@@ -147,6 +149,16 @@ namespace PlayOn
 
     QByteArray handoffJson(const Handoff& h);
     bool parseHandoff(const QByteArray& json, Handoff& out, QString& error);
+
+    // The FILE a "local" reference to what is playing names, or "" when nothing playing is a file a peer could
+    // open by path. `syncKey` is the app's stable key for the playing item and `recordedPath` the path its
+    // Recents row holds under that key; `exists` answers for this machine's filesystem. A file opened by path
+    // keys itself by that path, but a Local Library film keys itself by its TILE id — "local:<path>", or the
+    // imdb id from its .nfo — and only its Recents row still says which file it is. Asking the key alone named
+    // nothing for every Local Library film, so neither Play on device nor a watch-together room could share
+    // one (#86, found live). A stream's key and path are both links, which no `exists` confirms.
+    QString localFileFor(const QString& syncKey, const QString& recordedPath,
+                         const std::function<bool(const QString&)>& exists);
 
     // What the TARGET knows about itself when a hand-off arrives. Deliberately a flat answer-sheet rather than
     // a pointer to the library: the decision below is then pure, and the caller does the looking-up.

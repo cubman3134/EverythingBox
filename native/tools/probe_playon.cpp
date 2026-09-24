@@ -656,6 +656,31 @@ int main()
         }
     }
 
+    // ---- the file a "local" reference names (#86, found live) ---------------------------------------------
+    // A Local Library film keys itself by its tile id, not its path, so only its Recents row says which file it
+    // is. Without the row's path a host playing one had nothing to share and the guest was told it "couldn't
+    // play" a film sitting in the same library.
+    {
+        const QSet<QString> disk = { QStringLiteral("C:/lib/Film (2026)/Film (2026).mp4"),
+                                     QStringLiteral("C:/videos/clip.mp4") };
+        const auto exists = [&disk](const QString& p) { return disk.contains(p); };
+        const QString film = QStringLiteral("C:/lib/Film (2026)/Film (2026).mp4");
+        // Opened by path: the key IS the file.
+        CHECK(PlayOn::localFileFor(QStringLiteral("C:/videos/clip.mp4"), QStringLiteral("C:/videos/clip.mp4"), exists)
+              == QStringLiteral("C:/videos/clip.mp4"));
+        // A Local Library tile with no .nfo: keyed "local:<path>", the row holds the file.
+        CHECK(PlayOn::localFileFor(QStringLiteral("local:") + film, film, exists) == film);
+        // ...and one whose .nfo gave it an imdb id: keyed by that id, the row still holds the file.
+        CHECK(PlayOn::localFileFor(QStringLiteral("tt1375666"), film, exists) == film);
+        // A stream: neither the key nor the recorded link is a file here.
+        CHECK(PlayOn::localFileFor(QStringLiteral("tt1375666"), QStringLiteral("https://cdn.example.test/x.mkv"), exists)
+                  .isEmpty());
+        // A file that is gone names nothing: a peer handed its path would only be told it is not there.
+        CHECK(PlayOn::localFileFor(QStringLiteral("local:C:/lib/gone.mkv"), QStringLiteral("C:/lib/gone.mkv"), exists)
+                  .isEmpty());
+        CHECK(PlayOn::localFileFor(QString(), QString(), exists).isEmpty());
+    }
+
     if (failures == 0) std::printf("PLAYON-OK\n");
     else               std::fprintf(stderr, "PLAYON had %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

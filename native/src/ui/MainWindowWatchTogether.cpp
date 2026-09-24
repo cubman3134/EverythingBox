@@ -25,7 +25,10 @@
 #include "MainWindow.h"
 
 #include <QDateTime>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
+#include <QQuickItem>
 #include <QPointer>
 #include <QStackedWidget>
 #include <QRandomGenerator>
@@ -37,7 +40,9 @@
 #include "../core/RecentStore.h"
 #include "../core/Settings.h"
 #include "../media/WatchTogetherSession.h"
+#include "../theme2/ThemeEngine.h"
 #include "../video/MpvWidget.h"
+#include "HomeView.h"
 #include "Notifier.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
@@ -96,14 +101,17 @@ void MainWindow::watchTogetherWire()
         wtNudging_ = false;
         if (player_) player_->setSpeed(1.0);
         if (wtTimer_) wtTimer_->stop();
+        refreshWatchTogetherIndicator();
     });
     connect(watchSession_, &WatchTogetherSession::joined, this, [this] {
         if (wtTimer_) wtTimer_->start();
+        refreshWatchTogetherIndicator();
         // The host puts what it is already playing into the room the moment someone arrives, so a join that
         // lands mid-film needs no second press.
         if (watchSession_->isHost()) watchTogetherShareCurrent();
     });
     connect(watchSession_, &WatchTogetherSession::participantsChanged, this, [this] {
+        refreshWatchTogetherIndicator();   // the room indicator counts and names from this same list
         if (!watchSession_ || !watchSession_->active()) return;
         for (const Participant& p : watchSession_->participants())
         {
@@ -213,38 +221,162 @@ void MainWindow::watchTogetherWire()
 // ---------------------------------------------------------------------------- the menu -------------------
 // Nav kit, so it is the same on the themed and the classic surface. Reachable from Settings on BOTH, which is
 // #143's precedent and the only entry point that needs no theme to declare a new pill.
-void MainWindow::showWatchTogetherMenu()
+//
+// PRESELECTED (the detail view's entry, #86): `playItem` is how THIS machine plays the page's item, and it is the
+// whole of what "preselected" means — hosting starts the room and then plays it, and "Play this for everyone"
+// plays it rather than re-sharing whatever was already on. Nothing new is sent: a host that starts something
+// shares it on load (the fileLoaded hook in watchTogetherWire), so the page's item reaches the room through
+// the SAME reference #143 names what is playing with, and a guest arriving later lands on it mid-film.
+void MainWindow::showWatchTogetherMenu(const QString& itemTitle, const std::function<void()>& playItem)
 {
     watchTogetherWire();
     const bool inRoom = watchSession_ && watchSession_->active();
+    const bool preselected = bool(playItem);
+    const QString named = itemTitle.trimmed();
 
     QStringList rows;
     QList<int> acts;   // 0 host, 1 join, 2 who is watching, 3 share what is playing, 4 leave
     if (!inRoom)
     {
-        rows << tr("Host a room");                                   acts << 0;
+        if (!preselected)          rows << tr("Host a room");
+        else if (named.isEmpty())  rows << tr("Host a room with this");
+        else                       rows << tr("Host a room for “%1”").arg(named);
+        acts << 0;
         rows << tr("Join with a code…");                             acts << 1;
     }
     else
     {
         rows << tr("Who's watching");                                acts << 2;
         if (watchSession_->isHost())
-            { rows << tr("Play this for everyone"); acts << 3; }
+        {
+            rows << ((preselected && !named.isEmpty()) ? tr("Play “%1” for everyone").arg(named)
+                                                       : tr("Play this for everyone"));
+            acts << 3;
+        }
         rows << tr("Leave the room (%1)").arg(watchSession_->code()); acts << 4;
     }
     const int pick = NavMenu::pick(tr("Watch together"), rows, this);
     if (pick < 0 || pick >= acts.size()) return;
     switch (acts.at(pick))
     {
-        case 0:  watchTogetherHost(); break;
+        case 0:  if (watchTogetherHost() && playItem) playItem(); break;
         case 1:  watchTogetherJoin(); break;
         case 2:  watchTogetherShowRoom(); break;
-        case 3:  watchTogetherShareCurrent(); break;
+        case 3:  if (playItem) playItem(); else watchTogetherShareCurrent(); break;
         default: watchTogetherLeave(); break;
     }
 }
 
-void MainWindow::watchTogetherHost()
+// The detail view's action (#86), on both layouts. A HOST already in a room gets exactly what the label says —
+// "Play this for everyone" — with no menu in the way; anyone else gets the room menu with the item preselected
+// (a guest's copy of that menu is Who's watching / Leave, because the room's film is the host's to choose).
+void MainWindow::watchTogetherFromDetail(const QString& itemTitle, const std::function<void()>& playItem)
+{
+    watchTogetherWire();
+    if (watchSession_->active() && watchSession_->isHost())
+    {
+        if (playItem) playItem();
+        return;
+    }
+    showWatchTogetherMenu(itemTitle, playItem);
+}
+
+QString MainWindow::watchTogetherDetailLabel() const
+{
+    return (watchSession_ && watchSession_->active() && watchSession_->isHost()) ? tr("Play this for everyone")
+                                                                                   : tr("Watch together…");
+}
+
+// ---------------------------------------------------------------------------- the entry points -----------
+// Called once from the constructor, right after the transport row puts its time readout in: the indicator is
+// the next thing in that row, so it is read where the eye already goes for "where are we".
+void MainWindow::watchTogetherInstallEntryPoints()
+{
+    if (home_)
+    {
+        home_->setWatchTogetherLabelSource([this] { return watchTogetherDetailLabel(); });
+        // The classic detail page's button. The item is carried BY VALUE and checked by id when the menu
+        // returns: the menu is a nested loop, and the page may not be showing that item any more.
+        connect(home_, &HomeView::watchTogetherRequested, this, [this](const MediaItem& it) {
+            const QString id = it.id;
+            const QString title = it.title;
+            // Off the button's own click delivery before the menu's nested loop runs (the #28 rule).
+            deferPastQmlEmission([this, id, title] {
+                watchTogetherFromDetail(title, [this, id] { if (home_) home_->playDetailItemIfShowing(id); });
+            });
+        });
+    }
+    if (mediaControls_ && time_ && !wtIndicator_)
+    {
+        wtIndicator_ = new QLabel(mediaControls_);
+        wtIndicator_->setObjectName(QStringLiteral("wtIndicator"));
+        wtIndicator_->setTextFormat(Qt::RichText);
+        wtIndicator_->setStyleSheet(QStringLiteral("color:#e8e8e8; padding:0 6px;"));
+        wtIndicator_->setFocusPolicy(Qt::NoFocus);   // a readout, not a ring member
+        wtIndicator_->hide();
+        if (auto* row = qobject_cast<QHBoxLayout*>(mediaControls_->layout()))
+            row->insertWidget(row->indexOf(time_) + 1, wtIndicator_);
+    }
+}
+
+// ---------------------------------------------------------------------------- the room indicator ---------
+// ONE summary (WatchTogether::indicatorSummary, pinned in probe_watchtogether) painted on both layouts: the
+// classic transport row's label, which is also the chrome themed VIDEO plays under, and the themed audio
+// now-playing page's status line. Run on every room event and on the 1 Hz tick, so a stall shows within a
+// second of the room hearing about it.
+void MainWindow::refreshWatchTogetherIndicator()
+{
+    const bool inRoom = watchSession_ && watchSession_->active();
+    const IndicatorSummary s = inRoom ? indicatorSummary(watchSession_->room()) : IndicatorSummary();
+    const QString line = s.visible ? s.line : QString();
+
+    if (wtIndicator_ && line != wtIndicatorLine_)
+    {
+        QString html = QStringLiteral("👥 ") + s.count.toHtmlEscaped();
+        if (!s.bufferingBadge.isEmpty())
+            html += QStringLiteral(" <span style='background-color:#B7791F;color:#ffffff;'>&nbsp;⏳ %1&nbsp;</span>")
+                        .arg(s.bufferingBadge.toHtmlEscaped());
+        if (!s.unresolvedBadge.isEmpty())
+            html += QStringLiteral(" <span style='background-color:#B3261E;color:#ffffff;'>&nbsp;⚠ %1&nbsp;</span>")
+                        .arg(s.unresolvedBadge.toHtmlEscaped());
+        if (!s.notice.isEmpty())
+            html += QStringLiteral(" <i>%1</i>").arg(s.notice.toHtmlEscaped());
+        wtIndicator_->setText(html);
+        wtIndicator_->setToolTip(line);
+    }
+    if (wtIndicator_) wtIndicator_->setVisible(s.visible);
+    wtIndicatorLine_ = line;
+
+    if (QWidget* cur = themedAudioHost())
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            if (r->property("watchTogetherLine").toString() != line) r->setProperty("watchTogetherLine", line);
+
+    // A stall is exactly when somebody wants to know why the film stopped, so the chrome comes up on the EDGE
+    // of one (never on every tick: a room that stays stalled must not keep the bar pinned open).
+    const bool attention = s.buffering > 0 || s.unresolved > 0;
+    if (attention && !wtIndicatorAttention_ && stack_ && stack_->currentWidget() == playerPage_)
+        revealMediaControls();
+    wtIndicatorAttention_ = attention;
+
+    // The detail action's label is the room's state; refresh it when that flips, on both layouts.
+    const bool hosting = inRoom && watchSession_->isHost();
+    if (hosting != wtHosting_)
+    {
+        wtHosting_ = hosting;
+        if (home_) home_->refreshWatchTogetherLabel();
+        if (QQuickItem* r = themedHome_ ? ThemeEngine::rootItem(themedHome_) : nullptr)
+        {
+            QVariantMap d = r->property("detailData").toMap();
+            if (d.contains(QStringLiteral("watchLabel")))
+            {
+                d.insert(QStringLiteral("watchLabel"), watchTogetherDetailLabel());
+                r->setProperty("detailData", d);
+            }
+        }
+    }
+}
+
+bool MainWindow::watchTogetherHost()
 {
     watchTogetherWire();
     const QString code = makeRoomCode(QRandomGenerator::global()->generate());
@@ -258,16 +390,18 @@ void MainWindow::watchTogetherHost()
     if (haveRelay) rows << tr("Over the internet (via the relay)");
     else           rows << tr("Over the internet — set a relay first, in Settings ▸ General");
     const int how = NavMenu::pick(tr("Host a watch-together room"), rows, this);
-    if (how < 0) return;
+    if (how < 0) return false;
     if (how == 1 && !haveRelay)
     {
         notify(tr("Set a relay server first — Settings ▸ General ▸ the netplay relay. Watch together uses "
                   "the same one."), 8000);
-        return;
+        return false;
     }
     if (how == 1) watchSession_->hostViaRelay(relayHost, relayPort, code, Settings::deviceId(), Settings::deviceName());
     else          watchSession_->hostDirect(kDirectPort, code, Settings::deviceId(), Settings::deviceName());
     notify(tr("Room %1 — give that code to the other person.").arg(code), 15000);
+    refreshWatchTogetherIndicator();
+    return true;
 }
 
 void MainWindow::watchTogetherJoin()
@@ -308,6 +442,7 @@ void MainWindow::applyWatchTogetherPolicy()
 {
     if (!watchSession_ || !watchSession_->active()) return;
     watchSession_->setBufferPolicy(policyFromId(Settings::watchTogetherPolicy()));
+    refreshWatchTogetherIndicator();   // "keep going" stops naming who the room was waiting for
 }
 
 void MainWindow::watchTogetherLeave()
@@ -318,6 +453,7 @@ void MainWindow::watchTogetherLeave()
     wtNudging_ = false;
     wtBuffering_ = false;
     if (player_) player_->setSpeed(1.0);
+    refreshWatchTogetherIndicator();
     watchTogetherNotice(tr("Left the room."), 4000);
 }
 
@@ -432,6 +568,7 @@ void MainWindow::watchTogetherApplyTransport(bool paused, double positionSec)
 // ---------------------------------------------------------------------------- the 1 Hz tick --------------
 void MainWindow::watchTogetherTick()
 {
+    refreshWatchTogetherIndicator();
     if (!watchSession_ || !watchSession_->active() || !player_) return;
 
     const double pos = lastPos_;

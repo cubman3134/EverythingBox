@@ -1658,6 +1658,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(stop);
     mc->addWidget(seek_, 1);
     mc->addWidget(time_);
+    watchTogetherInstallEntryPoints();   // #86: the room indicator joins the row beside the time readout
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
     mc->addWidget(speedBtn_);
@@ -5133,6 +5134,10 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("pickerFitNote"), themePickerHost_->focusedRowFitNote());
         }
 #endif
+        // Watch together's room indicator (#86): the line both layouts paint, "" when not in a room, and whether
+        // the classic transport row's label is showing it (it hides with the chrome, like the rest of the row).
+        o.insert(QStringLiteral("wtIndicator"), wtIndicatorLine_);
+        o.insert(QStringLiteral("wtIndicatorShown"), wtIndicator_ && wtIndicator_->isVisible());
         if (cur == playerPage_)
         {
             // Player-touch automation (D1 Task 5): chrome visibility (tap toggle) + seek position in permille of
@@ -11544,6 +11549,20 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // launches it through openGamePath. Gated on collapsing being ON and a real game path — the same conditions
     // under which HomeView offers the pill — and deferred a turn past the QML emission like the verbs above,
     // with the path bound BY VALUE at the boundary (it is safe to keep even as themedDetail members churn).
+    // "Watch together…" / "Play this for everyone" (#86). The room menu is a nested loop, so the verb is
+    // deferred past this emission like the ones around it, and it carries the item's ID: the play it ends in
+    // runs only if the detail page is still on that item when the menu returns.
+    else if (verb == QStringLiteral("watchtogether"))
+    {
+        const QString id = home_ ? home_->themedLeafId(idx) : QString();
+        const QString title = home_ ? home_->themedLeafTitle(idx) : QString();
+        deferPastQmlEmission([this, id, title] {
+            watchTogetherFromDetail(title, [this, id] {
+                if (home_ && themedDetailIndex_ >= 0 && home_->themedLeafId(themedDetailIndex_) == id)
+                    home_->playThemedLeaf(themedDetailIndex_);
+            });
+        });
+    }
     else if (verb == QStringLiteral("otherversions"))
     {
         if (!Settings::collapseRegionalDuplicates()) return;

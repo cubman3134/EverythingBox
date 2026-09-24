@@ -699,6 +699,120 @@ int main()
         CHECK(QString::fromLatin1(kSettingsGroup) == QStringLiteral("watchtogether"));
     }
 
+    // =========================================================== 8. the room indicator ======================
+    // The one summary both layouts' overlays paint. Pinned as a text table, because the surfaces only draw
+    // `line`: a wrong count or a wrong name here is a wrong word on the screen.
+    {
+        auto person = [](const QString& id, const QString& name, bool host = false) {
+            Participant p; p.id = id; p.name = name; p.host = host; return p;
+        };
+        const QString me = QStringLiteral("dev-me");
+        const Participant hostMe = person(me, QStringLiteral("Parker"), true);
+        const Participant sam    = person(QStringLiteral("dev-sam"),  QStringLiteral("Sam"));
+        const Participant alex   = person(QStringLiteral("dev-alex"), QStringLiteral("Alex"));
+        const QString code = QStringLiteral("KJ72M");
+
+        // Not in a room: nothing at all, whatever stale list the caller still holds.
+        {
+            const IndicatorSummary s = indicatorSummary(false, code, me, { hostMe, sam }, BufferPolicy::WaitForEveryone);
+            CHECK(!s.visible);
+            CHECK(s.line.isEmpty() && s.count.isEmpty() && s.notice.isEmpty());
+            CHECK(s.bufferingBadge.isEmpty() && s.unresolvedBadge.isEmpty());
+            CHECK(!indicatorSummary(Room()).visible);   // a Room that was never opened
+        }
+        // Alone: the code is what the host still needs, so the count carries it.
+        {
+            const IndicatorSummary s = indicatorSummary(true, code, me, { hostMe }, BufferPolicy::WaitForEveryone);
+            CHECK(s.visible);
+            CHECK(s.watching == 1);
+            CHECK(s.count == QStringLiteral("Just you — room KJ72M"));
+            CHECK(s.line == s.count);
+            CHECK(s.bufferingBadge.isEmpty() && s.unresolvedBadge.isEmpty() && s.notice.isEmpty());
+        }
+        // Two, in sync.
+        {
+            const IndicatorSummary s = indicatorSummary(true, code, me, { hostMe, sam }, BufferPolicy::WaitForEveryone);
+            CHECK(s.visible && s.watching == 2 && s.buffering == 0 && s.unresolved == 0);
+            CHECK(s.count == QStringLiteral("2 watching"));
+            CHECK(s.line == QStringLiteral("2 watching"));
+            CHECK(s.bufferingBadge.isEmpty() && s.notice.isEmpty());
+        }
+        // Three, one buffering, "wait for everyone": the badge AND the name of who the room is waiting for.
+        {
+            Participant samStalled = sam; samStalled.buffering = true;
+            const IndicatorSummary s = indicatorSummary(true, code, me, { hostMe, samStalled, alex },
+                                                        BufferPolicy::WaitForEveryone);
+            CHECK(s.watching == 3);
+            CHECK(s.buffering == 1);
+            CHECK(s.bufferingBadge == QStringLiteral("1 is buffering"));
+            CHECK(s.notice == QStringLiteral("Waiting for Sam to catch up"));
+            CHECK(s.line == QStringLiteral("3 watching · 1 is buffering · Waiting for Sam to catch up"));
+        }
+        // ...and the same room under "keep going": the badge stays, but nobody is named — the film is not waiting.
+        {
+            Participant samStalled = sam; samStalled.buffering = true;
+            const IndicatorSummary s = indicatorSummary(true, code, me, { hostMe, samStalled, alex },
+                                                        BufferPolicy::KeepGoing);
+            CHECK(s.buffering == 1);
+            CHECK(s.bufferingBadge == QStringLiteral("1 is buffering"));
+            CHECK(s.notice.isEmpty());
+            CHECK(!s.line.contains(QStringLiteral("Sam")));
+            CHECK(s.line == QStringLiteral("3 watching · 1 is buffering"));
+        }
+        // Plural-correct, and the names listed: two stalled, one of them THIS machine.
+        {
+            Participant meStalled = hostMe; meStalled.buffering = true;
+            Participant samStalled = sam; samStalled.buffering = true;
+            const IndicatorSummary s = indicatorSummary(true, code, me, { meStalled, samStalled, alex },
+                                                        BufferPolicy::WaitForEveryone);
+            CHECK(s.buffering == 2);
+            CHECK(s.bufferingBadge == QStringLiteral("2 are buffering"));
+            CHECK(s.notice == QStringLiteral("Waiting for you and Sam to catch up"));
+            const IndicatorSummary solo = indicatorSummary(true, code, me, { meStalled, sam },
+                                                           BufferPolicy::WaitForEveryone);
+            CHECK(solo.notice == QStringLiteral("Waiting for you to catch up"));
+            Participant alexStalled = alex; alexStalled.buffering = true;
+            const IndicatorSummary three = indicatorSummary(true, code, me, { meStalled, samStalled, alexStalled },
+                                                            BufferPolicy::WaitForEveryone);
+            CHECK(three.bufferingBadge == QStringLiteral("3 are buffering"));
+            CHECK(three.notice == QStringLiteral("Waiting for you, Sam and Alex to catch up"));
+            // A participant with no name is still somebody.
+            Participant anon = person(QStringLiteral("dev-x"), QString()); anon.buffering = true;
+            CHECK(indicatorSummary(true, code, me, { hostMe, anon }, BufferPolicy::WaitForEveryone).notice
+                  == QStringLiteral("Waiting for someone to catch up"));
+        }
+        // One who could not play it: the couldn't-play badge, and their stale stall flag holds nobody — the
+        // same rule Room::anyoneBuffering applies to the wait itself.
+        {
+            Participant samGaveUp = sam; samGaveUp.resolved = false; samGaveUp.buffering = true;
+            const IndicatorSummary s = indicatorSummary(true, code, me, { hostMe, samGaveUp },
+                                                        BufferPolicy::WaitForEveryone);
+            CHECK(s.unresolved == 1);
+            CHECK(s.unresolvedBadge == QStringLiteral("1 couldn't play it"));
+            CHECK(s.buffering == 0 && s.bufferingBadge.isEmpty());
+            CHECK(s.notice.isEmpty());
+            CHECK(s.line == QStringLiteral("2 watching · 1 couldn't play it"));
+            Participant alexGaveUp = alex; alexGaveUp.resolved = false;
+            CHECK(indicatorSummary(true, code, me, { hostMe, samGaveUp, alexGaveUp }, BufferPolicy::KeepGoing)
+                      .unresolvedBadge == QStringLiteral("2 couldn't play it"));
+        }
+        // Read off a live Room: a host with a guest that has stalled says so through the Room overload too.
+        {
+            Room host, guest;
+            Wire wire;
+            host.open(code, me, QStringLiteral("Parker"), true);
+            guest.open(code, QStringLiteral("dev-sam"), QStringLiteral("Sam"), false);
+            wire.put(false, guest.helloMessage());
+            wire.pump(host, guest);
+            CHECK(indicatorSummary(host).line == QStringLiteral("2 watching"));
+            wire.put(false, guest.bufferingMessage(true, 12.0));
+            wire.pump(host, guest);
+            CHECK(indicatorSummary(host).line == QStringLiteral("2 watching · 1 is buffering · Waiting for Sam to catch up"));
+            host.close();
+            CHECK(!indicatorSummary(host).visible);
+        }
+    }
+
     if (failures == 0) std::printf("WATCHTOGETHER-OK\n");
     return failures == 0 ? 0 : 1;
 }

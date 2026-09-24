@@ -110,10 +110,14 @@ PlayOn::Handoff MainWindow::playOnCurrentHandoff(bool* ok) const
         h.ref.source = row.sourceAddonId;
         h.ref.type   = row.sourceType;
     }
-    else if (QFileInfo::exists(syncKey_))
+    else if (const QString file = PlayOn::localFileFor(syncKey_, row.path,
+                                                        [](const QString& p) { return QFileInfo::exists(p); });
+             !file.isEmpty())
     {
+        // By the FILE, not the key: a Local Library film's key is its tile id ("local:<path>" or its .nfo's
+        // imdb id), which no peer can open. #86 found this live — a room hosted on one had nothing to share.
         h.ref.kind = QStringLiteral("local");
-        h.ref.id   = syncKey_;
+        h.ref.id   = file;
         h.ref.type = row.kind.isEmpty() ? QStringLiteral("video") : row.kind;
     }
     else
