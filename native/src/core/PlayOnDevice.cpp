@@ -340,6 +340,18 @@ QByteArray handoffJson(const Handoff& h)
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
+QString localFileFor(const QString& syncKey, const QString& recordedPath,
+                     const std::function<bool(const QString&)>& exists)
+{
+    if (!exists) return QString();
+    // The key first: a file opened by path keys itself by that path, which is what this answered before.
+    if (!syncKey.isEmpty() && exists(syncKey)) return syncKey;
+    // Then the Recents row the key files: a Local Library film's key is its tile id, and its row is the only
+    // place left that says which file it is.
+    if (!recordedPath.isEmpty() && exists(recordedPath)) return recordedPath;
+    return QString();
+}
+
 bool parseHandoff(const QByteArray& json, Handoff& out, QString& error)
 {
     error.clear();

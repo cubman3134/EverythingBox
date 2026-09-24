@@ -11615,7 +11615,11 @@ QString HomeView::themedLeafTitle(int themedIndex) const
 bool HomeView::playDetailItemIfShowing(const QString& itemId)
 {
     if (stack_.isEmpty() || !stack_.last().detail || stack_.last().item.id != itemId) return false;
-    playDetailItem();
+    // A Local Library file opens as it stands — the same table activateItem reads — rather than through the
+    // addon resolve that Play on a catalogue page runs.
+    const MediaItem it = stack_.last().item;
+    if (!it.expandable && browse::localLeafRoute(it).play == browse::LeafPlay::OpenFile) emit openItem(it);
+    else playDetailItem();
     return true;
 }
 
@@ -11794,7 +11798,13 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
     //     when the default is the built-in player (the Stremio hand-off case).
     //   * "Play with built-in player" — the alternative, shown only when the default IS an external player
     //     (available()), so you can override a single item back to built-in.
-    const bool isVideoLeaf = (gates.play || directOpen || bridgedStream) && videoShapedLeaf(it, gates.readable);
+    // A local file this machine opens as it stands — a Local Library film — is played by the very
+    // playThemedLeaf the watch-together pill ends in, so it counts as playable for that pill even on a page
+    // whose classic-derived gates offer it no Play pill of its own. It is also the room's best case: a "local"
+    // reference is a path, and two boxes in one house usually mount the same library.
+    const bool localFileLeaf = !it.expandable && browse::localLeafRoute(it).play == browse::LeafPlay::OpenFile;
+    const bool isVideoLeaf = (gates.play || directOpen || bridgedStream || localFileLeaf)
+                             && videoShapedLeaf(it, gates.readable);
     if (isVideoLeaf && (gates.play || directOpen) && !ProfileStore::current().restricted)
     {
         if (ExternalPlayer::anyTarget()) verbs << QStringLiteral("external"); // one-off, any default
@@ -12466,7 +12476,10 @@ void HomeView::requestMeta(const MediaItem& item)
     if (wtBtn_)
     {
         wtBtn_->setText(QStringLiteral("👥  ") + watchTogetherLabel());
-        wtBtn_->setVisible(gates.play && videoShapedLeaf(item, gates.readable));
+        // The themed row's rule, including a Local Library file (see themedDetailData's localFileLeaf).
+        const bool localFileLeaf = !item.expandable
+                                   && browse::localLeafRoute(item).play == browse::LeafPlay::OpenFile;
+        wtBtn_->setVisible((gates.play || localFileLeaf) && videoShapedLeaf(item, gates.readable));
     }
     // Romhacks are a retro-ROM idea: a patch targets one dump of one game. PC games are excluded by
     // retroSystemFor (their system is "pc"), and anything that is not a game has no system at all.
