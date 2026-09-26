@@ -145,6 +145,7 @@ static HighlightStore::Highlight highlightFromObject(const QJsonObject& o)
     h.anchor  = anchorFromValue(o.value(QStringLiteral("anchor")));
     h.color   = HighlightStore::normalizeColor(o.value(QStringLiteral("color")).toInt(0));
     h.text    = o.value(QStringLiteral("text")).toString();
+    h.note    = o.value(QStringLiteral("note")).toString();   // absent (every pre-notes row) -> no note
     h.ts      = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
     return h;
 }
@@ -157,6 +158,9 @@ static QJsonObject highlightToObject(const HighlightStore::Highlight& h)
     o.insert(QStringLiteral("anchor"), h.anchor.toJson());
     o.insert(QStringLiteral("color"), h.color);
     o.insert(QStringLiteral("text"), h.text);
+    // Written only when there IS a note, so a row without one is byte-for-byte the row it was before notes
+    // existed - an older build reading it, and the equal-ts value tie-break comparing it, see no difference.
+    if (!h.note.isEmpty()) o.insert(QStringLiteral("note"), h.note);
     o.insert(QStringLiteral("ts"), static_cast<double>(h.ts));
     return o;
 }
@@ -223,6 +227,22 @@ HighlightStore::Highlight HighlightStore::add(const QString& bookKey, const Read
     hl.color   = normalizeColor(color);
     hl.text    = text;
     hl.ts      = QDateTime::currentSecsSinceEpoch();
+
+    // The NOTES of whatever this row replaces are carried onto it: re-adding the same passage, or extending a
+    // highlight by a word, is still the passage the reader wrote about, and the add must not silently delete
+    // what they wrote. More than one (a union swallowing two noted rows) are kept in reading order, each once.
+    {
+        QVector<Highlight> replaced;
+        for (const Highlight& h : items)
+            if (h.id == hl.id || plan.absorbed.contains(h.id)) replaced.push_back(h);
+        std::sort(replaced.begin(), replaced.end(), [](const Highlight& a, const Highlight& b) {
+            return ReaderAnchor::inReadingOrder(a.anchor, b.anchor);
+        });
+        QStringList notes;
+        for (const Highlight& h : replaced)
+            if (!h.note.isEmpty() && !notes.contains(h.note)) notes << h.note;
+        hl.note = notes.join(QStringLiteral("\n\n"));
+    }
 
     // Everything the union swallowed goes — tombstoned, so a peer that still holds the narrower row cannot
     // bring it back and leave the reader with two overlapping bands. The union's own id survives that sweep
@@ -295,3 +315,42 @@ HighlightStore::Highlight HighlightStore::at(const QString& bookKey, int spine, 
 }
 
 QVector<HighlightStore::Highlight> HighlightStore::all() { return readAll(); }
+
+// ---- notes (issue #136) --------------------------------------------------------------------------------------
+
+QString HighlightStore::normalizedNote(const QString& note)
+{
+    return note.trimmed();
+}
+
+bool HighlightStore::noteFits(const QString& note)
+{
+    // Code points, not UTF-16 units: the cap is stated in characters, and a reader who types an emoji typed one.
+    return normalizedNote(note).toUcs4().size() <= kMaxNoteChars;
+}
+
+bool HighlightStore::setNote(const QString& id, const QString& note)
+{
+    if (id.isEmpty()) return false;
+    if (!noteFits(note)) return false;            // refused, not truncated: nothing is written
+    const QString n = normalizedNote(note);
+
+    QVector<Highlight> items = readAll();
+    bool found = false, changed = false;
+    for (Highlight& h : items)
+        if (h.id == id)
+        {
+            found = true;
+            if (h.note == n) continue;             // the note it already has: nothing to say, nothing to sync
+            h.note = n;
+            // STRICTLY newer than the row's last write, even inside the same second: an equal ts would hand the
+            // merge to the value tie-break, and a peer's pre-note copy could then win over the note just typed.
+            h.ts = qMax(QDateTime::currentSecsSinceEpoch(), h.ts + 1);
+            changed = true;
+        }
+    if (!found) return false;
+    if (!changed) return true;
+    writeAll(items);
+    fireChanged();
+    return true;
+}

@@ -18,6 +18,8 @@
 
 class QScrollArea;
 class QLabel;
+class ElidedLabel;   // ../ui/OverflowBar.h: a label that shrinks to an ellipsis (#136 follow-up)
+class OverflowBar;
 class QPushButton;
 class QVBoxLayout;
 class QThreadPool;
@@ -267,10 +269,12 @@ private:
     double resumeFraction_ = 0.0; // webtoon: the stored fraction into the resume page, until it is applied
     bool inScrollUpdate_ = false; // guards the scrollbar -> current_ -> scrollbar loop
 
-    QWidget* bar_ = nullptr;   // the bottom control bar (hidden in hosted/themed mode)
+    // The bottom control bar (hidden in hosted/themed mode). An OverflowBar: its minimum width is only what must
+    // always be on it, so it can never force the window wider; what does not fit moves into its "More…".
+    OverflowBar* bar_ = nullptr;
     QScrollArea* scroll_ = nullptr;
     QLabel* imageLabel_ = nullptr;
-    QLabel* pageLabel_ = nullptr;
+    ElidedLabel* pageLabel_ = nullptr;   // elides (middle) rather than widening the bar
     ComicStripWidget* stripWidget_ = nullptr;   // #154: the continuous webtoon strip (scroll_'s widget there)
     ComicRailWidget*  railWidget_  = nullptr;   // #154: the thumbnail rail beside it
     QPushButton* modeBtn_ = nullptr;            // the classic bar's five per-series controls

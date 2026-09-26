@@ -150,6 +150,10 @@ Rectangle {
                                     brows.push({ i: chrome.br.selectSettingIndex,
                                                  t: chrome.br.cursorMode ? "▍ Selecting" : "▍ Select",
                                                  on: chrome.br.cursorMode })
+                                // Export notes (issue #136) closes the row, after Select. Its index is the
+                                // bridge's too, for the same reason Select's is.
+                                if (chrome.br.exportSettingIndex >= 0)
+                                    brows.push({ i: chrome.br.exportSettingIndex, t: "Export notes" })
                                 return brows
                             }
                             var rows = [{ i: 1, t: "−" }, { i: 2, t: "+" }, { i: 3, t: "Fit" }]
@@ -164,6 +168,9 @@ Rectangle {
                                 for (var k = 0; k < cc.length; ++k)
                                     rows.push({ i: 5 + k, t: cc[k], on: (k < on.length && on[k] === true) })
                             }
+                            // Export notes (issue #136): the last control of a pdf's and a comic's row too.
+                            if (chrome.br.exportSettingIndex >= 0)
+                                rows.push({ i: chrome.br.exportSettingIndex, t: "Export notes" })
                             return rows
                         }
                         delegate: Loader {
@@ -237,11 +244,20 @@ Rectangle {
                     model: chrome.br ? chrome.br.bookmarks : []
                     currentIndex: (chrome.g && chrome.g.zone === "readerBookmarks") ? chrome.g.index : -1
                     delegate: Rectangle {
+                        id: bmRow
                         required property var modelData
                         required property int index
                         width: bmView.width
-                        height: Math.round(30 * chrome.ffs)
                         readonly property bool sel: (chrome.g && chrome.g.zone === "readerBookmarks" && chrome.g.index === index)
+                        // A highlight's NOTE (issue #136). The label already ends in the note marker; the row the
+                        // cursor is ON expands to show the note itself, under the passage. Only the focused row
+                        // expands, so the list stays a list and the D-pad walks it row by row exactly as before.
+                        readonly property string note: (chrome.br && chrome.br.bookmarkNotes
+                                                        && index < chrome.br.bookmarkNotes.length)
+                                                       ? chrome.br.bookmarkNotes[index] : ""
+                        readonly property bool expanded: sel && note !== ""
+                        readonly property int headH: Math.round(30 * chrome.ffs)
+                        height: expanded ? headH + noteText.implicitHeight + Math.round(8 * chrome.ffs) : headH
                         color: sel ? Qt.rgba(0.23, 0.44, 0.69, 0.35) : "transparent"
                         radius: 5
                         // Row body: select + activate -> the host jumps to this bookmark (gotoBookmark).
@@ -259,7 +275,7 @@ Rectangle {
                                                           ? chrome.br.bookmarkColors[index] : ""
                             visible: hex !== ""
                             anchors.left: parent.left; anchors.leftMargin: 10
-                            anchors.verticalCenter: parent.verticalCenter
+                            y: Math.round((bmRow.headH - height) / 2)
                             width: Math.round(10 * chrome.ffs); height: width; radius: width / 2
                             color: hex === "" ? "transparent" : hex
                             border.color: "#2A3540"; border.width: 1
@@ -268,9 +284,21 @@ Rectangle {
                             anchors.left: swatch.visible ? swatch.right : parent.left
                             anchors.leftMargin: swatch.visible ? 8 : 10
                             anchors.right: rmBtn.left; anchors.rightMargin: 8
-                            anchors.verticalCenter: parent.verticalCenter
+                            y: Math.round((bmRow.headH - height) / 2)
                             text: modelData; elide: Text.ElideRight
                             color: parent.sel ? "#FFFFFF" : "#C7D0DA"; font.pixelSize: Math.round(14 * chrome.ffs)
+                        }
+                        // The expanded note: wrapped, and cut at a few lines so one long note cannot push the rest
+                        // of the list off the panel (the whole note is in the highlight's own menu).
+                        Text {
+                            id: noteText
+                            visible: bmRow.expanded
+                            anchors.left: parent.left; anchors.leftMargin: Math.round(28 * chrome.ffs)
+                            anchors.right: parent.right; anchors.rightMargin: 12
+                            y: bmRow.headH
+                            text: bmRow.expanded ? bmRow.note : ""
+                            wrapMode: Text.Wrap; maximumLineCount: 5; elide: Text.ElideRight
+                            color: "#E9D9A6"; font.pixelSize: Math.round(13 * chrome.ffs); font.italic: true
                         }
                         // Remove affordance (×): a distinct hit target over the row body — fires removeBookmark
                         // straight on the bridge (the store change re-emits bookmarksChanged, refreshing the model
@@ -278,7 +306,7 @@ Rectangle {
                         Rectangle {
                             id: rmBtn
                             anchors.right: parent.right; anchors.rightMargin: 6
-                            anchors.verticalCenter: parent.verticalCenter
+                            y: Math.round((bmRow.headH - height) / 2)
                             width: Math.round(24 * chrome.ffs); height: Math.round(24 * chrome.ffs); radius: 5
                             color: rmArea.containsMouse ? "#3A2530" : "transparent"
                             border.color: "#2A3540"; border.width: rmArea.containsMouse ? 1 : 0

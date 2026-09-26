@@ -38,8 +38,16 @@
 #include "HighlightStore.h"
 #include "ProfileStore.h"
 #include "HostedReader.h"
+#include "AnnotationExport.h"
+#include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QAbstractTextDocumentLayout>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QFont>
 #include <QGuiApplication>
 #include <QPointF>
@@ -501,6 +509,260 @@ int main(int argc, char** argv)
 
         delete small;
         delete large;
+    }
+
+    // ---- 8. NOTES on a highlight -----------------------------------------------------------------------------
+    // A note is a field on the highlight row: round-trips through the store, an edit bumps the row's ts
+    // STRICTLY (so it wins the newest-ts merge even inside the second the highlight was made - probe_cloudmerge
+    // plays that against a peer), an empty note is no note at all, and the cap refuses rather than truncates.
+    {
+        const QString book = QStringLiteral("/library/Notes.epub");
+        const HighlightStore::Highlight h = HighlightStore::add(book, range(0, 10, 20), 1, QStringLiteral("ten words"));
+        CHECK(!h.id.isEmpty());
+        CHECK(h.note.isEmpty());                                   // a fresh highlight carries no note
+
+        // 8a. Round trip, trimmed.
+        CHECK(HighlightStore::setNote(h.id, QStringLiteral("  a thought  ")));
+        QVector<HighlightStore::Highlight> l = HighlightStore::list(book);
+        CHECK(l.size() == 1);
+        CHECK(!l.isEmpty() && l.at(0).note == QStringLiteral("a thought"));
+        // 8b. The edit bumped the ts past the add's, though both happened inside the same second.
+        const qint64 afterFirst = l.isEmpty() ? 0 : l.at(0).ts;
+        CHECK(afterFirst > h.ts);
+        // 8c. EDIT: replaced, bumped again.
+        CHECK(HighlightStore::setNote(h.id, QStringLiteral("a better thought")));
+        l = HighlightStore::list(book);
+        CHECK(!l.isEmpty() && l.at(0).note == QStringLiteral("a better thought"));
+        CHECK(!l.isEmpty() && l.at(0).ts > afterFirst);
+        // ...and the note is not a different passage: same row, same id, same colour.
+        CHECK(!l.isEmpty() && l.at(0).id == h.id && l.at(0).color == 1);
+        // 8d. A recolour keeps the note, and so does re-adding (extending) the passage: the note is about the
+        // passage, and the passage is still there.
+        HighlightStore::setColor(h.id, 2);
+        CHECK(HighlightStore::list(book).at(0).note == QStringLiteral("a better thought"));
+        const HighlightStore::Highlight ext = HighlightStore::add(book, range(0, 20, 30), 3, QStringLiteral("ten words more"));
+        l = HighlightStore::list(book);
+        CHECK(l.size() == 1);
+        CHECK(!l.isEmpty() && l.at(0).id == ext.id && ext.id != h.id);
+        CHECK(!l.isEmpty() && l.at(0).note == QStringLiteral("a better thought"));
+        // 8e. EMPTY means no note: whitespace clears it, and a cleared row writes no "note" key at all (so a row
+        // that never had a note is byte-for-byte what it was before notes existed).
+        CHECK(HighlightStore::setNote(ext.id, QStringLiteral("   ")));
+        l = HighlightStore::list(book);
+        CHECK(!l.isEmpty() && l.at(0).note.isEmpty());
+        {
+            QSettings raw(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                          QSettings::IniFormat);
+            const QString rawItems = raw.value(HighlightStore::itemsKey()).toString();
+            CHECK(rawItems.contains(ext.id));
+            CHECK(!rawItems.contains(QStringLiteral("\"note\"")));
+        }
+        // 8f. THE CAP: kMaxNoteChars characters fit, one more is REFUSED - false, and nothing written (the old
+        // note stays; it is not truncated to the cap).
+        CHECK(HighlightStore::kMaxNoteChars == 2000);
+        CHECK(HighlightStore::setNote(ext.id, QStringLiteral("keep me")));
+        const QString atCap(HighlightStore::kMaxNoteChars, QLatin1Char('x'));
+        const QString overCap(HighlightStore::kMaxNoteChars + 1, QLatin1Char('x'));
+        CHECK(HighlightStore::noteFits(atCap));
+        CHECK(!HighlightStore::noteFits(overCap));
+        CHECK(!HighlightStore::setNote(ext.id, overCap));
+        CHECK(HighlightStore::list(book).at(0).note == QStringLiteral("keep me"));
+        CHECK(HighlightStore::setNote(ext.id, atCap));
+        CHECK(HighlightStore::list(book).at(0).note.size() == HighlightStore::kMaxNoteChars);
+        // Counted in CHARACTERS, not UTF-16 units: 2000 emoji (4000 units) is a 2000-character note.
+        QString emoji;
+        for (int i = 0; i < HighlightStore::kMaxNoteChars; ++i) emoji += QString::fromUcs4(U"\U0001F4DA", 1);
+        CHECK(HighlightStore::noteFits(emoji));
+        CHECK(!HighlightStore::noteFits(emoji + QStringLiteral("x")));
+        // Surrounding whitespace does not count against the cap - it is not stored.
+        CHECK(HighlightStore::noteFits(QStringLiteral("   ") + atCap + QStringLiteral("   ")));
+        // 8g. An unknown id is refused.
+        CHECK(!HighlightStore::setNote(QStringLiteral("no-such-id"), QStringLiteral("x")));
+        CHECK(!HighlightStore::setNote(QString(), QStringLiteral("x")));
+        // 8h. The panel carries the note, and marks a row that has one.
+        HighlightStore::setNote(ext.id, QStringLiteral("see chapter 3"));
+        const QVector<ReaderAnnotations::Entry> rows =
+            ReaderAnnotations::merged(QVector<BookmarkStore::Bookmark>(), HighlightStore::list(book));
+        CHECK(rows.size() == 1);
+        CHECK(!rows.isEmpty() && rows.at(0).note == QStringLiteral("see chapter 3"));
+        CHECK(!rows.isEmpty() && ReaderAnnotations::rowLabel(rows.at(0)).contains(ReaderAnnotations::noteMarker()));
+        HighlightStore::setNote(ext.id, QString());
+        const QVector<ReaderAnnotations::Entry> bare =
+            ReaderAnnotations::merged(QVector<BookmarkStore::Bookmark>(), HighlightStore::list(book));
+        CHECK(!bare.isEmpty() && !ReaderAnnotations::rowLabel(bare.at(0)).contains(ReaderAnnotations::noteMarker()));
+        HighlightStore::remove(ext.id);
+    }
+
+    // ---- 9. EXPORT: one book's annotations as Markdown and as plain text --------------------------------------
+    // Every expected line below is written out by hand, never produced by the formatter and read back.
+    {
+        AnnotationExport::BookInfo info;
+        info.title  = QStringLiteral("The Lighthouse Keeper");
+        info.author = QStringLiteral("Ada Northcott");
+        info.chapterTitles = QStringList{QStringLiteral("The Storm"), QStringLiteral("Lamps"), QString()};
+
+        auto mkBm = [](int spine, int at) {
+            BookmarkStore::Bookmark b; b.id = QStringLiteral("b%1-%2").arg(spine).arg(at);
+            b.anchor.kind = ReaderAnchor::Book; b.anchor.spine = spine; b.anchor.offset = at;
+            b.label = QStringLiteral("ignored label"); return b;
+        };
+        auto mkHl = [](int spine, int from, int to, const QString& words, int colour, const QString& note) {
+            HighlightStore::Highlight h; h.id = QStringLiteral("h%1-%2").arg(spine).arg(from);
+            h.anchor.kind = ReaderAnchor::Book; h.anchor.spine = spine; h.anchor.offset = from; h.anchor.endOffset = to;
+            h.text = words; h.color = colour; h.note = note; return h;
+        };
+
+        // Fed in a deliberately WRONG order, across chapters, so the sort is doing the work.
+        const QVector<BookmarkStore::Bookmark> bms{ mkBm(2, 5), mkBm(0, 50) };
+        const QVector<HighlightStore::Highlight> hls{
+            mkHl(1, 10, 20, QStringLiteral("The lamps were lit at dusk."), 0, QStringLiteral("Lovely image.")),
+            mkHl(0, 10, 30, QStringLiteral("The sea rose over the rocks."), 2, QString()),
+        };
+
+        // 9a. Location labels: a chapter's title, "Chapter N" when it has none, "Page N" for a page anchor.
+        ReaderAnchor c0; c0.kind = ReaderAnchor::Book; c0.spine = 0;
+        ReaderAnchor c2; c2.kind = ReaderAnchor::Book; c2.spine = 2;
+        ReaderAnchor p7; p7.kind = ReaderAnchor::Pdf; p7.page = 7;
+        CHECK(AnnotationExport::locationLabel(c0, info.chapterTitles) == QStringLiteral("The Storm"));
+        CHECK(AnnotationExport::locationLabel(c2, info.chapterTitles) == QStringLiteral("Chapter 3"));
+        CHECK(AnnotationExport::locationLabel(p7, info.chapterTitles) == QStringLiteral("Page 8"));
+
+        // 9b. The whole Markdown document, exactly: header, then DOCUMENT ORDER across both kinds - ch0 @10
+        // (highlight), ch0 @50 (bookmark), ch1 @10 (highlight, noted), ch2 @5 (bookmark).
+        const QString md = AnnotationExport::render(info, bms, hls, AnnotationExport::Format::Markdown);
+        const QString wantMd = QStringLiteral(
+            "# The Lighthouse Keeper\n"
+            "\n"
+            "by Ada Northcott\n"
+            "\n"
+            "## Blue highlight — The Storm\n"
+            "\n"
+            "> The sea rose over the rocks.\n"
+            "\n"
+            "## Bookmark — The Storm\n"
+            "\n"
+            "## Yellow highlight — Lamps\n"
+            "\n"
+            "> The lamps were lit at dusk.\n"
+            "\n"
+            "**Note:** Lovely image.\n"
+            "\n"
+            "## Bookmark — Chapter 3\n");
+        CHECK(md == wantMd);
+        if (md != wantMd) std::fprintf(stderr, "---- got ----\n%s\n---- want ----\n%s\n",
+                                       md.toUtf8().constData(), wantMd.toUtf8().constData());
+
+        // 9c. The same content as plain text: no Markdown syntax at all.
+        const QString txt = AnnotationExport::render(info, bms, hls, AnnotationExport::Format::PlainText);
+        const QString wantTxt = QStringLiteral(
+            "The Lighthouse Keeper\n"
+            "by Ada Northcott\n"
+            "\n"
+            "Blue highlight — The Storm\n"
+            "“The sea rose over the rocks.”\n"
+            "\n"
+            "Bookmark — The Storm\n"
+            "\n"
+            "Yellow highlight — Lamps\n"
+            "“The lamps were lit at dusk.”\n"
+            "Note: Lovely image.\n"
+            "\n"
+            "Bookmark — Chapter 3\n");
+        CHECK(txt == wantTxt);
+        if (txt != wantTxt) std::fprintf(stderr, "---- got ----\n%s\n---- want ----\n%s\n",
+                                         txt.toUtf8().constData(), wantTxt.toUtf8().constData());
+
+        // 9d. ESCAPING. A note (and a quote, and a title) is the user's TEXT: a '#' does not make a heading, a
+        // '*' does not make emphasis, a bracket does not make a link, a backtick does not make code.
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("# a *b* _c_ [d] `e`"))
+              == QStringLiteral("\\# a \\*b\\* \\_c\\_ \\[d\\] \\`e\\`"));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("a\\b <i> x|y ~z~ &amp;"))
+              == QStringLiteral("a\\\\b \\<i\\> x\\|y \\~z\\~ \\&amp;"));
+        // Line-start markers are only markers at a line start: a list dash, a plus, an ordered-list number and a
+        // setext underline are escaped THERE and left alone mid-line.
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("- item")) == QStringLiteral("\\- item"));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("+ item")) == QStringLiteral("\\+ item"));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("1. first")) == QStringLiteral("1\\. first"));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("12) twelfth")) == QStringLiteral("12\\) twelfth"));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("===")) == QStringLiteral("\\==="));
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("well-read, 1.5 times")) == QStringLiteral("well-read, 1.5 times"));
+        // Indentation would make a code block; it is dropped per line.
+        CHECK(AnnotationExport::escapeMarkdown(QStringLiteral("    code?")) == QStringLiteral("code?"));
+
+        const QString nasty = QStringLiteral("# not a heading *not bold* _no_ [no](link) `no code`");
+        QVector<HighlightStore::Highlight> one{ mkHl(0, 0, 5, QStringLiteral("*Stars* and # signs"), 1, nasty) };
+        const QString md2 = AnnotationExport::render(info, {}, one, AnnotationExport::Format::Markdown);
+        CHECK(md2.contains(QStringLiteral("**Note:** \\# not a heading \\*not bold\\* \\_no\\_ \\[no\\](link) \\`no code\\`\n")));
+        CHECK(md2.contains(QStringLiteral("> \\*Stars\\* and \\# signs\n")));
+        CHECK(!md2.contains(QStringLiteral("*not bold*")));
+        // ...and the plain text variant carries the words untouched.
+        const QString txt2 = AnnotationExport::render(info, {}, one, AnnotationExport::Format::PlainText);
+        CHECK(txt2.contains(QStringLiteral("Note: ") + nasty + QStringLiteral("\n")));
+        CHECK(!txt2.contains(QStringLiteral("\\")));
+        CHECK(!txt2.contains(QStringLiteral("## ")) && !txt2.contains(QStringLiteral("**")));
+
+        // A title with markup characters is escaped in the heading too.
+        AnnotationExport::BookInfo odd;
+        odd.title = QStringLiteral("C# *in* Depth");
+        CHECK(AnnotationExport::render(odd, {}, {}, AnnotationExport::Format::Markdown)
+              .startsWith(QStringLiteral("# C\\# \\*in\\* Depth\n")));
+
+        // A multi-line note keeps its lines (each escaped on its own), and a multi-line quote stays one quote.
+        QVector<HighlightStore::Highlight> ml{ mkHl(0, 0, 5, QStringLiteral("line one\nline two"), 0,
+                                                    QStringLiteral("first\n- second")) };
+        const QString md3 = AnnotationExport::render(info, {}, ml, AnnotationExport::Format::Markdown);
+        CHECK(md3.contains(QStringLiteral("> line one\n> line two\n")));
+        CHECK(md3.contains(QStringLiteral("**Note:** first\n\\- second\n")));
+
+        // 9e. A book with NO annotations: the header and "No notes yet", in both formats. No author = no by-line.
+        CHECK(AnnotationExport::render(info, {}, {}, AnnotationExport::Format::Markdown)
+              == QStringLiteral("# The Lighthouse Keeper\n\nby Ada Northcott\n\nNo notes yet.\n"));
+        CHECK(AnnotationExport::render(info, {}, {}, AnnotationExport::Format::PlainText)
+              == QStringLiteral("The Lighthouse Keeper\nby Ada Northcott\n\nNo notes yet.\n"));
+        AnnotationExport::BookInfo anon; anon.title = QStringLiteral("Anonymous");
+        CHECK(AnnotationExport::render(anon, {}, {}, AnnotationExport::Format::Markdown)
+              == QStringLiteral("# Anonymous\n\nNo notes yet.\n"));
+
+        // 9f. A PDF / comic: page locations, bookmarks alone.
+        BookmarkStore::Bookmark pg; pg.id = QStringLiteral("pg"); pg.anchor.kind = ReaderAnchor::Comic; pg.anchor.page = 11;
+        const QString comic = AnnotationExport::render(anon, {pg}, {}, AnnotationExport::Format::Markdown);
+        CHECK(comic == QStringLiteral("# Anonymous\n\n## Bookmark — Page 12\n"));
+    }
+
+    // ---- 10. The file: its name, its folder, and a re-export replacing it ------------------------------------
+    {
+        // 10a. The name, through the app's existing safe-name rule: every character a file system reserves
+        // becomes a space and the runs collapse.
+        CHECK(AnnotationExport::fileNameFor(QStringLiteral("A/B:C*D?\"E\"<F>|G"))
+              == QStringLiteral("A B C D E F G — notes.md"));
+        CHECK(AnnotationExport::fileNameFor(QStringLiteral("The Lighthouse Keeper"))
+              == QStringLiteral("The Lighthouse Keeper — notes.md"));
+        CHECK(AnnotationExport::fileNameFor(QStringLiteral("..\\..\\secret")).indexOf(QLatin1Char('\\')) < 0);
+        CHECK(!AnnotationExport::fileNameFor(QStringLiteral("../../x")).contains(QLatin1Char('/')));
+        // A title that sanitises away to nothing still exports, under a name.
+        CHECK(AnnotationExport::fileNameFor(QStringLiteral("???")) == QStringLiteral("Untitled — notes.md"));
+        CHECK(AnnotationExport::fileNameFor(QString()) == QStringLiteral("Untitled — notes.md"));
+
+        // 10b. The folder is <data dir>/exports.
+        CHECK(AnnotationExport::exportDir(QStringLiteral("/data")) == QStringLiteral("/data/exports"));
+
+        // 10c. Written, the folder created, and a second export of the same book REPLACES the first.
+        QTemporaryDir tmp;
+        CHECK(tmp.isValid());
+        const QString dir = AnnotationExport::exportDir(tmp.path());
+        const QString name = AnnotationExport::fileNameFor(QStringLiteral("The Lighthouse Keeper"));
+        QString err;
+        const QString path1 = AnnotationExport::writeExport(dir, name, QStringLiteral("first é\n"), &err);
+        CHECK(!path1.isEmpty());
+        CHECK(QFileInfo(path1).fileName() == name);
+        CHECK(QFileInfo(path1).absolutePath() == QFileInfo(dir).absoluteFilePath());
+        const QString path2 = AnnotationExport::writeExport(dir, name, QStringLiteral("second\n"), &err);
+        CHECK(path2 == path1);
+        QFile f(path1);
+        CHECK(f.open(QIODevice::ReadOnly));
+        CHECK(QString::fromUtf8(f.readAll()) == QStringLiteral("second\n"));
+        f.close();
+        CHECK(QDir(dir).entryList(QDir::Files).size() == 1);     // replaced, not "... (1).md"
     }
 
     if (failures == 0) { std::puts("HIGHLIGHTS-OK"); return 0; }

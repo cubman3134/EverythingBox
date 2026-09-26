@@ -26,6 +26,8 @@
 #include "BookmarkStore.h"
 #include "ReaderAnchor.h"
 #include "ProfileStore.h"
+#include "OverflowBar.h"         // #136 follow-up: the classic bar that never widens the window
+#include "nav/NavOverlay.h"       // ...whose "More…" is a NavMenu
 
 #include <QApplication>
 #include <QBuffer>
@@ -37,6 +39,9 @@
 #include <QImage>
 #include <QTemporaryDir>
 #include <QVector>
+#include <QVBoxLayout>
+#include <QKeyEvent>
+#include <QPushButton>
 #include <cstdio>
 #include <cstring>
 
@@ -312,6 +317,138 @@ int main(int argc, char** argv)
         CHECK(photos.openComic(cbzPath, &err));
         CHECK(photos.itemKey() == cbzPath);
         CHECK(photos.pageCount() == kComicPages);       // the comic's pages, not the folder's three
+    }
+
+    // ---- 6. The classic bar NEVER forces the window wider (issue #136 follow-up) ---------------------------
+    // A QHBoxLayout's minimum is the SUM of its children's, a QPushButton's minimum is its whole caption and a
+    // QLabel's minimum is its whole text - and a top-level window whose layout minimum exceeds its width is
+    // RESIZED to that minimum when shown. So a bar with fourteen buttons and a long "<file>  —  Pages 1–2 / 6"
+    // label made opening a comic grow a 1280 window. Asserted as RELATIONSHIPS - the window keeps the width
+    // it was given, the reader asks for no more than that, no button on the bar is squeezed below its own
+    // caption - never as pixel counts taken off one machine's font (the runner's font is not this one).
+    {
+        const QString longCbz = tmp.filePath(
+            QStringLiteral("Harbour Lights - The Complete Lighthouse Keeper's Edition, Volume 001.cbz"));
+        const QString longPdf = tmp.filePath(
+            QStringLiteral("The Lighthouse Keeper's Ledger - A Complete Illustrated Maintenance Manual.pdf"));
+        CHECK(writeCbz(longCbz, kComicPages));
+        CHECK(writeMultiPagePdf(longPdf, kPdfPages));
+
+        auto settle = [] { for (int i = 0; i < 6; ++i) QCoreApplication::processEvents(); };
+        // Every VISIBLE button inside `reader` (its bar) is at least as wide as its own minimum: the bar fits by
+        // moving controls out of the way, never by crushing them into unreadable slivers.
+        auto noneSqueezed = [](QWidget* reader) {
+            for (QPushButton* b : reader->findChildren<QPushButton*>())
+                if (b->isVisible() && b->width() < b->minimumSizeHint().width()) return false;
+            return true;
+        };
+
+        for (const int winW : { 1280, 1024 })
+        {
+            {
+                QWidget window;
+                auto* col = new QVBoxLayout(&window);
+                col->setContentsMargins(0, 0, 0, 0);
+                auto* comic = new ComicView(&window);
+                col->addWidget(comic);
+                window.resize(winW, 720);
+                window.show();
+                settle();
+                CHECK(comic->openComic(longCbz));
+                settle();
+                CHECK(window.width() == winW);                              // opening it did not grow the window
+                CHECK(comic->minimumSizeHint().width() <= winW);            // ...and never will at this width
+                CHECK(noneSqueezed(comic));
+                if (window.width() != winW)
+                    std::fprintf(stderr, "  comic @%d: window became %d, reader asks for %d\n", winW,
+                                 window.width(), comic->minimumSizeHint().width());
+
+                // Nothing is LOST to fit: every control the reader wants is on the bar or in "More…", and "More…"
+                // is on the bar exactly when something is in it.
+                OverflowBar* ob = comic->findChild<OverflowBar*>();
+                CHECK(ob != nullptr);
+                if (!ob) continue;
+                QPushButton* exportBtn = nullptr;
+                for (QPushButton* b : ob->findChildren<QPushButton*>())
+                {
+                    if (b == ob->more()) continue;
+                    if (b->text() == QStringLiteral("Export notes")) exportBtn = b;
+                    if (ob->wanted(b)) CHECK(b->isVisible() || ob->overflowed().contains(b));
+                }
+                CHECK(exportBtn != nullptr);
+                CHECK(ob->more()->isVisible() == !ob->overflowed().isEmpty());
+                // Lowest priority goes first: if anything had to move, Export notes did.
+                if (!ob->overflowed().isEmpty()) CHECK(ob->overflowed().contains(exportBtn));
+
+                // The page label draws what fits and keeps the whole text one hover away.
+                ElidedLabel* label = ob->findChild<ElidedLabel*>();
+                CHECK(label != nullptr);
+                if (label)
+                {
+                    CHECK(label->fullText().contains(QStringLiteral("Harbour Lights")));
+                    CHECK(label->toolTip() == label->fullText());
+                    CHECK(label->fontMetrics().horizontalAdvance(label->text()) <= label->contentsRect().width());
+                    // ...and its MINIMUM is an ellipsis, not its text: a file name as long as the screen cannot
+                    // widen the bar through the label either.
+                    CHECK(label->minimumSizeHint().width() <= label->fontMetrics().averageCharWidth() * 4);
+                }
+
+                // An owner re-showing its own controls (a reading-mode change relabels and re-shows all seven)
+                // does not overflow the bar again: the bar tracks the wish apart from its own fit decision.
+                comic->comicActivateControl(0);
+                settle();
+                CHECK(window.width() == winW);
+                CHECK(noneSqueezed(comic));
+                CHECK(ob->more()->isVisible() == !ob->overflowed().isEmpty());
+
+                // "More…" is a nav-kit menu listing what moved, in bar order, and choosing a row CLICKS that
+                // control - one action, two ways in. Driven with a real Return key on the menu.
+                QPushButton* firstOver = nullptr;
+                for (QPushButton* b : ob->overflowed()) if (b->isEnabled()) { firstOver = b; break; }
+                if (winW == 1024) CHECK(firstOver != nullptr);   // a 1024 bar cannot hold all fourteen
+                if (firstOver)
+                {
+                    int clicks = 0;
+                    QObject::connect(firstOver, &QPushButton::clicked, [&clicks] { ++clicks; });
+                    ob->openMore();
+                    settle();
+                    NavMenu* menu = window.findChild<NavMenu*>();
+                    CHECK(menu != nullptr);
+                    if (menu)
+                    {
+                        CHECK(menu->describe().endsWith(firstOver->text()));
+                        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                        QCoreApplication::sendEvent(menu, &enter);
+                        settle();
+                    }
+                    CHECK(clicks == 1);
+                }
+
+                // And with room to spare, everything is back on the bar and "More…" is gone.
+                window.resize(4000, 720);
+                settle();
+                CHECK(ob->overflowed().isEmpty());
+                CHECK(!ob->more()->isVisible());
+            }
+            {
+                QWidget window;
+                auto* col = new QVBoxLayout(&window);
+                col->setContentsMargins(0, 0, 0, 0);
+                auto* pdf = new PdfView(&window);
+                col->addWidget(pdf);
+                window.resize(winW, 720);
+                window.show();
+                settle();
+                CHECK(pdf->openPdf(longPdf));
+                settle();
+                CHECK(window.width() == winW);
+                CHECK(pdf->minimumSizeHint().width() <= winW);
+                CHECK(noneSqueezed(pdf));
+                if (window.width() != winW)
+                    std::fprintf(stderr, "  pdf @%d: window became %d, reader asks for %d\n", winW,
+                                 window.width(), pdf->minimumSizeHint().width());
+            }
+        }
     }
 
     if (failures == 0) { std::puts("READERBM-OK"); return 0; }

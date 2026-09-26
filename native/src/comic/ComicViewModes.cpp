@@ -12,6 +12,7 @@
 // which is why the webtoon path costs those three suppliers nothing.
 #include "ComicView.h"
 #include "ReadingModes.h"
+#include "../ui/OverflowBar.h"   // bar_->row(): the classic bar (#136 follow-up)
 #include "../core/ConsumptionStats.h"
 #include "../core/Settings.h"
 
@@ -253,12 +254,12 @@ struct ComicView::StripDecodeShared
 
 void ComicView::installModeControls()
 {
-    auto* bar = qobject_cast<QHBoxLayout*>(bar_->layout());
+    QHBoxLayout* bar = bar_->row();
     if (!bar) return;
     const auto add = [this, bar](QPushButton*& btn, void (ComicView::*slot)()) {
         btn = new QPushButton(this);
         connect(btn, &QPushButton::clicked, this, slot);
-        bar->insertWidget(bar->count() - 3, btn);   // before the Prev / page label / Next group
+        bar->insertWidget(bar->count() - 4, btn);   // before the More… / Prev / page label / Next group
     };
     add(modeBtn_,   &ComicView::cycleReadingMode);
     add(splitBtn_,  &ComicView::cycleSplitOverride);

@@ -23,6 +23,18 @@
 // about the passage wins, the same rule the ts merge follows). planMergeIn() is the pure half of that, so the
 // exactly-touching case is pinned without a store at all.
 //
+// NOTES (issue #136, the increment after highlights). A highlight may carry a NOTE — the reader's own words about
+// the passage. It is a field ON the highlight, not a second store: it lives in the same JSON row, so it syncs,
+// merges and is deleted with the passage it is about, and the CloudMerge rule needs no new clause — the whole
+// row is newest-ts-wins, so the newest NOTE wins with it. An edit therefore bumps the row's ts, and bumps it
+// STRICTLY (never to a value equal to the one it had): a note written in the same second the highlight was
+// made must still beat the pre-note copy a peer holds, which an equal ts would leave to the value tie-break.
+// An empty note (or one of nothing but whitespace) is NO note: setNote("") clears it, and a row with no note
+// writes no "note" key at all, so every row made before notes existed is byte-for-byte what it was.
+// The cap is kMaxNoteChars characters (Unicode code points, not UTF-16 units — an emoji is one character).
+// Longer text is REFUSED, never truncated: cutting a person's sentence off at an arbitrary character and
+// saving the stump is worse than telling them it is too long while their text is still on screen.
+//
 // CLOUD SYNC. "highlights/" is in CloudSync::isPerItemStoreKey (NOT isDeviceLocalKey): a highlight is a
 // statement about the BOOK, not about this device, so it rides the lightweight CloudMerge document with the
 // bookmarks. probe_cloudmerge pins the classification; probe_highlights pins the store and the merge.
@@ -50,6 +62,7 @@ namespace HighlightStore
         ReaderAnchor anchor;   // the RANGE: spine + offset + endOffset (a highlight is never a point anchor)
         int          color = 0; // index into the fixed palette above
         QString      text;     // the highlighted words, for the annotation panel's excerpt
+        QString      note;     // the reader's note on the passage; empty = no note (see NOTES above)
         qint64       ts = 0;   // epoch seconds of the last write (multi-device merge: newest-ts wins per id)
     };
 
@@ -89,6 +102,21 @@ namespace HighlightStore
     // Recolour in place: same id, same passage, new colour, fresh ts (so the newest colour wins on merge).
     // No-op for an unknown id.
     void setColor(const QString& id, int color);
+
+    // The longest note a highlight may carry, in characters (code points). Stated here, once: the store refuses
+    // past it, the reader's note prompt says it, and the probe pins it.
+    constexpr int kMaxNoteChars = 2000;
+
+    // The note as it would be stored: surrounding whitespace trimmed (so a note of only spaces is no note).
+    QString normalizedNote(const QString& note);
+    // Does `note` fit under the cap once normalised? Counted in code points. PURE.
+    bool noteFits(const QString& note);
+
+    // Set, replace or clear (empty / whitespace-only `note`) the note on highlight `id`. Bumps the row's ts
+    // STRICTLY past its old value, so the edit wins the newest-ts merge even within the same second. Returns
+    // false — and writes NOTHING — for an unknown id or a note over kMaxNoteChars (refused, not truncated).
+    // Setting the note a row already has is a successful no-op (no ts bump, no change hook).
+    bool setNote(const QString& id, const QString& note);
 
     // Remove the highlight with `id` and record a delete tombstone so a peer that still holds it cannot
     // resurrect it on merge. No-op for an empty/unknown id.
