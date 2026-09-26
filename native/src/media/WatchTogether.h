@@ -125,6 +125,10 @@ namespace WatchTogether
         bool    paused = false;      // Item / Transport / Beacon / RequestPause
         qint64  clockMs = 0;         // Beacon: the host's monotonic reading when it was sent
         bool    buffering = false;   // Buffering
+        // Transport / Beacon, host -> guests: the host's stall policy (#448), as policyId spells it. OPTIONAL on
+        // the wire in both directions: a host that predates it sends none, which a guest reads as "unknown", and
+        // a guest that predates it ignores a key it does not know. Empty = absent.
+        QString policy;
         QString reason;              // Unresolved / Bye — display only, scrubbed like everything else
         QList<RosterEntry> roster;   // Roster
     };
@@ -194,6 +198,34 @@ namespace WatchTogether
     BufferAction decideBuffering(BufferPolicy policy, bool anyoneBuffering, bool hostPlaying,
                                  bool heldForBuffering);
 
+    // Is THIS machine buffering? (#448) The answer a participant reports to the room, and it is about the
+    // participant's own CACHE — how much of the film it holds ahead of the playhead — never about whether its
+    // player happens to be playing.
+    //
+    // That distinction is the whole bug it fixes. The old check called a player "stalled" when its position
+    // stopped moving while it was NOT paused. But "wait for everyone" answers a stall by pausing the room, and
+    // pausing the room pauses the stalled guest's player too, so the very next tick read the guest as
+    // "recovered" with nothing buffered; the room resumed, the guest was hard-seeked past what it had, and
+    // stalled again. Measured live (#86's rig): the host never held for more than a second and the badge
+    // blinked every three.
+    //
+    //   cacheAheadSec  seconds of demuxed film ahead of the playhead (mpv's demuxer-cache-duration). NaN or
+    //                  negative = mpv could not say, which is no evidence either way: the answer stands.
+    //   atEnd          the rest of the file is already in the cache (mpv's demuxer-cache-state eof), so there
+    //                  is nothing left to wait for, however few seconds that is.
+    //   playerPaused   an input ON PURPOSE, and it changes nothing. It is here so the probe can pin that a
+    //                  paused player with an empty cache is still buffering.
+    //   wasBuffering   the previous answer. Two thresholds, as in the drift controller, so a cache hovering
+    //                  around one number cannot flap the whole room's transport: ENTER below enterBelowSec,
+    //                  LEAVE only at leaveAtSec or more.
+    struct ReadinessConfig
+    {
+        double enterBelowSec = 1.0;   // under a second ahead, the picture is about to stop
+        double leaveAtSec    = 3.0;   // three seconds ahead is enough to play through a resume without re-stalling
+    };
+    bool decideSelfBuffering(double cacheAheadSec, bool atEnd, bool playerPaused, bool wasBuffering,
+                             const ReadinessConfig& cfg = ReadinessConfig());
+
     // ---- 6. the room ------------------------------------------------------------------------------------
 
     struct Participant
@@ -240,6 +272,18 @@ namespace WatchTogether
         BufferPolicy bufferPolicy() const { return policy_; }
         bool heldForBuffering() const { return held_; }
 
+        // The stall policy the ROOM runs under, as this side knows it (#448). Only the host's setting decides
+        // anything, so a guest's own setting is not the answer: the host announces its policy on every
+        // Transport and Beacon, and a guest repeats what it last heard. From a host that predates the field
+        // the guest has heard nothing — roomPolicyKnown() is false — and roomPolicy() is the default, "wait for
+        // everyone", which is exactly what a guest assumed before the field existed.
+        bool roomPolicyKnown() const { return host_ || hostPolicyKnown_; }
+        BufferPolicy roomPolicy() const
+        {
+            if (host_) return policy_;
+            return hostPolicyKnown_ ? hostPolicy_ : BufferPolicy::WaitForEveryone;
+        }
+
         // This side's own resolution state (a guest that could not get the item stays in the room).
         //
         // BOTH RETURN "did this actually CHANGE anything", and the caller must send a message only when it
@@ -268,6 +312,7 @@ namespace WatchTogether
     private:
         Participant* findMut(const QString& id);
         QList<Message> hostBufferingSweep();   // re-run decideBuffering and answer with a Transport if it moved
+        void noteHostPolicy(const QString& id);  // guest: a Transport/Beacon's policy field, if it carried one
 
         bool active_ = false, host_ = false;
         QString code_, selfId_, selfName_;
@@ -278,6 +323,9 @@ namespace WatchTogether
         qint64 hostClockMs_ = 0;
         BufferPolicy policy_ = BufferPolicy::WaitForEveryone;
         bool held_ = false;
+        // Guest only: the host's policy as last announced, and whether it has announced one at all.
+        BufferPolicy hostPolicy_ = BufferPolicy::WaitForEveryone;
+        bool hostPolicyKnown_ = false;
     };
 
     // ---- 7. the persisted record ------------------------------------------------------------------------

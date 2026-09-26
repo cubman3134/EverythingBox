@@ -176,6 +176,10 @@ QByteArray encode(const Message& m)
         o.insert(QStringLiteral("paused"), m.paused);
     if (m.type == MsgType::Beacon) o.insert(QStringLiteral("clock"), double(m.clockMs));
     if (m.type == MsgType::Buffering) o.insert(QStringLiteral("buffering"), m.buffering);
+    // The host's stall policy (#448): only on the host's state messages, and only when set, so a message from
+    // a caller that did not set it is byte-identical to what a build before the field wrote.
+    if ((m.type == MsgType::Transport || m.type == MsgType::Beacon) && !m.policy.isEmpty())
+        o.insert(QStringLiteral("policy"), scrubForWire(m.policy));
     if (!m.reason.isEmpty()) o.insert(QStringLiteral("why"), scrubForWire(m.reason));
     if (m.type == MsgType::Roster)
     {
@@ -216,7 +220,8 @@ bool decode(const QByteArray& line, Message& out, QString& error)
     out.paused        = o.value(QStringLiteral("paused")).toBool(false);
     out.clockMs       = qint64(o.value(QStringLiteral("clock")).toDouble(0.0));
     out.buffering     = o.value(QStringLiteral("buffering")).toBool(false);
-    out.reason        = o.value(QStringLiteral("why")).toString();
+    out.policy        = o.value(QStringLiteral("policy")).toString();   // absent = "" = unknown
+    out.reason       = o.value(QStringLiteral("why")).toString();
     const QJsonObject ro = o.value(QStringLiteral("ref")).toObject();
     out.ref.kind   = ro.value(QStringLiteral("kind")).toString();
     out.ref.id     = ro.value(QStringLiteral("id")).toString();
@@ -320,6 +325,21 @@ BufferAction decideBuffering(BufferPolicy policy, bool anyoneBuffering, bool hos
     return BufferAction::Nothing;
 }
 
+bool decideSelfBuffering(double cacheAheadSec, bool atEnd, bool playerPaused, bool wasBuffering,
+                         const ReadinessConfig& cfg)
+{
+    // The pause flag is deliberately not consulted. "Wait for everyone" pauses the stalled guest's own player,
+    // so a check that treated a paused player as recovered released every hold it caused (#448).
+    Q_UNUSED(playerPaused);
+    // Everything that is left of the film is already here: there is nothing to wait for.
+    if (atEnd) return false;
+    // mpv could not say. No evidence either way, so the last answer stands. `!(>= 0)` also rejects NaN.
+    if (!(cacheAheadSec >= 0.0)) return wasBuffering;
+    // Two thresholds. Leaving needs three seconds ahead, entering needs less than one: a cache sitting on
+    // either line cannot flip the room's transport back and forth.
+    return wasBuffering ? cacheAheadSec < cfg.leaveAtSec : cacheAheadSec < cfg.enterBelowSec;
+}
+
 // ---- 6. the room -----------------------------------------------------------------------------------------
 
 void Room::open(const QString& code, const QString& selfId, const QString& selfName, bool asHost)
@@ -340,6 +360,8 @@ void Room::open(const QString& code, const QString& selfId, const QString& selfN
     hostPaused_ = true;
     hostClockMs_ = 0;
     held_ = false;
+    hostPolicyKnown_ = false;   // a new room's host has said nothing yet
+    hostPolicy_ = BufferPolicy::WaitForEveryone;
 }
 
 void Room::close()
@@ -348,6 +370,17 @@ void Room::close()
     people_.clear();
     item_ = PlayOn::ItemRef();
     held_ = false;
+    hostPolicyKnown_ = false;
+    hostPolicy_ = BufferPolicy::WaitForEveryone;
+}
+
+void Room::noteHostPolicy(const QString& id)
+{
+    // Absent means the host did not say — a build from before the field — which is not the same as saying
+    // "wait": an absent field leaves whatever this room last heard, and a room that never heard stays unknown.
+    if (id.isEmpty()) return;
+    hostPolicy_ = policyFromId(id);   // an id this build does not know reads as the default, never an error
+    hostPolicyKnown_ = true;
 }
 
 int Room::indexOf(const QString& id) const
@@ -456,6 +489,7 @@ Message Room::transportMessage() const
     m.participantId = selfId_;
     m.positionSec = hostPos_;
     m.paused = hostPaused_;
+    if (host_) m.policy = policyId(policy_);   // only the host's policy is the room's
     return m;
 }
 
@@ -468,6 +502,9 @@ Message Room::beaconMessage(qint64 clockMs)
     m.positionSec = hostPos_;
     m.paused = hostPaused_;
     m.clockMs = clockMs;
+    // On every beacon as well as every transport: a policy changed in a live room then reaches every guest
+    // within a second, with no extra message and nothing that could move anybody's player.
+    if (host_) m.policy = policyId(policy_);
     return m;
 }
 
@@ -545,11 +582,13 @@ QList<Message> Room::apply(const Message& in)
             case MsgType::Transport:
                 hostPos_ = in.positionSec;
                 hostPaused_ = in.paused;
+                noteHostPolicy(in.policy);
                 break;
             case MsgType::Beacon:
                 hostPos_ = in.positionSec;
                 hostPaused_ = in.paused;
                 hostClockMs_ = in.clockMs;
+                noteHostPolicy(in.policy);
                 break;
             case MsgType::Roster:
             {
@@ -733,7 +772,7 @@ IndicatorSummary indicatorSummary(bool inRoom, const QString& code, const QStrin
 
 IndicatorSummary indicatorSummary(const Room& room)
 {
-    return indicatorSummary(room.active(), room.code(), room.selfId(), room.participants(), room.bufferPolicy());
+    return indicatorSummary(room.active(), room.code(), room.selfId(), room.participants(), room.roomPolicy());
 }
 
 }   // namespace WatchTogether

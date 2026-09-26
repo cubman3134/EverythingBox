@@ -62,8 +62,11 @@ picture stopped. Themed video plays under the same controls; on the themed audio
 line sits under the track status. Both surfaces paint one summary (`WatchTogether::indicatorSummary`), so
 they cannot word the room differently. **W** still opens the full menu, with each person's state.
 
-A guest does not know which stall policy the host chose; the protocol does not carry it. A guest's
-indicator names whoever it is waiting for by the room's default, "wait for everyone".
+A guest's indicator follows the **host's** stall policy, not its own setting. The host announces it on
+every transport and position message (below), so a guest names whoever the room is waiting for only when
+the host really is waiting, and a change the host makes mid-film reaches every guest within a second. A
+host running a build from before the announcement says nothing; its guests then assume "wait for
+everyone", which is the default, and **Who's watching** marks that line as an assumption.
 
 ## What actually crosses the wire
 
@@ -92,6 +95,11 @@ handles that (below) rather than pretending otherwise.
 
 The traffic is a control channel — roughly ten messages a minute plus one small position beacon a
 second. That is why the same Python relay netplay uses carries it without noticing.
+
+The host's transport and position messages also carry its stall policy (`"policy": "wait"` or
+`"keepgoing"`). The field is optional in both directions. An older host leaves it out, and its guests read
+that as "not told". An older guest ignores a key it does not know. Neither side refuses the other, so the
+protocol version did not change.
 
 ## Who decides
 
@@ -131,13 +139,38 @@ room.
 
 ## When someone's stream stalls
 
-A guest whose picture stops moving tells the room, and everyone can see it in **Who's watching**.
-What the room *does* about it is your decision, not ours:
+A guest whose stream is running dry tells the room, and everyone can see it in **Who's watching**.
+
+"Running dry" is about the guest's own **buffer**, not about whether its picture is moving. Each box asks
+its player how many seconds of the film it already holds ahead of the playhead (mpv's
+`demuxer-cache-state`: its `cache-duration`, and its `eof` flag for "the rest of the file is already
+here"):
+
+| Seconds held ahead | Was it buffering? | Now |
+| --- | --- | --- |
+| under 1 | no | buffering |
+| 1 up to 3 | no | fine |
+| under 3 | yes | still buffering |
+| 3 or more | either | fine |
+| the rest of the film is already here | either | fine |
+| the player can't say | either | unchanged |
+
+Whether the player is paused plays **no part**. That matters because "pause for everyone" pauses the
+guest who stalled, too. An earlier version decided a paused player had recovered: the room resumed the
+moment it paused, the guest was pulled forward past what it had, and it stalled again. The badge blinked
+every few seconds and the room never really waited. Two thresholds, one to start buffering and one to
+stop, are what keep a buffer that hovers around one number from flipping the whole room back and forth.
+
+While the room waits for a guest, that guest is not moved forward to the host's position, because that
+would land it beyond its own buffer. It picks up exactly where it stopped, and anything left over once
+the film resumes is ordinary drift (see above).
+
+What the room *does* about a stall is your decision, not ours:
 
 **Settings ▸ General ▸ Watch together ▸ "When someone's stream stalls"**
 
-- **Pause for everyone until they catch up** (the default) — the room waits, and resumes by itself
-  when they recover.
+- **Pause for everyone until they catch up** (the default) — the room waits until **everyone** who
+  stalled has three seconds in hand again, then resumes by itself, once.
 - **Keep going and show who's behind** — nothing stops; the stall is just visible.
 
 A watch party has a social answer to this, not a technical one, which is why it is asked rather than

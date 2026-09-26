@@ -29,6 +29,11 @@
 //      and for any url at all — after a drive in which the host was deliberately handed a resolved,
 //      account-bearing stream url as the thing to share.
 //
+//   9. "WAIT FOR EVERYONE" REALLY WAITS (#448): the readiness table (cache ahead, end of file, the 1 s / 3 s
+//      hysteresis, and a paused player that is NOT thereby recovered), a two-guest tick simulation in which
+//      the room holds once and resumes once, only when the last guest is ready, "keep going" unchanged, and
+//      the host's policy on the wire — round-tripped, absent from an old host (unknown), followed by the guest.
+//
 // Prints WATCHTOGETHER-OK on success; any failure prints WATCHTOGETHER-FAIL <cond> (line) and exits non-zero.
 #include "WatchTogether.h"
 
@@ -810,6 +815,218 @@ int main()
             CHECK(indicatorSummary(host).line == QStringLiteral("2 watching · 1 is buffering · Waiting for Sam to catch up"));
             host.close();
             CHECK(!indicatorSummary(host).visible);
+        }
+    }
+
+    // ---- 9. "wait for everyone" really waits (#448) ---------------------------------------------------------
+    // Found live by #86's rig: a guest's stream starved, the host paused the room, the pause paused the guest's
+    // player, and the guest's stall check (which only counted a PLAYING player whose position froze) reported
+    // "recovered" at once. The room resumed, the guest was seeked past what it had, and stalled again.
+    {
+        const double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+        // 9a. THE READINESS TABLE. Buffering is about the cache ahead of the playhead, never the pause flag.
+        for (const bool paused : { false, true })
+        {
+            // Entering: below one second ahead, and only below it. Exactly 1.0 is not "below".
+            CHECK(decideSelfBuffering(0.0,  false, paused, false));
+            CHECK(decideSelfBuffering(0.5,  false, paused, false));
+            CHECK(decideSelfBuffering(0.99, false, paused, false));
+            CHECK(!decideSelfBuffering(1.0, false, paused, false));
+            CHECK(!decideSelfBuffering(2.99, false, paused, false));
+            CHECK(!decideSelfBuffering(30.0, false, paused, false));
+            // Staying: a guest that reported Buffering stays Buffering until it holds three seconds. The
+            // paused case is THE bug: a player the room paused, with an empty cache, is not recovered.
+            CHECK(decideSelfBuffering(0.0,  false, paused, true));
+            CHECK(decideSelfBuffering(1.0,  false, paused, true));
+            CHECK(decideSelfBuffering(1.5,  false, paused, true));
+            CHECK(decideSelfBuffering(2.99, false, paused, true));
+            // Leaving: three seconds or more.
+            CHECK(!decideSelfBuffering(3.0,  false, paused, true));
+            CHECK(!decideSelfBuffering(45.0, false, paused, true));
+            // The end of the file within the cache: nothing left to wait for, however little that is.
+            CHECK(!decideSelfBuffering(0.0, true, paused, true));
+            CHECK(!decideSelfBuffering(0.4, true, paused, false));
+            // mpv could not say (NaN, or a negative reading): no evidence, so the answer stands either way.
+            CHECK(decideSelfBuffering(kNaN, false, paused, true));
+            CHECK(!decideSelfBuffering(kNaN, false, paused, false));
+            CHECK(decideSelfBuffering(-1.0, false, paused, true));
+            CHECK(!decideSelfBuffering(-1.0, false, paused, false));
+        }
+        // The pause flag is inert over the whole range, both states.
+        for (int tenths = 0; tenths <= 60; ++tenths)
+            for (const bool was : { false, true })
+                CHECK(decideSelfBuffering(tenths / 10.0, false, true, was)
+                      == decideSelfBuffering(tenths / 10.0, false, false, was));
+        // No flapping. A cache wobbling across the entry line enters once and stays; one wobbling across the
+        // exit line leaves once and stays out.
+        {
+            bool b = false; int flips = 0;
+            for (int i = 0; i < 40; ++i)
+            {
+                const bool next = decideSelfBuffering((i % 2) ? 1.2 : 0.9, false, false, b);
+                if (next != b) ++flips;
+                b = next;
+            }
+            CHECK(b && flips == 1);
+            flips = 0;
+            for (int i = 0; i < 40; ++i)
+            {
+                const bool next = decideSelfBuffering((i % 2) ? 2.9 : 3.1, false, true, b);
+                if (next != b) ++flips;
+                b = next;
+            }
+            CHECK(!b && flips == 1);
+        }
+
+        // 9b. THE ROOM HOLDS UNTIL EVERY GUEST IS READY, THEN RESUMES EXACTLY ONCE. Two guests, driven tick by
+        // tick through the same function the app's 1 Hz tick calls, with each guest's player paused whenever
+        // the room is (which is what the room's pause does to them). Sam starves first; Alex starves while Sam
+        // is still out, and recovers first. The room must stay paused until Sam is back too.
+        struct Guest { Room room; bool buffering = false; QList<double> cache; };
+        auto run = [&](BufferPolicy policy, int& holds, int& resumes, int& pausedTicks, int& firstResumeTick)
+        {
+            Room h;
+            h.open(QStringLiteral("KJ72M"), QStringLiteral("h"), QStringLiteral("Host"), true);
+            h.setBufferPolicy(policy);
+            Guest sam, alex;
+            sam.room.open(QStringLiteral("KJ72M"), QStringLiteral("sam"), QStringLiteral("Sam"), false);
+            alex.room.open(QStringLiteral("KJ72M"), QStringLiteral("alex"), QStringLiteral("Alex"), false);
+            h.apply(sam.room.helloMessage());
+            h.apply(alex.room.helloMessage());
+            h.setHostTransport(false, 100.0);    // the film is playing
+            // Seconds of cache ahead, one entry per tick. A starved feed adds nothing while paused; a restored
+            // one fills while paused. Sam: fine, starved (enters at 0.8), empty for a while, refills past 3 at
+            // tick 14. Alex: starves at tick 6 and is back at 3 s by tick 9.
+            sam.cache  = { 6, 5, 4, 2.5, 0.8, 0.3, 0.0, 0.0, 0.0, 0.0, 0.6, 1.4, 2.2, 2.9, 3.4, 8, 9, 9, 9, 9 };
+            alex.cache = { 9, 9, 9, 9, 9, 9, 0.5, 1.8, 2.6, 3.5, 7, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
+            holds = resumes = pausedTicks = 0;
+            firstResumeTick = -1;
+            for (int tick = 0; tick < sam.cache.size(); ++tick)
+            {
+                for (Guest* g : { &sam, &alex })
+                {
+                    const bool now = decideSelfBuffering(g->cache.at(tick), false, h.hostPaused(), g->buffering);
+                    if (now == g->buffering) continue;
+                    g->buffering = now;
+                    for (const Message& out : h.apply(g->room.bufferingMessage(now, 100.0 + tick)))
+                    {
+                        if (out.type != MsgType::Transport) continue;
+                        if (out.paused) ++holds;
+                        else { ++resumes; if (firstResumeTick < 0) firstResumeTick = tick; }
+                    }
+                }
+                if (h.hostPaused()) ++pausedTicks;
+            }
+            CHECK(!h.anyoneBuffering());          // both reported ready by the end
+        };
+        int holds = 0, resumes = 0, pausedTicks = 0, firstResume = -1;
+        run(BufferPolicy::WaitForEveryone, holds, resumes, pausedTicks, firstResume);
+        CHECK(holds == 1);                         // held once, when Sam starved
+        CHECK(resumes == 1);                       // and released once
+        CHECK(firstResume == 14);                  // ...only when SAM (the last one out) holds three seconds
+        CHECK(pausedTicks == 10);                  // ticks 4..13 inclusive: no early release anywhere
+
+        // 9c. "KEEP GOING" IS UNCHANGED: the same starvation, and nothing stops or restarts.
+        run(BufferPolicy::KeepGoing, holds, resumes, pausedTicks, firstResume);
+        CHECK(holds == 0);
+        CHECK(resumes == 0);
+        CHECK(pausedTicks == 0);
+
+        // 9d. THE HOST'S POLICY REACHES THE GUEST, and a host that predates the field reads as "unknown".
+        {
+            Message x;
+            x.type = MsgType::Transport;
+            x.participantId = QStringLiteral("h");
+            x.positionSec = 12.5;
+            x.paused = true;
+            x.policy = policyId(BufferPolicy::KeepGoing);
+            const QByteArray line = encode(x);
+            CHECK(line.contains("\"policy\":\"keepgoing\""));
+            Message back; QString err;
+            CHECK(decode(line, back, err));
+            CHECK(back.policy == QStringLiteral("keepgoing"));
+            CHECK(nearly(back.positionSec, 12.5) && back.paused);     // the rest of the message is untouched
+            // Absent: no key on the wire at all, and nothing after decoding.
+            x.policy.clear();
+            const QByteArray bare = encode(x);
+            CHECK(!bare.contains("policy"));
+            CHECK(decode(bare, back, err) && back.policy.isEmpty());
+            // Beacons carry it too, so a live change reaches a guest within a second.
+            Message bcn;
+            bcn.type = MsgType::Beacon;
+            bcn.policy = policyId(BufferPolicy::WaitForEveryone);
+            CHECK(encode(bcn).contains("\"policy\":\"wait\""));
+            // Only the host's state messages carry it: a guest's own messages never do.
+            Message req;
+            req.type = MsgType::Buffering;
+            req.policy = QStringLiteral("keepgoing");
+            CHECK(!encode(req).contains("policy"));
+        }
+        {
+            Room h, g;
+            h.open(QStringLiteral("KJ72M"), QStringLiteral("h"), QStringLiteral("Host"), true);
+            g.open(QStringLiteral("KJ72M"), QStringLiteral("g"), QStringLiteral("Sam"), false);
+            // Before the host has said anything, and a guest whose OWN setting differs: still unknown, still
+            // the default. A guest's own setting never decides the room.
+            g.setBufferPolicy(BufferPolicy::KeepGoing);
+            CHECK(!g.roomPolicyKnown());
+            CHECK(g.roomPolicy() == BufferPolicy::WaitForEveryone);
+            CHECK(h.roomPolicyKnown());
+            // AN OLD HOST: a transport line exactly as a build before #448 wrote it. Unknown; the default.
+            Message m; QString err;
+            CHECK(decode(QByteArrayLiteral("{\"t\":\"xport\",\"v\":1,\"pid\":\"h\",\"pos\":30,\"paused\":false}"), m, err));
+            g.apply(m);
+            CHECK(!g.roomPolicyKnown());
+            CHECK(g.roomPolicy() == BufferPolicy::WaitForEveryone);
+            CHECK(nearly(g.hostPosition(), 30.0));
+            // A current host: its transport and its beacon both carry the policy, and the guest follows it.
+            h.setBufferPolicy(BufferPolicy::KeepGoing);
+            CHECK(h.transportMessage().policy == QStringLiteral("keepgoing"));
+            CHECK(decode(encode(h.transportMessage()), m, err));
+            g.apply(m);
+            CHECK(g.roomPolicyKnown());
+            CHECK(g.roomPolicy() == BufferPolicy::KeepGoing);
+            h.setBufferPolicy(BufferPolicy::WaitForEveryone);         // changed live
+            CHECK(decode(encode(h.beaconMessage(1000)), m, err));
+            g.apply(m);
+            CHECK(g.roomPolicy() == BufferPolicy::WaitForEveryone);
+            // An id this build does not know is the default, not an error.
+            CHECK(decode(QByteArrayLiteral("{\"t\":\"beacon\",\"v\":1,\"pid\":\"h\",\"pos\":31,\"paused\":false,\"clock\":2000,\"policy\":\"hand-edited\"}"), m, err));
+            g.apply(m);
+            CHECK(g.roomPolicyKnown() && g.roomPolicy() == BufferPolicy::WaitForEveryone);
+            // A guest that ignores the field (a build before #448) is simulated by the old line above: the extra
+            // key cannot make an older decoder refuse the message, because no decoder here refuses unknown keys.
+            CHECK(decode(QByteArrayLiteral("{\"t\":\"xport\",\"v\":1,\"pos\":1,\"paused\":true,\"policy\":\"keepgoing\",\"later\":7}"), m, err));
+
+            // The guest's INDICATOR follows the host, not its own setting: with a stalled participant, a
+            // keep-going host names nobody; a waiting host names who it is waiting for; a silent (old) host
+            // is read as waiting, which is what every guest assumed before.
+            QList<Participant> people;
+            Participant hp; hp.id = QStringLiteral("h"); hp.name = QStringLiteral("Host"); hp.host = true;
+            Participant sp; sp.id = QStringLiteral("g"); sp.name = QStringLiteral("Sam"); sp.buffering = true;
+            people << hp << sp;
+            RosterEntry he; he.id = hp.id; he.name = hp.name; he.host = true;
+            RosterEntry se; se.id = sp.id; se.name = sp.name; se.buffering = true;
+            Message roster; roster.type = MsgType::Roster; roster.roster << he << se;
+            g.apply(roster);
+            h.setBufferPolicy(BufferPolicy::KeepGoing);
+            CHECK(decode(encode(h.beaconMessage(3000)), m, err));
+            g.apply(m);
+            CHECK(!indicatorSummary(g).line.contains(QStringLiteral("Waiting")));
+            h.setBufferPolicy(BufferPolicy::WaitForEveryone);
+            CHECK(decode(encode(h.beaconMessage(4000)), m, err));
+            g.apply(m);
+            CHECK(indicatorSummary(g).line.contains(QStringLiteral("Waiting for you to catch up")));
+            Room old;
+            old.open(QStringLiteral("KJ72M"), QStringLiteral("g"), QStringLiteral("Sam"), false);
+            old.setBufferPolicy(BufferPolicy::KeepGoing);             // its own setting is irrelevant
+            old.apply(roster);
+            CHECK(indicatorSummary(old).line.contains(QStringLiteral("Waiting for you to catch up")));
+            // Leaving forgets what the last host said: the next room starts unknown.
+            g.close();
+            g.open(QStringLiteral("ZZ99Q"), QStringLiteral("g"), QStringLiteral("Sam"), false);
+            CHECK(!g.roomPolicyKnown());
         }
     }
 

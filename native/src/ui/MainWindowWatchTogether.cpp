@@ -16,16 +16,18 @@
 // convention: WatchTogether::encode scrubs every string it writes, and probe_watchtogether byte-scans a whole
 // session transcript for a token to prove it.
 //
-// TWO THINGS THIS FILE INFERS RATHER THAN BEING TOLD, and why:
+// TWO THINGS THIS FILE HAS TO WORK OUT FOR ITSELF, and how:
 //   * A SEEK. mpv has no "the user seeked" signal, only a position stream. A position that jumps further than
 //     a tick could have carried it IS a seek, and that is what the host broadcasts on.
-//   * BUFFERING. There is no stall property exposed here either. A position that stops advancing while the
-//     player is not paused is a stall, which is exactly what "buffering" means to the room, and it catches a
-//     throttled source as well as an empty cache.
+//   * BUFFERING. Read from the player's own cache (#448), not inferred from its position: mpv's
+//     demuxer-cache-state says how many seconds it holds ahead of the playhead, and WatchTogether::
+//     decideSelfBuffering turns that into buffering/ready with a 1 s / 3 s hysteresis. Whether the player is
+//     paused plays no part, because the room's own wait pauses the very guest it is waiting for.
 #include "MainWindow.h"
 
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QQuickItem>
@@ -35,6 +37,7 @@
 #include <QTimer>
 
 #include <cmath>
+#include <limits>
 
 #include "../core/AppPaths.h"
 #include "../core/RecentStore.h"
@@ -53,9 +56,6 @@ namespace
 {
     // The room's LAN port. Fixed, like netplay's, so "join on the same network" needs one number and not two.
     constexpr quint16 kDirectPort = 55421;
-    // How many 1 Hz ticks of a frozen position count as a stall. Two, because one tick can be lost to an
-    // ordinary frame hitch and telling the room about that would flap the whole party's transport.
-    constexpr int kStallTicks = 2;
     // How long after this machine moves its own player the player's reports about itself are echoes rather
     // than decisions. mpv's pause flag arrives on its own thread and lands a turn or three later, so a flag
     // cleared at the end of the applying function is already false by the time the echo comes back. MEASURED
@@ -376,6 +376,21 @@ void MainWindow::refreshWatchTogetherIndicator()
     }
 }
 
+void MainWindow::watchTogetherTestState(QJsonObject& o) const
+{
+    const bool inRoom = watchSession_ && watchSession_->active();
+    if (!inRoom) return;
+    const Room& room = watchSession_->room();
+    o.insert(QStringLiteral("wtBuffering"), wtBuffering_);
+    o.insert(QStringLiteral("wtCacheAhead"), wtCacheAheadSec_);
+    o.insert(QStringLiteral("wtAtEnd"), wtCacheAtEnd_);
+    o.insert(QStringLiteral("wtPos"), lastPos_);
+    o.insert(QStringLiteral("wtPlayerPaused"), player_ && player_->isPaused());
+    o.insert(QStringLiteral("wtHostPaused"), room.hostPaused());
+    o.insert(QStringLiteral("wtHeld"), room.heldForBuffering());
+    o.insert(QStringLiteral("wtRoomPolicy"), room.roomPolicyKnown() ? policyId(room.roomPolicy()) : QStringLiteral("unknown"));
+}
+
 bool MainWindow::watchTogetherHost()
 {
     watchTogetherWire();
@@ -470,9 +485,15 @@ void MainWindow::watchTogetherShowRoom()
         rows << (p.host ? tr("★  %1 — %2 (host)").arg(who, state) : tr("•  %1 — %2").arg(who, state));
     }
     rows << tr("Room code: %1").arg(watchSession_->code());
-    rows << (watchSession_->bufferPolicy() == BufferPolicy::WaitForEveryone
-                 ? tr("When someone stalls: everyone waits")
-                 : tr("When someone stalls: keep going"));
+    // The ROOM's policy, which is the host's (#448): a guest shows what the host announced, not its own setting.
+    // A host too old to announce it leaves a guest assuming the default, and the row says it is an assumption.
+    const Room& room = watchSession_->room();
+    if (!room.roomPolicyKnown())
+        rows << tr("When someone stalls: everyone waits (assumed — the host's app doesn't say)");
+    else
+        rows << (room.roomPolicy() == BufferPolicy::WaitForEveryone
+                     ? tr("When someone stalls: everyone waits")
+                     : tr("When someone stalls: keep going"));
     NavMenu::pick(tr("Who's watching"), rows, this);
 }
 
@@ -557,7 +578,11 @@ void MainWindow::watchTogetherApplyTransport(bool paused, double positionSec)
     // The host follows this too: an automatic buffering hold is a pause this machine did not ask for.
     wtApplying_ = true;
     wtQuietUntilMs_ = QDateTime::currentMSecsSinceEpoch() + kEchoWindowMs;
-    if (!watchSession_->isHost() && std::abs(lastPos_ - positionSec) > 2.0)
+    // A guest the room is waiting FOR is never pushed forward past what it has (#448): the room waits for it
+    // where it is. Moving it to the host's position would land it beyond its own cache — the forward jump, and
+    // the fresh stall, the live repro showed. Anything left over after the room resumes is ordinary drift.
+    const bool forwardPastOwnCache = wtBuffering_ && positionSec > lastPos_;
+    if (!watchSession_->isHost() && std::abs(lastPos_ - positionSec) > 2.0 && !forwardPastOwnCache)
         player_->setPosition(positionSec);
     if (player_->isPaused() != paused) player_->setPaused(paused);
     if (wtNudging_) { player_->setSpeed(1.0); wtNudging_ = false; }
@@ -574,18 +599,27 @@ void MainWindow::watchTogetherTick()
     const double pos = lastPos_;
     const bool paused = player_->isPaused();
 
-    // STALL DETECTION, both sides. A position that has stopped advancing while the player is not paused is a
-    // stall — which is what buffering means to the room, and it catches a throttled source as well as an
-    // empty cache. Reported on the EDGE only, so a long stall is one message and not one a second.
-    const bool frozen = !paused && player_->hasMedia() && wtSeenPos_ >= 0.0 && std::abs(pos - wtSeenPos_) < 0.01;
-    wtStalledTicks_ = frozen ? wtStalledTicks_ + 1 : 0;
-    const bool stalled = wtStalledTicks_ >= kStallTicks;
+    // STALL DETECTION, both sides (#448). Buffering is about this machine's own CACHE — the seconds of film
+    // mpv holds ahead of the playhead — and never about whether the player is playing. The check this replaced
+    // counted a frozen position only while NOT paused; "wait for everyone" then paused the stalled guest along
+    // with the room, the next tick read that as recovered with nothing buffered, and the room resumed into a
+    // hard seek and a fresh stall (reproduced on #86's two-instance rig: the host never held longer than a
+    // second). decideSelfBuffering enters below one second ahead and leaves at three, paused or not; the end of
+    // the file in the cache counts as ready. Reported on the EDGE only, so a long stall is one message.
+    const bool loaded = player_->hasMedia();
+    const MpvWidget::CacheAhead cache = loaded ? player_->cacheAhead() : MpvWidget::CacheAhead();
+    wtCacheAheadSec_ = cache.known ? cache.seconds : -1.0;
+    wtCacheAtEnd_ = cache.atEnd;
+    // Nothing loaded is not a stall: there is nothing to wait for, and the room re-sends the item to a guest in
+    // that state. A load in progress with no demuxer yet is "unknown", which keeps the last answer.
+    const bool stalled = loaded
+        && decideSelfBuffering(cache.known ? cache.seconds : std::numeric_limits<double>::quiet_NaN(),
+                               cache.atEnd, paused, wtBuffering_);
     if (stalled != wtBuffering_)
     {
         wtBuffering_ = stalled;
         watchSession_->reportBuffering(stalled, pos);
     }
-    wtSeenPos_ = pos;
 
     if (watchSession_->isHost()) { watchSession_->notePosition(pos); return; }
 

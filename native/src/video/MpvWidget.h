@@ -74,6 +74,13 @@ public:
     // and both read a stopped target as still playing without this. (MEASURED: after stop() the position
     // freezes at its last value while `playing` stayed true, which is what sent this looking.)
     bool hasMedia() const;
+    // How much of the film this player already holds AHEAD of the playhead (#448, watch together's "am I
+    // buffering?"). Read from mpv's demuxer-cache-state: `seconds` is its cache-duration (0 when the map has
+    // none, which is what a drained cache reports), `atEnd` its eof flag — the reader has reached the end of
+    // the file, so everything left is in the cache. `known` is false when mpv could not answer at all (no
+    // demuxer yet), which the caller must treat as no evidence rather than as an empty cache.
+    struct CacheAhead { bool known = false; double seconds = 0.0; bool atEnd = false; };
+    CacheAhead cacheAhead() const;
     void togglePause();
     void seekRelative(double seconds);
     void setPosition(double seconds);
