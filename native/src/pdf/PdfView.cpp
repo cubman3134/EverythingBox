@@ -1,4 +1,5 @@
 #include "PdfView.h"
+#include "../ebook/AnnotationExportAction.h"   // issue #136: "Export notes"
 #include "../core/AppBrand.h"
 
 #if !defined(Q_OS_ANDROID)
@@ -59,6 +60,10 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     auto* zoomOutBtn = new QPushButton(tr("−"), this);
     auto* zoomInBtn = new QPushButton(tr("+"), this);
     auto* fit = new QPushButton(tr("Fit Width"), this);
+    // Export notes (issue #136): this file's bookmarks (and highlights, if it has any) as Markdown in
+    // <data>/exports - the same verb the book reader and the themed chrome offer.
+    auto* exportBtn = new QPushButton(tr("Export notes"), this);
+    exportBtn->setToolTip(tr("Save this file's bookmarks as a Markdown file"));
     pageLabel_ = new QLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
@@ -69,6 +74,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     connect(zoomOutBtn, &QPushButton::clicked, this, &PdfView::zoomOut);
     connect(zoomInBtn, &QPushButton::clicked, this, &PdfView::zoomIn);
     connect(fit, &QPushButton::clicked, this, &PdfView::fitWidth);
+    connect(exportBtn, &QPushButton::clicked, this, [this] { AnnotationExportAction::run(this); });
     connect(view_->pageNavigator(), &QPdfPageNavigator::currentPageChanged, this, &PdfView::updateLabel);
     connect(doc_, &QPdfDocument::statusChanged, this, &PdfView::updateLabel);
 
@@ -78,6 +84,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     bar->addWidget(zoomOutBtn);
     bar->addWidget(zoomInBtn);
     bar->addWidget(fit);
+    bar->addWidget(exportBtn);
     bar->addStretch(1);
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);

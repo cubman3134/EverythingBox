@@ -61,6 +61,11 @@ class ReaderBridge : public QObject
     Q_PROPERTY(QStringList bookmarks READ bookmarkLabels NOTIFY bookmarksChanged)
     Q_PROPERTY(QStringList bookmarkColors READ bookmarkColors NOTIFY bookmarksChanged)
     Q_PROPERTY(int bookmarkCount READ bookmarkCount NOTIFY bookmarksChanged)
+    // Notes (issue #136): per row, a highlight's note ("" for a bookmark and for an un-noted highlight). The
+    // label already carries the note MARKER; the text is here so the panel can expand the focused row to it.
+    Q_PROPERTY(QStringList bookmarkNotes READ bookmarkNotes NOTIFY bookmarksChanged)
+    // Export notes (issue #136): the LAST control in every kind's top row. Stated once, here, like Select's.
+    Q_PROPERTY(int exportSettingIndex READ exportSettingIndex NOTIFY changed)
     // Selection (issue #136). selectionSupported gates the whole control: false for a pdf/comic, which have no
     // text layer to select in. selectSettingIndex is the index the Select control occupies in the top row -
     // stated ONCE here so the host that fires the row and the QML that draws it cannot disagree about which
@@ -104,12 +109,14 @@ public:
     // count (the readerBookmarks zone count a future list panel feeds). Empty when the reader has no item key.
     QStringList bookmarkLabels() const;
     QStringList bookmarkColors() const;   // per row: a highlight's "#RRGGBB", or "" for a bookmark
+    QStringList bookmarkNotes() const;    // per row: a highlight's note, or "" (issue #136)
     int  bookmarkCount() const;
 
     bool selectionSupported() const;      // the reader has a text layer (book yes; pdf/comic no)
     bool cursorMode() const;              // the caret is live right now
     int  selectSettingIndex() const;      // where the Select control sits in the top row (-1 = not offered)
-    int  settingsRowCount() const;        // the whole row's length, Select included - what the host feeds the zone
+    int  settingsRowCount() const;        // the whole row's length, Select + Export included - what the host feeds the zone
+    int  exportSettingIndex() const;      // where "Export notes" sits: the last control, for every kind (#136)
 
     QStringList themeNames() const;      // the reading themes, in ReaderTypography's own order
     int  themeIndex() const;             // the stored theme, as an index into themeNames()
@@ -149,6 +156,9 @@ public slots:
     // live in the reader (EbookView), so this is a one-line forward - the themed chrome and the classic bar
     // press the same button.
     void beginSelection();
+    // Export notes (issue #136): this item's bookmarks, highlights and notes as Markdown in <data>/exports - the
+    // SAME verb the classic bars call (AnnotationExportAction::run), so the two layouts write the same file.
+    void exportNotes();
 
     // Reading look. Each writes the stored preference and asks the reader to re-read it, so the ONE definition
     // of what a preference means stays in the reader and this never applies anything itself.
@@ -192,6 +202,7 @@ public:
     bool readerCursorMode() const;
     int  annotationCount() const;
     QString annotationLabels() const;   // the panel's rows, joined with " | " 
+    QString annotationNotes() const;    // the rows' notes (issue #136), parallel to the labels, joined with " | "
 
     // Called each time a book is (re)opened into this host: toggle themed vs classic chrome, refresh the
     // bridge/toc, (re)push the reader level, and — themed — flash the chrome so it's discoverable.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.324 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.325 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -529,6 +529,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderGestureConfig.h
         src/ebook/ReaderSpread.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
+        # #136: "Export notes" -- the pure Markdown/plain-text formatter (header-only) and the reader verb all
+        # three readers and the themed chrome call.
+        src/ebook/AnnotationExport.h
+        src/ebook/AnnotationExportAction.cpp src/ebook/AnnotationExportAction.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
@@ -1362,6 +1366,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BookmarkStore.cpp src/core/BookmarkStore.h
         src/core/Tombstones.cpp   src/core/Tombstones.h   # remove() records a delete tombstone
         src/core/ProfileStore.cpp src/core/ProfileStore.h # bookmarks are namespaced by the active profile
+        # Both readers' classic bars carry "Export notes" (#136): the verb, the stores it reads, and the
+        # safe-name rule the file name goes through (RomhackInstall, which brings RomPatch).
+        src/ebook/AnnotationExportAction.cpp src/ebook/AnnotationExportAction.h src/ebook/AnnotationExport.h
+        src/core/HighlightStore.cpp src/core/HighlightStore.h
+        src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        src/core/RomPatch.cpp     src/core/RomPatch.h
         src/core/Settings.cpp     src/core/Settings.h     # PhotoLibrary::root() -> Settings::photosFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/ebook/ReaderAnchor.h  src/ui/PlayerIcons.h    # header-only (the anchor model, the drawn chip icon)
@@ -1387,7 +1397,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderAnnotations.h                             # header-only: the document-order merge
         src/theme2/HostedReader.h                                 # header-only: the interface the stub implements
         src/core/Tombstones.cpp src/core/Tombstones.h  # remove() records a delete tombstone
-        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        # Notes + export (#136): the formatter is header-only; the export file name goes through the app's
+        # existing safe-name rule (RomhackInstall::sanitizeHackTitle), which brings its own small closure.
+        src/ebook/AnnotationExport.h
+        src/core/RomhackInstall.cpp src/core/RomhackInstall.h
+        src/core/RomPatch.cpp src/core/RomPatch.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_highlights PRIVATE src src/core src/ebook src/theme2)
     target_link_libraries(probe_highlights PRIVATE Qt6::Core Qt6::Gui)
 

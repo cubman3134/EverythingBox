@@ -77,6 +77,11 @@ public:
     // Used by a bookmark jump and by the chrome's progress bar, which is a scale over exactly this number.
     virtual void gotoPage(int /*page0*/) {}
 
+    // Export notes (issue #136): the header of the exported file. A book knows its own title and author; a pdf or
+    // a comic leaves both empty and the export names it after its file (the title those readers already show).
+    virtual QString bookTitle() const { return {}; }
+    virtual QString bookAuthor() const { return {}; }
+
     // Read aloud (issue #145). A BOOK narrates; a pdf/comic does not, so every one of these keeps an inert
     // default and the chrome asks readAloudAvailable() before it draws a single control. That question is
     // answered false by three separate things — a kind that has no text, a build without the Qt TextToSpeech

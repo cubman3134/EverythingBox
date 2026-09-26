@@ -2537,6 +2537,59 @@ int main(int argc, char** argv)
         mergeDoc(hNarrow);
         CHECK(hlIds() == (QStringList{wide}));
 
+        // 24d2-d. NOTES (issue #136). A note is a field on the highlight row, so it rides the row's own
+        // newest-ts rule: a peer's NEWER note replaces ours, a peer's OLDER note does not. The peer copies are
+        // built by rewriting OUR serialised row (same id, same everything) with a different note and a ts an
+        // hour either side, so the only thing that differs between the two outcomes is which ts is newer.
+        auto hlNote = [&](const QString& id) -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(hlk).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("id")).toString() == id) return o.value(QStringLiteral("note")).toString(); }
+            return QStringLiteral("<absent>");
+        };
+        auto peerWithNote = [&](const QJsonObject& doc, const QString& note, qint64 tsDelta) {
+            QJsonObject root = doc;
+            QJsonObject hs = root.value(QStringLiteral("highlights")).toObject();
+            QJsonObject po = hs.value(QStringLiteral("hl24")).toObject();
+            QJsonArray items = po.value(QStringLiteral("items")).toArray();
+            for (int i = 0; i < items.size(); ++i)
+            {
+                QJsonObject o = items.at(i).toObject();
+                o.insert(QStringLiteral("note"), note);
+                o.insert(QStringLiteral("ts"), o.value(QStringLiteral("ts")).toDouble() + double(tsDelta));
+                items[i] = o;
+            }
+            po.insert(QStringLiteral("items"), items);
+            hs.insert(QStringLiteral("hl24"), po);
+            root.insert(QStringLiteral("highlights"), hs);
+            return root;
+        };
+
+        wipeStores();
+        const QString nid = HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some words")).id;
+        CHECK(HighlightStore::setNote(nid, QStringLiteral("mine")));
+        const QJsonObject hMine = serializeNow();
+        // A peer that wrote its note an hour LATER wins...
+        mergeDoc(peerWithNote(hMine, QStringLiteral("theirs, newer"), 3600));
+        CHECK(hlNote(nid) == QStringLiteral("theirs, newer"));
+        // ...and one that wrote an hour EARLIER than what we now hold loses.
+        mergeDoc(peerWithNote(serializeNow(), QStringLiteral("theirs, older"), -3600));
+        CHECK(hlNote(nid) == QStringLiteral("theirs, newer"));
+
+        // A note written in the SAME second the highlight was made still beats the pre-note copy a peer holds:
+        // the edit bumps the ts strictly, so this is decided by the rule and not by the value tie-break.
+        wipeStores();
+        const QString sid = HighlightStore::add(book, range(10, 20), 0, QStringLiteral("some words")).id;
+        const QJsonObject hBare = serializeNow();            // the peer's copy: no note yet
+        CHECK(HighlightStore::setNote(sid, QStringLiteral("written just now")));
+        mergeDoc(hBare);
+        CHECK(hlNote(sid) == QStringLiteral("written just now"));
+        // ...and a CLEARED note is a newer statement too: the peer's older noted copy does not bring it back.
+        const QJsonObject hNoted = serializeNow();
+        CHECK(HighlightStore::setNote(sid, QString()));
+        mergeDoc(hNoted);
+        CHECK(hlNote(sid) == QStringLiteral(""));
+
         wipeStores();
         useProfile(QString());
     }
