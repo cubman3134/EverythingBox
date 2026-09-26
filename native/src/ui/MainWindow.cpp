@@ -122,6 +122,7 @@
 #include "../core/HomeRows.h"          // issue #161: the per-profile home row list + its pure planner
 #include "../core/BookmarkStore.h"
 #include "../core/HighlightStore.h"   // per-book highlights: the bookmark store's twin (issue #136)
+#include "../ebook/AnnotationExportAction.h"   // issue #136: "Export notes" says where the file went
 #include "../core/AudioBookmarkStore.h"   // per-item audio bookmarks + jump-to (issue #140)
 #include "../core/DownloadManager.h"
 #include "../core/DownloadRecipe.h"        // issue #437: an add-on download keeps its #224 recipe, not its link
@@ -2119,6 +2120,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     BookmarkStore::setChangeHook(armProgressSync);   // issue #136: a reading bookmark is user data, so it syncs
     HighlightStore::setChangeHook(armProgressSync);  // issue #136: so is a highlight - it is about the book, not this device
+    AnnotationExportAction::setNoticeHook([this](const QString& t) { notify(t); });  // issue #136: the export/note toasts
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
     HomeRowStore::setChangeHook(armProgressSync); // issue #161: the home arrangement is user data, so it syncs
@@ -5100,6 +5102,7 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("readerCursor"), rh->readerCursorMode());
             o.insert(QStringLiteral("readerAnnotations"), rh->annotationCount());
             o.insert(QStringLiteral("readerAnnotationList"), rh->annotationLabels());
+            o.insert(QStringLiteral("readerAnnotationNotes"), rh->annotationNotes());   // issue #136: notes
             if (rh->kind() == ReaderKind::Comic) o.insert(QStringLiteral("readerTwoUp"), rh->readerTwoUp());
         }
         // The themed settings-panel host: its QQuickWidget focus is opaque, so surface the graph selection +

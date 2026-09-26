@@ -286,6 +286,9 @@ public:
     // the lookup card's language override and the vocabulary row both need the same answer this reader gives
     // its narrator — one seam, not two opinions about what language the book is in.
     QString bookLanguage() const;
+    // Export notes (issue #136): the exported file's header - this book's own title and author.
+    QString bookTitle() const override;
+    QString bookAuthor() const override;
     // Drive one key through cursor mode. True when the mode consumed it — both chromes ask this BEFORE their
     // own arbitration, so while the caret is live the arrows move it instead of turning pages.
     bool handleCursorKey(int key);
@@ -357,7 +360,10 @@ private:
     void offerLookupLanguage(int verb, const QString& term, const ReaderAnchor& range);
     void cancelLookup();            // page turn / chapter change / leaving the reader: drop what is in flight
     void offerHighlightColour(const ReaderAnchor& range);  // the four-colour NavMenu for a fresh selection
-    void offerHighlightEdit(const QString& id);            // an EXISTING highlight: recolour / remove
+    void offerHighlightEdit(const QString& id);            // an EXISTING highlight: recolour / note / remove
+    // A highlight's NOTE (issue #136): the nav-kit Osk, seeded with the note it has. Accepting stores it (an empty
+    // note clears it); an over-long one is refused with a toast and the prompt reopens holding the text.
+    void offerNoteEdit(const QString& id, const QString& draft = QString(), bool useDraft = false);
     void annotationsChanged();      // stores moved: repaint the bands and tell the hosted chrome
 
     std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / Fb2Book / TextBook / PdfTextBook, chosen by content then name

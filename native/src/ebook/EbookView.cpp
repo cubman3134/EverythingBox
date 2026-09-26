@@ -14,6 +14,8 @@
 #include "../core/BookmarkStore.h"     // the annotation panel's other half (issue #136)
 #include "../core/HighlightStore.h"    // per-book highlights: the range anchor + the fixed palette (issue #136)
 #include "ReaderAnnotations.h"         // the ONE document-order merge of bookmarks + highlights (issue #136)
+#include "AnnotationExportAction.h"    // issue #136: "Export notes", and the toast a refused note says itself through
+#include "../ui/nav/Osk.h"            // issue #136: a highlight's note is typed on the nav kit's keyboard
 #include "../ui/nav/NavOverlay.h"      // NavMenu: the colour picker and the annotation list (nav kit only)
 #include "../core/LookupClient.h"   // issue #137: the in-book lookup's one socket owner
 #include "../core/LookupRequest.h"  // issue #137: the pure URL/response/failure-sentence half
@@ -55,6 +57,7 @@
 #include <QDateTime>
 #include <QUrl>
 #include <QFileInfo>
+#include <QPointer>
 
 // ---- BookPageWidget: paints a single, line-clean page of a QTextDocument -------------------------------
 
@@ -1007,13 +1010,16 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
                               "Enter starts and finishes the selection"));
     marksBtn_  = new QPushButton(tr("Marks"), menu_);
     marksBtn_->setToolTip(tr("Bookmarks and highlights in this book"));
+    // Export notes (issue #136): this book's bookmarks, highlights and notes as Markdown in <data>/exports.
+    auto* exportBtn = new QPushButton(tr("Export notes"), menu_);
+    exportBtn->setToolTip(tr("Save this book's bookmarks, highlights and notes as a Markdown file"));
     auto* smaller  = new QPushButton(tr("A−"), menu_);
     auto* bigger   = new QPushButton(tr("A+"), menu_);
     auto* prev     = new QPushButton(tr("‹ Prev"), menu_);
     auto* next     = new QPushButton(tr("Next ›"), menu_);
     pageLabel_ = new QLabel(menu_);
     pageLabel_->setAlignment(Qt::AlignCenter);
-    for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, selectBtn_, marksBtn_,
+    for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, selectBtn_, marksBtn_, exportBtn,
                             smaller, bigger, prev, next })
         b->setFocusPolicy(Qt::NoFocus); // keep arrow-key focus on the view, not a button
 
@@ -1027,6 +1033,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     connect(streamIssueBtn_, &QPushButton::clicked, this, &EbookView::streamIssueRequested);
     connect(selectBtn_, &QPushButton::clicked, this, &EbookView::beginCursorMode);
     connect(marksBtn_,  &QPushButton::clicked, this, &EbookView::openAnnotationsMenu);
+    connect(exportBtn,  &QPushButton::clicked, this, [this] { AnnotationExportAction::run(this); });
 
     bar->addWidget(backBtn);
     bar->addWidget(streamIssueBtn_);
@@ -1034,6 +1041,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     bar->addWidget(contents);
     bar->addWidget(selectBtn_);
     bar->addWidget(marksBtn_);
+    bar->addWidget(exportBtn);
     bar->addWidget(smaller);
     bar->addWidget(bigger);
 
@@ -1334,6 +1342,8 @@ void EbookView::gotoTocIndex(int i)
 // The stable natural key is the source path — the same basis resume keys on (bookKey() hashes it), so a book's
 // resume position and its bookmarks name one identity. Empty when no book is open.
 QString EbookView::itemKey() const { return book_ ? book_->sourcePath() : QString(); }
+QString EbookView::bookTitle() const  { return book_ ? book_->title()  : QString(); }
+QString EbookView::bookAuthor() const { return book_ ? book_->author() : QString(); }
 
 // The current top character offset — the #135 repagination-stable anchor, so a bookmark taken at one font size
 // lands on the same words at another.
@@ -1984,14 +1994,40 @@ void EbookView::offerHighlightColour(const ReaderAnchor& range)
     }, window());
 }
 
-// An EXISTING highlight, re-selected: recolour or remove, exactly what the issue asks a tap on one to offer.
+// The stored highlight with `id` (all books), or a default one (empty id) when it is gone.
+static HighlightStore::Highlight highlightById(const QString& id)
+{
+    for (const HighlightStore::Highlight& h : HighlightStore::all())
+        if (h.id == id) return h;
+    return HighlightStore::Highlight();
+}
+
+// An EXISTING highlight, re-selected: recolour, its note, or remove - what the issue asks a tap on one to offer.
+// The note verbs say what they will do: "Add note..." on a highlight without one, "Edit note..." and "Remove
+// note" on one that has it. The menu's title carries the note itself, so re-selecting a noted passage shows
+// what was written about it before asking what to do.
 void EbookView::offerHighlightEdit(const QString& id)
 {
     if (id.isEmpty()) return;
+    const HighlightStore::Highlight h = highlightById(id);
+    if (h.id.isEmpty()) return;
+
+    enum Verb { Recolour, Note, ClearNote, Remove };
     QStringList rows;
-    rows << tr("Recolour...") << tr("Remove highlight");
-    new NavMenu(tr("Highlight"), rows, [this, id](int row) {
-        if (row == 0)
+    QVector<Verb> verbs;
+    rows << tr("Recolour...");                                        verbs << Recolour;
+    rows << (h.note.isEmpty() ? tr("Add note...") : tr("Edit note...")); verbs << Note;
+    if (!h.note.isEmpty()) { rows << tr("Remove note");               verbs << ClearNote; }
+    rows << tr("Remove highlight");                                   verbs << Remove;
+
+    const QString title = h.note.isEmpty()
+        ? tr("Highlight")
+        : tr("Highlight") + QStringLiteral("\n") + ReaderAnnotations::noteMarker() + QStringLiteral(" ") + h.note;
+    new NavMenu(title, rows, [this, id, verbs](int row) {
+        if (row < 0 || row >= verbs.size()) return;
+        switch (verbs.at(row))
+        {
+        case Recolour:
         {
             QStringList colours;
             for (int i = 0; i < HighlightStore::colorCount(); ++i) colours << HighlightStore::colorName(i);
@@ -2000,7 +2036,37 @@ void EbookView::offerHighlightEdit(const QString& id)
             }, window());
             return;
         }
-        if (row == 1) { HighlightStore::remove(id); endCursorMode(); annotationsChanged(); }
+        case Note:      offerNoteEdit(id); return;
+        case ClearNote: HighlightStore::setNote(id, QString()); annotationsChanged(); return;
+        case Remove:    HighlightStore::remove(id); endCursorMode(); annotationsChanged(); return;
+        }
+    }, window());
+}
+
+// Add or edit a highlight's note, with the nav kit's on-screen keyboard (a physical keyboard types straight into
+// it). The prompt states the cap; an over-long note is REFUSED, never truncated - the toast says so and the
+// prompt comes back holding every character, so nothing typed is lost. Reopened on the next event-loop turn,
+// never from inside the closing keyboard's own key delivery (the #28/#211 rule).
+void EbookView::offerNoteEdit(const QString& id, const QString& draft, bool useDraft)
+{
+    const HighlightStore::Highlight h = highlightById(id);
+    if (h.id.isEmpty()) return;
+    const QString title = (h.note.isEmpty() ? tr("Add note") : tr("Edit note"))
+                        + tr(" (up to %1 characters)").arg(QLocale().toString(HighlightStore::kMaxNoteChars));
+    QPointer<EbookView> self(this);
+    new Osk(title, useDraft ? draft : h.note, QLineEdit::Normal, [self, id](const QString& text, bool ok) {
+        if (!self || !ok) return;
+        if (!HighlightStore::noteFits(text))
+        {
+            const int n = int(HighlightStore::normalizedNote(text).toUcs4().size());
+            AnnotationExportAction::notice(
+                tr("That note is %1 characters - notes are limited to %2. Nothing was saved.")
+                    .arg(QLocale().toString(n), QLocale().toString(HighlightStore::kMaxNoteChars)));
+            QTimer::singleShot(0, self, [self, id, text] { if (self) self->offerNoteEdit(id, text, true); });
+            return;
+        }
+        HighlightStore::setNote(id, text);
+        self->annotationsChanged();
     }, window());
 }
 
@@ -2026,7 +2092,20 @@ void EbookView::openAnnotationsMenu()
 
     QStringList rows;
     rows << tr("Bookmark this page");
-    for (const ReaderAnnotations::Entry& e : entries) rows << ReaderAnnotations::rowLabel(e);
+    // A noted highlight's row is EXPANDED here: its note follows on the row's own next line, so the list shows
+    // what was written without a second press. Long notes are cut for the list only (the whole note is in the
+    // row's own menu, one Enter away); the classic list is always expanded because it is a menu, not a focus.
+    for (const ReaderAnnotations::Entry& e : entries)
+    {
+        QString row = ReaderAnnotations::rowLabel(e);
+        if (e.hasNote())
+        {
+            QString preview = e.note.simplified();
+            if (preview.size() > 160) preview = preview.left(159) + QChar(0x2026);
+            row += QStringLiteral("\n      ") + preview;
+        }
+        rows << row;
+    }
 
     new NavMenu(tr("Bookmarks & highlights"), rows, [this, key, entries](int row) {
         if (row < 0) return;
@@ -2047,14 +2126,27 @@ void EbookView::openAnnotationsMenu()
         const ReaderAnnotations::Entry e = entries.at(i);
         if (!e.isHighlight()) { gotoSpineOffset(e.anchor.spine, e.anchor.offset); return; }
         // A highlight row goes one level deeper, because "go to it" and "change it" are different intentions
-        // and guessing wrong costs the reader an annotation.
-        QStringList verbs;
-        verbs << tr("Go to it") << tr("Recolour...") << tr("Remove highlight");
+        // and guessing wrong costs the reader an annotation. Its title is the passage and, when it has one, the
+        // WHOLE note - the row's full expansion - and its verbs include the note's, as the re-select menu does.
+        enum Verb { GoTo, Recolour, Note, ClearNote, Remove };
+        QStringList labels;
+        QVector<Verb> verbs;
+        labels << tr("Go to it");                                            verbs << GoTo;
+        labels << tr("Recolour...");                                         verbs << Recolour;
+        labels << (e.hasNote() ? tr("Edit note...") : tr("Add note..."));   verbs << Note;
+        if (e.hasNote()) { labels << tr("Remove note");                      verbs << ClearNote; }
+        labels << tr("Remove highlight");                                    verbs << Remove;
         const QString id = e.id;
         const int spine = e.anchor.spine, offset = e.anchor.offset;
-        new NavMenu(e.excerpt, verbs, [this, id, spine, offset](int v) {
-            if (v == 0) { gotoHighlight(spine, offset); return; }
-            if (v == 1)
+        const QString title = e.hasNote()
+            ? e.excerpt + QStringLiteral("\n\n") + ReaderAnnotations::noteMarker() + QStringLiteral(" ") + e.note
+            : e.excerpt;
+        new NavMenu(title, labels, [this, id, spine, offset, verbs](int v) {
+            if (v < 0 || v >= verbs.size()) return;
+            switch (verbs.at(v))
+            {
+            case GoTo: gotoHighlight(spine, offset); return;
+            case Recolour:
             {
                 QStringList colours;
                 for (int c = 0; c < HighlightStore::colorCount(); ++c) colours << HighlightStore::colorName(c);
@@ -2063,7 +2155,10 @@ void EbookView::openAnnotationsMenu()
                 }, window());
                 return;
             }
-            if (v == 2) { HighlightStore::remove(id); annotationsChanged(); }
+            case Note:      offerNoteEdit(id); return;
+            case ClearNote: HighlightStore::setNote(id, QString()); annotationsChanged(); return;
+            case Remove:    HighlightStore::remove(id); annotationsChanged(); return;
+            }
         }, window());
     }, window());
 }

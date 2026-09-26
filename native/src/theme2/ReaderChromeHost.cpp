@@ -12,6 +12,7 @@
 #include "../ebook/ReaderAnnotations.h" // issue #136: the ONE document-order merge of the two
 #include "../ebook/ReaderAnchor.h"   // issue #136: the one anchor model the capture/jump build
 #include "../ebook/ReadAloud.h"     // issue #145: the pure settings-row count (and the divider behind it)
+#include "../ebook/AnnotationExportAction.h" // issue #136: "Export notes", the verb both layouts call
 #include "../core/Settings.h"        // the reading look is a stored preference, not chrome state
 
 #include <QQuickWidget>
@@ -275,6 +276,13 @@ QStringList ReaderBridge::bookmarkColors() const
     return out;
 }
 
+QStringList ReaderBridge::bookmarkNotes() const
+{
+    QStringList out;
+    for (const ReaderAnnotations::Entry& e : annotations()) out << e.note;
+    return out;
+}
+
 int ReaderBridge::bookmarkCount() const { return annotations().size(); }
 
 bool ReaderBridge::selectionSupported() const { return reader_ && reader_->selectionSupported(); }
@@ -291,12 +299,26 @@ int ReaderBridge::selectSettingIndex() const
 
 int ReaderBridge::settingsRowCount() const
 {
+    // + 1 for every kind: "Export notes" (issue #136) closes the row, after everything else it draws.
     if (kind_ == ReaderKind::Book)
-        return ReadAloud::bookSettingsRowCount(readAloudAvailable()) + (selectionSupported() ? 1 : 0);
+        return ReadAloud::bookSettingsRowCount(readAloudAvailable()) + (selectionSupported() ? 1 : 0) + 1;
     // #154: the comic's five fixed controls (Exit, −, +, Fit, Two-Up) plus one per per-series control the
     // reader offers. Stated ONCE here, as read-aloud's count is, so the zone the cursor can walk and the row
     // the QML draws cannot disagree — and so a photo folder, which offers none, keeps the row it had.
-    return (kind_ == ReaderKind::Comic) ? 5 + comicControls().size() : 4;
+    return ((kind_ == ReaderKind::Comic) ? 5 + comicControls().size() : 4) + 1;
+}
+
+// Export notes is APPENDED, like Select was: every index before it keeps the meaning it already had, so nothing
+// that fires by number (this bridge's switch, the QML model, probe_readaloud's count) has to move. A photo
+// folder has no item key and nothing to export, and says so when pressed rather than hiding a control.
+int ReaderBridge::exportSettingIndex() const
+{
+    return settingsRowCount() - 1;
+}
+
+void ReaderBridge::exportNotes()
+{
+    if (reader_) AnnotationExportAction::run(reader_);   // says "nothing to export" itself for a keyless item
 }
 
 void ReaderBridge::beginSelection()
@@ -372,6 +394,10 @@ void ReaderBridge::activateSetting(int index)
     // Index 0 is Exit for every kind, and returns immediately: leaving is not a reader command and must not
     // fall through to one.
     if (index == 0) { exitReader(); return; }
+
+    // Export notes (issue #136) closes every kind's row. Checked before the kind switches below, because its
+    // index moves with the row's length (read-aloud, Select, a comic's per-series controls).
+    if (index == exportSettingIndex()) { exportNotes(); return; }
 
     // Select (issue #136) is the LAST control in a book's row, at selectSettingIndex(). Checked before the
     // switch because the number it sits at depends on whether read-aloud is available - so a literal case here
@@ -498,6 +524,11 @@ int  ReaderChromeHost::readerPageCount() const { return reader_ ? reader_->pageC
 bool ReaderChromeHost::readerTwoUp() const     { return reader_ && reader_->twoUp(); }
 bool ReaderChromeHost::readerCursorMode() const { return reader_ && reader_->cursorMode(); }
 int  ReaderChromeHost::annotationCount() const  { return bridge_ ? bridge_->bookmarkCount() : 0; }
+QString ReaderChromeHost::annotationNotes() const
+{
+    return bridge_ ? bridge_->bookmarkNotes().join(QStringLiteral(" | ")) : QString();
+}
+
 QString ReaderChromeHost::annotationLabels() const
 {
     return bridge_ ? bridge_->bookmarkLabels().join(QStringLiteral(" | ")) : QString();

@@ -1,4 +1,5 @@
 #include "ComicView.h"
+#include "../ebook/AnnotationExportAction.h"   // issue #136: "Export notes"
 #include "ComicInfo.h"       // #152: the archive's own ComicInfo.xml -> the reading direction
 #include "ComicName.h"       // seriesKey(): the key a per-series direction override is stored under
 #include "ComicPageOrder.h"
@@ -97,6 +98,10 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     auto* zoomOutBtn = new QPushButton(tr("−"), this);
     auto* zoomInBtn = new QPushButton(tr("+"), this);
     auto* fit = new QPushButton(tr("Fit Width"), this);
+    // Export notes (issue #136): this file's bookmarks (and highlights, if it has any) as Markdown in
+    // <data>/exports - the same verb the book reader and the themed chrome offer.
+    auto* exportBtn = new QPushButton(tr("Export notes"), this);
+    exportBtn->setToolTip(tr("Save this file's bookmarks as a Markdown file"));
     pageLabel_ = new QLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
@@ -107,12 +112,14 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     connect(zoomOutBtn, &QPushButton::clicked, this, &ComicView::zoomOut);
     connect(zoomInBtn, &QPushButton::clicked, this, &ComicView::zoomIn);
     connect(fit, &QPushButton::clicked, this, &ComicView::fitWidth);
+    connect(exportBtn, &QPushButton::clicked, this, [this] { AnnotationExportAction::run(this); });
 
     bar->addWidget(backBtn);
     bar->addWidget(homeBtn);
     bar->addWidget(zoomOutBtn);
     bar->addWidget(zoomInBtn);
     bar->addWidget(fit);
+    bar->addWidget(exportBtn);
     bar->addStretch(1);
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);

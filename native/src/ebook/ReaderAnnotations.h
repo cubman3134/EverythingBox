@@ -33,6 +33,9 @@ struct Entry
     ReaderAnchor anchor;    // where in the book (a highlight's carries the range end)
     QString      excerpt;   // what the panel shows: a bookmark's label, a highlight's words
     int          color = -1; // highlight palette index; -1 for a bookmark (it has no colour)
+    QString      note;      // a highlight's note (issue #136); empty for a bookmark and for an un-noted highlight
+
+    bool hasNote() const { return !note.isEmpty(); }
 
     bool isHighlight() const { return kind == Highlight; }
 };
@@ -64,6 +67,7 @@ inline QVector<Entry> merged(const QVector<BookmarkStore::Bookmark>& bookmarks,
         e.anchor  = h.anchor;
         e.color   = h.color;
         e.excerpt = h.text.isEmpty() ? QStringLiteral("Highlight") : h.text;
+        e.note    = h.note;
         out.push_back(e);
     }
 
@@ -73,11 +77,18 @@ inline QVector<Entry> merged(const QVector<BookmarkStore::Bookmark>& bookmarks,
     return out;
 }
 
+// The mark a noted highlight's row carries (issue #136) - a pencil, as text, for the same no-icon-font reason
+// as the row marks below. Both panels draw it through rowLabel, so neither can forget it.
+inline QString noteMarker() { return QStringLiteral("✎"); }
+
 // The row a panel draws. A highlight is marked so the two kinds are told apart at a glance without the panel
-// inventing its own vocabulary; the marks are text, so they survive a theme with no icon font.
+// inventing its own vocabulary; the marks are text, so they survive a theme with no icon font. A highlight
+// with a note ends in the note marker; the note's TEXT is not in the label (it can be 2,000 characters) -
+// each panel expands the row to show it.
 inline QString rowLabel(const Entry& e)
 {
-    return (e.isHighlight() ? QStringLiteral("▍ ") : QStringLiteral("🔖 ")) + e.excerpt;
+    return (e.isHighlight() ? QStringLiteral("▍ ") : QStringLiteral("🔖 ")) + e.excerpt
+         + (e.hasNote() ? QStringLiteral("  ") + noteMarker() : QString());
 }
 
 } // namespace ReaderAnnotations
