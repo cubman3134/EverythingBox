@@ -224,6 +224,96 @@
       "replace": "        if (!p.resolved) { ++s.unresolved; }",
       "count": 1,
       "expect": "killed"
+    },
+    {
+      "name": "a-paused-player-counts-as-recovered",
+      "//": "#448. THE bug, put back: a player the room paused reads as recovered, so every hold the room makes releases itself on the next tick.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    Q_UNUSED(playerPaused);",
+      "replace": "    if (playerPaused) return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "one-readiness-threshold-instead-of-two",
+      "//": "#448. The hysteresis removed: a guest leaves buffering at the same one second it entered at, so a cache hovering there flaps the room.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    return wasBuffering ? cacheAheadSec < cfg.leaveAtSec : cacheAheadSec < cfg.enterBelowSec;",
+      "replace": "    return cacheAheadSec < cfg.enterBelowSec;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-leave-bound-moves",
+      "//": "#448. Ready at two seconds ahead instead of three.",
+      "file": "native/src/media/WatchTogether.h",
+      "find": "        double leaveAtSec    = 3.0;",
+      "replace": "        double leaveAtSec    = 2.0;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-enter-bound-moves",
+      "//": "#448. Buffering entered at a second and a half instead of below one.",
+      "file": "native/src/media/WatchTogether.h",
+      "find": "        double enterBelowSec = 1.0;",
+      "replace": "        double enterBelowSec = 1.5;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "exactly-three-seconds-is-not-ready",
+      "//": "#448. The leave boundary given to the buffering side: 'three seconds or more' becomes 'more than three'.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "cacheAheadSec < cfg.leaveAtSec :",
+      "replace": "cacheAheadSec <= cfg.leaveAtSec :",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-end-of-the-file-is-not-ready",
+      "//": "#448. A guest whose cache already holds the rest of the film waits for seconds that do not exist.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (atEnd) return false;",
+      "replace": "    if (false) return false;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "an-unreadable-cache-reads-as-empty",
+      "//": "#448. mpv not answering is taken as an empty cache, so a file still opening holds the room with no evidence.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (!(cacheAheadSec >= 0.0)) return wasBuffering;",
+      "replace": "    if (!(cacheAheadSec >= 0.0)) return true;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "a-silent-host-reads-as-an-announced-wait",
+      "//": "#448. A host from before the field is treated as having said 'wait', so the guest can never tell it does not know.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (id.isEmpty()) return;\n",
+      "replace": "",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-guest-uses-its-own-setting",
+      "//": "#448. The guest's indicator follows its own stall setting instead of the host's.",
+      "file": "native/src/media/WatchTogether.h",
+      "find": "            return hostPolicyKnown_ ? hostPolicy_ : BufferPolicy::WaitForEveryone;",
+      "replace": "            return policy_;",
+      "count": 1,
+      "expect": "killed"
+    },
+    {
+      "name": "the-beacon-does-not-carry-the-policy",
+      "//": "#448. Only a transport carries the policy, so a live change never reaches a guest until the next pause or seek.",
+      "file": "native/src/media/WatchTogether.cpp",
+      "find": "    if (host_) m.policy = policyId(policy_);\n    return m;",
+      "replace": "    return m;",
+      "count": 1,
+      "expect": "killed"
     }
   ]
 }

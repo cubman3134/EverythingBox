@@ -890,6 +890,36 @@ bool MpvWidget::hasMedia() const
     return idle == 0;
 }
 
+MpvWidget::CacheAhead MpvWidget::cacheAhead() const
+{
+    CacheAhead c;
+    if (!mpv) return c;
+    // One read of the whole map rather than demuxer-cache-duration on its own: that property is UNAVAILABLE
+    // both when there is no demuxer and when the cache has simply run dry, and those two must not look alike —
+    // the second is exactly the stall this is asked about. The map exists whenever a demuxer does, and it
+    // leaves out cache-duration when nothing is buffered ahead.
+    mpv_node node;
+    if (mpv_get_property(mpv, "demuxer-cache-state", MPV_FORMAT_NODE, &node) < 0) return c;
+    if (node.format == MPV_FORMAT_NODE_MAP && node.u.list)
+    {
+        c.known = true;
+        const mpv_node_list* l = node.u.list;
+        for (int i = 0; i < l->num; ++i)
+        {
+            const char* key = l->keys[i];
+            const mpv_node& v = l->values[i];
+            if (!key) continue;
+            if (std::strcmp(key, "cache-duration") == 0 && v.format == MPV_FORMAT_DOUBLE)
+                c.seconds = v.u.double_ < 0.0 ? 0.0 : v.u.double_;
+            else if ((std::strcmp(key, "eof") == 0 || std::strcmp(key, "eof-cached") == 0)
+                     && v.format == MPV_FORMAT_FLAG && v.u.flag)
+                c.atEnd = true;
+        }
+    }
+    mpv_free_node_contents(&node);
+    return c;
+}
+
 void MpvWidget::togglePause()
 {
     // #141: inside a window this becomes an explicit set of BOTH decks rather than a per-deck "cycle" — two

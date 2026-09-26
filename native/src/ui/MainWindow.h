@@ -881,8 +881,8 @@ private:
     bool   wtApplying_ = false;         // applying the room's transport: our own pausedChanged is not a request
     qint64 wtQuietUntilMs_ = 0;         // ...and mpv reports it LATE, so the guard is a window, not an instant
     bool   wtBuffering_ = false;        // we have told the room we are stalled
-    double wtSeenPos_ = -1.0;           // last position sample, for the stall detector
-    int    wtStalledTicks_ = 0;
+    double wtCacheAheadSec_ = -1.0;     // #448: seconds of cache ahead at the last tick (-1 = mpv could not say)
+    bool   wtCacheAtEnd_ = false;       // #448: ...and whether the rest of the file is already in it
     double wtSentPos_ = -1.0;           // host: the position last broadcast, for seek detection
 
     // Reachable from Settings on BOTH layouts, from W during playback, and from the detail view with the page's
@@ -892,6 +892,9 @@ private:
     // The detail view's "Watch together…" / "Play this for everyone" (#86), on both layouts.
     void watchTogetherFromDetail(const QString& itemTitle, const std::function<void()>& playItem);
     QString watchTogetherDetailLabel() const;                  // that action's label, which is the room's state
+    // The room's live state for the UI-test channel (#448): this machine's cache and buffering answer, the
+    // room's transport and hold, and the stall policy as this side knows it. Written into `state`'s object.
+    void watchTogetherTestState(class QJsonObject& o) const;
     // Once, at construction: the classic overlay's room indicator (beside the time readout in the transport
     // row) and the detail view's label source.
     void watchTogetherInstallEntryPoints();

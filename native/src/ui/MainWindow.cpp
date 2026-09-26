@@ -5138,6 +5138,7 @@ void MainWindow::updateUiTestServer()
         // the classic transport row's label is showing it (it hides with the chrome, like the rest of the row).
         o.insert(QStringLiteral("wtIndicator"), wtIndicatorLine_);
         o.insert(QStringLiteral("wtIndicatorShown"), wtIndicator_ && wtIndicator_->isVisible());
+        watchTogetherTestState(o);   // #448: cache, buffering, hold and the room's policy
         if (cur == playerPage_)
         {
             // Player-touch automation (D1 Task 5): chrome visibility (tap toggle) + seek position in permille of
