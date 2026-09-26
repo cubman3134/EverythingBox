@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.325 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.326 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -533,6 +533,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # three readers and the themed chrome call.
         src/ebook/AnnotationExport.h
         src/ebook/AnnotationExportAction.cpp src/ebook/AnnotationExportAction.h
+        # The classic pdf/comic bar that can never widen the window: collapsible controls + a "More..." menu,
+        # and a page label that elides (#136 follow-up).
+        src/ui/OverflowBar.cpp    src/ui/OverflowBar.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
         src/comic/Tar.h           src/comic/ComicPageOrder.h  # #144 CB7/CBT comic readers (header-only)
@@ -1369,6 +1372,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         # Both readers' classic bars carry "Export notes" (#136): the verb, the stores it reads, and the
         # safe-name rule the file name goes through (RomhackInstall, which brings RomPatch).
         src/ebook/AnnotationExportAction.cpp src/ebook/AnnotationExportAction.h src/ebook/AnnotationExport.h
+        # ...and both bars are OverflowBars now, whose "More..." is a nav-kit NavMenu (section 6 measures them).
+        src/ui/OverflowBar.cpp src/ui/OverflowBar.h
+        src/ui/nav/Nav.cpp src/ui/nav/Nav.h src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
+        src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
+        # NavRing (Nav.cpp) opens the Osk for a line edit, and the Osk's footer reads InputMode -- the same
+        # closure probe_nav links (Gamepad stays inert without EVERYTHINGBOX_HAVE_SDL).
+        src/ui/nav/Osk.cpp src/ui/nav/Osk.h
+        src/input/InputMode.cpp src/input/InputMode.h src/input/PadGlyphs.cpp src/input/PadGlyphs.h
+        src/input/Gamepad.cpp src/input/Gamepad.h
         src/core/HighlightStore.cpp src/core/HighlightStore.h
         src/core/RomhackInstall.cpp src/core/RomhackInstall.h
         src/core/RomPatch.cpp     src/core/RomPatch.h
@@ -1377,7 +1389,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ebook/ReaderAnchor.h  src/ui/PlayerIcons.h    # header-only (the anchor model, the drawn chip icon)
         third_party/miniz.c)
     target_include_directories(probe_readerbookmarks PRIVATE src src/core src/ebook src/comic src/pdf src/ui
-        src/theme2 third_party)
+        src/theme2 src/input src/libretro third_party)
     target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
         lzma7z unarr)

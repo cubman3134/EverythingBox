@@ -1,5 +1,6 @@
 #include "ComicView.h"
 #include "../ebook/AnnotationExportAction.h"   // issue #136: "Export notes"
+#include "../ui/OverflowBar.h"   // #136 follow-up: the bar that never widens the window
 #include "ComicInfo.h"       // #152: the archive's own ComicInfo.xml -> the reading direction
 #include "ComicName.h"       // seriesKey(): the key a per-series direction override is stored under
 #include "ComicPageOrder.h"
@@ -88,9 +89,11 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     imageLabel_->setStyleSheet(QStringLiteral("background:#15171c;"));
     scroll_->setWidget(imageLabel_);
 
-    bar_ = new QWidget(this);
-    auto* bar = new QHBoxLayout(bar_);
-    bar->setContentsMargins(0, 0, 0, 0);
+    // #136 follow-up: an OverflowBar, so fourteen captions and a long file name can never make the window wider
+    // than it is. Back / Home / Prev / the page label / Next always stay; the rest are COLLAPSIBLE and move
+    // into "More…" (a nav-kit menu) when they do not fit, lowest priority first.
+    bar_ = new OverflowBar(this);
+    auto* bar = bar_->row();
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
     auto* homeBtn = new QPushButton(tr("Home"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
@@ -102,7 +105,7 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     // <data>/exports - the same verb the book reader and the themed chrome offer.
     auto* exportBtn = new QPushButton(tr("Export notes"), this);
     exportBtn->setToolTip(tr("Save this file's bookmarks as a Markdown file"));
-    pageLabel_ = new QLabel(this);
+    pageLabel_ = new ElidedLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
     connect(backBtn, &QPushButton::clicked, this, &ComicView::backRequested);
@@ -120,7 +123,9 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     bar->addWidget(zoomInBtn);
     bar->addWidget(fit);
     bar->addWidget(exportBtn);
-    bar->addStretch(1);
+    // No stretch spacer (#136 follow-up): the page label is the ONE thing that takes spare room, so a tight
+    // bar gives it every pixel the controls leave rather than splitting them with empty space.
+    bar->addWidget(bar_->more());   // the per-series controls (installModeControls) go in just before it
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);
     bar->addWidget(next);
@@ -133,6 +138,19 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     installModeSurfaces(v);
     v->addWidget(bar_);
     installModeControls();
+    // What gives way first when the bar is narrow: Export notes (an occasional verb), then the per-series
+    // modes from the least-used up, then Fit, and the zoom pair last - they are what a page turn leans on.
+    bar_->addCollapsible(zoomOutBtn, 90);
+    bar_->addCollapsible(zoomInBtn, 90);
+    bar_->addCollapsible(fit, 80);
+    bar_->addCollapsible(modeBtn_, 70);
+    bar_->addCollapsible(splitBtn_, 60);
+    bar_->addCollapsible(filterBtn_, 55);
+    bar_->addCollapsible(cropBtn_, 50);
+    bar_->addCollapsible(railBtn_, 40);
+    bar_->addCollapsible(scanBtn_, 30);
+    bar_->addCollapsible(zoomStartBtn_, 20);
+    bar_->addCollapsible(exportBtn, 10);
 
     setFocusPolicy(Qt::StrongFocus);
 }

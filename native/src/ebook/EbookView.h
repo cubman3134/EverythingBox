@@ -18,6 +18,7 @@
 
 class QListWidget;
 class QLabel;
+class ElidedLabel;   // ../ui/OverflowBar.h
 class QFrame;
 class QPushButton;
 class QTimer;
@@ -377,7 +378,7 @@ private:
     QPushButton* raSpeedBtn_ = nullptr;   // the shared #140 speed, stepped
     QPushButton* raVoiceBtn_ = nullptr;   // the platform voice, stepped
     QListWidget* tocList_ = nullptr;    // contents panel (overlay, toggled)
-    QLabel* pageLabel_ = nullptr;
+    ElidedLabel* pageLabel_ = nullptr;   // elides (middle) rather than clipping (#136 follow-up)
     QTimer* menuTimer_ = nullptr;
     QTimer* repagTimer_ = nullptr;      // debounces book-wide repagination after a resize
     QVector<int> chapterStart_;         // cumulative page offset where each chapter begins

@@ -1,5 +1,6 @@
 #include "PdfView.h"
 #include "../ebook/AnnotationExportAction.h"   // issue #136: "Export notes"
+#include "../ui/OverflowBar.h"   // #136 follow-up: the bar that never widens the window
 #include "../core/AppBrand.h"
 
 #if !defined(Q_OS_ANDROID)
@@ -41,9 +42,11 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     view_->setPageMode(QPdfView::PageMode::SinglePage); // one page at a time, like the old reader
     view_->setZoomMode(QPdfView::ZoomMode::FitInView);
 
-    bar_ = new QWidget(this);
-    auto* bar = new QHBoxLayout(bar_);
-    bar->setContentsMargins(0, 0, 0, 0);
+    // #136 follow-up: an OverflowBar, so the captions and a long file name can never make the window wider
+    // than it is. Back / Home / Prev / the page label / Next always stay; the rest are COLLAPSIBLE and move
+    // into "More…" (a nav-kit menu) when they do not fit, lowest priority first.
+    bar_ = new OverflowBar(this);
+    auto* bar = bar_->row();
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
     streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), this);
     // Drawn beside the label rather than typed into it: as ⚠ the mark came out of the colour emoji
@@ -64,7 +67,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     // <data>/exports - the same verb the book reader and the themed chrome offer.
     auto* exportBtn = new QPushButton(tr("Export notes"), this);
     exportBtn->setToolTip(tr("Save this file's bookmarks as a Markdown file"));
-    pageLabel_ = new QLabel(this);
+    pageLabel_ = new ElidedLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
     connect(backBtn, &QPushButton::clicked, this, &PdfView::backRequested);
@@ -85,10 +88,17 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     bar->addWidget(zoomInBtn);
     bar->addWidget(fit);
     bar->addWidget(exportBtn);
-    bar->addStretch(1);
+    bar->addWidget(bar_->more());
+    // No stretch spacer (#136 follow-up): the page label is the ONE thing that takes spare room, so a tight
+    // bar gives it every pixel the controls leave rather than splitting them with empty space.
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);
     bar->addWidget(next);
+    // What gives way first when the bar is narrow: Export notes, then Fit, then the zoom pair.
+    bar_->addCollapsible(zoomOutBtn, 90);
+    bar_->addCollapsible(zoomInBtn, 90);
+    bar_->addCollapsible(fit, 80);
+    bar_->addCollapsible(exportBtn, 10);
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);

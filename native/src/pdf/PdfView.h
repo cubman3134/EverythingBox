@@ -8,6 +8,8 @@
 class QPdfDocument;
 class QPdfView;
 class QLabel;
+class ElidedLabel;   // ../ui/OverflowBar.h: a label that shrinks to an ellipsis (#136 follow-up)
+class OverflowBar;
 class QPushButton;
 
 class PdfView : public QWidget, public HostedReader
@@ -63,8 +65,8 @@ private slots:
 private:
     QPdfDocument* doc_ = nullptr;
     QPdfView* view_ = nullptr;
-    QWidget* bar_ = nullptr;                // the bottom control bar (hidden in hosted/themed mode)
-    QLabel* pageLabel_ = nullptr;
+    OverflowBar* bar_ = nullptr;            // the bottom control bar (hidden in hosted/themed mode); never widens the window
+    ElidedLabel* pageLabel_ = nullptr;      // elides (middle) rather than widening the bar
     QPushButton* streamIssueBtn_ = nullptr; // "Issue with Streaming" (hidden unless a remote book)
     QString path_;
     qreal zoom_ = 1.0;

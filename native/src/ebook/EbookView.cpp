@@ -15,6 +15,7 @@
 #include "../core/HighlightStore.h"    // per-book highlights: the range anchor + the fixed palette (issue #136)
 #include "ReaderAnnotations.h"         // the ONE document-order merge of bookmarks + highlights (issue #136)
 #include "AnnotationExportAction.h"    // issue #136: "Export notes", and the toast a refused note says itself through
+#include "../ui/OverflowBar.h"         // #136 follow-up: the classic bar moves what does not fit into "More…"
 #include "../ui/nav/Osk.h"            // issue #136: a highlight's note is typed on the nav kit's keyboard
 #include "../ui/nav/NavOverlay.h"      // NavMenu: the colour picker and the annotation list (nav kit only)
 #include "../core/LookupClient.h"   // issue #137: the in-book lookup's one socket owner
@@ -988,8 +989,14 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     // reserved at the top of the page can be shorter - leaving more of it as reading margin.
     menu_->setStyleSheet(QStringLiteral(
         "QPushButton{min-height:20px;padding:2px 9px;font-size:12px;} QLabel{font-size:12px;}"));
-    auto* bar = new QHBoxLayout(menu_);
-    bar->setContentsMargins(8, 3, 8, 3);
+    // #136 follow-up: the controls live on an OverflowBar inside the frame. The frame is an overlay, so it never
+    // widened the window - but at the app's narrowest it clipped the page read-out on both sides. Now the
+    // collapsible controls move into "More…" and the read-out elides instead.
+    auto* frameRow = new QHBoxLayout(menu_);
+    frameRow->setContentsMargins(8, 3, 8, 3);
+    auto* overflow = new OverflowBar(menu_);
+    frameRow->addWidget(overflow);
+    auto* bar = overflow->row();
     bar->setSpacing(5);
     auto* backBtn = new QPushButton(tr("‹ Back"), menu_);
     streamIssueBtn_ = new QPushButton(tr("Issue with Streaming"), menu_);
@@ -1017,7 +1024,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     auto* bigger   = new QPushButton(tr("A+"), menu_);
     auto* prev     = new QPushButton(tr("‹ Prev"), menu_);
     auto* next     = new QPushButton(tr("Next ›"), menu_);
-    pageLabel_ = new QLabel(menu_);
+    pageLabel_ = new ElidedLabel(menu_);
     pageLabel_->setAlignment(Qt::AlignCenter);
     for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, selectBtn_, marksBtn_, exportBtn,
                             smaller, bigger, prev, next })
@@ -1069,10 +1076,22 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     }
 #endif
 
-    bar->addStretch(1);
+    overflow->more()->setFocusPolicy(Qt::NoFocus);
+    bar->addWidget(overflow->more());
+    // No stretch spacer: the read-out is the one thing that takes spare room (see OverflowBar.h).
     bar->addWidget(prev);
     bar->addWidget(pageLabel_, 1);
     bar->addWidget(next);
+    // What gives way first when the bar is narrow: Export notes, the read-aloud extras, then Marks/Select/
+    // Contents, and the font pair last.
+    overflow->addCollapsible(smaller, 90);
+    overflow->addCollapsible(bigger, 90);
+    overflow->addCollapsible(contents, 80);
+    overflow->addCollapsible(selectBtn_, 75);
+    overflow->addCollapsible(marksBtn_, 75);
+    for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_ })
+        if (b) overflow->addCollapsible(b, b == raBtn_ ? 60 : (b == raPauseBtn_ ? 50 : 30));
+    overflow->addCollapsible(exportBtn, 10);
 
     menuTimer_ = new QTimer(this);
     menuTimer_->setSingleShot(true);
