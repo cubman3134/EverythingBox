@@ -1,5 +1,7 @@
 #include "AddonManager.h"
 #include "../core/AddonRoster.h"   // issue #77: the roster's stamped shadow, touched after every live write
+#include "../core/AddonConfigKeys.h" // issue #77: an add-on's password fields are stored device-local
+#include "../core/ThemeRegistry.h"   // issue #77: the registry download budgets, shared with the registry browser
 #include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/QuitBudget.h"    // issue #442: a quit ends a blocking fetch on a pool thread
 #include "../core/CatalogMatch.h"
@@ -32,6 +34,10 @@
 #include <QSet>
 #include <QDateTime>
 #include <QStandardPaths>
+#include <QHostAddress>
+#include <QPointer>
+#include <QSaveFile>
+#include <algorithm>
 #include <QDebug>
 #include <cstring>
 
@@ -316,7 +322,7 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
     QJsonObject o;
     for (const AddonSetting& s : src->manifest.settings)
     {
-        const QString v = AddonContext::readConfig(src->manifest.id, s.key);
+        const QString v = AddonContext::readConfig(src->manifest.id, s.key, QString(), s.type);   // #77: by type
         if (!v.isEmpty()) o.insert(s.key, v);
     }
     if (o.isEmpty()) return {};
@@ -766,6 +772,7 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
                 ? qEnvironmentVariable("EB_ADDONS_ROOT")
                 : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
+    AddonRoster::setAddonsRoot(root_);   // #77 inc 2: the roster reads which folder add-ons came from a registry
     reload();
     // Issue #77: stamp the roster's shadow from what is live BEFORE the migrations below touch it. On the first
     // launch of a build with a roster this is the backfill (ts 0, no tombstones); after that it catches any
@@ -854,8 +861,17 @@ void AddonManager::checkAddonUpdates()
             f.write(pkg);
             f.close();
             QString err;
+            // #77: a registry-installed add-on that updates itself is still registry-installed. installPackage
+            // replaces the whole folder (and never extracts a provenance file from a package), so carry it over.
+            AddonRoster::Provenance prov = AddonRoster::readProvenance(root_ + QLatin1Char('/') + t.id);
             if (installPackage(tmp, &err)) // replaces the addon folder in place + reload()s the source list
             {
+                if (prov.valid())
+                {
+                    prov.version = remoteVer;
+                    prov.installedAt = QDateTime::currentSecsSinceEpoch();
+                    AddonRoster::writeProvenance(root_ + QLatin1Char('/') + t.id, prov);
+                }
                 streamLog(QStringLiteral("addon update: %1 %2 -> %3").arg(t.id, t.version, remoteVer));
                 emit sourcesChanged(); // the UI rebuilds its tabs against the refreshed addon
             }
@@ -888,6 +904,7 @@ void AddonManager::reload()
     // run; it earns its keep once, on the first launch after an install whose keys an earlier build stranded.
     const QStringList ids = installedIds();
     const int restored = BrandMigration::reconcileAddonConfig(AppPaths::dataDir(), ids);
+    migrateSecretConfig();   // #77 inc 3: after the repair above, so a restored password is moved too
     snapshotEnabled();   // #77: after the repair above, which can move a flag onto the id in use
     if (restored)
         streamLog(QStringLiteral("addon config: restored %1 stranded setting(s) to the add-on ids in use")
@@ -2849,6 +2866,9 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
         if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
         const QString name = QFileInfo(QString::fromUtf8(st.m_filename)).fileName(); // top-level only
         if (name.isEmpty()) continue;
+        // #77: only a registry install writes the provenance file. A package carrying one would otherwise
+        // present a sideloaded add-on as a registry install, and sync a reference for it.
+        if (name == AddonRoster::provenanceFileName()) continue;
         mz_zip_reader_extract_to_file(&zip, i, (dest + QStringLiteral("/") + name).toUtf8().constData(), 0);
     }
     mz_zip_reader_end(&zip);
@@ -2860,7 +2880,14 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
 bool AddonManager::removeAddon(const QString& id)
 {
     if (id.isEmpty()) return false;
-    const bool ok = QDir(root_ + QStringLiteral("/") + id).removeRecursively();
+    const QString dir = root_ + QStringLiteral("/") + id;
+    // #77: uninstalling a REGISTRY add-on is a roster edit — a dated tombstone, so the other devices uninstall
+    // it too. A sideloaded one never reached the roster, so its removal is this device's business alone. The
+    // provenance goes first: whatever of the folder then refuses to delete is left as a device-only add-on.
+    const AddonRoster::Provenance prov = AddonRoster::readProvenance(dir);
+    if (prov.valid()) QFile::remove(dir + QLatin1Char('/') + AddonRoster::provenanceFileName());
+    const bool ok = QDir(dir).removeRecursively();
+    if (prov.valid() && !AddonRoster::readProvenance(dir).valid()) AddonRoster::recordRemoval(id);
     if (ok) reload();
     return ok;
 }
@@ -3045,6 +3072,398 @@ void AddonManager::applyMergedRoster()
             emit sourcesChanged();
         });
     }
+
+    applyMergedRegistryRefs();   // #77 inc 2: registry references - installed from the registry, or listed
+}
+
+// ---- issue #77, increment 2: registry installs sync as references; add-on code never syncs ------------------
+
+QString AddonManager::registryUrlFor(bool uitest, const QString& overrideUrl, bool* ignoredOverride)
+{
+    const QString fixture = overrideUrl.trimmed();
+    if (ignoredOverride) *ignoredOverride = !fixture.isEmpty() && !uitest;
+    if (uitest && !fixture.isEmpty()) return fixture;
+    return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+}
+
+QString AddonManager::defaultRegistryUrl()
+{
+    // EB_ADDON_REGISTRY_URL points the built-in registry at a fixture — a test rig's loopback registry — the way
+    // EB_UITEST_BUILDBOT_BASE points the core catalogue at one (#98), so a rig never reaches the real registry.
+    // Honoured only under EB_UITEST (registryUrlFor); an ordinary run ignores it and says so ONCE.
+    bool ignored = false;
+    const QString url = registryUrlFor(qEnvironmentVariableIsSet("EB_UITEST"),
+                                       qEnvironmentVariable("EB_ADDON_REGISTRY_URL"), &ignored);
+    static bool loggedIgnored = false;   // once per process: this is asked on every list and every merge
+    if (ignored && !loggedIgnored)
+    {
+        loggedIgnored = true;
+        streamLog(QStringLiteral("addon registry: EB_ADDON_REGISTRY_URL ignored - it is honoured only with EB_UITEST set"));
+    }
+    return url;
+}
+
+QStringList AddonManager::configuredRegistries()
+{
+    // The registry browser's own list for add-ons: the built-in registry plus registry/addonsExtras.
+    QStringList l;
+    l << defaultRegistryUrl();
+    for (const QString& u : store().value(QStringLiteral("registry/addonsExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !l.contains(u.trimmed())) l << u.trimmed();
+    return l;
+}
+
+bool AddonManager::isRegistryConfigured(const QString& indexUrl)
+{
+    const QString u = indexUrl.trimmed();
+    return !u.isEmpty() && configuredRegistries().contains(u);
+}
+
+namespace {
+
+bool isLoopbackHost(const QString& host)
+{
+    if (host.compare(QLatin1String("localhost"), Qt::CaseInsensitive) == 0) return true;
+    const QHostAddress a(host);
+    return !a.isNull() && a.isLoopback();
+}
+
+// One path segment that is safe as a folder name on every platform this app runs on.
+bool isSafeFolderName(const QString& id)
+{
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"));
+    return re.match(id).hasMatch() && !id.contains(QLatin1String(".."));
+}
+
+// A registry file path: relative to the index, forward slashes, no way off the index's host or out of its tree.
+bool isSafeRegistryPath(const QString& rel)
+{
+    if (rel.isEmpty() || rel.startsWith(QLatin1Char('/')) || rel.contains(QLatin1Char('\\'))
+        || rel.contains(QLatin1Char(':')) || rel.contains(QLatin1Char('?')) || rel.contains(QLatin1Char('#'))
+        || rel.contains(QLatin1Char('%')))
+        return false;
+    for (const QString& seg : rel.split(QLatin1Char('/')))
+        if (seg.isEmpty() || seg == QLatin1String(".") || seg == QLatin1String("..")) return false;
+    return true;
+}
+
+QNetworkRequest registryRequest(const QString& url)
+{
+    QNetworkRequest rq((QUrl(url)));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(20000);
+    return rq;
+}
+
+// Bound a reply AS IT ARRIVES (the registry browser's rule): a response that declares, or grows, past `maxBytes`
+// is aborted and flagged rather than buffered whole.
+void boundRegistryReply(QNetworkReply* reply, qint64 maxBytes, const std::shared_ptr<bool>& over)
+{
+    QObject::connect(reply, &QNetworkReply::downloadProgress, reply, [reply, maxBytes, over](qint64 got, qint64 total) {
+        if (*over) return;
+        if (got > maxBytes || total > maxBytes) { *over = true; reply->abort(); }
+    });
+}
+
+// A host is all a log line or a status line may say about a registry (the URL is public, but a path is noise and
+// a user-added one is theirs).
+QString registryHost(const QString& indexUrl)
+{
+    const QString h = QUrl(indexUrl).host();
+    return h.isEmpty() ? QStringLiteral("an unknown registry") : h;
+}
+
+} // namespace
+
+QVector<AddonManager::RegistryFile> AddonManager::planRegistryInstall(const QJsonObject& entry,
+                                                                      const QString& indexUrl, QString* error)
+{
+    auto fail = [error](const QString& m) { if (error) *error = m; return QVector<RegistryFile>{}; };
+    const QString indexText = indexUrl.trimmed();
+    const QUrl index(indexText);
+    const QString scheme = index.scheme().toLower();
+    if (!index.isValid() || index.host().isEmpty())
+        return fail(tr("The registry's address isn't a valid URL."));
+    if (scheme != QLatin1String("https") && !(scheme == QLatin1String("http") && isLoopbackHost(index.host())))
+        return fail(tr("The registry isn't served over https, so nothing is installed from it."));
+    if (!entry.value(QStringLiteral("url")).toString().isEmpty())
+        return fail(tr("That entry is a remote add-on: it is subscribed to, not installed."));
+    const QString id = entry.value(QStringLiteral("id")).toString();
+    if (id.isEmpty()) return fail(tr("Entry has no id."));
+    if (!isSafeFolderName(id)) return fail(tr("The entry's id isn't a safe folder name."));
+    if (AddonRoster::isFirstPartyId(id))
+        return fail(tr("Refused: that id is reserved for the add-ons that ship with the app."));
+
+    const int slash = indexText.lastIndexOf(QLatin1Char('/'));
+    const QString base = slash > 0 ? indexText.left(slash) : indexText;
+    QVector<RegistryFile> out;
+    QSet<QString> names;
+    bool manifest = false;
+    for (const QJsonValue& v : entry.value(QStringLiteral("files")).toArray())
+    {
+        const QString rel = v.toString();
+        if (rel.isEmpty()) continue;
+        if (!isSafeRegistryPath(rel)) return fail(tr("The entry names a file outside its registry: %1").arg(rel));
+        const QString name = QFileInfo(rel).fileName();
+        if (name.isEmpty() || name.startsWith(QLatin1Char('.')) || name == AddonRoster::provenanceFileName())
+            return fail(tr("The entry names a file that can't be installed: %1").arg(rel));
+        if (names.contains(name.toLower())) return fail(tr("The entry names %1 twice.").arg(name));
+        names.insert(name.toLower());
+        out.push_back({ base + QLatin1Char('/') + rel, name });
+        if (name == QLatin1String("manifest.json")) manifest = true;
+    }
+    if (out.isEmpty()) return fail(tr("Nothing to download for this entry."));
+    if (out.size() > kMaxRegistryFiles) return fail(tr("The entry names more files than an add-on may have."));
+    if (!manifest) return fail(tr("The entry has no manifest.json."));
+    if (error) error->clear();
+    return out;
+}
+
+bool AddonManager::recordRegistryInstall(const QString& entryId, const QString& indexUrl)
+{
+    const QString dir = root_ + QLatin1Char('/') + entryId;
+    QFile mf(dir + QStringLiteral("/manifest.json"));
+    if (entryId.isEmpty() || !mf.open(QIODevice::ReadOnly)) return false;
+    AddonRoster::Provenance p;
+    p.registry = indexUrl.trimmed();
+    p.entry = entryId;
+    p.version = QJsonDocument::fromJson(mf.readAll()).object().value(QStringLiteral("version")).toString();
+    p.installedAt = QDateTime::currentSecsSinceEpoch();
+    if (!AddonRoster::writeProvenance(dir, p)) return false;
+    AddonRoster::touched();   // the reference joins the roster, dated now, and the push is armed
+    return true;
+}
+
+void AddonManager::installFromRegistry(const QString& indexUrl, const QString& entryId,
+                                       std::function<void(bool, const QString&)> done)
+{
+    auto finish = [done](bool ok, const QString& m) { if (done) done(ok, m); };
+    const QString index = indexUrl.trimmed();
+    // Only from a registry the user added on THIS device (or the built-in one). A reference from a device with a
+    // registry this one lacks is listed, never fetched: adding a registry is the user's trust decision, per
+    // device, and a synced document must not be able to make it for them.
+    if (!isRegistryConfigured(index)) { finish(false, tr("That registry isn't added on this device.")); return; }
+    if (!isSafeFolderName(entryId)) { finish(false, tr("The entry's id isn't a safe folder name.")); return; }
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+
+    QNetworkReply* reply = nam_->get(registryRequest(index));
+    auto over = std::make_shared<bool>(false);
+    boundRegistryReply(reply, ThemeRegistry::kMaxListingBytes, over);
+    QPointer<AddonManager> self(this);
+    connect(reply, &QNetworkReply::finished, this, [this, self, reply, over, index, entryId, finish] {
+        reply->deleteLater();
+        if (*over) { finish(false, tr("The registry's index is larger than this app accepts.")); return; }
+        if (reply->error() != QNetworkReply::NoError)
+        { finish(false, tr("Couldn't reach the registry: %1").arg(NetErrorText::forReply(reply))); return; }
+        QJsonObject entry;
+        for (const QJsonValue& e : QJsonDocument::fromJson(reply->readAll()).object()
+                                       .value(QStringLiteral("addons")).toArray())
+            if (e.toObject().value(QStringLiteral("id")).toString() == entryId) { entry = e.toObject(); break; }
+        if (entry.isEmpty()) { finish(false, tr("The registry no longer lists this add-on.")); return; }
+        QString err;
+        const QVector<RegistryFile> files = planRegistryInstall(entry, index, &err);
+        if (files.isEmpty()) { finish(false, err); return; }
+
+        // One file at a time, each bounded, the whole entry bounded too — the registry browser's budget.
+        struct Fetch
+        {
+            QVector<RegistryFile> files;
+            QVector<QPair<QString, QByteArray>> got;
+            qint64 total = 0;
+            std::function<void()> next;
+        };
+        auto st = std::make_shared<Fetch>();
+        st->files = files;
+        std::weak_ptr<Fetch> weak = st;
+        auto complete = [this, self, index, entryId, finish](const QVector<QPair<QString, QByteArray>>& got) {
+            if (!self) return;
+            // The downloaded manifest must be a real add-on manifest outside the reserved namespace — the same
+            // refusal installPackage makes, so a registry cannot shadow an add-on that ships with the app.
+            QByteArray mfBytes;
+            for (const auto& f : got) if (f.first == QLatin1String("manifest.json")) mfBytes = f.second;
+            bool ok = false;
+            const AddonManifest m = AddonManifest::fromJson(mfBytes, &ok);
+            if (!ok) { finish(false, tr("The add-on's manifest is invalid.")); return; }
+            if (AddonRoster::isFirstPartyId(m.id))
+            { finish(false, tr("Refused: that id is reserved for the add-ons that ship with the app.")); return; }
+            // Stage beside the destination, then swap, so a failed write never leaves half an add-on to load.
+            const QString dest = root_ + QLatin1Char('/') + entryId;
+            const QString staging = root_ + QStringLiteral("/.install-") + entryId;
+            QDir(staging).removeRecursively();
+            if (!QDir().mkpath(staging)) { finish(false, tr("Couldn't write the add-on's folder.")); return; }
+            for (const auto& f : got)
+            {
+                QSaveFile out(staging + QLatin1Char('/') + f.first);
+                if (!out.open(QIODevice::WriteOnly) || out.write(f.second) != f.second.size() || !out.commit())
+                {
+                    QDir(staging).removeRecursively();
+                    finish(false, tr("Couldn't write all of the add-on's files — the disk may be full."));
+                    return;
+                }
+            }
+            AddonRoster::Provenance p;
+            p.registry = index;
+            p.entry = entryId;
+            p.version = m.version;          // what was actually installed: the registry's latest, as served now
+            p.installedAt = QDateTime::currentSecsSinceEpoch();
+            if (!AddonRoster::writeProvenance(staging, p))
+            { QDir(staging).removeRecursively(); finish(false, tr("Couldn't write the add-on's folder.")); return; }
+            QDir(dest).removeRecursively();
+            if (!QDir().rename(staging, dest))
+            { QDir(staging).removeRecursively(); finish(false, tr("Couldn't move the add-on into place.")); return; }
+            reload();
+            AddonRoster::touched();         // normally a no-op: the reference it was installed from already matches
+            emit sourcesChanged();
+            finish(true, tr("Installed %1 %2.").arg(m.name.isEmpty() ? m.id : m.name, m.version));
+        };
+        // `next` holds the chain only WEAKLY (the in-flight reply's handler holds it strongly), so there is no
+        // cycle to break — and it is never reset from inside itself, which would destroy the running lambda.
+        st->next = [this, self, weak, finish, complete] {
+            auto s = weak.lock();
+            if (!s || !self) return;
+            if (s->got.size() == s->files.size()) { complete(s->got); return; }
+            const RegistryFile f = s->files[s->got.size()];
+            const qint64 budget = std::min<qint64>(ThemeRegistry::kMaxFileBytes, ThemeRegistry::kMaxTotalBytes - s->total);
+            QNetworkReply* r = nam_->get(registryRequest(f.url));
+            auto fover = std::make_shared<bool>(false);
+            boundRegistryReply(r, budget, fover);
+            // The reply holds the only strong reference while it is in flight; it is released when the chain ends.
+            connect(r, &QNetworkReply::finished, this, [r, s, fover, f, finish] {
+                r->deleteLater();
+                if (*fover) { finish(false, tr("%1 is larger than this app accepts for an add-on.").arg(f.name)); return; }
+                if (r->error() != QNetworkReply::NoError)
+                { finish(false, tr("Download failed: %1 (%2)").arg(f.name, NetErrorText::forReply(r))); return; }
+                const QByteArray body = r->readAll();
+                s->total += body.size();
+                s->got.push_back({ f.name, body });
+                if (s->next) s->next();
+            });
+        };
+        st->next();
+    });
+}
+
+QVector<AddonManager::PendingRegistryRef> AddonManager::pendingRegistryRefs() const
+{
+    QVector<PendingRegistryRef> out;
+    for (const AddonRoster::Record& r : AddonRoster::pendingRegistryInstalls())
+    {
+        PendingRegistryRef p;
+        p.key = r.key; p.entry = r.entry; p.registry = r.registry; p.version = r.version;
+        if (registryInFlight_.contains(r.key)) p.state = PendingRegistryRef::Installing;
+        else if (!isRegistryConfigured(r.registry)) p.state = PendingRegistryRef::UnknownRegistry;
+        else if (registryFailed_.contains(r.key)) { p.state = PendingRegistryRef::Failed; p.detail = registryFailed_.value(r.key); }
+        else p.state = PendingRegistryRef::Installing;   // configured: the next merge installs it
+        out.push_back(p);
+    }
+    return out;
+}
+
+QString AddonManager::pendingRefText(const PendingRegistryRef& r)
+{
+    const QString host = registryHost(r.registry);
+    switch (r.state)
+    {
+    case PendingRegistryRef::UnknownRegistry:
+        return tr("%1 — installed on another device from %2, a registry that isn't added here. "
+                  "Add that registry to install it.").arg(r.entry, host);
+    case PendingRegistryRef::Failed:
+        return tr("%1 — couldn't install from %2: %3").arg(r.entry, host, r.detail);
+    case PendingRegistryRef::Installing:
+        break;
+    }
+    return tr("%1 — installing from %2…").arg(r.entry, host);
+}
+
+bool AddonManager::isDeviceOnly(const LoadedAddon* a) const
+{
+    if (!a || a->transport != LoadedAddon::JsLocal) return false;          // a remote source syncs by URL
+    if (AddonRoster::isFirstPartyId(a->manifest.id)) return false;          // ships with the build
+    return !AddonRoster::readProvenance(a->dir).valid();                   // no registry to reinstall it from
+}
+
+QString AddonManager::notSyncedReason()
+{
+    // ONE line on a television: short enough not to elide on the themed panel's row at 1280 wide.
+    return tr("Installed here from a file. Add-on code is never synced, so other devices don't get these.");
+}
+
+void AddonManager::applyMergedRegistryRefs()
+{
+    // The projection has already uninstalled any registry add-on a peer removed; bring the loaded set in line.
+    bool gone = false;
+    for (const auto& e : loaded_)
+        if (e->transport == LoadedAddon::JsLocal && !QFileInfo::exists(e->dir + QStringLiteral("/manifest.json")))
+            gone = true;
+    if (gone)
+    {
+        streamLog(QStringLiteral("roster merge: a registry add-on removed on another device was uninstalled - reloading"));
+        reload();
+        emit sourcesChanged();
+    }
+
+    for (const AddonRoster::Record& r : AddonRoster::pendingRegistryInstalls())
+    {
+        if (registryInFlight_.contains(r.key)) continue;
+        if (!isRegistryConfigured(r.registry))
+        {
+            // Listed (pendingRegistryRefs), never fetched. Logged once per reference, not once per merge.
+            if (!registryUnknownLogged_.contains(r.key))
+            {
+                registryUnknownLogged_.insert(r.key);
+                streamLog(QStringLiteral("roster merge: %1 is from a registry this device doesn't have (%2) - "
+                                         "listed, not fetched").arg(r.entry, registryHost(r.registry)));
+            }
+            continue;
+        }
+        registryInFlight_.insert(r.key, r.registry);
+        registryFailed_.remove(r.key);
+        streamLog(QStringLiteral("roster merge: installing synced add-on %1 from %2")
+                      .arg(r.entry, registryHost(r.registry)));
+        const QString key = r.key, entry = r.entry;
+        QPointer<AddonManager> self(this);
+        installFromRegistry(r.registry, r.entry, [this, self, key, entry](bool ok, const QString& msg) {
+            if (!self) return;
+            registryInFlight_.remove(key);
+            if (ok) { registryFailed_.remove(key); streamLog(QStringLiteral("roster merge: installed %1 - %2").arg(entry, msg)); }
+            else { registryFailed_.insert(key, msg); streamLog(QStringLiteral("roster merge: install of %1 failed - %2").arg(entry, msg)); }
+            emit sourcesChanged();
+        });
+    }
+}
+
+// ---- issue #77, increment 3: an add-on's password fields stay on the device --------------------------------
+// See core/AddonConfigKeys.h. Runs on every reload, because that is when the manifests — the only place a
+// field's TYPE is declared — are known; it is idempotent, and does nothing once every value has moved.
+void AddonManager::migrateSecretConfig()
+{
+    QSettings& s = store();
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    int moved = 0, dropped = 0;
+    for (const auto& a : loaded_)
+        for (const AddonSetting& set : a->manifest.settings)
+        {
+            if (!AddonConfigKeys::isSecretType(set.type)) continue;
+            const QString synced = AddonConfigKeys::syncedKey(a->manifest.id, set.key);
+            if (!s.contains(synced)) continue;
+            const QString stamp = AddonConfigKeys::migratedStampKey(a->manifest.id, set.key);
+            if (!s.contains(stamp))
+            {
+                // Once: the value moves device-local — never over one this device already holds — and is stamped.
+                const QString local = AddonConfigKeys::secretKey(a->manifest.id, set.key);
+                if (!s.contains(local)) s.setValue(local, s.value(synced));
+                s.setValue(stamp, now);
+                ++moved;
+            }
+            else ++dropped;   // an older peer's copy, re-arrived after the move: never read, never kept
+            s.remove(synced);
+        }
+    if (moved + dropped == 0) return;
+    s.sync();
+    // COUNTS only — these values are credentials.
+    streamLog(QStringLiteral("addon config: %1 password field(s) moved to this device only, %2 synced copy(ies) dropped")
+                  .arg(moved).arg(dropped));
 }
 
 LoadedAddon* AddonManager::metaProviderFor(LoadedAddon* exclude, const QString& type) const

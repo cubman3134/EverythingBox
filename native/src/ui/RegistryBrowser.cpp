@@ -61,8 +61,10 @@ static QString extrasKey(RegistryBrowser::Kind kind)
 
 QString RegistryBrowser::defaultUrl() const
 {
+    // The add-on registry is AddonManager's spelling (#77): a synced registry reference is installed on another
+    // device only from a registry that device has configured, and this list is that set.
     return kind_ == Addons
-        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json")
+        ? AddonManager::defaultRegistryUrl()
         : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
 }
 
@@ -901,38 +903,43 @@ bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& inde
     { status_->setText(tr("That kind of entry can't be installed this way. Reopen this window and try again."));
       return false; }
 
-    const QString base = baseUrl(indexUrl);
-    QStringList files;
-    QString destDir;
-
-    // FALSE for both of these, for the same reason the kind_ guard above returns false: nothing was
-    // attempted. An entry with no id and an entry with no files are refusals by the registry's own listing,
-    // not failures of an install — returning true had the caller re-read isInstalled, find it false and
-    // relabel an untouched card "Retry" for something that never ran and that pressing again cannot change.
-    // This is the confusion the return value exists to prevent, five lines from where it was just fixed.
+    // FALSE for a refused plan, for the same reason the kind_ guard above returns false: nothing was
+    // attempted. An entry with no id, no files, or a file the install rule refuses is a refusal by the
+    // registry's own listing, not a failure of an install — returning true had the caller re-read
+    // isInstalled, find it false and relabel an untouched card "Retry" for something that never ran and that
+    // pressing again cannot change.
+    //
+    // THE RULE is AddonManager::planRegistryInstall (issue #77): the same function that installs a registry
+    // add-on synced from another device, so what this button may install and what sync may install cannot
+    // drift — https (or a loopback registry), files only under the index's own directory, a safe folder id,
+    // manifest.json present, bounded in number.
+    QString planError;
+    const QVector<AddonManager::RegistryFile> plan = AddonManager::planRegistryInstall(entry, indexUrl, &planError);
+    if (plan.isEmpty()) { status_->setText(planError); return false; }
     const QString id = entry.value(QStringLiteral("id")).toString();
-    if (id.isEmpty()) { status_->setText(tr("Entry has no id.")); return false; }
-    destDir = localDirFor(id);
-    for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
+    const QString destDir = localDirFor(id);
 
-    if (files.isEmpty()) { status_->setText(tr("Nothing to download for this entry.")); return false; }
-
-    for (const QString& rel : files)
+    for (const AddonManager::RegistryFile& f : plan)
     {
-        if (rel.isEmpty()) continue;
-        const QString url = base + QStringLiteral("/") + rel;
-        const QString dest = destDir + QStringLiteral("/") + QFileInfo(rel).fileName();
+        const QString dest = destDir + QStringLiteral("/") + f.name;
         QString err;
-        if (!downloadTo(url, dest, &err))
+        if (!downloadTo(f.url, dest, &err))
         {
-            status_->setText(tr("Download failed: %1\n%2").arg(QFileInfo(rel).fileName(), err));
+            status_->setText(tr("Download failed: %1\n%2").arg(f.name, err));
             return true;
         }
     }
 
     installed_ = true;
     status_->setText(tr("Installed “%1”.").arg(entry.value(QStringLiteral("name")).toString()));
-    if (kind_ == Addons && addons_) addons_->reload();
+    if (kind_ == Addons && addons_)
+    {
+        // #77: the add-on's origin is recorded in its folder and joins the roster as a REFERENCE — registry,
+        // id, version — so the user's other devices install it from this registry themselves. Its code is
+        // never synced.
+        addons_->recordRegistryInstall(id, indexUrl);
+        addons_->reload();
+    }
     return true;
 }
 

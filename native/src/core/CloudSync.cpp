@@ -12,6 +12,7 @@
 #include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
 #include "Tracker.h"         // isDeviceLocalKey()/linkKeyPrefix() - #156 straddles the carve-out both ways
 #include "AddonRoster.h"     // issue #77: the roster's live keys leave the bundle; an old peer's snapshot is adopted
+#include "AddonConfigKeys.h" // issue #77: an add-on's PASSWORD fields are device-local
 #include "PerItemStores.h"   // #332: THE per-item-store prefix table, shared with SettingsTxn::inScope
 #include <QSet>
 #include <QSettings>
@@ -112,53 +113,41 @@ void CloudSync::findBrandedFile(const QString& folderId, const QString& name, co
     });
 }
 
-// ---- state bundle (a zip of the synced settings + local addons + themes) ----------------------------
+// ---- state bundle (a zip of the synced settings + themes) --------------------------------------------
 
 static const char* kBundleName = AppBrand::kSyncZip;
 
-// First-party addon folders (manifest id "com.everythingbox.*"). These ship with the app build and are
-// updated by install/deploy, so they're kept OUT of cloud sync - otherwise the cloud snapshot would clobber
-// a freshly-deployed update on the next startup. Third-party addons (other ids) still sync. Addon *config*
-// lives in settings.json, which is synced regardless, so API keys still travel across devices.
-static QSet<QString> firstPartyAddonDirs()
+// ADD-ON CODE NEVER RIDES SYNC (issue #77, increment 2). The bundle used to zip addons/ minus the first-party
+// folders, which meant third-party add-on code — registry-installed and sideloaded alike — was uploaded to a
+// third party's disk and then unpacked and RUN on every other device on the account. None of it is in the
+// bundle now, in either direction:
+//   * a first-party add-on ships with the build (it always was excluded, so a stale cloud copy could not
+//     clobber a freshly deployed one);
+//   * a registry-installed add-on syncs as a REFERENCE in the merge document's roster section, and a receiving
+//     device installs it from the registry itself (AddonRoster, AddonManager::applyMergedRoster);
+//   * a sideloaded add-on is device-only, and the add-on list says so ("Not synced").
+// An older peer still packs addons/ into its bundle; applyBundle refuses every such entry (see there).
+static bool isAddonCodePath(const QString& name)
 {
-    QSet<QString> out;
-    const QString root = AppPaths::dataDir() + QStringLiteral("/addons");
-    const QFileInfoList subs = QDir(root).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QFileInfo& d : subs)
-    {
-        QFile mf(d.absoluteFilePath() + QStringLiteral("/manifest.json"));
-        if (!mf.open(QIODevice::ReadOnly)) continue;
-        const QJsonObject m = QJsonDocument::fromJson(mf.readAll()).object();
-        const QString id = m.value(QStringLiteral("id")).toString();
-        // Until the addon-id migration is confirmed, a first-party manifest may still carry the PREVIOUS
-        // namespace. Missing it here would let the cloud snapshot carry a bundled addon and then clobber the
-        // freshly-deployed copy on the next startup — the exact failure this exclusion exists to prevent.
-        // The tolerance retires itself the moment the flag is set.
-        if (id.startsWith(QLatin1String(AppBrand::kAddonPrefix))
-            || (!BrandMigration::done(BrandMigration::Step::AddonIds)
-                && id.startsWith(QLatin1String(AppBrand::Legacy::kAddonPrefix))))
-            out.insert(d.fileName());
-    }
-    return out;
+    return name.startsWith(QLatin1String("addons/")) || name == QLatin1String("addons");
 }
 
-// Top-level subfolder of a relative path, e.g. "aiocatalog/main.js" -> "aiocatalog".
-static QString topSegment(const QString& rel)
+static void appendSyncLog(const QString& msg)
 {
-    const int s = rel.indexOf(QLatin1Char('/'));
-    return s < 0 ? rel : rel.left(s);
+    // stream_debug.log, the file every other sync diagnostic in this app lands in. Counts and a reason only.
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg
+                 + QStringLiteral("\n")).toUtf8());
 }
 
-static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& prefix,
-                      const QSet<QString>& excludeTop = {})
+static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& prefix)
 {
     QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext())
     {
         const QString path = it.next();
         const QString rel = QDir(dir).relativeFilePath(path);
-        if (!excludeTop.isEmpty() && excludeTop.contains(topSegment(rel))) continue; // skip first-party addons
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) continue;
         const QByteArray data = f.readAll();
@@ -301,6 +290,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     // showing it. It is deliberately NOT in isPerItemStoreKey either: that family names the stores the
     // CloudMerge progress document owns, which is the other way a per-item key reaches a peer.
     if (key.startsWith(QLatin1String("openfail/"))) return true;
+    // ADD-ON PASSWORD FIELDS (issue #77, increment 3): a setting an add-on declares `type: password` is stored at
+    // addonsecret/<id>/<key>, with its one-shot migration stamp at addonsecretmig/<id>/<key>. The rest of an
+    // add-on's settings (addoncfg/<id>/<key>) still sync, so an API key typed once is there everywhere; a
+    // password is a credential for somebody's account, and the bundle is a zip on a third party's disk. The key
+    // spellings live in AddonConfigKeys.h, shared with the writer, so this carve-out cannot drift from it.
+    if (AddonConfigKeys::isDeviceLocal(key)) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)
@@ -502,7 +497,7 @@ static QByteArray buildBundle()
     mz_zip_writer_add_mem(&z, "settings.json", sJson.constData(), sJson.size(), MZ_DEFAULT_COMPRESSION);
 
     const QString app = AppPaths::dataDir();
-    zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"), firstPartyAddonDirs());
+    // No addons/ (issue #77): add-on code never rides sync. See isAddonCodePath above.
     zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
     // saves/ and states/ are NOT in the bundle: they sync per-file via SaveSync. They used to be here, which
     // meant (a) two devices silently overwrote each other's saves wholesale, and (b) every save write flipped
@@ -516,12 +511,13 @@ static QByteArray buildBundle()
     return out;
 }
 
-static bool applyBundle(const QByteArray& data)
+static bool applyBundle(const QByteArray& data, int* refusedAddonFiles)
 {
+    if (refusedAddonFiles) *refusedAddonFiles = 0;
     mz_zip_archive z; std::memset(&z, 0, sizeof(z));
     if (!mz_zip_reader_init_mem(&z, data.constData(), data.size(), 0)) return false;
     const QString app = AppPaths::dataDir();
-    const QSet<QString> firstParty = firstPartyAddonDirs(); // never let the cloud overwrite these
+    int refused = 0;
     const int n = int(mz_zip_reader_get_num_files(&z));
     for (int i = 0; i < n; ++i)
     {
@@ -535,6 +531,12 @@ static bool applyBundle(const QByteArray& data)
         // would be the other kind of wrong: this device's saves are live data, not bundle spillover. Checked
         // before the extract so a legacy bundle's saves aren't decompressed just to be thrown away.
         if (name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/"))) continue;
+        // REFUSE, never extract, add-on code from an older peer's bundle (issue #77). Writing it would install
+        // and run code that arrived through sync, which is exactly what this build stopped doing: a registry
+        // add-on reaches this device as a roster reference and is installed from its registry, and a sideloaded
+        // one stays on the device it was sideloaded on. Counted and logged once below; checked before the
+        // extract so the code is never even decompressed.
+        if (isAddonCodePath(name)) { ++refused; continue; }
         size_t sz = 0;
         void* p = mz_zip_reader_extract_to_heap(&z, i, &sz, 0);
         if (!p) continue;
@@ -546,11 +548,8 @@ static bool applyBundle(const QByteArray& data)
             // Device-local keys AND per-item store keys are held off here (the merge document owns per-item).
             CloudSync::applySettingsJson(bytes);
         }
-        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/")))
+        else if (name.startsWith(QStringLiteral("themes/")))
         {
-            // A first-party addon ships with the build; don't let an (older) cloud bundle overwrite it.
-            if (name.startsWith(QStringLiteral("addons/")) && firstParty.contains(topSegment(name.mid(7))))
-                continue;
             // Restrict to the app dir (defend against path traversal in archive names).
             const QString dest = QDir::cleanPath(app + QStringLiteral("/") + name);
             if (!dest.startsWith(QDir::cleanPath(app) + QStringLiteral("/"))) continue;
@@ -560,10 +559,14 @@ static bool applyBundle(const QByteArray& data)
         }
     }
     mz_zip_reader_end(&z);
+    if (refused > 0)
+        appendSyncLog(QStringLiteral("cloud sync: ignored %1 add-on file(s) in an older device's bundle - "
+                                     "add-on code never rides sync").arg(refused));
+    if (refusedAddonFiles) *refusedAddonFiles = refused;
     return true;
 }
 
-// A deterministic fingerprint of the local synced state (settings + addon/theme files), independent of the
+// A deterministic fingerprint of the local synced state (settings + theme files), independent of the
 // zip's byte layout. Lets us tell "this device has unsynced edits" from "nothing changed".
 static QByteArray stateHash()
 {
@@ -583,11 +586,12 @@ static QByteArray stateHash()
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
 
     const QString app = AppPaths::dataDir();
-    const QSet<QString> firstParty = firstPartyAddonDirs(); // not synced -> not part of the fingerprint
     // saves/ and states/ are NOT here either (save-sync T3), and this is the edit that pays for the track: a
     // per-file SHA of every save folded into this fingerprint is precisely WHY one F2 press read as "local
     // changed" and re-uploaded addons, themes and settings. SaveSync tracks those files' state itself.
-    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes") })
+    // Nor is addons/ (issue #77): it is not in the bundle, so installing or editing an add-on is not an
+    // unsynced change, and must not re-upload the bundle.
+    for (const QString& sub : { QStringLiteral("themes") })
     {
         const QString dir = app + QStringLiteral("/") + sub;
         QStringList files;
@@ -597,7 +601,6 @@ static QByteArray stateHash()
         for (const QString& f : files)
         {
             const QString rel = QDir(dir).relativeFilePath(f);
-            if (sub == QStringLiteral("addons") && firstParty.contains(topSegment(rel))) continue;
             QFile file(f);
             if (!file.open(QIODevice::ReadOnly)) continue;
             h.addData((sub + QStringLiteral("/") + rel).toUtf8());
@@ -605,6 +608,13 @@ static QByteArray stateHash()
         }
     }
     return h.result().toHex();
+}
+
+// Test seams (issue #77): the real bundle writer and reader, without the transport.
+QByteArray CloudSync::buildStateBundle() { return buildBundle(); }
+bool CloudSync::applyStateBundle(const QByteArray& zip, int* refusedAddonFiles)
+{
+    return applyBundle(zip, refusedAddonFiles);
 }
 
 // Test seam (mdsync T5): the same fingerprint the sync gate uses (checkStatus's st.localChanged). Exposed so
@@ -664,7 +674,7 @@ void CloudSync::applyRemote(const QString& fileId, const QString& modifiedIso, c
 {
     if (fileId.isEmpty()) { cb(false); return; }
     downloadFile(fileId, [modifiedIso, remoteHash, cb](bool ok, const QByteArray& data) {
-        if (!ok || !applyBundle(data)) { cb(false); return; }
+        if (!ok || !applyBundle(data, nullptr)) { cb(false); return; }
         adoptSyncedBaseline(modifiedIso, remoteHash);
         cb(true);
     });

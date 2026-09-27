@@ -9446,6 +9446,18 @@ void MainWindow::openLibrary()
         { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("lib.sep"); r.label = tr("Sources"); rows << r; }
 
         const QVector<LoadedAddon*>& srcs = addons_->sources();
+        auto sourceRow = [this, &rows](LoadedAddon* s) {
+            QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+            if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + s->manifest.id;
+            r.label = name;
+            r.value = addons_->isEnabled(s->manifest.id) ? QString() : tr("disabled"); // enabled-state annotation
+            rows << r;
+        };
+        // Issue #77: an add-on installed on THIS device from a file goes under "Not synced", with the one line
+        // that says why; a registry add-on another device installed, not yet (or not able to be) installed
+        // here, is listed under "From your other devices". The classic LibraryView draws the same sections.
+        QVector<LoadedAddon*> deviceOnly;
         if (srcs.isEmpty())
         {
             PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.none");
@@ -9453,12 +9465,24 @@ void MainWindow::openLibrary()
         }
         else for (LoadedAddon* s : srcs)
         {
-            QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
-            if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
-            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + s->manifest.id;
-            r.label = name;
-            r.value = addons_->isEnabled(s->manifest.id) ? QString() : tr("disabled"); // enabled-state annotation
-            rows << r;
+            if (addons_->isDeviceOnly(s)) deviceOnly << s;
+            else sourceRow(s);
+        }
+        if (!deviceOnly.isEmpty())
+        {
+            { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("lib.sep.local"); r.label = tr("Not synced"); rows << r; }
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.local.why");
+              r.label = AddonManager::notSyncedReason(); rows << r; }
+            for (LoadedAddon* s : deviceOnly) sourceRow(s);
+        }
+        const QVector<AddonManager::PendingRegistryRef> pendingRefs = addons_->pendingRegistryRefs();
+        if (!pendingRefs.isEmpty())
+        {
+            { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("lib.sep.refs");
+              r.label = tr("From your other devices"); rows << r; }
+            for (const AddonManager::PendingRegistryRef& p : pendingRefs)
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.ref:") + p.key;
+              r.label = AddonManager::pendingRefText(p); rows << r; }
         }
         { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.status"); rows << r; } // add-by-URL / op results
 
@@ -9596,7 +9620,7 @@ void MainWindow::presentAddonConfig(const AddonManifest& manifest)
       r.label = tr("This add-on has no configurable settings."); rows << r; }
     else for (const AddonSetting& sset : manifest.settings)
     {
-        const QString stored = AddonContext::readConfig(manifest.id, sset.key, sset.defaultValue);
+        const QString stored = AddonContext::readSetting(manifest.id, sset);   // a password reads device-local (#77)
         PanelRow r; r.id = QStringLiteral("cfg:") + sset.key; r.label = sset.label.isEmpty() ? sset.key : sset.label;
         if (sset.type == QStringLiteral("checkbox"))
         {
@@ -9613,19 +9637,25 @@ void MainWindow::presentAddonConfig(const AddonManifest& manifest)
     }
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.label = tr("Note");
       r.value = tr("Credentials are stored on this device (plaintext in everythingbox.ini) and are only sent "
-                   "where the add-on's script chooses to use them."); rows << r; }
+                   "where the add-on's script chooses to use them. Password fields are not synced to your "
+                   "other devices."); rows << r; }
 
     themedPanelHost_->present(tr("%1 — Settings").arg(name), rows,
         [this, manifest](const QString& id, const QString& val) {
             if (!id.startsWith(QStringLiteral("cfg:"))) return;
             const QString key = id.mid(4);
-            QString value = val;
+            QString value = val, type;
             // Toggle delivers "1"/"0"; convert ONLY for a checkbox setting (a text/password field's literal
             // "0"/"1" must be stored verbatim). Look the type up from the manifest to disambiguate.
             for (const AddonSetting& sset : manifest.settings)
-                if (sset.key == key && sset.type == QStringLiteral("checkbox"))
-                { value = (val == QStringLiteral("1")) ? QStringLiteral("true") : QStringLiteral("false"); break; }
-            AddonContext::writeConfig(manifest.id, key, value);
+            {
+                if (sset.key != key) continue;
+                type = sset.type;   // #77: a password field is written device-local
+                if (sset.type == QStringLiteral("checkbox"))
+                    value = (val == QStringLiteral("1")) ? QStringLiteral("true") : QStringLiteral("false");
+                break;
+            }
+            AddonContext::writeConfig(manifest.id, key, value, type);
         },
         [] { /* nested: Back pops to the addon detail */ });
     stack_->setCurrentWidget(themedPanelHost_);
@@ -9713,7 +9743,7 @@ void MainWindow::presentAddByUrl()
 namespace {
 // The built-in add-on registry (the always-present cubman3134 store index).
 QString addonsRegistryDefaultUrl()
-{ return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json"); }
+{ return AddonManager::defaultRegistryUrl(); }   // #77: one spelling, shared with sync's "is this registry configured"
 // The directory an index URL lives in (its files are resolved relative to this).
 QString registryBaseUrl(const QString& indexUrl)
 { const int slash = indexUrl.lastIndexOf(QLatin1Char('/')); return slash > 0 ? indexUrl.left(slash) : indexUrl; }
@@ -9957,20 +9987,24 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
         return;
     }
 
+    // #77: the classic RegistryBrowser's rule, not a copy of it — AddonManager::planRegistryInstall, the same
+    // function a synced registry reference installs through on another device.
     const QString id = entry.value(QStringLiteral("id")).toString();
-    if (id.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Registry entry has no id.")); return; }
-    const QString destDir = addons_->addonsRoot() + QStringLiteral("/") + id;
-    const QString base = registryBaseUrl(indexUrl);
-    QStringList files;
-    for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
-    if (files.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Nothing to download for this entry.")); return; }
-
-    for (const QString& rel : files)
+    QString planError;
+    const QVector<AddonManager::RegistryFile> plan = AddonManager::planRegistryInstall(entry, indexUrl, &planError);
+    if (plan.isEmpty())
     {
-        if (rel.isEmpty()) continue;
+        updatePanelInfo(QStringLiteral("reg.status"), planError);
+        PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.enabled = true;
+        themedPanelHost_->updateRow(rowId, r);
+        return;
+    }
+    const QString destDir = addons_->addonsRoot() + QStringLiteral("/") + id;
+
+    for (const AddonManager::RegistryFile& f : plan)
+    {
         QString err;
-        if (!registryDownloadTo(docNam_, base + QStringLiteral("/") + rel,
-                                destDir + QStringLiteral("/") + QFileInfo(rel).fileName(), &err))
+        if (!registryDownloadTo(docNam_, f.url, destDir + QStringLiteral("/") + f.name, &err))
         {
             updatePanelInfo(QStringLiteral("reg.status"), tr("Download failed: %1").arg(err));
             PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Retry");
@@ -9978,6 +10012,7 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
             return;
         }
     }
+    addons_->recordRegistryInstall(id, indexUrl);                   // #77: syncs as a reference, never as code
     addons_->reload();                                              // pick up the new add-on folder
     { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installed ✓");
       r.enabled = false; themedPanelHost_->updateRow(rowId, r); }

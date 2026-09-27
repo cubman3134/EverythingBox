@@ -3,6 +3,7 @@
 #include "../core/QuitBudget.h"    // issue #442: a quit ends the wait below instead of waiting it out
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/AddonConfigKeys.h"   // issue #77: where a setting of each type is stored
 #include "../core/BuiltinSecretBlob.h" // the ONE runtime de-obfuscator (shared with the scrobble app key)
 #include "BuiltinSecrets.h" // generated into the build tree by cmake/GenerateSecrets.cmake
 
@@ -35,24 +36,26 @@ AddonContext::AddonContext(const AddonManifest& manifest, const QString& storage
       storageDir_(storageDir)
 {
     for (const QString& p : manifest.permissions) permissions_.insert(p);
-    for (const AddonSetting& s : manifest.settings) configDefaults_.insert(s.key, s.defaultValue);
+    for (const AddonSetting& s : manifest.settings) { configDefaults_.insert(s.key, s.defaultValue);
+                                                      configTypes_.insert(s.key, s.type); }
     QDir().mkpath(storageDir_);
 }
 
-QString AddonContext::readConfig(const QString& addonId, const QString& key, const QString& defaultValue)
+QString AddonContext::readConfig(const QString& addonId, const QString& key, const QString& defaultValue,
+                                 const QString& type)
 {
-    return configStore().value(QStringLiteral("addoncfg/%1/%2").arg(addonId, key), defaultValue).toString();
+    return configStore().value(AddonConfigKeys::keyFor(addonId, key, type), defaultValue).toString();
 }
 
-void AddonContext::writeConfig(const QString& addonId, const QString& key, const QString& value)
+void AddonContext::writeConfig(const QString& addonId, const QString& key, const QString& value, const QString& type)
 {
-    configStore().setValue(QStringLiteral("addoncfg/%1/%2").arg(addonId, key), value);
+    configStore().setValue(AddonConfigKeys::keyFor(addonId, key, type), value);
     configStore().sync();
 }
 
 QString AddonContext::getConfig(const QString& key) const
 {
-    return readConfig(id_, key, configDefaults_.value(key));
+    return readConfig(id_, key, configDefaults_.value(key), configTypes_.value(key));
 }
 
 namespace {

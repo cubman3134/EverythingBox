@@ -707,6 +707,335 @@ static void probeRoster(const std::function<void(const char*, bool)>& check)
     }
 }
 
+
+// ---- issue #77, increments 2 + 3: registry references, sideloaded add-ons, password fields ------------------
+// Against a LOOPBACK fixture registry on an ephemeral port — never a real registry. It serves one add-on whose
+// CURRENT version is 2.0.0; the reference a peer synced says 1.0.0, so an install that lands 2.0.0 is the
+// "latest in the registry" version policy, observed.
+namespace {
+struct RegistryHost
+{
+    QTcpServer srv;
+    QStringList hits;   // every path requested, in order
+    bool start()
+    {
+        if (!srv.listen(QHostAddress::LocalHost, 0)) return false;
+        QObject::connect(&srv, &QTcpServer::newConnection, &srv, [this] {
+            QTcpSocket* c = srv.nextPendingConnection();
+            if (!c) return;
+            auto buf = std::make_shared<QByteArray>();
+            QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf] {
+                buf->append(c->readAll());
+                const int end = buf->indexOf("\r\n\r\n");
+                if (end < 0) return;
+                const QByteArray path = buf->left(end).split('\n').value(0).trimmed().split(' ').value(1);
+                hits << QString::fromUtf8(path);
+                QByteArray body; QByteArray status = "200 OK";
+                if (path == "/reg/index.json")
+                    body = "{\"addons\":[{\"id\":\"probe.regaddon\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\","
+                           "\"files\":[\"probe.regaddon/manifest.json\",\"probe.regaddon/main.js\"]}]}";
+                else if (path == "/reg/probe.regaddon/manifest.json")
+                    body = "{\"id\":\"probe.regaddon\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\",\"type\":\"media-source\","
+                           "\"entry\":\"main.js\",\"permissions\":[],"
+                           "\"catalogs\":[{\"id\":\"movies\",\"name\":\"Movies\",\"type\":\"movie\"}]}";
+                else if (path == "/reg/probe.regaddon/main.js")
+                    body = "function getCatalog(){return JSON.stringify({title:'r',items:[],hasMore:false});}\n";
+                else { status = "404 Not Found"; body = "nope"; }
+                c->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                         + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                c->flush();
+                c->disconnectFromHost();
+            });
+            QObject::connect(c, &QTcpSocket::disconnected, c, &QObject::deleteLater);
+        });
+        return true;
+    }
+    QString url(const char* path) const
+    { return QStringLiteral("http://127.0.0.1:%1%2").arg(srv.serverPort()).arg(QLatin1String(path)); }
+};
+} // namespace
+
+static void probeRegistrySync(const std::function<void(const char*, bool)>& check)
+{
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    const qint64 t0 = QDateTime::currentSecsSinceEpoch();
+
+    // (a) THE install rule, pure. Hand-written fixtures.
+    {
+        auto entry = [](const char* json) { return QJsonDocument::fromJson(QByteArray(json)).object(); };
+        const QJsonObject good = entry("{\"id\":\"good.addon\",\"files\":[\"good.addon/manifest.json\",\"good.addon/main.js\"]}");
+        QString err;
+        const auto plan = AddonManager::planRegistryInstall(good, QStringLiteral("https://reg.test/a/index.json"), &err);
+        check("registry rule: an https registry's entry plans its files under the index's own directory, flattened",
+              plan.size() == 2 && plan[0].url == QStringLiteral("https://reg.test/a/good.addon/manifest.json")
+              && plan[0].name == QStringLiteral("manifest.json") && plan[1].name == QStringLiteral("main.js") && err.isEmpty());
+        check("registry rule: plain http is refused off loopback",
+              AddonManager::planRegistryInstall(good, QStringLiteral("http://reg.test/a/index.json"), &err).isEmpty() && !err.isEmpty());
+        check("registry rule: plain http on a loopback registry is allowed (a registry on this machine)",
+              AddonManager::planRegistryInstall(good, QStringLiteral("http://127.0.0.1:9/a/index.json"), &err).size() == 2);
+        const char* bad[] = {
+            "{\"id\":\"x\",\"files\":[\"../x/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"https://evil.test/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"/abs/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"x\\\\manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"x/%2e%2e/manifest.json\"]}",
+            "{\"id\":\"../x\",\"files\":[\"x/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"x/main.js\"]}",
+            "{\"id\":\"x\",\"files\":[\"x/manifest.json\",\"y/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[\"x/manifest.json\",\"x/.registry-origin.json\"]}",
+            "{\"id\":\"x\",\"url\":\"https://remote.test/x\",\"files\":[\"x/manifest.json\"]}",
+            "{\"id\":\"x\",\"files\":[]}" };
+        bool allRefused = true;
+        for (const char* b : bad)
+            if (!AddonManager::planRegistryInstall(entry(b), QStringLiteral("https://reg.test/a/index.json"), &err).isEmpty()
+                || err.isEmpty())
+            { allRefused = false; printf("    refused? NO: %s\n", b); }
+        check("registry rule: traversal, another host, absolute, backslash, encoded, unsafe id, no manifest, "
+              "duplicate names, a forged provenance file, a remote entry and an empty list are all refused", allRefused);
+        // The fixture-registry override is a TEST seam, honoured only under EB_UITEST (#98's rule).
+        const QString prod = QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+        const QString fx = QStringLiteral("http://127.0.0.1:9/reg/index.json");
+        bool ignored = false;
+        check("registry override: honoured WITH EB_UITEST",
+              AddonManager::registryUrlFor(true, fx, &ignored) == fx && !ignored);
+        check("registry override: IGNORED without EB_UITEST (production URL, and reported as ignored)",
+              AddonManager::registryUrlFor(false, fx, &ignored) == prod && ignored);
+        check("registry override: no override is production either way, and nothing is reported",
+              AddonManager::registryUrlFor(true, QString(), &ignored) == prod && !ignored
+              && AddonManager::registryUrlFor(false, QStringLiteral("  "), &ignored) == prod && !ignored);
+        {
+            // ...and through the real environment: set without EB_UITEST it is ignored and logged exactly once.
+            const QByteArray hadUi = qgetenv("EB_UITEST");
+            const bool uiSet = qEnvironmentVariableIsSet("EB_UITEST");
+            qunsetenv("EB_UITEST");
+            qputenv("EB_ADDON_REGISTRY_URL", fx.toUtf8());
+            const QString logPath = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
+            QFile::remove(logPath);
+            const bool prodBoth = AddonManager::defaultRegistryUrl() == prod && AddonManager::defaultRegistryUrl() == prod;
+            QFile lf(logPath);
+            const QByteArray logged = lf.open(QIODevice::ReadOnly) ? lf.readAll() : QByteArray();
+            check("registry override: the real environment without EB_UITEST falls back to production, logged ONCE",
+                  prodBoth && logged.count("EB_ADDON_REGISTRY_URL ignored") == 1);
+            qputenv("EB_UITEST", "1");
+            check("registry override: the real environment WITH EB_UITEST uses the fixture",
+                  AddonManager::defaultRegistryUrl() == fx);
+            qunsetenv("EB_ADDON_REGISTRY_URL");
+            if (uiSet) qputenv("EB_UITEST", hadUi); else qunsetenv("EB_UITEST");
+        }
+        const QJsonObject reserved = QJsonDocument::fromJson(
+            (QByteArray("{\"id\":\"") + AppBrand::kAddonPrefix + "x\",\"files\":[\"a/manifest.json\"]}")).object();
+        check("registry rule: the first-party namespace is refused",
+              AddonManager::planRegistryInstall(reserved, QStringLiteral("https://reg.test/a/index.json"), &err).isEmpty());
+    }
+
+    RegistryHost host;
+    if (!host.start()) { check("registry: loopback fixture registry listens", false); return; }
+    const QString idx = host.url("/reg/index.json");
+    const QString rootR = QDir::tempPath() + QStringLiteral("/eb-regsync-fixture-") + QString::number(QCoreApplication::applicationPid());
+    QDir(rootR).removeRecursively(); QDir().mkpath(rootR);
+    qputenv("EB_ADDONS_ROOT", rootR.toUtf8());
+    {
+        QSettings st(iniPath, QSettings::IniFormat);
+        st.remove(QStringLiteral("registry/addonsExtras"));
+        st.sync();
+    }
+    AddonManager mgr;
+    const QString rid = QStringLiteral("probe.regaddon");
+
+    // (b) RECEIVE side. A merge has put a peer's registry reference (version 1.0.0) into the shadow; this device
+    //     does not have the add-on.
+    {
+        AddonRoster::Record r;
+        r.key = rid; r.registry = idx; r.entry = rid; r.version = QStringLiteral("1.0.0"); r.ts = t0;
+        QVector<AddonRoster::Record> recs = AddonRoster::records();
+        recs.push_back(r);
+        AddonRoster::saveRecords(recs);
+    }
+    mgr.applyMergedRoster();
+    spin(600);
+    {
+        const auto pending = mgr.pendingRegistryRefs();
+        check("registry receive: an UNKNOWN registry is not fetched (no request reached it)", host.hits.isEmpty());
+        check("registry receive: ...and nothing is installed", !QDir(rootR + QStringLiteral("/") + rid).exists());
+        check("registry receive: ...but it is LISTED, with the registry it needs",
+              pending.size() == 1 && pending[0].key == rid
+              && pending[0].state == AddonManager::PendingRegistryRef::UnknownRegistry
+              && AddonManager::pendingRefText(pending[0]).contains(QStringLiteral("127.0.0.1")));
+    }
+    {
+        QSettings st(iniPath, QSettings::IniFormat);
+        st.setValue(QStringLiteral("registry/addonsExtras"), QStringList{ idx });   // the user adds the registry here too
+        st.sync();
+    }
+    mgr.applyMergedRoster();
+    const bool installed = spinUntil([&] { return mgr.sourceById(rid) != nullptr; }, 10000);
+    check("registry receive: with the registry configured, the reference is INSTALLED from the registry", installed);
+    check("registry receive: ...through the index and each of its files, from the fixture registry only",
+          host.hits.contains(QStringLiteral("/reg/index.json")) && host.hits.contains(QStringLiteral("/reg/probe.regaddon/manifest.json"))
+          && host.hits.contains(QStringLiteral("/reg/probe.regaddon/main.js")));
+    {
+        const AddonRoster::Provenance p = AddonRoster::readProvenance(rootR + QStringLiteral("/") + rid);
+        check("registry receive: version policy — the registry's LATEST (2.0.0) is installed, and recorded",
+              p.valid() && p.registry == idx && p.entry == rid && p.version == QStringLiteral("2.0.0"));
+        LoadedAddon* s = mgr.sourceById(rid);
+        check("registry receive: a registry install is not device-only", s && !mgr.isDeviceOnly(s));
+        check("registry receive: nothing is left pending", mgr.pendingRegistryRefs().isEmpty());
+        AddonRoster::Record rec;
+        for (const AddonRoster::Record& x : AddonRoster::records()) if (x.key == rid) rec = x;
+        check("registry receive: installing a synced reference is not an edit (the record keeps its stamp)",
+              rec.isRegistry() && rec.ts == t0 && rec.version == QStringLiteral("1.0.0"));
+        QDir d(rootR);
+        check("registry receive: no staging folder is left behind",
+              d.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden).filter(QStringLiteral(".install-")).isEmpty());
+    }
+
+    // A TOMBSTONE uninstalls it: the merge's projection removes the folder, applyMergedRoster the loaded source.
+    Tombstones::record(AddonRoster::tombStore(), rid, t0 + 100);
+    AddonRoster::project();
+    mgr.applyMergedRoster();
+    check("registry receive: a tombstone UNINSTALLS a registry add-on",
+          !QDir(rootR + QStringLiteral("/") + rid).exists() && mgr.sourceById(rid) == nullptr);
+    // The tombstone stays: the user re-installing it below must come out NEWER than that removal.
+
+    // (c) The USER's install (the registry browser's path): recordRegistryInstall stamps a dated reference, and
+    //     removeAddon of it is a dated tombstone the other devices act on.
+    {
+        bool ok = false; QString msg;
+        bool doneFlag = false;
+        mgr.installFromRegistry(idx, rid, [&](bool k, const QString& m) { ok = k; msg = m; doneFlag = true; });
+        spinUntil([&] { return doneFlag; }, 10000);
+        check("registry install: installFromRegistry lands the add-on from the fixture registry", ok && mgr.sourceById(rid));
+        // The browser's own path writes the files and then records the install; exercise that recorder directly.
+        const bool recorded = mgr.recordRegistryInstall(rid, idx);
+        AddonRoster::Record rec;
+        for (const AddonRoster::Record& x : AddonRoster::records()) if (x.key == rid) rec = x;
+        check("registry install: the reference joins the roster, dated after the removal it undoes",
+              recorded && rec.isRegistry() && rec.registry == idx && rec.entry == rid && rec.ts >= t0 + 101);
+        const qint64 recTs = rec.ts;
+        const bool removed = mgr.removeAddon(rid);
+        qint64 tomb = 0;
+        for (const Tombstones::Entry& e : Tombstones::all(AddonRoster::tombStore())) if (e.key == rid) tomb = e.ts;
+        bool still = false;
+        for (const AddonRoster::Record& x : AddonRoster::records()) if (x.key == rid) still = true;
+        check("registry install: removing it TOMBSTONES the reference, strictly after its record",
+              removed && tomb > recTs && !still);
+        check("registry install: installFromRegistry refuses a registry this device has not configured",
+              [&] { bool k = true, fin = false;
+                    mgr.installFromRegistry(QStringLiteral("https://unknown.test/index.json"), rid,
+                                            [&](bool kk, const QString&) { k = kk; fin = true; });
+                    return fin && !k; }());
+        Tombstones::remove(AddonRoster::tombStore(), rid);
+    }
+
+    // SIDELOADED: an .addon package installs with no provenance — even one that carries a forged provenance file —
+    // so it is device-only: "Not synced", no roster record, its flag kept out too.
+    {
+        const QString sid = QStringLiteral("probe.sideloaded");
+        const QString pkg = rootR + QStringLiteral("/side.addon");
+        const QByteArray manifest = "{\"id\":\"probe.sideloaded\",\"name\":\"Side\",\"version\":\"1.0.0\",\"type\":\"media-source\","
+                                    "\"entry\":\"main.js\",\"permissions\":[],\"catalogs\":[{\"id\":\"m\",\"name\":\"M\",\"type\":\"movie\"}]}";
+        const QByteArray forged = "{\"registry\":\"https://forged.test/index.json\",\"entry\":\"probe.sideloaded\",\"version\":\"9\"}";
+        static const char* JS = "function getCatalog(){return JSON.stringify({title:'s',items:[],hasMore:false});}\n";
+        mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
+        bool built = mz_zip_writer_init_file(&zip, pkg.toUtf8().constData(), 0);
+        built = built && mz_zip_writer_add_mem(&zip, "manifest.json", manifest.constData(), size_t(manifest.size()), MZ_BEST_SPEED)
+                      && mz_zip_writer_add_mem(&zip, "main.js", JS, std::strlen(JS), MZ_BEST_SPEED)
+                      && mz_zip_writer_add_mem(&zip, ".registry-origin.json", forged.constData(), size_t(forged.size()), MZ_BEST_SPEED);
+        built = mz_zip_writer_finalize_archive(&zip) && built;
+        mz_zip_writer_end(&zip);
+        QString err;
+        const bool ok = built && mgr.installPackage(pkg, &err);
+        LoadedAddon* s = mgr.sourceById(sid);
+        check("sideloaded: a package's own provenance file is never extracted",
+              ok && !QFileInfo::exists(rootR + QStringLiteral("/") + sid + QStringLiteral("/.registry-origin.json")));
+        check("sideloaded: it is device-only (the \"Not synced\" section lists it)", s && mgr.isDeviceOnly(s));
+        check("sideloaded: the reason line says why", AddonManager::notSyncedReason().contains(QStringLiteral("never synced"))
+                                                           && AddonManager::notSyncedReason().size() <= 100);
+        mgr.setEnabled(sid, false);
+        bool inRoster = false;
+        for (const AddonRoster::Record& x : AddonRoster::records()) if (x.key == sid) inRoster = true;
+        check("sideloaded: it stays OUT of the roster, its on/off flag included", !inRoster);
+        mgr.setEnabled(sid, true);
+        mgr.removeAddon(sid);
+        bool tombed = false;
+        for (const Tombstones::Entry& e : Tombstones::all(AddonRoster::tombStore())) if (e.key == sid) tombed = true;
+        check("sideloaded: removing it writes no tombstone (it was never synced)", !tombed);
+    }
+
+    // (d) PASSWORD FIELDS stay on the device. A fixture add-on declares one text and one password field.
+    {
+        const QString cid = QStringLiteral("probe.creds");
+        const QString dir = rootR + QStringLiteral("/") + cid;
+        QDir().mkpath(dir);
+        writeText(dir + QStringLiteral("/manifest.json"),
+                  "{\"id\":\"probe.creds\",\"name\":\"Creds\",\"version\":\"1.0.0\",\"type\":\"media-source\",\"entry\":\"main.js\","
+                  "\"permissions\":[],\"catalogs\":[{\"id\":\"m\",\"name\":\"M\",\"type\":\"movie\"}],"
+                  "\"settings\":[{\"key\":\"apikey\",\"label\":\"API key\",\"type\":\"text\"},"
+                  "{\"key\":\"password\",\"label\":\"Password\",\"type\":\"password\"}]}");
+        writeText(dir + QStringLiteral("/main.js"), "function getCatalog(){return JSON.stringify({title:'c',items:[],hasMore:false});}\n");
+        const QString syncedPw = QStringLiteral("addoncfg/probe.creds/password");
+        const QString localPw = QStringLiteral("addonsecret/probe.creds/password");
+        const QString stampPw = QStringLiteral("addonsecretmig/probe.creds/password");
+        const QString syncedApi = QStringLiteral("addoncfg/probe.creds/apikey");
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            st.setValue(syncedPw, QStringLiteral("old-pw-fixture"));      // what an earlier build stored (synced)
+            st.setValue(syncedApi, QStringLiteral("api-fixture"));
+            st.remove(localPw); st.remove(stampPw);
+            st.sync();
+        }
+        mgr.reload();
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            check("password migration: an existing value MOVES to the device-local key",
+                  st.value(localPw).toString() == QStringLiteral("old-pw-fixture"));
+            check("password migration: ...is removed from the synced key", !st.contains(syncedPw));
+            check("password migration: ...and is stamped", st.value(stampPw).toLongLong() >= t0);
+            check("password migration: a non-password field is left where it syncs",
+                  st.value(syncedApi).toString() == QStringLiteral("api-fixture"));
+            st.setValue(syncedPw, QStringLiteral("peer-pw-fixture"));    // an older peer's copy re-arrives
+            st.sync();
+        }
+        mgr.reload();
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            check("password migration: ONCE — a re-arrived synced copy is dropped, never over the moved value",
+                  !st.contains(syncedPw) && st.value(localPw).toString() == QStringLiteral("old-pw-fixture"));
+        }
+        LoadedAddon* s = mgr.sourceById(cid);
+        AddonSetting pwSet, apiSet;
+        if (s) for (const AddonSetting& x : s->manifest.settings) (x.key == QStringLiteral("password") ? pwSet : apiSet) = x;
+        AddonContext::writeSetting(cid, pwSet, QStringLiteral("new-pw-fixture"));
+        AddonContext::writeSetting(cid, apiSet, QStringLiteral("new-api-fixture"));
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            check("password field: a write lands on the device-local key, never the synced one",
+                  s && pwSet.type == QStringLiteral("password") && st.value(localPw).toString() == QStringLiteral("new-pw-fixture")
+                  && !st.contains(syncedPw));
+            check("password field: a non-password write still lands on the synced key",
+                  st.value(syncedApi).toString() == QStringLiteral("new-api-fixture"));
+        }
+        if (s)
+        {
+            AddonContext ctx(s->manifest, rootR + QStringLiteral("/_storage/probe.creds"));
+            check("password field: the add-on's getConfig reads the device-local value",
+                  ctx.getConfig(QStringLiteral("password")) == QStringLiteral("new-pw-fixture")
+                  && ctx.getConfig(QStringLiteral("apikey")) == QStringLiteral("new-api-fixture"));
+        }
+        QSettings st(iniPath, QSettings::IniFormat);
+        st.remove(localPw); st.remove(stampPw); st.remove(syncedApi); st.remove(syncedPw);
+        st.sync();
+    }
+
+    {
+        QSettings st(iniPath, QSettings::IniFormat);
+        st.remove(QStringLiteral("registry/addonsExtras"));
+        st.sync();
+    }
+    qunsetenv("EB_ADDONS_ROOT");
+    QDir(rootR).removeRecursively();
+}
+
 static int probePrefetch()
 {
     int pass = 0, fail = 0;
@@ -1001,6 +1330,7 @@ static int probePrefetch()
 
     probeRemoteReplace(check);
     probeRoster(check);   // issue #77: the roster writers, the merge landing, the one-shot migrations
+    probeRegistrySync(check);   // issue #77 inc 2+3: registry references, sideloaded add-ons, password fields
 
     QDir(root).removeRecursively();
     qunsetenv("EB_ADDONS_ROOT");

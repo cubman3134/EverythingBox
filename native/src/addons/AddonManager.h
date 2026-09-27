@@ -414,7 +414,68 @@ public:
     // Issue #77: a cloud merge has just projected a peer's add-on roster onto the live keys. Reloads if the
     // remote set changed, fetches the manifest of any synced add-on this device has never cached, and emits
     // sourceEnabledChanged for every flag the merge flipped. Touches no roster stamp: nothing here is an edit.
+    // Increment 2: a registry REFERENCE this device lacks is installed from its registry — only when this device
+    // has that registry configured too (installFromRegistry); one from a registry it lacks is listed
+    // (pendingRegistryRefs), never fetched. A registry add-on a peer uninstalled has already been removed from
+    // the folder by the merge's projection; the loaded set is brought in line here.
     void applyMergedRoster();
+
+    // ---- issue #77, increment 2: registry installs sync as references, and code never syncs ----------------
+    // The built-in add-on registry, and every registry this device has configured (the built-in one plus the
+    // user's registry/addonsExtras). RegistryBrowser lists the same set.
+    static QString defaultRegistryUrl();
+    // PURE (#98's rule, BuildbotInstall::policyFor): the built-in registry URL for a given environment. `uitest` =
+    // EB_UITEST is set, `overrideUrl` = EB_ADDON_REGISTRY_URL. The override is honoured ONLY under EB_UITEST — a
+    // test-only fixture seam that an ordinary run must never obey, or one stray environment variable would point
+    // every registry install AND every synced registry reference at whatever it names. `*ignoredOverride` is set
+    // when an override was present and refused, so the caller can say so.
+    static QString registryUrlFor(bool uitest, const QString& overrideUrl, bool* ignoredOverride = nullptr);
+    static QStringList configuredRegistries();
+    static bool isRegistryConfigured(const QString& indexUrl);
+
+    // THE add-on install rule for a registry entry, shared by the registry browser (a user's Install press) and
+    // a synced reference's install on another device, so the two cannot drift. Pure. Returns the files to fetch
+    // and where each lands inside the add-on's folder, or an empty list with *error set:
+    //   * the index is https — or plain http on a LOOPBACK host only (a registry served from this machine);
+    //   * the entry is a folder add-on with a safe id (one path segment, no dot-leading name, no separators,
+    //     not the reserved first-party namespace); a remote ("url") entry is a subscription, not an install;
+    //   * every file is a plain relative path resolved against the index's own directory — no scheme, no
+    //     absolute path, no ".." segment, no backslash — so nothing can be fetched from another host; it lands
+    //     flattened to its file name (as installs always have), a duplicate name is refused, and so is the
+    //     provenance file's name, which only the installer writes;
+    //   * at most kMaxRegistryFiles files, and manifest.json among them.
+    struct RegistryFile { QString url; QString name; };
+    static constexpr int kMaxRegistryFiles = 64;
+    static QVector<RegistryFile> planRegistryInstall(const QJsonObject& entry, const QString& indexUrl,
+                                                     QString* error);
+
+    // Record that the add-on folder <root>/<entryId> was just installed from `indexUrl`: writes its provenance
+    // (the version is the installed manifest's own) and stamps the roster, which arms the push. The registry
+    // browser calls this after its downloads land. False when the folder has no manifest.json.
+    bool recordRegistryInstall(const QString& entryId, const QString& indexUrl);
+
+    // Install `entryId` from the registry at `indexUrl` in the background: fetch the index, plan the entry with
+    // planRegistryInstall, fetch every file (size-bounded), write the folder atomically, record provenance,
+    // reload. Refuses a registry this device has not configured. Version policy: whatever version the registry
+    // offers NOW (its latest), and the provenance records what was installed. `done` may be empty.
+    void installFromRegistry(const QString& indexUrl, const QString& entryId,
+                             std::function<void(bool ok, const QString& message)> done = {});
+
+    // A synced registry reference this device has not installed, with the reason, for the add-on list.
+    struct PendingRegistryRef
+    {
+        QString key, entry, registry, version;
+        enum State { UnknownRegistry, Installing, Failed } state = UnknownRegistry;
+        QString detail;        // Failed: the reason
+    };
+    QVector<PendingRegistryRef> pendingRegistryRefs() const;
+
+    // "Not synced": a folder add-on installed on THIS device from a file (or dropped into the folder) — neither
+    // first-party nor registry-installed. Its code and its on/off flag stay here. notSyncedReason() is the one
+    // line both add-on list layouts show under the section.
+    bool isDeviceOnly(const LoadedAddon* a) const;
+    static QString notSyncedReason();
+    static QString pendingRefText(const PendingRegistryRef& r);   // one line per pending reference, both layouts
 
     // A local script addon (other than `exclude`) that has a catalog of `type` and can supply metadata for an
     // IMDB id - used to enrich a movie/episode whose own source addon returns no /meta (e.g. Allarr via AIO).
@@ -442,6 +503,11 @@ signals:
 private:
     void snapshotEnabled();                     // #77: the flags applyMergedRoster diffs against
     QHash<QString, bool> enabledSeen_;          // #77: installed id -> flag as last announced
+    void migrateSecretConfig();                 // #77 inc 3: move password-field values device-local, once
+    void applyMergedRegistryRefs();             // #77 inc 2: install synced registry references
+    QHash<QString, QString> registryInFlight_;  // #77: roster key -> registry, installs running now
+    QHash<QString, QString> registryFailed_;    // #77: roster key -> why its last install failed
+    QSet<QString> registryUnknownLogged_;       // #77: references already logged as "registry not configured"
     void loadFolder(const QString& dir);
     void loadRemoteSources();                   // build RemoteHttp addons from the persisted URL list
     void seedDefaultStremioSources();           // add Cinemeta on first run so movie/series catalogs work
