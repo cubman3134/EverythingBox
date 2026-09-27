@@ -131,7 +131,7 @@ Rectangle {
                                              { i: 2, t: "A +" },
                                              { i: 3, t: chrome.br.themeNames[chrome.br.themeIndex] },
                                              { i: 4, t: chrome.br.fontFamilies[chrome.br.fontFamilyIndex] }]
-                                // Read aloud (issue #145), indices 5..8. Gated on the ONE availability flag, so
+                                // Read aloud (issue #145), indices 5..9. Gated on the ONE availability flag, so
                                 // a build without the Qt TextToSpeech module (or a platform with no engine)
                                 // draws the five controls this row has always had - and the host's zone count,
                                 // ReadAloud::bookSettingsRowCount, agrees because it reads the same flag.
@@ -142,9 +142,12 @@ Rectangle {
                                                  on: chrome.br.readAloudPaused })
                                     brows.push({ i: 7, t: chrome.br.readAloudSpeedLabel })
                                     brows.push({ i: 8, t: chrome.br.readAloudVoiceLabel })
+                                    // The sleep timer's menu (#145): labelled with what is armed.
+                                    brows.push({ i: 9, t: chrome.br.readAloudSleepLabel,
+                                                 on: chrome.br.readAloudSleepArmed })
                                 }
                                 // Select (issue #136), LAST. Its index comes from the bridge rather than from
-                                // a literal here, because where it sits depends on whether the four read-aloud
+                                // a literal here, because where it sits depends on whether the five read-aloud
                                 // controls are in the row - and a number stated twice is a number that drifts.
                                 if (chrome.br.selectionSupported && chrome.br.selectSettingIndex >= 0)
                                     brows.push({ i: chrome.br.selectSettingIndex,

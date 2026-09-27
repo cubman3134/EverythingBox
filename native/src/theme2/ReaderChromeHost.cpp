@@ -386,6 +386,14 @@ QString ReaderBridge::readAloudVoiceLabel() const
     return v.isEmpty() ? tr("Voice") : v;
 }
 
+QString ReaderBridge::readAloudSleepLabel() const
+{
+    const QString l = reader_ ? reader_->readAloudSleepLabel() : QString();
+    return l.isEmpty() ? tr("Sleep timer") : l;
+}
+
+bool ReaderBridge::readAloudSleepArmed() const { return reader_ && reader_->readAloudSleepArmed(); }
+
 // pdf/comic settings rows: 0 = zoom out, 1 = zoom in, 2 = fit width, 3 = two-up (comic only).
 void ReaderBridge::activateSetting(int index)
 {
@@ -414,7 +422,7 @@ void ReaderBridge::activateSetting(int index)
         // open a sub-menu for, and every value is one press away from every other.
         case 3: setTheme((themeIndex() + 1) % themeNames().size()); break;
         case 4: setFontFamily((fontFamilyIndex() + 1) % fontFamilies().size()); break;
-        // Read aloud (issue #145), indices 5..8 - present in the row ONLY when readAloudAvailable(), which is
+        // Read aloud (issue #145), indices 5..9 - present in the row ONLY when readAloudAvailable(), which is
         // what ReadAloud::bookSettingsRowCount() counts and what the QML model gates its entries on. Guarded
         // here as well so a stale index (a count that arrived before the reader did) can never fire a command
         // the row is not drawing.
@@ -422,6 +430,9 @@ void ReaderBridge::activateSetting(int index)
         case 6: if (readAloudAvailable()) reader_->readAloudTogglePause(); break;
         case 7: if (readAloudAvailable()) reader_->readAloudCycleSpeed();  break;
         case 8: if (readAloudAvailable()) reader_->readAloudCycleVoice();  break;
+        // The sleep timer's menu (#145). It opens over the chrome on the next event-loop turn (the reader defers
+        // it), so nothing runs under this delegate's emission.
+        case 9: if (readAloudAvailable()) reader_->readAloudOpenSleepTimer(); break;
         default: return;
         }
         emit changed();   // narration's labels (Stop/Resume/speed/voice) are read straight off this bridge

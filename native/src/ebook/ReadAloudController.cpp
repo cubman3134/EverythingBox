@@ -6,8 +6,12 @@
 #include "../core/Settings.h"
 #include "../core/SpeedStore.h"
 
+#include <QDebug>
 #include <QLocale>
 #include <QSettings>
+#include <QTimer>
+
+#include <cmath>
 
 namespace
 {
@@ -37,6 +41,14 @@ ReadAloudController::ReadAloudController(ReadAloudTarget* target, QObject* paren
     connect(tts_, &QTextToSpeech::aboutToSynthesize, this, &ReadAloudController::onAboutToSynthesize);
     connect(tts_, &QTextToSpeech::stateChanged, this, &ReadAloudController::onStateChanged);
     loadVoices();
+
+    // The sleep timer's clock and its fade (issue #145). The tick only drives the volume and the minutes the
+    // controls show; it never stops narration itself - stopping is decided at utterance boundaries, below.
+    mono_.start();
+    sleepTick_ = new QTimer(this);
+    sleepTick_->setInterval(250);
+    connect(sleepTick_, &QTimer::timeout, this, &ReadAloudController::onSleepTick);
+    connect(tts_, &QTextToSpeech::sayingWord, this, &ReadAloudController::onSayingWord);
 }
 
 // ---- Voices ------------------------------------------------------------------------------------------------
@@ -132,6 +144,9 @@ void ReadAloudController::resolveSpeedForBook()
 void ReadAloudController::adoptBook()
 {
     if (active_) stop();
+    // Leaving the book ends its sleep timer (#145). stop() above already did when narration was running; said
+    // again here so the rule does not depend on it having been.
+    if (sleep_.armed()) { sleep_.bookLeft(); qInfo().noquote() << "readaloud.sleep: disarmed (left the book)"; }
     resolveSpeedForBook();
     loadVoices();
     applyVoice();
@@ -164,6 +179,18 @@ void ReadAloudController::start()
 
 void ReadAloudController::stop()
 {
+    // Any stop ends the session's sleep timer (#145) - the user's own included - and hands the engine back its
+    // own volume. Before the early return, so no path out of narration can leave a timer armed behind it.
+    if (sleep_.armed())
+    {
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: disarmed (narration stopped, %1 s narrated)")
+                                 .arg(sleep_.narrated(nowSec()), 0, 'f', 3);
+        sleep_.narrationStopped();
+    }
+    sleepTick_->stop();
+    applySleepVolume(1.0);
+    shownMinutes_ = -2;
+
     if (!active_ && tts_->state() == QTextToSpeech::Ready) return;
     active_ = false;
     restarting_ = true;
@@ -171,6 +198,7 @@ void ReadAloudController::stop()
     restarting_ = false;
     current_ = -1;
     paused_ = false;
+    drainedWhilePaused_ = false;
     utts_.clear();
     first_ = queued_ = spoken_ = 0;
     if (target_) target_->raClearSpoken();   // the highlight goes; the POSITION stays where it reached
@@ -186,9 +214,23 @@ void ReadAloudController::toggle() { if (active_) stop(); else start(); }
 void ReadAloudController::togglePause()
 {
     if (!active_) return;
-    if (paused_) { tts_->resume(); paused_ = false; }
-    else         { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
-    notifyChanged();
+    if (paused_ && drainedWhilePaused_)
+    {
+        // The pause landed as an utterance ended (see onStateChanged): there is nothing in the engine to resume,
+        // so carry on from the next one - or the next chapter - through the restart path skip uses, which also
+        // clears the engine's own pause.
+        drainedWhilePaused_ = false;
+        if (queued_ >= utts_.size()) advanceChapterOrStop();
+        else                         speakFrom(queued_);
+    }
+    else if (paused_) { tts_->resume(); paused_ = false; }
+    else              { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
+    notifyChanged();   // re-asserts the sleep clock: stopped while paused, running again on resume (#145)
+    if (sleep_.armed())
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: narration %1 at %2 s narrated")
+                                 .arg(paused_ ? QStringLiteral("paused - the clock stops")
+                                              : QStringLiteral("resumed - the clock runs"))
+                                 .arg(sleep_.narrated(nowSec()), 0, 'f', 3);
 }
 
 // Paragraph back / forward — the reader's twin of #140's jump controls, at the granularity narration actually
@@ -213,6 +255,7 @@ void ReadAloudController::speakFrom(int index)
     tts_->stop(QTextToSpeech::BoundaryHint::Immediate);   // clears the engine's queue, resetting its ids to 0
     restarting_ = false;
     paused_ = false;
+    drainedWhilePaused_ = false;
 
     first_ = qBound(0, index, int(utts_.size()) - 1);
     queued_ = first_;
@@ -221,20 +264,59 @@ void ReadAloudController::speakFrom(int index)
     pump();
 }
 
+// Two rules keep the queue in the order it was planned. Both were measured on Windows SAPI with Qt 6.8, where
+// breaking them spoke a chapter's heading and ONE of its paragraphs and skipped the rest (a word-by-word log of
+// sayingWord showed it; the highlight, which followed the ids, never did):
+//   * No re-entry. enqueue() onto an idle engine emits aboutToSynthesize BEFORE it hands the engine the text,
+//     and the slot tops the queue back up - so a pump inside a pump handed the idle engine three texts
+//     innermost-first, and SAPI's say() purges whatever it is already speaking when a new text arrives.
+//   * Nothing more to an engine that still reports Ready. Qt queues a text itself only once the engine is
+//     busy; one handed to an engine it still believes idle goes straight to say(), on top of the last. SAPI
+//     reports busy a few tens of milliseconds later, from its own thread, so there each text is handed over at
+//     the previous one's end (the drained-Ready path below) - a gap of that size, measured, and never a text
+//     purged. An engine that reports busy at once keeps the full look-ahead.
 void ReadAloudController::pump()
 {
+    if (pumping_) return;
+    pumping_ = true;
     while (queued_ < utts_.size() && (queued_ - first_ - spoken_) < kLookahead)
+    {
         tts_->enqueue(utts_[queued_++].text);
+        if (tts_->state() == QTextToSpeech::Ready) break;
+    }
+    pumping_ = false;
 }
 
 void ReadAloudController::onAboutToSynthesize(qsizetype id)
 {
     if (!active_) return;
-    const int idx = first_ + int(id);
+
+    // A boundary, and the sleep timer's (#145) one place to stop: Qt emits this only when nothing is being
+    // spoken - either the engine was idle when the utterance was queued, or it has just finished the previous
+    // one and the next has not started (QTextToSpeechPrivate::updateState hands the engine the next text only
+    // AFTER this signal returns, and hands it nothing if a slot stopped it). So stopping here never cuts a
+    // word. Asked BEFORE the id is mapped, because every emission is a boundary whatever id it carries.
+    if (sleepStopAtBoundary(target_ ? target_->raChapterIndex() : -1)) return;
+
+    // Which utterance this is, by COUNT: the n-th boundary since the queue was (re)started is its n-th text.
+    // Qt's id is not usable for this - it is 0 when a text goes straight to an idle engine, and otherwise a
+    // counter QTextToSpeech never resets on stop(), so after the first restart it names the wrong paragraph.
+    const int idx = first_ + spoken_;
+    if (sleep_.armed())
+    {
+        // While a timer is armed, every boundary is logged with the session clock: the evidence that a stop lands
+        // BETWEEN utterances, and how long each one ran.
+        utterStarted_ = sleep_.narrated(nowSec());
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: boundary - utterance %1 of %2 (chapter %3, engine id %4) at %5 s narrated")
+                                 .arg(idx + 1).arg(utts_.size())
+                                 .arg(target_ ? target_->raChapterIndex() : -1)
+                                 .arg(qint64(id))
+                                 .arg(utterStarted_, 0, 'f', 3);
+    }
     if (idx < 0 || idx >= utts_.size()) return;
 
     current_ = idx;
-    spoken_  = int(id) + 1;
+    spoken_  = spoken_ + 1;   // counted, not taken from `id` - see the note on idx above
     if (target_) target_->raShowSpoken(utts_[idx].start, utts_[idx].end);
     pump();               // keep the look-ahead full so the next paragraph starts without a gap
     notifyChanged();
@@ -246,11 +328,18 @@ void ReadAloudController::onStateChanged(QTextToSpeech::State s)
     if (s == QTextToSpeech::Error) { stop(); return; }
     if (s != QTextToSpeech::Ready) { notifyChanged(); return; }
 
+    // The engine finished its text while narration is paused - a pause that landed on a boundary, which is where
+    // an engine that pauses only between words (or not at all, between texts) puts it. Hold here: handing it
+    // the next text now would un-pause narration behind a control that still says Resume. Resume carries on.
+    if (paused_) { drainedWhilePaused_ = true; notifyChanged(); return; }
+
     // Ready with nothing left to hand over means this chapter is finished.
     if (queued_ >= utts_.size()) { advanceChapterOrStop(); return; }
 
     // Ready with more to say means the engine drained faster than the look-ahead refilled it (a very short
     // paragraph, or a slow signal). Re-base on what is left and carry on rather than stopping mid-chapter.
+    // A drained engine is a boundary too, so a due sleep timer (#145) stops here rather than re-filling.
+    if (sleepStopAtBoundary(target_ ? target_->raChapterIndex() : -1)) return;
     first_ = queued_;
     spoken_ = 0;
     pump();
@@ -263,6 +352,10 @@ void ReadAloudController::advanceChapterOrStop()
     for (int next = target_->raChapterIndex() + 1; next < count; ++next)
     {
         if (!target_->raGotoChapter(next)) break;
+        // Crossing into the next spine item: End of chapter (#145) stops HERE, the reader already standing at
+        // the start of the next chapter (raGotoChapter loads it there and persists it), before a word of it is
+        // spoken. A due minute timer stops at this boundary too.
+        if (sleepStopAtBoundary(next)) return;
         if (planCurrentChapter()) { speakFrom(0); notifyChanged(); return; }
         // else: nothing to say in this one — keep walking.
     }
@@ -271,6 +364,146 @@ void ReadAloudController::advanceChapterOrStop()
 
 void ReadAloudController::notifyChanged()
 {
+    syncSleepClock();   // every state change passes through here, so the sleep clock can never disagree with it
     if (target_) target_->raNarrationChanged();
     emit changed();
+}
+
+// ---- The sleep timer (issue #145) -------------------------------------------------------------------------------
+// The decision is ReadAloud::SleepSession's (pure, probed with a fake clock in probe_readaloud); everything below
+// is plumbing: which clock, when to ask, and what a "yes" does to the engine.
+
+double ReadAloudController::nowSec() const { return double(mono_.elapsed()) / 1000.0; }
+
+bool ReadAloudController::armSleep(const SleepTimer::Timer& t)
+{
+    if (!active_ || !target_) return false;
+    const double now = nowSec();
+    if (!sleep_.arm(t, now, target_->raChapterIndex(), paused_))
+    {
+        disarmSleep();   // Off (or a zero Custom) over an armed timer: turn it off, fade and all
+        return false;
+    }
+    utterStarted_ = 0.0;
+    lastWord_.clear();
+    lastWordEnd_ = -1;
+    shownMinutes_ = -2;
+    applySleepVolume(1.0);   // a re-arm lifts a fade the old timer had applied
+    sleepTick_->start();
+    if (t.mode == SleepTimer::Mode::EndOfChapter)
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: armed end-of-chapter (chapter %1)")
+                                 .arg(target_->raChapterIndex());
+    else
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: armed %1 min of narration (chapter %2%3)")
+                                 .arg(t.minutes).arg(target_->raChapterIndex())
+                                 .arg(paused_ ? QStringLiteral(", paused - the clock starts on resume") : QString());
+    notifyChanged();
+    return true;
+}
+
+void ReadAloudController::disarmSleep()
+{
+    const bool was = sleep_.armed();
+    sleep_.disarm();
+    sleepTick_->stop();
+    applySleepVolume(1.0);
+    shownMinutes_ = -2;
+    if (was) qInfo().noquote() << "readaloud.sleep: disarmed (turned off)";
+    notifyChanged();
+}
+
+int ReadAloudController::sleepMinutesLeft() const
+{
+    if (sleep_.mode() != SleepTimer::Mode::Minutes) return -1;
+    return int(std::ceil(sleep_.secondsLeft(nowSec(), -1.0) / 60.0));
+}
+
+bool ReadAloudController::sleepStopAtBoundary(int nextChapter)
+{
+    if (!sleep_.armed()) return false;
+    const double now = nowSec();
+    if (!sleep_.stopAtBoundary(now, nextChapter)) return false;
+    // `current_` is still the utterance that has just finished (the boundary is asked before it moves on).
+    const int spokenLen = (current_ >= 0 && current_ < utts_.size()) ? int(utts_[current_].text.size()) : -1;
+    qInfo().noquote() << QStringLiteral("readaloud.sleep: fired at an utterance boundary (%1, %2 s narrated, next chapter %3); "
+                                        "last word heard '%4', ending at character %5 of the %6-character utterance")
+                             .arg(sleep_.mode() == SleepTimer::Mode::EndOfChapter ? QStringLiteral("end of chapter")
+                                                                                  : QStringLiteral("minutes"))
+                             .arg(sleep_.narrated(now), 0, 'f', 3)
+                             .arg(nextChapter)
+                             .arg(lastWord_)
+                             .arg(lastWordEnd_)
+                             .arg(spokenLen);
+    stop();                 // the existing contract: the reader stays where narration reached, position saved
+    // One more purge on the next turn. When this boundary was an ENQUEUE onto an idle engine (a restart - skip,
+    // voice, speed), Qt emits aboutToSynthesize and then calls the engine's say() regardless of what the slot
+    // did, so the stop above would be followed by one stray utterance. Anywhere else this finds the engine idle
+    // and does nothing.
+    QMetaObject::invokeMethod(this, [this] {
+        if (!active_) tts_->stop(QTextToSpeech::BoundaryHint::Immediate);
+    }, Qt::QueuedConnection);
+    emit sleepStopped();
+    return true;
+}
+
+// Only while a timer is armed, and only to name the last word heard when it fires (see sleepStopAtBoundary).
+void ReadAloudController::onSayingWord(const QString& word, qsizetype, qsizetype start, qsizetype length)
+{
+    if (!sleep_.armed()) return;
+    lastWord_    = word;
+    lastWordEnd_ = int(start + length);
+}
+
+void ReadAloudController::syncSleepClock()
+{
+    if (!sleep_.armed()) return;
+    const double now = nowSec();
+    if (active_ && !paused_) sleep_.resume(now);
+    else                     sleep_.pause(now);
+}
+
+void ReadAloudController::onSleepTick()
+{
+    if (!sleep_.armed() || !active_) { sleepTick_->stop(); return; }
+    const double now = nowSec();
+    // End of chapter's seconds-left is an estimate from what is still to be said; a minute timer's is exact,
+    // and the session ignores this argument for it.
+    const double est = sleep_.mode() == SleepTimer::Mode::EndOfChapter
+                           ? ReadAloud::chapterSecondsLeft(utts_, current_, sleep_.narrated(now) - utterStarted_, speed_)
+                           : -1.0;
+    applySleepVolume(sleep_.gain(now, est));
+    const int mins = sleepMinutesLeft();
+    if (mins != shownMinutes_)
+    {
+        if (mins == 0)
+            qInfo().noquote() << QStringLiteral("readaloud.sleep: minutes are up at %1 s narrated - finishing the utterance")
+                                     .arg(sleep_.narrated(now), 0, 'f', 3);
+        shownMinutes_ = mins;
+        notifyChanged();    // the controls show the minutes left; re-label only when that number moves
+    }
+}
+
+// Qt's volume, scaled by the fade. The engine's own volume is captured the first time a fade goes below 1 and
+// written back when it returns to 1 (disarm, stop, re-arm), so the fade is a transient over the level the engine
+// had, never a replacement for it. An engine without a volume control ignores setVolume, and then the timer
+// simply stops without fading.
+void ReadAloudController::applySleepVolume(double gain)
+{
+    if (gain >= 1.0)
+    {
+        if (baseVolume_ >= 0.0) tts_->setVolume(baseVolume_);
+        baseVolume_ = -1.0;
+        appliedGain_ = 1.0;
+        return;
+    }
+    if (baseVolume_ < 0.0) baseVolume_ = tts_->volume();
+    const bool atFloor = gain <= ReadAloud::kSleepFadeFloor + 1e-9;
+    if (std::abs(gain - appliedGain_) < 0.01 && !(atFloor && appliedGain_ > gain)) return;
+    // Logged as it passes each quarter, and once at the floor - enough to read the ramp without a line a tick.
+    const bool mark = int(gain * 4.0) != int(appliedGain_ * 4.0) || atFloor;
+    appliedGain_ = gain;
+    tts_->setVolume(baseVolume_ * gain);
+    if (mark)
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: fade gain %1 (engine volume %2 of %3)")
+                                 .arg(gain, 0, 'f', 2).arg(tts_->volume(), 0, 'f', 2).arg(baseVolume_, 0, 'f', 2);
 }

@@ -23,8 +23,12 @@
 #include <QList>
 #include <QTextToSpeech>
 #include <QVoice>
+#include <QElapsedTimer>
 
 #include "ReadAloud.h"
+#include "ReadAloudSleep.h"
+
+class QTimer;
 
 class ReadAloudTarget;
 
@@ -68,11 +72,23 @@ public:
     int  voiceIndex() const { return voiceIdx_; }
     void cycleVoice();     // step through the offered voices, wrapping
 
+    // The sleep timer (issue #145, the #140 timer applied to narration). The decision is ReadAloud::SleepSession
+    // (pure, probed); this is its clock, its fade and its stop. Armed only while narrating - arming when not
+    // narrating, or with Off, returns false and leaves nothing armed. ANY stop disarms it (see stop()).
+    bool armSleep(const SleepTimer::Timer& t);
+    void disarmSleep();                       // Off from the menu
+    bool sleepArmed() const { return sleep_.armed(); }
+    SleepTimer::Mode sleepMode() const { return sleep_.mode(); }
+    // Whole minutes of narration left on a minute timer (rounded up), or -1 for End of chapter / not armed.
+    int  sleepMinutesLeft() const;
+
 signals:
-    void changed();        // active/paused/paragraph/speed/voice moved
+    void changed();        // active/paused/paragraph/speed/voice/sleep timer moved
+    void sleepStopped();   // the sleep timer, not the user, just ended narration
 
 private slots:
     void onAboutToSynthesize(qsizetype id);
+    void onSayingWord(const QString& word, qsizetype id, qsizetype start, qsizetype length);
     void onStateChanged(QTextToSpeech::State s);
 
 private:
@@ -86,23 +102,45 @@ private:
     void advanceChapterOrStop();   // the chapter ran out: walk forward to one that speaks, else stop
     void notifyChanged();
 
+    // Sleep timer plumbing.
+    double nowSec() const;          // the monotonic clock the session is driven by
+    bool   sleepStopAtBoundary(int nextChapter);   // ask the session; on yes, stop as the timer and say so
+    void   syncSleepClock();        // the session's clock runs exactly while narration is speaking
+    void   onSleepTick();           // the fade, while armed
+    void   applySleepVolume(double gain);
+
     ReadAloudTarget* target_ = nullptr;
     QTextToSpeech*   tts_ = nullptr;
     QVector<ReadAloud::Utterance> utts_;
     QList<QVoice>    voices_;
 
-    // Queue bookkeeping. `first_` is the utterance the engine's CURRENT queue starts at, so the id Qt reports
-    // in aboutToSynthesize (an index into that queue, reset by stop()) maps to an utterance by simple addition.
+    // Queue bookkeeping. `first_` is the utterance the engine's CURRENT queue starts at, and every
+    // aboutToSynthesize is the next text of that queue starting, so first_ + spoken_ names the utterance.
+    // (Qt's own id is not used: it is not reset by stop() - see onAboutToSynthesize.)
     int  first_   = 0;
     int  queued_  = 0;     // one past the last utterance handed to the engine
-    int  spoken_  = 0;     // how many of the current queue have started
+    int  spoken_  = 0;     // how many of the current queue have started (counted per aboutToSynthesize)
     int  current_ = -1;    // the utterance being spoken
 
     bool active_     = false;
     bool paused_     = false;   // see paused(): ours, because the engine's state enum does not say
     bool restarting_ = false;   // a stop() WE asked for: its Ready is not the end of the book
+    bool pumping_    = false;   // inside pump(): an aboutToSynthesize emitted by enqueue() must not re-enter it
+    bool drainedWhilePaused_ = false;   // the engine finished its text while paused: resume starts the next one
     double speed_    = 1.0;
     int    voiceIdx_ = 0;
+
+    ReadAloud::SleepSession sleep_;
+    QElapsedTimer mono_;
+    QTimer* sleepTick_      = nullptr;
+    double  utterStarted_   = 0.0;    // session-clock seconds at which the current utterance began
+    double  baseVolume_     = -1.0;   // the engine's volume before any fade; <0 = no fade applied
+    double  appliedGain_    = 1.0;
+    int     shownMinutes_   = -2;     // the minutes-left the controls last showed, so a tick re-labels only on change
+    // The last word the engine said while a timer is armed, and where it ended in its utterance: what the log
+    // names when the timer fires, so a stop can be SEEN to have come after the utterance's last word.
+    QString lastWord_;
+    int     lastWordEnd_    = -1;
 
     static constexpr int kLookahead = 2;   // paragraphs kept in the engine's queue ahead of the spoken one
 };

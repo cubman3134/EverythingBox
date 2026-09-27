@@ -17542,7 +17542,7 @@ void MainWindow::openSleepTimerMenu(QWidget* anchor)
         menu.addSeparator();
     }
 
-    for (const int mins : { 15, 30, 45, 60, 90, 120 })
+    for (const int mins : SleepTimer::kPresetMinutes)   // the one preset list, shared with read-aloud's (#145)
     {
         QAction* a = menu.addAction(tr("In %n minute(s)", nullptr, mins));
         connect(a, &QAction::triggered, this, [this, mins] { armSleepTimer(0, double(mins)); });

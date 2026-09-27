@@ -339,8 +339,9 @@ double engineRateForSpeed(double speed)
 int bookSettingsRowCount(bool readAloudAvailable)
 {
     // Exit, font −, font +, theme, typeface — the five the book's row has always had. Read-aloud adds its
-    // four (speak/stop, pause/resume, speed, voice) and NOTHING when the engine module is not in the build.
-    return readAloudAvailable ? 9 : 5;
+    // five (speak/stop, pause/resume, speed, voice, sleep timer) and NOTHING when the engine module is not in
+    // the build.
+    return readAloudAvailable ? 10 : 5;
 }
 
 } // namespace ReadAloud

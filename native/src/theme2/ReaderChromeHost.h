@@ -88,6 +88,9 @@ class ReaderBridge : public QObject
     Q_PROPERTY(bool readAloudPaused READ readAloudPaused NOTIFY changed)
     Q_PROPERTY(QString readAloudSpeedLabel READ readAloudSpeedLabel NOTIFY changed)
     Q_PROPERTY(QString readAloudVoiceLabel READ readAloudVoiceLabel NOTIFY changed)
+    // The sleep timer on narration (#145): what is armed ("Sleep timer" when nothing is), and whether anything is.
+    Q_PROPERTY(QString readAloudSleepLabel READ readAloudSleepLabel NOTIFY changed)
+    Q_PROPERTY(bool readAloudSleepArmed READ readAloudSleepArmed NOTIFY changed)
 public:
     explicit ReaderBridge(HostedReader* reader, ReaderKind kind, QObject* parent = nullptr);
 
@@ -128,6 +131,8 @@ public:
     bool readAloudPaused() const;
     QString readAloudSpeedLabel() const;   // e.g. "1.25x", drawn on the speed control
     QString readAloudVoiceLabel() const;   // the platform voice's own name, or "Voice" when there is none
+    QString readAloudSleepLabel() const;   // e.g. "Sleep: 14 min", or "Sleep timer" when none is armed
+    bool readAloudSleepArmed() const;
 
     void refresh();       // re-emit changed() (page/font/zoom/two-up moved)
     void refreshToc();    // re-emit tocChanged() + changed() (a new document loaded)
