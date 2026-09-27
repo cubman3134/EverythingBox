@@ -9,6 +9,7 @@
 #include "../core/ThemeShots.h" // #91: a screenshot's fetch, cap and cache — shared with the themed surface
 #include "../addons/AddonManager.h"
 #include "../core/AddonRoster.h"     // #77: the registries the user added are roster records, synced by merge
+#include "GlyphButton.h"             // #458: the remove button's caption had no room left under the app sheet
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -165,6 +166,7 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     top->addWidget(new QLabel(tr("Registries"), this));
     top->addStretch(1);
     auto* add = new QPushButton(tr("Add registry…"), this);
+    addRegistryButton_ = add;
     auto* reload = new QPushButton(tr("Reload"), this);
     top->addWidget(add);
     top->addWidget(reload);
@@ -263,32 +265,73 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
 
 void RegistryBrowser::renderRegistryRows()
 {
-    while (QLayoutItem* it = registriesLayout_->takeAt(0)) { delete it->widget(); delete it; }
+    // Issue #458. A row used to be a bare QHBoxLayout whose label and button were parented to the DIALOG, and
+    // this loop's `delete it->widget()` was a no-op for it: the item was the layout, whose widget() is null,
+    // and deleting a layout deletes its items, not its widgets. So every earlier render's labels and buttons
+    // stayed alive, visible and out of any layout, painted at their last geometry over the new list (two
+    // "(default)" lines after the first add) — and their buttons still worked, each wired to its old row.
+    //
+    // Now a row is ONE widget that owns its label and button, so retiring the row retires both. Hidden at once
+    // and deleted LATER rather than deleted here: the remove button that asked for this render is one of the
+    // widgets going, and it is still inside its own clicked() emission — QAbstractButton's click code runs on
+    // after our slot returns. Nothing between here and the end of that emission spins an event loop
+    // (removeExtra writes the roster; fetchAll only starts requests, and refuses outright mid-install), so the
+    // deferred deletion cannot land under it.
+    while (QLayoutItem* it = registriesLayout_->takeAt(0))
+    {
+        if (QWidget* w = it->widget()) { w->hide(); w->deleteLater(); }
+        delete it;
+    }
+    removeButtons_.clear();
     const QStringList all = allRegistries();
     for (int i = 0; i < all.size(); ++i)
     {
-        auto* row = new QHBoxLayout();
+        auto* rowWidget = new QWidget(this);
+        auto* row = new QHBoxLayout(rowWidget);
+        row->setContentsMargins(0, 0, 0, 0);
         const bool isDefault = (i == 0);
         auto* lbl = new QLabel(QStringLiteral("%1%2").arg(isDefault ? tr("(default) ") : QString(),
-                                                          repoOf(all[i])), this);
+                                                          repoOf(all[i])), rowWidget);
         lbl->setToolTip(all[i]);
         lbl->setStyleSheet(QStringLiteral("color:#555;"));
         row->addWidget(lbl, 1);
+        QPushButton* removeButton = nullptr;
         if (!isDefault)
         {
-            auto* rm = new QPushButton(tr("✕"), this);
-            rm->setFixedWidth(28);
+            // The caption was never a missing glyph: 28px under the app sheet's 16px-a-side padding left the
+            // caption a NEGATIVE contents rect, so the style clipped it to nothing (see GlyphButton.h).
+            auto* rm = new QPushButton(tr("✕"), rowWidget);
+            GlyphButton::apply(rm, 28);
             rm->setToolTip(tr("Remove this registry"));
             const QString url = all[i];
             connect(rm, &QPushButton::clicked, this, [this, url] {
+                const int at = allRegistries().indexOf(url);
                 removeExtra(url);
                 renderRegistryRows();
+                focusRegistryRow(at);
                 fetchAll();
             });
             row->addWidget(rm);
+            removeButton = rm;
         }
-        registriesLayout_->addLayout(row);
+        removeButtons_ << removeButton;
+        registriesLayout_->addWidget(rowWidget);
+        // Shown NOW rather than by the queued show the layout posts, so focusRegistryRow can put focus on a
+        // button in this row straight away (focus given to a hidden widget is only remembered, not taken).
+        rowWidget->show();
     }
+}
+
+void RegistryBrowser::focusRegistryRow(int row)
+{
+    // The removed row's index now holds the row that was below it — the natural next stop for a pad user
+    // working down the list. Past the end (the LAST row went), walk up. The default row has no button, so a
+    // list with nothing else left sends focus back to "Add registry…", which is where the user began.
+    QPushButton* target = nullptr;
+    for (int r = qMin(row, int(removeButtons_.size()) - 1); r >= 0 && !target; --r)
+        target = removeButtons_.at(r);
+    if (!target) target = addRegistryButton_;
+    if (target) target->setFocus(Qt::OtherFocusReason);
 }
 
 QString RegistryBrowser::localDirFor(const QString& id) const

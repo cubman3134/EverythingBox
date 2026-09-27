@@ -22,6 +22,7 @@
 #include <QByteArray>
 #include <QDialog>
 #include <QHash>
+#include <QList>
 #include <QStringList>
 
 #include <functional>
@@ -103,7 +104,13 @@ private:
     void removeExtra(const QString& url);  // a dated tombstone
     QStringList allRegistries() const;     // default + extras
 
-    void renderRegistryRows();             // (re)draw the list of configured registries
+    // (Re)draw the list of configured registries. Each row is ONE widget owning its label and remove button,
+    // so a re-render retires whole rows — issue #458, where it retired only the rows' layouts and left every
+    // earlier label and button alive, visible and painted over the new list.
+    void renderRegistryRows();
+    // After a remove: focus the row that moved into index `row`, else the nearest row above it that has a
+    // remove button, else "Add registry…" — never the retired button, and never nothing.
+    void focusRegistryRow(int row);
     void fetchAll();                       // load every registry and merge the entries
     void fetchOne(const QString& indexUrl);
 
@@ -229,6 +236,8 @@ private:
     AddonManager* addons_ = nullptr;
     QNetworkAccessManager* nam_ = nullptr;
     QVBoxLayout* registriesLayout_ = nullptr;
+    QList<QPushButton*> removeButtons_;      // per rendered registry row; nullptr for the default row (no remove)
+    QPushButton* addRegistryButton_ = nullptr;
     QVBoxLayout* listLayout_ = nullptr;
     QLabel* status_ = nullptr;
     QLabel* repoLink_ = nullptr;

@@ -1,5 +1,6 @@
 #include "ProfileDialog.h"
 #include "../core/ProfileStore.h"
+#include "GlyphButton.h"          // issue #458: a narrow glyph button keeps room for its glyph
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -98,8 +99,10 @@ void ProfileDialog::rebuild()
         connect(pick, &QPushButton::clicked, this, [this, id] { selectedId_ = id; accept(); });
         row->addWidget(pick, 1);
 
+        // Through GlyphButton (issue #458): 36px under the app sheet's 16px-a-side padding left the caption
+        // about no room at all, so the style clipped the glyph off both of this row's buttons.
         auto* edit = new QPushButton(tr("✎"), this);
-        edit->setFixedWidth(36);
+        GlyphButton::apply(edit, 36);
         edit->setToolTip(tr("Edit this profile"));
         // GATED: the edit page carries the "Passcode…" row, so an ungated ✎ on a locked profile is a way to
         // remove the code and walk in. The themed row menu gates the same action; this is not a second copy
@@ -110,7 +113,7 @@ void ProfileDialog::rebuild()
         if (canDelete)
         {
             auto* del = new QPushButton(tr("✕"), this);
-            del->setFixedWidth(36);
+            GlyphButton::apply(del, 36);
             del->setToolTip(tr("Delete this profile"));
             const QString name = p.name;
             connect(del, &QPushButton::clicked, this, [this, id, name] {
