@@ -6,6 +6,7 @@
 #include "../pdf/PdfView.h"
 #include "../comic/ComicView.h"
 #include "PlayerIcons.h"          // the same drawn transport glyphs the video bar uses
+#include "GlyphButton.h"          // issue #458: a narrow glyph button keeps room for its glyph
 
 #include <QStackedWidget>
 #include <QLabel>
@@ -26,7 +27,9 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
     // own text colour rather than the bar's near-white — this one sits on a native button face, not a dark bar.
     pauseBtn_ = new QPushButton(this);
     setPauseGlyph();
-    pauseBtn_->setFixedWidth(40);
+    // Both of this bar's glyph buttons go through GlyphButton (issue #458): 40px under the app sheet's
+    // 16px-a-side padding leaves a contents rect narrower than the glyph, which the style clips to it.
+    GlyphButton::apply(pauseBtn_, 40);
     pauseBtn_->setToolTip(tr("Pause / resume this pane"));
     volume_ = new QSlider(Qt::Horizontal, this);
     volume_->setRange(0, 200);
@@ -34,7 +37,7 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
     volume_->setFixedWidth(90);
     volume_->setToolTip(tr("Volume for this pane"));
     closeBtn_ = new QPushButton(QStringLiteral("✕"), this);
-    closeBtn_->setFixedWidth(40);
+    GlyphButton::apply(closeBtn_, 40);
     closeBtn_->setToolTip(tr("Close this pane"));
 
     auto* bar = new QHBoxLayout();

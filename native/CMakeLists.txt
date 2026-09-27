@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.337 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.338 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -4087,6 +4087,39 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_queuekeys PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
     target_compile_definitions(probe_queuekeys PRIVATE
         EB_QUEUEKEYS_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    # The classic registry browser's registry rows (issue #458): after an add or a remove, exactly the
+    # configured registries are painted (a re-render used to leave every earlier row's label and button alive
+    # and visible, out of any layout), focus lands on a neighbouring row, and the remove button's caption fits
+    # the contents rect the app sheet leaves it (it was clipped to nothing). Constructs the REAL RegistryBrowser
+    # under the REAL app sheet (AppStyleSheet.h) on the offscreen QPA, against loopback fixture registries; so
+    # it links what RegistryBrowser.cpp links -- the add-on manager set probe_addon carries, the theme and
+    # decoration install lanes probe_themereg / probe_decopack carry, and QtWidgets.
+    add_executable(probe_regbrowser tools/probe_regbrowser.cpp
+        src/ui/RegistryBrowser.cpp   src/ui/RegistryBrowser.h
+        src/ui/AppStyleSheet.h       src/ui/GlyphButton.h
+        src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h
+        src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/CatalogMatch.cpp    src/core/CatalogMatch.h
+        src/core/BrandMigration.cpp  src/core/BrandMigration.h
+        src/addons/StremioTranslate.cpp
+        src/core/StreamHeaders.cpp
+        src/core/SubtitleHash.cpp    src/core/SubtitleHash.h
+        src/core/ThemeRegistry.cpp   src/core/ThemeRegistry.h
+        src/core/ThemeZip.cpp        src/core/ThemeZip.h
+        src/core/ThemeShots.cpp      src/core/ThemeShots.h
+        src/core/MetaCache.cpp       src/core/MetaCache.h
+        src/core/MetaOverrides.cpp   src/core/MetaOverrides.h
+        src/core/DecorationPack.cpp  src/core/DecorationPack.h
+        src/core/DecorationInstall.cpp src/core/DecorationInstall.h
+        src/core/ArchiveRom.cpp      src/core/ArchiveRom.h
+        src/core/SevenZip.cpp        src/core/SevenZip.h
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_regbrowser PRIVATE src src/addons src/core src/emu third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
+    target_compile_definitions(probe_regbrowser PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_regbrowser PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Concurrent lzma7z)
 
     # Seek previews (issue #85): the trickplay arithmetic -- which sprite-sheet grid, row and column a
     # given second of a film lives in (the last grid is SHORT, and a time past the end clamps rather than

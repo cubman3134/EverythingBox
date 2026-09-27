@@ -30,6 +30,7 @@
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
+#include "ui/AppStyleSheet.h"   // issue #458: the base sheet, shared with the probes that lay widgets out
 #include "core/ProfilePasscode.h"   // mustShowPicker — the pure always-ask-at-launch decision (#30)
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
@@ -46,7 +47,7 @@
 #include "core/QuitBudget.h"   // issue #442: the exit waits on the thread pool for a bounded time, never a fetch
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.337";
+static constexpr const char* kAppVersion = "0.6.338";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -351,31 +352,9 @@ int main(int argc, char** argv)
     // nothing does not compile.
     UiTestServer::ensureListening(UiTestServer::IniPhase::NotSettled);
 
-    // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
-    // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
-    // The :focus rules are the app-wide SELECTION HIGHLIGHT: stylesheet-styled controls suppress the
-    // native focus rectangle, so any widget without its own :focus rule (e.g. the profile picker's
-    // buttons) looked completely unselected while focused — "the selection disappeared" when arrowing
-    // onto it. Screens with their own :focus styles (panel rows, overlays, the esc menu) win over these.
-    app.setStyleSheet(QStringLiteral(
-        "QPushButton{min-height:30px;padding:8px 16px;font-size:14px;}"
-        "QPushButton:focus{background:#2D6CDF;color:#fff;border:2px solid #5B8CFF;border-radius:6px;}"
-        "QLineEdit,QComboBox,QAbstractSpinBox{min-height:30px;padding:5px 10px;font-size:14px;}"
-        // Focused = SELECTED: an outline around the box (you navigated to it, you're not typing yet).
-        "QLineEdit:focus,QComboBox:focus,QAbstractSpinBox:focus{border:2px solid #5B8CFF;border-radius:4px;}"
-        // EDITING (a live cursor, set by NavTextField): a brighter, filled look so it's clearly distinct
-        // from the plain selection outline.
-        "QLineEdit[mmvEditing=\"true\"]{background:#0d0f14;border:2px solid #8FB2FF;border-radius:4px;}"
-        // A scrollable text view (the Debug log) gets the same two-state outline: SELECTED shows a border,
-        // INTERACTING (scroll mode) shows the brighter one.
-        "QPlainTextEdit:focus,QTextEdit:focus{border:2px solid #5B8CFF;}"
-        "QPlainTextEdit[mmvEditing=\"true\"],QTextEdit[mmvEditing=\"true\"]{border:2px solid #8FB2FF;}"
-        "QCheckBox,QRadioButton{font-size:14px;spacing:8px;}"
-        "QCheckBox:focus,QRadioButton:focus{color:#2D6CDF;font-weight:bold;}"
-        "QCheckBox::indicator,QRadioButton::indicator{width:20px;height:20px;}"
-        "QSlider:focus{background:rgba(91,140,255,0.20);border-radius:4px;}"
-        "QListWidget::item,QListView::item{min-height:34px;}"
-        "QScrollBar:vertical{width:14px;}QScrollBar:horizontal{height:14px;}"));
+    // The app-wide base sheet (sizing, and the selection highlight) lives in AppStyleSheet.h, so a probe can
+    // lay a real widget out under exactly the rules the app runs with (issue #458).
+    app.setStyleSheet(AppStyleSheet::base());
 
     // First-run asset extraction (D2 Task 2). A fresh Android install boots into an empty AppPaths::dataDir()
     // with the stock themes2/ + first-party addons/ only inside the read-only APK, so extract them before
