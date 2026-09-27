@@ -15,6 +15,8 @@
 #include "StoredUrl.h"          // issue #200: a peer on an older build can still send us a signed url
 #include "StoredIdentity.h"     // issue #203: ...and a playlist whose rows still ARE signed urls
 #include "LiveTvIdentity.h"     // issue #203: ...and the Live TV half of the same question
+#include "AddonRoster.h"        // issue #77: the add-on roster's stamped shadow, merged as the `roster` section
+#include "SettingsTxn.h"        // issue #77: a roster merge closes an open settings transaction first
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -22,6 +24,7 @@
 #include <QJsonArray>
 #include <QHash>
 #include <QSet>
+#include <QVector>
 #include <QStringList>
 #include <algorithm>
 
@@ -1244,6 +1247,82 @@ void mergePresets(const QJsonObject& presets)
     }
 }
 
+// ---- the add-on roster (issue #77): per scope, union by key newest-ts + tombstones --------------------------
+// The remote add-ons and every add-on's on/off flag, as AddonRoster's stamped shadow of the live keys
+// (addon.remote.urls / addon.enabled.<id>). The favourites/presets rule and nothing new: union by key keeping
+// the newest ts (equal ts -> remoteReplaces' order-independent tie-break), mergeTombs for the deletions, and a
+// tombstone at-or-after a record's ts suppressing it — so an add on either device survives, a removal beats
+// every copy stamped at-or-before it, and a strictly-newer re-add beats the removal. The key is the manifest
+// id when known, so two devices that configured the same add-on differently fold to ONE record and the newer
+// URL wins (#80's replace rule, carried across devices); the flag rides in the same record, so one ts decides
+// both. Records are written in KEY order, which is what makes A-merges-B and B-merges-A byte-identical.
+//
+// Local truth first: reconcile() stamps whatever changed in the live keys since the last look (a settings
+// Discard, an older build on this ini) BEFORE the merge compares anything, and the result is projected back
+// onto the live keys at the end. Only the kScope entry is applied — the roster is device-wide on main (see
+// AddonRoster.h); an unknown scope from a later build is ignored rather than guessed at.
+
+void serializeRoster(QJsonObject& roster)
+{
+    AddonRoster::reconcile();                     // an unstamped local edit must not leave undated
+    QJsonArray items;
+    for (const AddonRoster::Record& r : AddonRoster::records()) items.append(AddonRoster::toJson(r));
+    const QJsonArray tombs = tombsToArray(AddonRoster::tombStore());
+    if (items.isEmpty() && tombs.isEmpty()) return;
+    QJsonObject so;
+    so.insert(QStringLiteral("items"), items);
+    so.insert(QStringLiteral("tombs"), tombs);
+    roster.insert(QLatin1String(AddonRoster::kScope), so);
+}
+
+void mergeRoster(const QJsonObject& roster)
+{
+    const QJsonObject so = roster.value(QLatin1String(AddonRoster::kScope)).toObject();
+    if (so.isEmpty()) return;
+    // ORDERING (#77): not before this process's bundled-add-on migrations have run. The section is not lost —
+    // the whole document is pulled again at the next merge.
+    if (!AddonRoster::migrationsRun()) return;
+
+    AddonRoster::reconcile();
+
+    QHash<QString, QJsonObject> byKey;
+    auto ingest = [&](const QJsonArray& arr) {
+        for (const QJsonValue& v : arr)
+        {
+            // Rebuilt through fromJson/toJson so both sides compare in the one canonical shape (unknown fields
+            // from a later build dropped, the url normalised) and the tie-break sees content, not spelling.
+            const AddonRoster::Record r = AddonRoster::fromJson(v.toObject());
+            if (r.key.isEmpty()) continue;
+            const QJsonObject o = AddonRoster::toJson(r);
+            if (!byKey.contains(r.key)) { byKey.insert(r.key, o); continue; }
+            if (remoteReplaces(r.ts, static_cast<qint64>(byKey[r.key].value(QStringLiteral("ts")).toDouble()),
+                               o, byKey[r.key]))
+                byKey.insert(r.key, o);
+        }
+    };
+    QJsonArray local;
+    for (const AddonRoster::Record& r : AddonRoster::records()) local.append(AddonRoster::toJson(r));
+    ingest(local);
+    ingest(so.value(QStringLiteral("items")).toArray());
+
+    const QHash<QString, qint64> tombs = mergeTombs(AddonRoster::tombStore(), so.value(QStringLiteral("tombs")).toArray());
+
+    QVector<AddonRoster::Record> out;
+    for (auto it = byKey.begin(); it != byKey.end(); ++it)
+    {
+        const AddonRoster::Record r = AddonRoster::fromJson(it.value());
+        if (tombs.contains(r.key) && tombs.value(r.key) >= r.ts) continue; // a REAL tombstone beats an older/equal copy; "no tombstone" is an ABSENT key, so a ts-0 record is swept only by a real removal
+        out.push_back(r);
+    }
+    AddonRoster::saveRecords(out);                // key order: A-merges-B == B-merges-A, byte for byte
+
+    // The live keys are settings rows (a Discard can revert them). A merge landing mid-visit must not leave
+    // the peer's roster in a transaction the user can throw away — a Discard would turn it into a removal on
+    // the next reconcile — so close the transaction first, exactly as CloudSync::applySettingsJson does.
+    if (AddonRoster::project(/*dryRun*/ true) && SettingsTxn::active()) SettingsTxn::commit();
+    AddonRoster::project();
+}
+
 // ---- personal TV channels (per profile, id-stable, tombstoned deletes) --------------------------------------
 // A channel (issue #179) is a handful of small fields — a source, an ordering, a start epoch, a break grid —
 // and the timeline is
@@ -1725,7 +1804,7 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, highlights, vocabulary, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels;
+    QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, highlights, vocabulary, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels, roster;
     serializeResumeRecent(resume, recent);
     serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
@@ -1746,6 +1825,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializeLyricOffset(lyricoffset);                           // per-item lyric offset memory (issue #142)
     serializeTrackerLink(trackerlink);                           // per-item tracker links (issue #156)
     serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
+    serializeRoster(roster);                                     // issue #77: the add-on roster
     serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
     root.insert(QStringLiteral("resume"), resume);
@@ -1776,6 +1856,7 @@ void CloudMerge::serializeAll(QJsonObject& root)
     root.insert(QStringLiteral("lyricoffset"), lyricoffset);     // issue #142 — a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("trackerlink"), trackerlink);     // issue #156 - a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("missed"), missed);
+    root.insert(QStringLiteral("roster"), roster);               // issue #77 - a new root key; old builds ignore it (mergeAll reads by name)
     root.insert(QStringLiteral("stats"), stats);
     root.insert(QStringLiteral("playstats"), playstats);
 }
@@ -1804,6 +1885,7 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeLyricOffset(root.value(QStringLiteral("lyricoffset")).toObject()); // issue #142: per-item lyric offset
     mergeTrackerLink(root.value(QStringLiteral("trackerlink")).toObject()); // issue #156: per-item tracker links
     mergeMissed(root.value(QStringLiteral("missed")).toObject());
+    mergeRoster(root.value(QStringLiteral("roster")).toObject());           // issue #77: the add-on roster
     const QString localDevice = Settings::deviceId();
     mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
     mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);

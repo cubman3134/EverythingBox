@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.332 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.333 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -906,6 +906,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ControllerWrite.h                                      # the per-emulator "manage controllers" switch + the ONE object every controller-config write goes through (issue #104, header-only)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/IptvSourceStore.cpp src/core/IptvSourceStore.h  # per-profile Live TV sources (#75 inc 2)
@@ -1454,6 +1455,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp       src/core/Tombstones.h
         src/core/ProfileStore.cpp     src/core/ProfileStore.h
         src/core/CloudSync.cpp        src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
         src/core/SyncBackend.h
@@ -2021,6 +2023,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/AudioOutput.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
         src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -2045,6 +2049,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/video/AudioOutput.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
         src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h   # Increment B: Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                      # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -2278,6 +2284,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
         src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h
         src/core/SyncBackend.h
@@ -2404,6 +2412,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # linked here) and AUTOMOC handles its QObject, so this costs the target nothing but one TU.
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
         # issue #136: the per-book HIGHLIGHT store. Section 24d-2 drives the REAL store rather than raw ini
         # rows, because what it pins is that the store and the merge agree on the key AND on the id - which a
         # hand-built fixture would paper over. QtCore-only, and every dependency it has (Tombstones,
@@ -2484,6 +2493,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_onboarding tools/probe_onboarding.cpp
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h      # Increment B: the Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                         # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -2906,6 +2917,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp      src/core/BrandMigration.h
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h      # Increment B: Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                         # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -3623,6 +3635,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SaveMeta.cpp     src/core/SaveMeta.h
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
         src/core/DriveSyncBackend.cpp src/core/DriveSyncBackend.h  # Increment B: Drive transport behind the SyncBackend seam
         src/core/ServerSyncBackend.cpp src/core/ServerSyncBackend.h # Increment C: self-hosted server transport behind the SyncBackend seam
         src/core/SyncBackend.h                                     # the abstract seam CloudSync composes (Q_OBJECT for AUTOMOC)
@@ -4247,6 +4260,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
@@ -4261,6 +4276,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
@@ -4289,6 +4306,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_showdispatch tools/probe_showdispatch.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
@@ -4307,6 +4326,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_docbridge tools/probe_docbridge.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/BrandMigration.cpp src/core/BrandMigration.h
         src/addons/StremioTranslate.cpp
         src/core/StreamHeaders.cpp
@@ -4326,6 +4347,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_chapters tools/probe_chapters.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/AddonRoster.cpp     src/core/AddonRoster.h        # issue #77: the add-on roster's stamped shadow (CloudSync/CloudMerge/AddonManager)
+        src/core/Tombstones.cpp      src/core/Tombstones.h         # issue #77: AddonRoster tombstones a removed add-on
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # AddonManager judges a doc-bridge result's title with it
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator

@@ -156,6 +156,17 @@ inline constexpr const char* const kPrefixes[] = {
     // document owns it alone: the union survives, and one row drag stops flipping the stateHash and
     // re-uploading the whole zip. probe_cloudmerge section 41 drives both arrival orders.
     "homerows/",
+    // The ADD-ON ROSTER's stamped shadow (issue #77): one record per add-on {key, url, enabled, ts} under
+    // "roster/<scope>/items", merged by the CloudMerge `roster` section with favourites' rule. It is the ONLY
+    // sync authority for the roster, so it must not also ride the heavy bundle (the bundle would write it raw,
+    // bypassing the tombstones that keep a removed add-on removed). Out of the settings transaction on purpose:
+    // the LIVE keys it shadows (addon.remote.urls / addon.enabled.*) stay IN scope and discardable, and a
+    // Discard that reverted them is then read by AddonRoster::reconcile as the edit it is — if this shadow
+    // were rolled back with them, the Discard would leave no trace for reconcile to stamp and a peer that had
+    // already pulled the discarded change would hand it straight back. Those live keys are carved out of the
+    // bundle separately (CloudSync, AddonRoster::isLiveKey), not here: this table also decides transaction
+    // scope, and they are settings rows.
+    "roster/",
 };
 
 inline constexpr int kPrefixCount = int(sizeof(kPrefixes) / sizeof(kPrefixes[0]));

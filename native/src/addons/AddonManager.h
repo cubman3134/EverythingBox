@@ -411,6 +411,11 @@ public:
     bool isEnabled(const QString& id) const;
     void setEnabled(const QString& id, bool enabled);
 
+    // Issue #77: a cloud merge has just projected a peer's add-on roster onto the live keys. Reloads if the
+    // remote set changed, fetches the manifest of any synced add-on this device has never cached, and emits
+    // sourceEnabledChanged for every flag the merge flipped. Touches no roster stamp: nothing here is an edit.
+    void applyMergedRoster();
+
     // A local script addon (other than `exclude`) that has a catalog of `type` and can supply metadata for an
     // IMDB id - used to enrich a movie/episode whose own source addon returns no /meta (e.g. Allarr via AIO).
     LoadedAddon* metaProviderFor(LoadedAddon* exclude, const QString& type) const;
@@ -435,6 +440,8 @@ signals:
     void remoteSourceResult(bool ok, const QString& message); // outcome of addRemoteSource()
 
 private:
+    void snapshotEnabled();                     // #77: the flags applyMergedRoster diffs against
+    QHash<QString, bool> enabledSeen_;          // #77: installed id -> flag as last announced
     void loadFolder(const QString& dir);
     void loadRemoteSources();                   // build RemoteHttp addons from the persisted URL list
     void seedDefaultStremioSources();           // add Cinemeta on first run so movie/series catalogs work

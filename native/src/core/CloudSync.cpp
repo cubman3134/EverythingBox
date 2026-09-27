@@ -11,6 +11,7 @@
 #include "Scrobble.h"        // isDeviceLocalKey() - the #192 token/queue families, device-local
 #include "PlayOnDevice.h"   // isDeviceLocalKey() - the #143 per-peer pairing tokens, device-local
 #include "Tracker.h"         // isDeviceLocalKey()/linkKeyPrefix() - #156 straddles the carve-out both ways
+#include "AddonRoster.h"     // issue #77: the roster's live keys leave the bundle; an old peer's snapshot is adopted
 #include "PerItemStores.h"   // #332: THE per-item-store prefix table, shared with SettingsTxn::inScope
 #include <QSet>
 #include <QSettings>
@@ -436,9 +437,14 @@ QByteArray CloudSync::buildSettingsJson()
     // per-item tick (a mark/favorite/playlist/stats accrual) flip the stateHash fingerprint and re-upload the
     // whole zip. Excluding them here (and in stateHash) keeps the heavy bundle quiet on per-item churn while the
     // lightweight merge doc still pushes on its own 15s debounce.
+    //
+    // The add-on roster's LIVE keys (addon.remote.urls / addon.enabled.*) are out too (issue #77): the merge
+    // document's `roster` section is their one sync authority, and a last-writer-wins copy of them here is
+    // exactly how a late push used to erase a subscription another device had just added.
     QJsonObject so;
     for (const QString& k : store().allKeys())
-        if (!isDeviceLocalKey(k) && !isPerItemStoreKey(k)) so.insert(k, store().value(k).toString());
+        if (!isDeviceLocalKey(k) && !isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k))
+            so.insert(k, store().value(k).toString());
     return QJsonDocument(so).toJson(QJsonDocument::Compact);
 }
 
@@ -451,15 +457,33 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
     if (SettingsTxn::active()) SettingsTxn::commit();
 
     const QJsonObject so = QJsonDocument::fromJson(settingsJson).object();
+    QString legacyUrls;                    // issue #77: an OLDER peer's roster snapshot, adopted below
+    QHash<QString, bool> legacyFlags;
+    bool legacyRoster = false;
     for (auto it = so.begin(); it != so.end(); ++it)
     {
         const QString& k = it.key();
         // Inbound carve-out: never overwrite a device-local key, and never write a per-item store key (the
         // merge document owns those — writing them here would clobber this device's live/merged state).
         if (isDeviceLocalKey(k) || isPerItemStoreKey(k)) continue;
+        // The roster's live keys are never written raw either (#77). Only a peer on a build before #77 still
+        // sends them; its snapshot is kept aside and ADOPTED after the loop — so its manifest caches, which
+        // do still ride the bundle, are already in place to key the entries by manifest id.
+        if (AddonRoster::isLiveKey(k))
+        {
+            legacyRoster = true;
+            if (k == QLatin1String("addon.remote.urls")) legacyUrls = it.value().toString();
+            else legacyFlags.insert(k.mid(int(strlen("addon.enabled."))),
+                                    QVariant(it.value().toString()).toBool());
+            continue;
+        }
         store().setValue(k, it.value().toString());
     }
     store().sync();
+    // As ADDS, at ts 0, never over a local tombstone, never as a removal: the snapshot carries no dates, so the
+    // union is the most it can honestly say. What it cannot say — that the old peer REMOVED something — waits
+    // for that peer to upgrade and send a dated tombstone through the merge document.
+    if (legacyRoster) AddonRoster::adoptLegacySnapshot(legacyUrls, legacyFlags);
 }
 
 static QByteArray buildBundle()
@@ -552,7 +576,8 @@ static QByteArray stateHash()
     // re-upload the heavy bundle. Keeping them out means per-item churn is served solely by the merge doc's
     // own push cadence; the bundle only re-uploads when a genuinely bundle-synced setting or file changes.
     for (const QString& k : store().allKeys())
-        if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k)) keys << k;
+        if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k))
+            keys << k;   // #77: the roster's live keys are the merge document's, so they are out here too
     keys.sort();
     for (const QString& k : keys)
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
