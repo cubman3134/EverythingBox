@@ -88,6 +88,7 @@ signals:
 
 private slots:
     void onAboutToSynthesize(qsizetype id);
+    void onSayingWord(const QString& word, qsizetype id, qsizetype start, qsizetype length);
     void onStateChanged(QTextToSpeech::State s);
 
 private:
@@ -135,6 +136,10 @@ private:
     double  baseVolume_     = -1.0;   // the engine's volume before any fade; <0 = no fade applied
     double  appliedGain_    = 1.0;
     int     shownMinutes_   = -2;     // the minutes-left the controls last showed, so a tick re-labels only on change
+    // The last word the engine said while a timer is armed, and where it ended in its utterance: what the log
+    // names when the timer fires, so a stop can be SEEN to have come after the utterance's last word.
+    QString lastWord_;
+    int     lastWordEnd_    = -1;
 
     static constexpr int kLookahead = 2;   // paragraphs kept in the engine's queue ahead of the spoken one
 };

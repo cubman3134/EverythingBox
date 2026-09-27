@@ -48,6 +48,7 @@ ReadAloudController::ReadAloudController(ReadAloudTarget* target, QObject* paren
     sleepTick_ = new QTimer(this);
     sleepTick_->setInterval(250);
     connect(sleepTick_, &QTimer::timeout, this, &ReadAloudController::onSleepTick);
+    connect(tts_, &QTextToSpeech::sayingWord, this, &ReadAloudController::onSayingWord);
 }
 
 // ---- Voices ------------------------------------------------------------------------------------------------
@@ -214,7 +215,12 @@ void ReadAloudController::togglePause()
     if (!active_) return;
     if (paused_) { tts_->resume(); paused_ = false; }
     else         { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
-    notifyChanged();
+    notifyChanged();   // re-asserts the sleep clock: stopped while paused, running again on resume (#145)
+    if (sleep_.armed())
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: narration %1 at %2 s narrated")
+                                 .arg(paused_ ? QStringLiteral("paused - the clock stops")
+                                              : QStringLiteral("resumed - the clock runs"))
+                                 .arg(sleep_.narrated(nowSec()), 0, 'f', 3);
 }
 
 // Paragraph back / forward — the reader's twin of #140's jump controls, at the granularity narration actually
@@ -363,6 +369,8 @@ bool ReadAloudController::armSleep(const SleepTimer::Timer& t)
         return false;
     }
     utterStarted_ = 0.0;
+    lastWord_.clear();
+    lastWordEnd_ = -1;
     shownMinutes_ = -2;
     applySleepVolume(1.0);   // a re-arm lifts a fade the old timer had applied
     sleepTick_->start();
@@ -399,11 +407,17 @@ bool ReadAloudController::sleepStopAtBoundary(int nextChapter)
     if (!sleep_.armed()) return false;
     const double now = nowSec();
     if (!sleep_.stopAtBoundary(now, nextChapter)) return false;
-    qInfo().noquote() << QStringLiteral("readaloud.sleep: fired at an utterance boundary (%1, %2 s narrated, next chapter %3)")
+    // `current_` is still the utterance that has just finished (the boundary is asked before it moves on).
+    const int spokenLen = (current_ >= 0 && current_ < utts_.size()) ? int(utts_[current_].text.size()) : -1;
+    qInfo().noquote() << QStringLiteral("readaloud.sleep: fired at an utterance boundary (%1, %2 s narrated, next chapter %3); "
+                                        "last word heard '%4', ending at character %5 of the %6-character utterance")
                              .arg(sleep_.mode() == SleepTimer::Mode::EndOfChapter ? QStringLiteral("end of chapter")
                                                                                   : QStringLiteral("minutes"))
                              .arg(sleep_.narrated(now), 0, 'f', 3)
-                             .arg(nextChapter);
+                             .arg(nextChapter)
+                             .arg(lastWord_)
+                             .arg(lastWordEnd_)
+                             .arg(spokenLen);
     stop();                 // the existing contract: the reader stays where narration reached, position saved
     // One more purge on the next turn. When this boundary was an ENQUEUE onto an idle engine (a restart - skip,
     // voice, speed), Qt emits aboutToSynthesize and then calls the engine's say() regardless of what the slot
@@ -414,6 +428,14 @@ bool ReadAloudController::sleepStopAtBoundary(int nextChapter)
     }, Qt::QueuedConnection);
     emit sleepStopped();
     return true;
+}
+
+// Only while a timer is armed, and only to name the last word heard when it fires (see sleepStopAtBoundary).
+void ReadAloudController::onSayingWord(const QString& word, qsizetype, qsizetype start, qsizetype length)
+{
+    if (!sleep_.armed()) return;
+    lastWord_    = word;
+    lastWordEnd_ = int(start + length);
 }
 
 void ReadAloudController::syncSleepClock()
@@ -459,8 +481,13 @@ void ReadAloudController::applySleepVolume(double gain)
         return;
     }
     if (baseVolume_ < 0.0) baseVolume_ = tts_->volume();
-    if (std::abs(gain - appliedGain_) < 0.01) return;
+    const bool atFloor = gain <= ReadAloud::kSleepFadeFloor + 1e-9;
+    if (std::abs(gain - appliedGain_) < 0.01 && !(atFloor && appliedGain_ > gain)) return;
+    // Logged as it passes each quarter, and once at the floor - enough to read the ramp without a line a tick.
+    const bool mark = int(gain * 4.0) != int(appliedGain_ * 4.0) || atFloor;
     appliedGain_ = gain;
     tts_->setVolume(baseVolume_ * gain);
-    qInfo().noquote() << QStringLiteral("readaloud.sleep: fade gain %1").arg(gain, 0, 'f', 2);
+    if (mark)
+        qInfo().noquote() << QStringLiteral("readaloud.sleep: fade gain %1 (engine volume %2 of %3)")
+                                 .arg(gain, 0, 'f', 2).arg(tts_->volume(), 0, 'f', 2).arg(baseVolume_, 0, 'f', 2);
 }
