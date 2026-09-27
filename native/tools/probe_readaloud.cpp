@@ -20,6 +20,10 @@
 //      round-trip for every utterance in a plan.
 //   5. the feature-absent build — the book's settings row is the historical 5 controls without the module.
 //   6. speed — the shared #140 presets, stepping, and the speed -> engine-rate map.
+//   8. the sleep timer on narration (#145, over #140's SleepTimer) - a FAKE clock throughout: minutes are minutes
+//      of narration (a pause does not count), End of chapter fires at the spine boundary and not before, a
+//      minute expiry mid-utterance waits for the utterance to end, the fade schedule (down to a floor, never
+//      silence, while the last utterance finishes), both lifetime edges disarm, and Off does nothing.
 //   7. voice choice (#137 / #283) — ReadAloud::chooseVoices over an INJECTED voice list (the runner has no
 //      voices): a book's declared language offers only its voices, regional variants included; no matching
 //      voice, or no preference, offers ALL voices (today's rule, pinned as-is); the stored pick is restored by
@@ -27,6 +31,7 @@
 //
 // Prints READALOUD-OK on success; any failure prints READALOUD-FAIL <cond> (line) and exits non-zero.
 #include "ReadAloud.h"
+#include "ReadAloudSleep.h"
 
 #include <QCoreApplication>
 #include <QByteArray>
@@ -318,10 +323,11 @@ static void testFeatureAbsentRow()
 {
     // Without the TextToSpeech module the reader's control row is the five it has always had — Exit, font -,
     // font +, theme, typeface — so nothing is drawn that cannot act and the nav cursor cannot stop on a control
-    // that is not there. With the module it gains exactly four: speak/stop, pause/resume, speed, voice.
+    // that is not there. With the module it gains exactly five: speak/stop, pause/resume, speed, voice and the
+    // sleep timer (#145).
     CHECK(ReadAloud::bookSettingsRowCount(false) == 5);
-    CHECK(ReadAloud::bookSettingsRowCount(true) == 9);
-    CHECK(ReadAloud::bookSettingsRowCount(true) - ReadAloud::bookSettingsRowCount(false) == 4);
+    CHECK(ReadAloud::bookSettingsRowCount(true) == 10);
+    CHECK(ReadAloud::bookSettingsRowCount(true) - ReadAloud::bookSettingsRowCount(false) == 5);
 }
 
 // ---- 6. Speed (the shared #140 preference) ------------------------------------------------------------------
@@ -459,6 +465,194 @@ static void testVoiceChoice()
     CHECK(c.selected == 0);
 }
 
+// ---- 8. The sleep timer on narration (#145) ------------------------------------------------------------------
+// Every time below is a literal on a FAKE clock: seconds on whatever monotonic clock the controller keeps.
+
+static bool near(double a, double b) { return a - b < 1e-9 && b - a < 1e-9; }
+
+static SleepTimer::Timer minutesTimer(double m)
+{
+    SleepTimer::Timer t;
+    t.mode = SleepTimer::Mode::Minutes;
+    t.minutes = m;
+    return t;
+}
+static SleepTimer::Timer chapterTimer()
+{
+    SleepTimer::Timer t;
+    t.mode = SleepTimer::Mode::EndOfChapter;
+    return t;
+}
+static SleepTimer::Timer offTimer() { return SleepTimer::Timer(); }
+
+static void testSleepMinutesExcludePause()
+{
+    ReadAloud::SleepSession s;
+    CHECK(s.arm(minutesTimer(1), 100.0, 3, /*paused*/ false));
+    CHECK(s.armed());
+    CHECK(s.mode() == SleepTimer::Mode::Minutes);
+
+    // Twenty seconds in, narration is paused for twenty seconds of wall time.
+    s.pause(120.0);
+    s.pause(125.0);                       // re-asserting a pause changes nothing
+    CHECK(near(s.narrated(130.0), 20.0)); // the clock stood still while paused
+    s.resume(140.0);
+    s.resume(141.0);                      // nor does re-asserting a resume
+    CHECK(near(s.narrated(150.0), 30.0));
+
+    // Sixty wall-seconds after arming it has narrated only forty: not due, and no boundary stops it.
+    CHECK(!s.due(160.0));
+    CHECK(!s.stopAtBoundary(160.0, 3));
+    // One narrated minute is wall-time 180 (60 + the 20 paused). Just before: not yet.
+    CHECK(!s.due(179.9));
+    CHECK(!s.stopAtBoundary(179.9, 3));
+    CHECK(s.due(180.0));
+    CHECK(s.stopAtBoundary(180.0, 3));    // a boundary in the SAME chapter stops it once the minutes are up
+    CHECK(near(s.secondsLeft(170.0, -1.0), 10.0));
+    CHECK(near(s.secondsLeft(200.0, -1.0), 0.0));
+
+    // Armed while paused: the clock starts stopped, and only narration moves it.
+    ReadAloud::SleepSession p;
+    CHECK(p.arm(minutesTimer(1), 0.0, 0, /*paused*/ true));
+    CHECK(near(p.narrated(1000.0), 0.0));
+    CHECK(!p.due(1000.0));
+    p.resume(1000.0);
+    CHECK(!p.due(1059.0));
+    CHECK(p.due(1060.0));
+}
+
+static void testSleepEndOfChapterAtTheBoundary()
+{
+    ReadAloud::SleepSession s;
+    CHECK(s.arm(chapterTimer(), 0.0, 4, false));
+    CHECK(s.mode() == SleepTimer::Mode::EndOfChapter);
+    // Every boundary INSIDE chapter 4 carries on, however long the chapter runs.
+    CHECK(!s.stopAtBoundary(0.0, 4));
+    CHECK(!s.stopAtBoundary(30.0, 4));
+    CHECK(!s.stopAtBoundary(36000.0, 4));
+    // End of chapter is decided at the boundary alone; time never makes it due.
+    CHECK(!s.due(36000.0));
+    // Crossing into the next spine item is where it stops - at the start of the next chapter.
+    CHECK(s.stopAtBoundary(40.0, 5));
+    // A pause mid-chapter does not change the rule.
+    s.pause(50.0);
+    s.resume(60.0);
+    CHECK(!s.stopAtBoundary(70.0, 4));
+    CHECK(s.stopAtBoundary(70.0, 5));
+}
+
+// The controller asks only at utterance boundaries. Given the moments the utterances END, the first boundary at
+// which it stops - or -1 when none does.
+static double firstStop(const ReadAloud::SleepSession& s, const QVector<double>& ends, int chapter)
+{
+    for (double t : ends)
+        if (s.stopAtBoundary(t, chapter)) return t;
+    return -1.0;
+}
+
+static void testSleepExpiryWaitsForTheUtterance()
+{
+    ReadAloud::SleepSession s;
+    CHECK(s.arm(minutesTimer(1), 0.0, 2, false));
+    // Utterances end at 25, 50, 70 and 95: the one being spoken at the 60 s expiry runs 50..70.
+    const QVector<double> ends = { 25.0, 50.0, 70.0, 95.0 };
+    CHECK(s.due(60.0));                       // the minutes are up mid-utterance...
+    CHECK(near(firstStop(s, ends, 2), 70.0)); // ...and it stops when THAT utterance ends: not before, not later
+    // Still audible while it finishes: the fade bottoms out at the floor, not at silence.
+    CHECK(s.gain(65.0, -1.0) > 0.0);
+    CHECK(near(s.gain(65.0, -1.0), ReadAloud::kSleepFadeFloor));
+}
+
+static void testSleepFadeSchedule()
+{
+    CHECK(near(ReadAloud::kSleepFadeWindowSec, 10.0));
+    CHECK(near(ReadAloud::kSleepFadeFloor, 0.25));
+
+    ReadAloud::SleepSession s;
+    CHECK(s.arm(minutesTimer(1), 0.0, 0, false));
+    CHECK(near(s.gain(0.0, -1.0), 1.0));
+    CHECK(near(s.gain(49.9, -1.0), 1.0));    // more than the window left: full volume
+    CHECK(near(s.gain(50.0, -1.0), 1.0));    // the window's edge
+    CHECK(near(s.gain(55.0, -1.0), 0.625));  // halfway: 0.25 + 0.75 * 0.5
+    CHECK(near(s.gain(57.5, -1.0), 0.4375)); // a quarter left: 0.25 + 0.75 * 0.25
+    CHECK(near(s.gain(60.0, -1.0), 0.25));   // expiry: the floor
+    CHECK(near(s.gain(75.0, -1.0), 0.25));   // and held there until the boundary stops it
+    // A pause inside the window holds the fade where it was.
+    s.pause(55.0);
+    CHECK(near(s.gain(500.0, -1.0), 0.625));
+
+    // End of chapter fades on the caller's estimate of the seconds left; unknown (<0) means no fade.
+    ReadAloud::SleepSession c;
+    CHECK(c.arm(chapterTimer(), 0.0, 1, false));
+    CHECK(near(c.gain(0.0, 20.0), 1.0));
+    CHECK(near(c.gain(0.0, 5.0), 0.625));
+    CHECK(near(c.gain(0.0, 0.0), 0.25));
+    CHECK(near(c.gain(0.0, -1.0), 1.0));
+
+    // The estimate: 15 characters a second at 1x, faster with the speed, and never negative.
+    CHECK(near(ReadAloud::estimateSpeakingSeconds(150, 1.0), 10.0));
+    CHECK(near(ReadAloud::estimateSpeakingSeconds(150, 2.0), 5.0));
+    CHECK(near(ReadAloud::estimateSpeakingSeconds(150, 0.0), 10.0));   // a nonsense speed reads as 1x
+    CHECK(near(ReadAloud::estimateSpeakingSeconds(0, 1.0), 0.0));
+    QVector<ReadAloud::Utterance> plan;
+    plan.append(ReadAloud::Utterance{ 0, 30, QString(30, QLatin1Char('a')) });
+    plan.append(ReadAloud::Utterance{ 31, 91, QString(60, QLatin1Char('b')) });
+    plan.append(ReadAloud::Utterance{ 92, 182, QString(90, QLatin1Char('c')) });
+    CHECK(near(ReadAloud::chapterSecondsLeft(plan, 1, 2.0, 1.0), 8.0));   // (60 + 90) / 15 - 2
+    CHECK(near(ReadAloud::chapterSecondsLeft(plan, -1, 0.0, 1.0), 12.0)); // nothing spoken yet: all 180
+    CHECK(near(ReadAloud::chapterSecondsLeft(plan, 2, 99.0, 1.0), 0.0));  // clamped, never negative
+}
+
+static void testSleepDisarms()
+{
+    // The user's own Stop.
+    ReadAloud::SleepSession s;
+    CHECK(s.arm(minutesTimer(1), 0.0, 0, false));
+    s.narrationStopped();
+    CHECK(!s.armed());
+    CHECK(s.mode() == SleepTimer::Mode::Off);
+    CHECK(!s.due(1000.0));
+    CHECK(!s.stopAtBoundary(1000.0, 9));
+    CHECK(near(s.gain(1000.0, 0.0), 1.0));
+    s.resume(1000.0);                     // narration starting again does not bring the timer back
+    CHECK(!s.armed());
+    CHECK(!s.due(5000.0));
+
+    // Leaving the book.
+    ReadAloud::SleepSession b;
+    CHECK(b.arm(chapterTimer(), 0.0, 3, false));
+    b.bookLeft();
+    CHECK(!b.armed());
+    CHECK(!b.stopAtBoundary(10.0, 4));
+
+    // Re-arming is a fresh session: its minutes count from the new arm, not the old one.
+    ReadAloud::SleepSession r;
+    CHECK(r.arm(minutesTimer(1), 0.0, 0, false));
+    CHECK(r.arm(minutesTimer(1), 50.0, 0, false));
+    CHECK(!r.due(100.0));
+    CHECK(r.due(110.0));
+}
+
+static void testSleepOffDoesNothing()
+{
+    ReadAloud::SleepSession s;
+    CHECK(!s.arm(offTimer(), 0.0, 0, false));
+    CHECK(!s.armed());
+    CHECK(!s.due(36000.0));
+    CHECK(!s.stopAtBoundary(36000.0, 0));
+    CHECK(!s.stopAtBoundary(36000.0, 1));   // not even across a chapter
+    CHECK(near(s.gain(36000.0, 0.0), 1.0));
+    CHECK(near(s.secondsLeft(36000.0, 5.0), -1.0));
+    // A zero-minute Custom is not a timer either.
+    CHECK(!s.arm(minutesTimer(0), 0.0, 0, false));
+    CHECK(!s.armed());
+    // Off from the menu over an armed timer turns it off.
+    CHECK(s.arm(minutesTimer(15), 0.0, 0, false));
+    CHECK(!s.arm(offTimer(), 1.0, 0, false));
+    CHECK(!s.armed());
+    CHECK(!s.stopAtBoundary(99999.0, 1));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -473,6 +667,12 @@ int main(int argc, char** argv)
     testSpeed();
     testFeatureAbsentRow();
     testVoiceChoice();
+    testSleepMinutesExcludePause();
+    testSleepEndOfChapterAtTheBoundary();
+    testSleepExpiryWaitsForTheUtterance();
+    testSleepFadeSchedule();
+    testSleepDisarms();
+    testSleepOffDoesNothing();
     if (failures == 0) std::printf("READALOUD-OK\n");
     return failures == 0 ? 0 : 1;
 }

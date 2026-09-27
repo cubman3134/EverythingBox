@@ -16,6 +16,13 @@
 // treats "stop in 30 minutes" as 30 minutes of the position clock, which is 30 wall-minutes at 1x. A negative
 // return means "never / not armed" — Off, a non-positive minute count, or an end-of-chapter whose computed end
 // is already at or behind the current position (nothing left to fire on).
+//
+// ANY CLOCK (issue #145). The player's time base is the playback position, and a narrator has none: read-aloud
+// has spine indices for chapters and a clock that must not count while narration is paused. Rather than a
+// second timer, the bottom of this file generalises the same one: RunClock is an injected-"now" clock that
+// only runs while told to, and fired() asks the SAME question expiryTime answers (minutes via expiryTime
+// itself) with the chapter half handed in as the caller's own predicate. The player keeps calling the three
+// functions above exactly as before.
 #pragma once
 #include "../core/MediaSegments.h"
 #include <QVector>
@@ -29,6 +36,10 @@ namespace SleepTimer
         Mode   mode    = Mode::Off;
         double minutes = 0.0;   // used by Mode::Minutes only (a preset or the custom count)
     };
+
+    // The minute presets every sleep-timer menu offers — the player's transport menu and read-aloud's (#145)
+    // read this one list, so the two menus cannot drift into offering different numbers.
+    inline constexpr int kPresetMinutes[] = { 15, 30, 45, 60, 90, 120 };
 
     // The absolute playback-second at which the timer fires, or a negative sentinel for "never / not armed".
     // `chapters` and `duration` are consulted only by Mode::EndOfChapter; a minute timer ignores them.
@@ -83,5 +94,51 @@ namespace SleepTimer
     {
         const double p = posOnExpiry - nudgeSec;
         return p > 0.0 ? p : 0.0;
+    }
+
+    // ---- Any clock (issue #145) ---------------------------------------------------------------------------
+
+    // A clock that counts only while it is running. `now` is injected — any monotonic seconds the caller keeps
+    // (the app passes a QElapsedTimer; a probe passes literals) — so "the clock does not count while narration
+    // is paused" is two calls, and a test of it needs no sleep. start/stop are idempotent: starting a running
+    // clock or stopping a stopped one changes nothing, so a caller may simply re-assert the state it wants.
+    struct RunClock
+    {
+        double banked = 0.0;    // seconds counted in runs that have already stopped
+        double since  = -1.0;   // `now` the current run began at, or <0 while stopped
+
+        bool   running() const { return since >= 0.0; }
+        void   start(double now) { if (!running()) since = now; }
+        void   stop(double now)
+        {
+            if (!running()) return;
+            if (now > since) banked += now - since;   // a clock that went backwards adds nothing, never subtracts
+            since = -1.0;
+        }
+        double elapsed(double now) const
+        {
+            return banked + ((running() && now > since) ? now - since : 0.0);
+        }
+    };
+
+    // Has an armed timer fired, on ANY clock? `armedAt` and `now` are seconds on the caller's clock (the playback
+    // position, or a RunClock's elapsed()); `chapterEnded` is the caller's own chapter-end predicate evaluated at
+    // `now` — a player would derive it from expiryTime's chapter list, a narrator from its spine index. Minutes
+    // are expiryTime's arithmetic, not a copy of it: fired exactly when `now` reaches the expiry it reports.
+    inline bool fired(const Timer& t, double armedAt, double now, bool chapterEnded)
+    {
+        switch (t.mode)
+        {
+            case Mode::Off:
+                return false;
+            case Mode::Minutes:
+            {
+                const double e = expiryTime(t, armedAt, {}, 0.0);
+                return e >= 0.0 && now >= e;
+            }
+            case Mode::EndOfChapter:
+                return chapterEnded;
+        }
+        return false;
     }
 }

@@ -10,6 +10,9 @@
 //       - fadeGain is 1 outside the window, ramps linearly 1->0 across it, is 0 at/after expiry, and a
 //         non-positive window disables the fade.
 //       - resumeNudgeBack steps back by the nudge and clamps at 0 (never a negative seek).
+//       - ANY CLOCK (#145): the shared preset list; RunClock counts only while running (idempotent start/stop,
+//         a backwards clock adds nothing); fired() is expiryTime's minutes on any clock and the caller's own
+//         chapter-end predicate for End of chapter, and Off never fires.
 //   * PER-ITEM SPEED (src/core/SpeedStore, mutation-tested resolve + a store round-trip):
 //       - speedForItem: an explicit per-item speed wins for any content; else the global default; MUSIC is
 //         forced to 1x unless a per-item speed was stored; a non-positive global default falls back to 1x.
@@ -34,6 +37,7 @@
 #include <QVector>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -142,6 +146,38 @@ int main(int argc, char** argv)
         CHECK(near(ST::resumeNudgeBack(0.0), 0.0));
         // Exactly at the nudge distance -> 0, not a tiny negative.
         CHECK(near(ST::resumeNudgeBack(30.0), 0.0));
+    }
+
+    // ---- 7b. Any clock (#145): the preset list, RunClock, fired() ------------------------------------------
+    {
+        // The one preset list both menus read.
+        const QVector<int> presets(std::begin(ST::kPresetMinutes), std::end(ST::kPresetMinutes));
+        CHECK((presets == QVector<int>{ 15, 30, 45, 60, 90, 120 }));
+
+        ST::RunClock c;
+        CHECK(!c.running());
+        CHECK(near(c.elapsed(50.0), 0.0));
+        c.start(10.0);
+        c.start(20.0);                        // starting a running clock changes nothing
+        CHECK(near(c.elapsed(30.0), 20.0));
+        c.stop(30.0);
+        c.stop(40.0);                         // nor does stopping a stopped one
+        CHECK(near(c.elapsed(100.0), 20.0));  // stopped: the time does not count
+        c.start(100.0);
+        CHECK(near(c.elapsed(105.0), 25.0));
+        CHECK(near(c.elapsed(90.0), 20.0));   // a clock read behind its start adds nothing, never subtracts
+
+        ST::Timer off;
+        CHECK(!ST::fired(off, 0.0, 1e9, true));
+        ST::Timer m; m.mode = ST::Mode::Minutes; m.minutes = 30.0;
+        CHECK(!ST::fired(m, 100.0, 1899.9, false));
+        CHECK(ST::fired(m, 100.0, 1900.0, false));   // exactly expiryTime(m, 100) = 100 + 1800
+        CHECK(!ST::fired(m, 100.0, 1899.9, true));   // a minute timer ignores the chapter predicate
+        ST::Timer z; z.mode = ST::Mode::Minutes; z.minutes = 0.0;
+        CHECK(!ST::fired(z, 0.0, 1e9, false));       // a zero count is never, as in expiryTime
+        ST::Timer e; e.mode = ST::Mode::EndOfChapter;
+        CHECK(!ST::fired(e, 0.0, 1e9, false));       // End of chapter is the predicate, never the clock
+        CHECK(ST::fired(e, 0.0, 0.0, true));
     }
 
     // ---- 8. speedForItem: stored wins for any content; else default; music forced to 1x ------------------

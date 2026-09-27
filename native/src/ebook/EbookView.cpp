@@ -1063,7 +1063,8 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
         raPauseBtn_ = new QPushButton(tr("Pause"), menu_);
         raSpeedBtn_ = new QPushButton(QStringLiteral("1×"), menu_);
         raVoiceBtn_ = new QPushButton(tr("Voice"), menu_);
-        for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_ })
+        raSleepBtn_ = new QPushButton(tr("Sleep timer"), menu_);
+        for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_, raSleepBtn_ })
         {
             b->setFocusPolicy(Qt::NoFocus);   // arrow keys stay with the view, like every other bar button
             bar->addWidget(b);
@@ -1072,6 +1073,11 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
         connect(raPauseBtn_, &QPushButton::clicked, this, &EbookView::readAloudTogglePause);
         connect(raSpeedBtn_, &QPushButton::clicked, this, &EbookView::readAloudCycleSpeed);
         connect(raVoiceBtn_, &QPushButton::clicked, this, &EbookView::readAloudCycleVoice);
+        connect(raSleepBtn_, &QPushButton::clicked, this, &EbookView::readAloudOpenSleepTimer);
+        // The sleep timer ending narration says so (#145): a reader who wakes to silence should find out why.
+        connect(readAloud_, &ReadAloudController::sleepStopped, this, [] {
+            AnnotationExportAction::notice(tr("Stopped reading aloud (sleep timer)"));
+        });
         syncReadAloudButtons();
     }
 #endif
@@ -1089,8 +1095,8 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     overflow->addCollapsible(contents, 80);
     overflow->addCollapsible(selectBtn_, 75);
     overflow->addCollapsible(marksBtn_, 75);
-    for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_ })
-        if (b) overflow->addCollapsible(b, b == raBtn_ ? 60 : (b == raPauseBtn_ ? 50 : 30));
+    for (QPushButton* b : { raBtn_, raPauseBtn_, raSpeedBtn_, raVoiceBtn_, raSleepBtn_ })
+        if (b) overflow->addCollapsible(b, b == raBtn_ ? 60 : (b == raPauseBtn_ ? 50 : (b == raSleepBtn_ ? 40 : 30)));
     overflow->addCollapsible(exportBtn, 10);
 
     menuTimer_ = new QTimer(this);
@@ -1637,6 +1643,122 @@ void EbookView::syncReadAloudButtons()
     raSpeedBtn_->setText(QString::number(readAloud_->speed(), 'g', 3) + QString(QChar(0x00D7)));
     const QString v = readAloud_->voiceNames().value(readAloud_->voiceIndex());
     raVoiceBtn_->setText(v.isEmpty() ? tr("Voice") : v);
+    raSleepBtn_->setText(readAloudSleepLabel());
+    raSleepBtn_->setEnabled(on);   // only narration can be timed (#145)
+#endif
+}
+
+// ---- The sleep timer on narration (issue #145) -------------------------------------------------------------------
+// The #140 player's timer, applied to narration: the same presets (SleepTimer::kPresetMinutes), the same words,
+// plus Custom. ONE menu for both layouts - the classic bar's Sleep button and the themed row's control both land
+// here - built with the nav kit's NavMenu (non-blocking: its choice arrives after it closes, so no nested loop
+// runs inside anybody's signal). The decision itself is ReadAloud::SleepSession, owned by the controller.
+
+QString EbookView::readAloudSleepLabel() const
+{
+#ifdef EB_HAVE_TTS
+    if (readAloud_ && readAloud_->sleepArmed())
+    {
+        if (readAloud_->sleepMode() == SleepTimer::Mode::EndOfChapter) return tr("Sleep: end of chapter");
+        return tr("Sleep: %n min", nullptr, qMax(0, readAloud_->sleepMinutesLeft()));
+    }
+#endif
+    return tr("Sleep timer");
+}
+
+bool EbookView::readAloudSleepArmed() const
+{
+#ifdef EB_HAVE_TTS
+    return readAloud_ && readAloud_->sleepArmed();
+#else
+    return false;
+#endif
+}
+
+void EbookView::readAloudOpenSleepTimer()
+{
+#ifdef EB_HAVE_TTS
+    if (!readAloud_) return;
+    if (!readAloud_->active())
+    {
+        AnnotationExportAction::notice(tr("Start reading aloud first — the sleep timer runs with narration."));
+        return;
+    }
+    // Opened on the next turn of the event loop, never from inside the press that asked for it: the themed row
+    // fires from a QML delegate's signal, and the #28 / #211 rule is that nothing opens a menu under one.
+    QPointer<EbookView> self(this);
+    QTimer::singleShot(0, this, [self] {
+        if (!self || !self->readAloud_ || !self->readAloud_->active()) return;
+        QStringList rows;
+        QVector<std::function<void()>> acts;
+        if (self->readAloud_->sleepArmed())
+        {
+            rows << tr("■  Turn sleep timer off");
+            acts << [self] { if (self) self->armReadAloudSleep(-1, 0.0); };
+        }
+        for (const int mins : SleepTimer::kPresetMinutes)
+        {
+            rows << tr("In %n minute(s)", nullptr, mins);
+            acts << [self, mins] { if (self) self->armReadAloudSleep(0, double(mins)); };
+        }
+        rows << tr("Custom…");
+        acts << [self] {
+            // The Osk after the menu has fully closed, on its own turn (the offerNoteEdit pattern).
+            if (self) QTimer::singleShot(0, self, [self] { if (self) self->promptReadAloudSleepMinutes(); });
+        };
+        rows << tr("At the end of this chapter");
+        acts << [self] { if (self) self->armReadAloudSleep(1, 0.0); };
+        new NavMenu(tr("Sleep timer"), rows, [acts](int row) {
+            if (row >= 0 && row < acts.size()) acts[row]();
+        }, self->window());
+    });
+#endif
+}
+
+void EbookView::armReadAloudSleep(int mode, double minutes)
+{
+#ifdef EB_HAVE_TTS
+    if (!readAloud_) return;
+    if (mode < 0)
+    {
+        readAloud_->disarmSleep();
+        AnnotationExportAction::notice(tr("Sleep timer off."));
+        return;
+    }
+    SleepTimer::Timer t;
+    if (mode == 1) t.mode = SleepTimer::Mode::EndOfChapter;
+    else         { t.mode = SleepTimer::Mode::Minutes; t.minutes = minutes; }
+    if (!readAloud_->armSleep(t))
+    {
+        AnnotationExportAction::notice(tr("Start reading aloud first — the sleep timer runs with narration."));
+        return;
+    }
+    if (mode == 1) AnnotationExportAction::notice(tr("Sleep timer set — stopping at the end of this chapter."));
+    else           AnnotationExportAction::notice(tr("Sleep timer set — stopping in about %n minute(s).", nullptr,
+                                                     int(minutes + 0.5)));
+#else
+    Q_UNUSED(mode);
+    Q_UNUSED(minutes);
+#endif
+}
+
+void EbookView::promptReadAloudSleepMinutes()
+{
+#ifdef EB_HAVE_TTS
+    if (!readAloud_ || !readAloud_->active()) return;
+    QPointer<EbookView> self(this);
+    new Osk(tr("Sleep timer — minutes of narration"), QString(), QLineEdit::Normal,
+            [self](const QString& text, bool ok) {
+        if (!self || !ok) return;
+        bool isNumber = false;
+        const int mins = text.trimmed().toInt(&isNumber);
+        if (!isNumber || mins < 1 || mins > 24 * 60)
+        {
+            AnnotationExportAction::notice(tr("Enter a number of minutes, from 1 to 1440."));
+            return;
+        }
+        self->armReadAloudSleep(0, double(mins));
+    }, window());
 #endif
 }
 

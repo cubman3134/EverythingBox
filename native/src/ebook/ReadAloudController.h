@@ -23,8 +23,12 @@
 #include <QList>
 #include <QTextToSpeech>
 #include <QVoice>
+#include <QElapsedTimer>
 
 #include "ReadAloud.h"
+#include "ReadAloudSleep.h"
+
+class QTimer;
 
 class ReadAloudTarget;
 
@@ -68,8 +72,19 @@ public:
     int  voiceIndex() const { return voiceIdx_; }
     void cycleVoice();     // step through the offered voices, wrapping
 
+    // The sleep timer (issue #145, the #140 timer applied to narration). The decision is ReadAloud::SleepSession
+    // (pure, probed); this is its clock, its fade and its stop. Armed only while narrating - arming when not
+    // narrating, or with Off, returns false and leaves nothing armed. ANY stop disarms it (see stop()).
+    bool armSleep(const SleepTimer::Timer& t);
+    void disarmSleep();                       // Off from the menu
+    bool sleepArmed() const { return sleep_.armed(); }
+    SleepTimer::Mode sleepMode() const { return sleep_.mode(); }
+    // Whole minutes of narration left on a minute timer (rounded up), or -1 for End of chapter / not armed.
+    int  sleepMinutesLeft() const;
+
 signals:
-    void changed();        // active/paused/paragraph/speed/voice moved
+    void changed();        // active/paused/paragraph/speed/voice/sleep timer moved
+    void sleepStopped();   // the sleep timer, not the user, just ended narration
 
 private slots:
     void onAboutToSynthesize(qsizetype id);
@@ -85,6 +100,13 @@ private:
     bool planCurrentChapter();     // (re)divide the chapter the reader is on; false when it has nothing to say
     void advanceChapterOrStop();   // the chapter ran out: walk forward to one that speaks, else stop
     void notifyChanged();
+
+    // Sleep timer plumbing.
+    double nowSec() const;          // the monotonic clock the session is driven by
+    bool   sleepStopAtBoundary(int nextChapter);   // ask the session; on yes, stop as the timer and say so
+    void   syncSleepClock();        // the session's clock runs exactly while narration is speaking
+    void   onSleepTick();           // the fade, while armed
+    void   applySleepVolume(double gain);
 
     ReadAloudTarget* target_ = nullptr;
     QTextToSpeech*   tts_ = nullptr;
@@ -103,6 +125,14 @@ private:
     bool restarting_ = false;   // a stop() WE asked for: its Ready is not the end of the book
     double speed_    = 1.0;
     int    voiceIdx_ = 0;
+
+    ReadAloud::SleepSession sleep_;
+    QElapsedTimer mono_;
+    QTimer* sleepTick_      = nullptr;
+    double  utterStarted_   = 0.0;    // session-clock seconds at which the current utterance began
+    double  baseVolume_     = -1.0;   // the engine's volume before any fade; <0 = no fade applied
+    double  appliedGain_    = 1.0;
+    int     shownMinutes_   = -2;     // the minutes-left the controls last showed, so a tick re-labels only on change
 
     static constexpr int kLookahead = 2;   // paragraphs kept in the engine's queue ahead of the spoken one
 };

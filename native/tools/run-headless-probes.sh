@@ -2263,7 +2263,7 @@ echo
 # still compiles and still ships a reader, minus the feature: no controller TU, no engine link, and a control
 # row with nothing drawn on it that cannot act.
 #
-# probe_readaloud pins the PURE half of that promise: bookSettingsRowCount(false) == 5 and (true) == 9. What a
+# probe_readaloud pins the PURE half of that promise: bookSettingsRowCount(false) == 5 and (true) == 10. What a
 # probe cannot reach is the WIRING that decides which of those two the app is in — whether the count and the
 # drawn row read the same flag, whether the engine-facing TU really is behind the guard, whether the pure half
 # stayed engine-free. Each of those is a one-line slip that leaves both builds compiling and one of them
@@ -2333,8 +2333,8 @@ if [ "$ra_fail" -eq 0 ]; then
     || ra_note "ReaderChromeHost no longer feeds the readerSettings zone from ReaderBridge::settingsRowCount(). The zone the cursor can reach and the row the QML draws must be ONE statement about the row's length."
   grep -q 'readAloudAvailable' "$RA_QML" \
     || ra_note "ReaderChrome.qml does not gate its read-aloud controls on readAloudAvailable — the feature-absent build would draw controls that cannot speak."
-  ra_ctls="$(grep -c 'i: [5-8],' "$RA_QML" | tr -d '[:space:]')"
-  [ "$ra_ctls" -eq 4 ] || ra_note "ReaderChrome.qml draws $ra_ctls read-aloud control(s) at indices 5..8; ReadAloud::bookSettingsRowCount says there are 4. The row the cursor can reach and the row the eye can see must be the same row."
+  ra_ctls="$(grep -c 'i: [5-9],' "$RA_QML" | tr -d '[:space:]')"
+  [ "$ra_ctls" -eq 5 ] || ra_note "ReaderChrome.qml draws $ra_ctls read-aloud control(s) at indices 5..9; ReadAloud::bookSettingsRowCount says there are 5. The row the cursor can reach and the row the eye can see must be the same row."
 fi
 if [ "$ra_fail" -eq 0 ]; then echo "PASS: read-aloud feature gate"; else echo "FAIL: read-aloud feature gate"; fail=1; fi
 echo

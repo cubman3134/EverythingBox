@@ -260,6 +260,9 @@ public:
     void readAloudCycleSpeed() override;
     QString readAloudVoiceName() const override;
     void readAloudCycleVoice() override;
+    QString readAloudSleepLabel() const override;
+    bool readAloudSleepArmed() const override;
+    void readAloudOpenSleepTimer() override;
 
     // ReadAloudTarget - the narrow seam the controller drives. The position contract lives in ReadAloudTarget.h:
     // raShowSpoken is the reader ARRIVING at the spoken paragraph (page turned, highlighted, position persisted
@@ -343,6 +346,8 @@ private:
     // reckoning a page turn does, rather than a second one that could drift from it.
     void accrueReadingProgress();
     void syncReadAloudButtons();   // classic bar: the labels that mirror narration's state
+    void armReadAloudSleep(int mode, double minutes);   // mode: -1 off, 0 minutes, 1 end of chapter
+    void promptReadAloudSleepMinutes();                 // Custom: the nav-kit Osk, then arm
     void restoreState();
     void layoutOverlays();
     void recomputeBookPages(); // tally each chapter's page count for a book-wide "page x / y"
@@ -379,6 +384,7 @@ private:
     QPushButton* raPauseBtn_ = nullptr;   // Pause / Resume
     QPushButton* raSpeedBtn_ = nullptr;   // the shared #140 speed, stepped
     QPushButton* raVoiceBtn_ = nullptr;   // the platform voice, stepped
+    QPushButton* raSleepBtn_ = nullptr;   // the sleep timer's menu (#145), enabled while narrating
     QListWidget* tocList_ = nullptr;    // contents panel (overlay, toggled)
     ElidedLabel* pageLabel_ = nullptr;   // elides (middle) rather than clipping (#136 follow-up)
     QTimer* menuTimer_ = nullptr;

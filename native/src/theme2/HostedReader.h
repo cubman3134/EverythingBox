@@ -96,6 +96,12 @@ public:
     virtual void readAloudCycleSpeed() {}
     virtual QString readAloudVoiceName() const { return {}; }
     virtual void readAloudCycleVoice() {}
+    // The sleep timer applied to narration (issue #145): the control's label (which says what is armed) and the
+    // menu it opens - the player's presets, Custom, End of chapter, Off. Only narration can be timed, so it acts
+    // while narrating and says so otherwise.
+    virtual QString readAloudSleepLabel() const { return {}; }
+    virtual bool readAloudSleepArmed() const { return false; }
+    virtual void readAloudOpenSleepTimer() {}
 
     // Text selection and highlights (issue #136). Selection is a MODE, entered on purpose from the reader's
     // menu, because the pad has no pointer to sweep a paragraph with — see ReaderSelection.h for the key map.
