@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.326 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.327 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1387,12 +1387,29 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp     src/core/Settings.h     # PhotoLibrary::root() -> Settings::photosFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/ebook/ReaderAnchor.h  src/ui/PlayerIcons.h    # header-only (the anchor model, the drawn chip icon)
+        # Section 7 (issue #451): the REAL EbookView, driven into and out of cursor mode over an EPUB this probe
+        # writes. What EbookView.cpp references comes with it: the book sources it picks between by content
+        # (EPUB + its OPF reader, FB2, MOBI, text/Markdown, PDF text), the read-aloud divider, the in-book
+        # lookup's socket owner (Qt6::Network) and word list, and the keep-awake guard. No EB_HAVE_TTS, as in CI.
+        src/ebook/EbookView.cpp   src/ebook/EbookView.h
+        src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
+        src/ebook/EpubMeta.cpp    src/ebook/EpubMeta.h
+        src/ebook/Fb2Book.cpp     src/ebook/Fb2Book.h
+        src/ebook/Fb2Meta.cpp     src/ebook/Fb2Meta.h
+        src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        src/ebook/MobiHeader.cpp  src/ebook/MobiHeader.h
+        src/ebook/TextBook.cpp    src/ebook/TextBook.h
+        src/ebook/PdfTextBook.cpp src/ebook/PdfTextBook.h
+        src/ebook/ReadAloud.cpp   src/ebook/ReadAloud.h
+        src/core/LookupClient.cpp src/core/LookupClient.h
+        src/core/VocabularyStore.cpp src/core/VocabularyStore.h
+        src/core/KeepAwake.cpp    src/core/KeepAwake.h
         third_party/miniz.c)
     target_include_directories(probe_readerbookmarks PRIVATE src src/core src/ebook src/comic src/pdf src/ui
         src/theme2 src/input src/libretro third_party)
     target_compile_definitions(probe_readerbookmarks PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_readerbookmarks PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
-        lzma7z unarr)
+        Qt6::Network lzma7z unarr)
 
     # Text SELECTION and HIGHLIGHTS in the reader (issue #136, the half after bookmarks). The pure D-pad
     # selection model (ReaderSelection.h, header-only), the range-anchor round-trip, the HighlightStore and its

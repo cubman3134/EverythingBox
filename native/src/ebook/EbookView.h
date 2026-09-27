@@ -106,6 +106,8 @@ public:
     void setSelectionRange(int start, int end);              // the selection being made right now (-1,-1 clears)
     void setCaretPos(int pos);                               // the cursor-mode caret; -1 hides it
     int  caretPos() const { return caretPos_; }
+    int  selectionStart() const { return selStart_; }        // the live selection band; -1 = none (#451)
+    int  selectionEnd()   const { return selEnd_; }
     // Every line's start offset in this chapter, ascending - the units the caret's Up/Down move in. The WHOLE
     // chapter, not just the page being shown, so a caret at the foot of a page steps onto the next line and the
     // page follows it (ensurePosVisible) rather than the caret stopping at a page edge that is not in the text.

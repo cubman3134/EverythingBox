@@ -1753,9 +1753,15 @@ bool EbookView::beginCursorModeAt(const QPointF& pos)
     return true;
 }
 
+// THE ONE WAY OUT of cursor mode (issue #451). Every exit comes here - the key map's Exited (Escape, Back,
+// Backspace, and the second Escape after a selection), a highlight stored or removed, another book opened -
+// and this is the only caller of cursor_.leave(). ReaderSelection::Model::key() REPORTS Exited without leaving,
+// precisely so this guard still sees the mode on: when the model left first, this returned at once and the page
+// kept its caret while the themed chrome, never re-read, went on reading "Selecting". Leaving is always the
+// same three things: the caret comes down, the selection band goes, and pageInfoChanged() tells the chrome.
 void EbookView::endCursorMode()
 {
-    if (!cursor_.active) return;
+    if (!cursor_.active) return;   // not in the mode: nothing drawn to take down, nothing to tell the chrome
     cursor_.leave();
     if (page_)
     {
@@ -1785,7 +1791,7 @@ bool EbookView::handleCursorKey(int key)
     case ReaderSelection::Result::Ignored:
         return false;                       // not ours: the reader own keys still work inside the mode
     case ReaderSelection::Result::Exited:
-        endCursorMode();
+        endCursorMode();                    // the model asked; the view leaves (the mode is still on here)
         return true;
     case ReaderSelection::Result::Committed:
     {

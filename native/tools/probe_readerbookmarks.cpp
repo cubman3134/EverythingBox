@@ -20,8 +20,14 @@
 // Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so BookmarkStore and both
 // readers' resume keys open an everythingbox.ini that starts empty and is removed at exit.
 //
+// Section 7 is the EBOOK reader's half of #136's selection (issue #451): a real EbookView over a real EPUB,
+// driven with real key events, asserting what the PAGE shows after every way out of cursor mode.
+// probe_highlights pins the pure ReaderSelection model, and could not see that the view left the caret drawn.
+//
 // Prints READERBM-OK on success; any failure prints READERBM-FAIL <cond> (line) and exits non-zero.
 #include "PdfView.h"
+#include "EbookView.h"            // section 7: the ebook reader's cursor mode (issue #451)
+#include "HighlightStore.h"
 #include "ComicView.h"
 #include "BookmarkStore.h"
 #include "ReaderAnchor.h"
@@ -144,6 +150,46 @@ static bool writeMultiPagePdf(const QString& path, int pages)
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
     return f.write(out) == out.size();
+}
+
+// The smallest complete EPUB: an uncompressed `mimetype` first (the OCF rule), container.xml pointing at the
+// OPF, and one XHTML chapter of ordinary words - enough text that a caret has words to walk across (#451).
+static bool writeEpub(const QString& path, const QString& title)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile::remove(path);
+    QByteArray body;
+    for (int i = 1; i <= 12; ++i)
+        body += "<p>Paragraph " + QByteArray::number(i)
+              + ". The quick brown fox jumps over the lazy dog while the reader walks a caret across it.</p>";
+    const QByteArray t = title.toUtf8();
+    const QByteArray chapter = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>" + t + "</title></head><body><h1>"
+        + t + "</h1>" + body + "</body></html>";
+    const QByteArray opf = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"id\">"
+        "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>" + t + "</dc:title>"
+        "<dc:identifier id=\"id\">" + t + "-451</dc:identifier><dc:language>en</dc:language></metadata>"
+        "<manifest><item id=\"c1\" href=\"c1.xhtml\" media-type=\"application/xhtml+xml\"/></manifest>"
+        "<spine><itemref idref=\"c1\"/></spine></package>";
+    const QByteArray container = "<?xml version=\"1.0\"?>"
+        "<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles>"
+        "<rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/>"
+        "</rootfiles></container>";
+    const QByteArray mime = "application/epub+zip";
+
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_writer_init_file(&zip, path.toUtf8().constData(), 0)) return false;
+    bool ok = mz_zip_writer_add_mem(&zip, "mimetype", mime.constData(), size_t(mime.size()), MZ_NO_COMPRESSION);
+    ok = mz_zip_writer_add_mem(&zip, "META-INF/container.xml", container.constData(), size_t(container.size()),
+                               MZ_BEST_SPEED) && ok;
+    ok = mz_zip_writer_add_mem(&zip, "OEBPS/content.opf", opf.constData(), size_t(opf.size()), MZ_BEST_SPEED) && ok;
+    ok = mz_zip_writer_add_mem(&zip, "OEBPS/c1.xhtml", chapter.constData(), size_t(chapter.size()), MZ_BEST_SPEED)
+         && ok;
+    ok = mz_zip_writer_finalize_archive(&zip) && ok;
+    mz_zip_writer_end(&zip);
+    return ok;
 }
 
 // The anchors are built BY HAND (the fixture — never produced by the reader under test).
@@ -447,6 +493,181 @@ int main(int argc, char** argv)
                 if (window.width() != winW)
                     std::fprintf(stderr, "  pdf @%d: window became %d, reader asks for %d\n", winW,
                                  window.width(), pdf->minimumSizeHint().width());
+            }
+        }
+    }
+
+    // ---- 7. Leaving cursor mode takes the caret DOWN with it (issue #451) -------------------------------
+    // THE BUG IT PINS. With no selection in flight, Escape/Back/Backspace made ReaderSelection's key() call
+    // leave() ITSELF and then report Exited; EbookView answered Exited with endCursorMode(), whose first line
+    // is `if (!cursor_.active) return;` - so it returned at once. The mode was over (cursorMode() false, the
+    // arrows turned pages again) while the page kept drawing the caret and the themed chrome, never told,
+    // went on reading "Selecting". probe_highlights asserted !active after Exited, which was TRUE, and so was
+    // green over it. The fix gives leaving ONE owner: the model reports Exited and endCursorMode() does all of
+    // it - clears the caret, clears the selection band, emits pageInfoChanged() (the signal the themed bridge
+    // re-reads cursorMode off). Every exit below is held to that same state, and each one is a DIFFERENT
+    // caller of the one path: the key map (three keys, and the second Escape after a selection), a highlight
+    // being stored, a highlight being removed, and another book being opened.
+    {
+        auto settle = [] {
+            for (int i = 0; i < 6; ++i)
+            {
+                QCoreApplication::processEvents();
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);   // dismissed menus go
+            }
+        };
+        const QString epubPath  = tmp.filePath(QStringLiteral("Caret.epub"));
+        const QString otherPath = tmp.filePath(QStringLiteral("Other.epub"));
+        CHECK(writeEpub(epubPath, QStringLiteral("Caret")));
+        CHECK(writeEpub(otherPath, QStringLiteral("Other")));
+
+        QWidget window;
+        auto* col = new QVBoxLayout(&window);
+        col->setContentsMargins(0, 0, 0, 0);
+        auto* view = new EbookView(&window);
+        col->addWidget(view);
+        window.resize(1024, 720);
+        window.show();
+        settle();
+        QString err;
+        CHECK(view->openBook(epubPath, &err));
+        CHECK(err.isEmpty());
+        settle();
+        BookPageWidget* page = view->findChild<BookPageWidget*>();
+        CHECK(page != nullptr);
+        if (page)
+        {
+            int infos = 0;
+            QObject::connect(view, &EbookView::pageInfoChanged, [&infos] { ++infos; });
+            // A real key event to a real receiver: the reader, or the menu the reader opened.
+            auto keyTo = [&](QObject* to, int key) {
+                QKeyEvent ev(QEvent::KeyPress, key, Qt::NoModifier);
+                QCoreApplication::sendEvent(to, &ev);
+                settle();
+            };
+            auto press = [&](int key) { keyTo(view, key); };
+            // The one live menu the reader opened (a dismissed one is hidden before it is deleted).
+            auto liveMenu = [&window]() -> NavMenu* {
+                for (NavMenu* m : window.findChildren<NavMenu*>()) if (m->isVisible()) return m;
+                return nullptr;
+            };
+            // Enter the mode and walk the caret two words, so there IS a caret on the page to take down.
+            auto enterAndWalk = [&] {
+                view->beginCursorMode();
+                press(Qt::Key_Right);
+                press(Qt::Key_Right);
+                CHECK(view->cursorMode());
+                CHECK(page->caretPos() > 0);
+            };
+            // THE CLEAN EXIT: the same facts for every path out.
+            auto leftCleanly = [&](const char* how, int infosBefore) {
+                const bool ok = !view->cursorMode() && page->caretPos() == -1 && page->selectionStart() == -1
+                             && page->selectionEnd() == -1 && infos > infosBefore;
+                if (!ok)
+                    std::fprintf(stderr, "  exit via %s: cursorMode=%d caret=%d selection=[%d,%d] "
+                                 "pageInfoChanged emitted %d time(s)\n", how, int(view->cursorMode()),
+                                 page->caretPos(), page->selectionStart(), page->selectionEnd(),
+                                 infos - infosBefore);
+                CHECK(!view->cursorMode());
+                CHECK(page->caretPos() == -1);                  // the caret is no longer drawn
+                CHECK(page->selectionStart() == -1);            // ...nor any selection band
+                CHECK(page->selectionEnd() == -1);
+                CHECK(infos > infosBefore);                     // ...and the chrome was told to re-read it
+            };
+
+            // 7a. The issue's steps: Select, move, Escape - and Back and Backspace, the same key-map row.
+            for (int key : { int(Qt::Key_Escape), int(Qt::Key_Back), int(Qt::Key_Backspace) })
+            {
+                enterAndWalk();
+                const int before = infos;
+                press(key);
+                leftCleanly(key == Qt::Key_Escape ? "Escape" : key == Qt::Key_Back ? "Back" : "Backspace", before);
+            }
+
+            // 7b. With a selection in flight the FIRST Escape only drops it (mode and caret stay - you cancel a
+            // selection far more often than you mean to leave), and the SECOND leaves, just as cleanly.
+            enterAndWalk();
+            press(Qt::Key_Return);                               // select-from-here
+            press(Qt::Key_Right);
+            press(Qt::Key_Right);
+            CHECK(page->selectionStart() >= 0);                  // the band is really drawn before we cancel it
+            CHECK(page->selectionEnd() > page->selectionStart());
+            const int caretBeforeCancel = page->caretPos();
+            press(Qt::Key_Escape);
+            CHECK(view->cursorMode());                           // unchanged path: still in the mode...
+            CHECK(page->caretPos() == caretBeforeCancel);        // ...with the caret where it was...
+            CHECK(page->selectionStart() == -1);                 // ...and the selection gone
+            {
+                const int before = infos;
+                press(Qt::Key_Escape);
+                leftCleanly("second Escape after a selection", before);
+            }
+
+            // 7c. Storing a highlight ends the mode: commit a selection, choose "Highlight...", choose a colour.
+            const QString key = view->itemKey();
+            CHECK(!key.isEmpty());
+            enterAndWalk();
+            press(Qt::Key_Return);
+            press(Qt::Key_Right);
+            press(Qt::Key_Right);
+            press(Qt::Key_Return);                               // commit: the action menu opens
+            NavMenu* actions = liveMenu();
+            CHECK(actions != nullptr);
+            if (actions)
+            {
+                CHECK(actions->describe().contains(QStringLiteral("Highlight")));   // row 0
+                keyTo(actions, Qt::Key_Return);                  // "Highlight..." opens the colour menu
+                NavMenu* colours = liveMenu();
+                CHECK(colours != nullptr);
+                CHECK(colours != actions);
+                if (colours && colours != actions)
+                {
+                    const int before = infos;
+                    keyTo(colours, Qt::Key_Return);              // the first colour
+                    leftCleanly("a stored highlight", before);
+                }
+            }
+            const QVector<HighlightStore::Highlight> stored = HighlightStore::list(key);
+            CHECK(stored.size() == 1);
+
+            // 7d. Removing a highlight ends the mode too: land the caret inside it (the panel's jump), Enter on
+            // it offers the edit menu, and "Remove highlight" is its last row.
+            if (stored.size() == 1)
+            {
+                view->gotoHighlight(stored.at(0).anchor.spine, stored.at(0).anchor.offset);
+                settle();
+                CHECK(view->cursorMode());
+                CHECK(page->caretPos() == stored.at(0).anchor.offset);
+                press(Qt::Key_Return);
+                NavMenu* edit = liveMenu();
+                CHECK(edit != nullptr);
+                if (edit)
+                {
+                    keyTo(edit, Qt::Key_Down);
+                    keyTo(edit, Qt::Key_Down);
+                    CHECK(edit->describe().contains(QStringLiteral("Remove highlight")));
+                    const int before = infos;
+                    keyTo(edit, Qt::Key_Return);
+                    leftCleanly("a removed highlight", before);
+                }
+                CHECK(HighlightStore::list(key).isEmpty());
+            }
+
+            // 7e. Opening another book ends the mode: a caret belongs to the book it was placed in.
+            enterAndWalk();
+            {
+                const int before = infos;
+                CHECK(view->openBook(otherPath, &err));
+                settle();
+                leftCleanly("opening another book", before);
+            }
+
+            // 7f. And the mode comes back after all of that, and leaves cleanly again - leaving is not a latch.
+            enterAndWalk();
+            {
+                const int before = infos;
+                press(Qt::Key_Escape);
+                leftCleanly("Escape after re-entering", before);
             }
         }
     }
