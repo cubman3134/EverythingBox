@@ -3078,14 +3078,29 @@ void AddonManager::applyMergedRoster()
 
 // ---- issue #77, increment 2: registry installs sync as references; add-on code never syncs ------------------
 
+QString AddonManager::registryUrlFor(bool uitest, const QString& overrideUrl, bool* ignoredOverride)
+{
+    const QString fixture = overrideUrl.trimmed();
+    if (ignoredOverride) *ignoredOverride = !fixture.isEmpty() && !uitest;
+    if (uitest && !fixture.isEmpty()) return fixture;
+    return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+}
+
 QString AddonManager::defaultRegistryUrl()
 {
     // EB_ADDON_REGISTRY_URL points the built-in registry at a fixture — a test rig's loopback registry — the way
-    // EB_ADDONS_ROOT points discovery at a fixture folder, so a rig never reaches the real registry. Unset in
-    // normal runs.
-    const QString fixture = qEnvironmentVariable("EB_ADDON_REGISTRY_URL").trimmed();
-    if (!fixture.isEmpty()) return fixture;
-    return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+    // EB_UITEST_BUILDBOT_BASE points the core catalogue at one (#98), so a rig never reaches the real registry.
+    // Honoured only under EB_UITEST (registryUrlFor); an ordinary run ignores it and says so ONCE.
+    bool ignored = false;
+    const QString url = registryUrlFor(qEnvironmentVariableIsSet("EB_UITEST"),
+                                       qEnvironmentVariable("EB_ADDON_REGISTRY_URL"), &ignored);
+    static bool loggedIgnored = false;   // once per process: this is asked on every list and every merge
+    if (ignored && !loggedIgnored)
+    {
+        loggedIgnored = true;
+        streamLog(QStringLiteral("addon registry: EB_ADDON_REGISTRY_URL ignored - it is honoured only with EB_UITEST set"));
+    }
+    return url;
 }
 
 QStringList AddonManager::configuredRegistries()

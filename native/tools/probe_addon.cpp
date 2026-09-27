@@ -792,6 +792,36 @@ static void probeRegistrySync(const std::function<void(const char*, bool)>& chec
             { allRefused = false; printf("    refused? NO: %s\n", b); }
         check("registry rule: traversal, another host, absolute, backslash, encoded, unsafe id, no manifest, "
               "duplicate names, a forged provenance file, a remote entry and an empty list are all refused", allRefused);
+        // The fixture-registry override is a TEST seam, honoured only under EB_UITEST (#98's rule).
+        const QString prod = QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+        const QString fx = QStringLiteral("http://127.0.0.1:9/reg/index.json");
+        bool ignored = false;
+        check("registry override: honoured WITH EB_UITEST",
+              AddonManager::registryUrlFor(true, fx, &ignored) == fx && !ignored);
+        check("registry override: IGNORED without EB_UITEST (production URL, and reported as ignored)",
+              AddonManager::registryUrlFor(false, fx, &ignored) == prod && ignored);
+        check("registry override: no override is production either way, and nothing is reported",
+              AddonManager::registryUrlFor(true, QString(), &ignored) == prod && !ignored
+              && AddonManager::registryUrlFor(false, QStringLiteral("  "), &ignored) == prod && !ignored);
+        {
+            // ...and through the real environment: set without EB_UITEST it is ignored and logged exactly once.
+            const QByteArray hadUi = qgetenv("EB_UITEST");
+            const bool uiSet = qEnvironmentVariableIsSet("EB_UITEST");
+            qunsetenv("EB_UITEST");
+            qputenv("EB_ADDON_REGISTRY_URL", fx.toUtf8());
+            const QString logPath = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
+            QFile::remove(logPath);
+            const bool prodBoth = AddonManager::defaultRegistryUrl() == prod && AddonManager::defaultRegistryUrl() == prod;
+            QFile lf(logPath);
+            const QByteArray logged = lf.open(QIODevice::ReadOnly) ? lf.readAll() : QByteArray();
+            check("registry override: the real environment without EB_UITEST falls back to production, logged ONCE",
+                  prodBoth && logged.count("EB_ADDON_REGISTRY_URL ignored") == 1);
+            qputenv("EB_UITEST", "1");
+            check("registry override: the real environment WITH EB_UITEST uses the fixture",
+                  AddonManager::defaultRegistryUrl() == fx);
+            qunsetenv("EB_ADDON_REGISTRY_URL");
+            if (uiSet) qputenv("EB_UITEST", hadUi); else qunsetenv("EB_UITEST");
+        }
         const QJsonObject reserved = QJsonDocument::fromJson(
             (QByteArray("{\"id\":\"") + AppBrand::kAddonPrefix + "x\",\"files\":[\"a/manifest.json\"]}")).object();
         check("registry rule: the first-party namespace is refused",

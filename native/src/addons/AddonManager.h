@@ -424,6 +424,12 @@ public:
     // The built-in add-on registry, and every registry this device has configured (the built-in one plus the
     // user's registry/addonsExtras). RegistryBrowser lists the same set.
     static QString defaultRegistryUrl();
+    // PURE (#98's rule, BuildbotInstall::policyFor): the built-in registry URL for a given environment. `uitest` =
+    // EB_UITEST is set, `overrideUrl` = EB_ADDON_REGISTRY_URL. The override is honoured ONLY under EB_UITEST — a
+    // test-only fixture seam that an ordinary run must never obey, or one stray environment variable would point
+    // every registry install AND every synced registry reference at whatever it names. `*ignoredOverride` is set
+    // when an override was present and refused, so the caller can say so.
+    static QString registryUrlFor(bool uitest, const QString& overrideUrl, bool* ignoredOverride = nullptr);
     static QStringList configuredRegistries();
     static bool isRegistryConfigured(const QString& indexUrl);
 
