@@ -126,6 +126,7 @@ private:
     bool paused_     = false;   // see paused(): ours, because the engine's state enum does not say
     bool restarting_ = false;   // a stop() WE asked for: its Ready is not the end of the book
     bool pumping_    = false;   // inside pump(): an aboutToSynthesize emitted by enqueue() must not re-enter it
+    bool drainedWhilePaused_ = false;   // the engine finished its text while paused: resume starts the next one
     double speed_    = 1.0;
     int    voiceIdx_ = 0;
 

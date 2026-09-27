@@ -198,6 +198,7 @@ void ReadAloudController::stop()
     restarting_ = false;
     current_ = -1;
     paused_ = false;
+    drainedWhilePaused_ = false;
     utts_.clear();
     first_ = queued_ = spoken_ = 0;
     if (target_) target_->raClearSpoken();   // the highlight goes; the POSITION stays where it reached
@@ -213,8 +214,17 @@ void ReadAloudController::toggle() { if (active_) stop(); else start(); }
 void ReadAloudController::togglePause()
 {
     if (!active_) return;
-    if (paused_) { tts_->resume(); paused_ = false; }
-    else         { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
+    if (paused_ && drainedWhilePaused_)
+    {
+        // The pause landed as an utterance ended (see onStateChanged): there is nothing in the engine to resume,
+        // so carry on from the next one - or the next chapter - through the restart path skip uses, which also
+        // clears the engine's own pause.
+        drainedWhilePaused_ = false;
+        if (queued_ >= utts_.size()) advanceChapterOrStop();
+        else                         speakFrom(queued_);
+    }
+    else if (paused_) { tts_->resume(); paused_ = false; }
+    else              { tts_->pause(QTextToSpeech::BoundaryHint::Default); paused_ = true; }
     notifyChanged();   // re-asserts the sleep clock: stopped while paused, running again on resume (#145)
     if (sleep_.armed())
         qInfo().noquote() << QStringLiteral("readaloud.sleep: narration %1 at %2 s narrated")
@@ -245,6 +255,7 @@ void ReadAloudController::speakFrom(int index)
     tts_->stop(QTextToSpeech::BoundaryHint::Immediate);   // clears the engine's queue, resetting its ids to 0
     restarting_ = false;
     paused_ = false;
+    drainedWhilePaused_ = false;
 
     first_ = qBound(0, index, int(utts_.size()) - 1);
     queued_ = first_;
@@ -316,6 +327,11 @@ void ReadAloudController::onStateChanged(QTextToSpeech::State s)
     if (!active_ || restarting_) return;
     if (s == QTextToSpeech::Error) { stop(); return; }
     if (s != QTextToSpeech::Ready) { notifyChanged(); return; }
+
+    // The engine finished its text while narration is paused - a pause that landed on a boundary, which is where
+    // an engine that pauses only between words (or not at all, between texts) puts it. Hold here: handing it
+    // the next text now would un-pause narration behind a control that still says Resume. Resume carries on.
+    if (paused_) { drainedWhilePaused_ = true; notifyChanged(); return; }
 
     // Ready with nothing left to hand over means this chapter is finished.
     if (queued_ >= utts_.size()) { advanceChapterOrStop(); return; }
