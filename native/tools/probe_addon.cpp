@@ -22,6 +22,10 @@
 #include <QTcpSocket>
 #include "../src/core/AppPaths.h"
 #include "../src/core/AppBrand.h"
+#include "../src/core/AddonRoster.h"   // issue #77
+#include "../src/core/Tombstones.h"    // issue #77: a removed add-on's tombstone
+#include <QDateTime>
+#include <QJsonArray>
 #include <functional>
 #include <memory>
 #include <cstdio>
@@ -533,6 +537,176 @@ static void probeRemoteReplace(const std::function<void(const char*, bool)>& che
     QDir(rootR).removeRecursively();
 }
 
+// ---- issue #77: the add-on roster is stamped by the writers, and the migrations do not fight the merge ------
+// The roster merge itself lives in probe_cloudmerge §43. This half pins the AddonManager side of it, against
+// the same loopback add-on host as #80 (never a real add-on server):
+//   (a) every live write — subscribe, #80 re-configure, toggle, remove — leaves a DATED roster record or
+//       tombstone keyed by the manifest id, which is what the merge compares;
+//   (b) a merge's projection reaches the loaded set: a synced URL this device never cached is fetched and
+//       loaded, and a flag the merge flipped is announced like a toggle;
+//   (c) the startup migrations are ONE-SHOT: their removals tombstone once, a second launch writes nothing,
+//       and an add-on a migration removed that comes back later is left alone.
+namespace {
+QHash<QString, qint64> rosterTombs()
+{
+    QHash<QString, qint64> m;
+    for (const Tombstones::Entry& e : Tombstones::all(AddonRoster::tombStore())) m.insert(e.key, e.ts);
+    return m;
+}
+const AddonRoster::Record* rosterRecord(const QVector<AddonRoster::Record>& recs, const QString& key)
+{
+    for (const AddonRoster::Record& r : recs) if (r.key == key) return &r;
+    return nullptr;
+}
+} // namespace
+
+static void probeRoster(const std::function<void(const char*, bool)>& check)
+{
+    AddonHost host;
+    if (!host.start()) { check("roster: loopback add-on host listens", false); return; }
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    const qint64 t0 = QDateTime::currentSecsSinceEpoch();
+
+    // ---- (a) + (b): hermetic manager, the writers ------------------------------------------------------------
+    {
+        const QString rootR = QDir::tempPath() + QStringLiteral("/eb-roster-fixture-")
+                            + QString::number(QCoreApplication::applicationPid());
+        QDir(rootR).removeRecursively(); QDir().mkpath(rootR);
+        qputenv("EB_ADDONS_ROOT", rootR.toUtf8());
+        AddonManager mgr;
+        for (const QString& u : mgr.remoteSourceUrls()) mgr.removeRemoteSource(u);
+
+        bool got = false, lastOk = false;
+        QObject::connect(&mgr, &AddonManager::remoteSourceResult, &mgr, [&](bool ok, const QString&) { got = true; lastOk = ok; });
+        auto add = [&](const QString& url) { got = false; mgr.addRemoteSource(url); return spinUntil([&] { return got; }, 8000) && lastOk; };
+        const QString other = host.url("/other"), a = host.url("/opt-a"), b = host.url("/opt-b");
+        const QString reconf = QStringLiteral("probe.reconf"), otherId = QStringLiteral("probe.other");
+
+        const bool added = add(host.url("/other/manifest.json"));
+        QVector<AddonRoster::Record> recs = AddonRoster::records();
+        const AddonRoster::Record* ro = rosterRecord(recs, otherId);
+        check("roster: a subscribe leaves a record keyed by the MANIFEST id, holding its URL, dated at the add",
+              added && ro && ro->url == other && ro->enabled && ro->ts >= t0);
+
+        const bool reconfigured = add(host.url("/opt-a/manifest.json")) && add(host.url("/opt-b/manifest.json"));
+        recs = AddonRoster::records();
+        int reconfRecords = 0; for (const AddonRoster::Record& r : recs) if (r.key == reconf) ++reconfRecords;
+        const AddonRoster::Record* rr = rosterRecord(recs, reconf);
+        check("roster: an #80 re-configure is ONE record for the id, now holding the new URL",
+              reconfigured && reconfRecords == 1 && rr && rr->url == b);
+        const qint64 addTs = rr ? rr->ts : 0;
+
+        mgr.setEnabled(reconf, false);
+        recs = AddonRoster::records();
+        rr = rosterRecord(recs, reconf);
+        check("roster: a toggle rewrites the same record's flag, at a stamp no older than the add",
+              rr && !rr->enabled && rr->ts >= addTs && rr->url == b);
+
+        const qint64 toggleTs = rr ? rr->ts : 0;
+        const bool removed = mgr.removeRemoteSource(b);
+        recs = AddonRoster::records();
+        const QHash<QString, qint64> tombs = rosterTombs();
+        check("roster: a removal drops the record and TOMBSTONES the manifest id, strictly after its last edit",
+              removed && !rosterRecord(recs, reconf) && tombs.value(reconf, 0) > toggleTs && toggleTs >= t0);
+
+        // (b) a merge projected a URL this device has never cached (its manifest cache is absent), and flipped a
+        //     flag. applyMergedRoster must fetch + load the first and announce the second.
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            QJsonArray arr; for (const QString& u : mgr.remoteSourceUrls()) arr.append(u); arr.append(a);
+            st.setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
+            st.remove(QStringLiteral("addon.remote.manifest.")
+                      + QString::fromUtf8(QCryptographicHash::hash(a.toUtf8(), QCryptographicHash::Md5).toHex()));
+            st.setValue(QStringLiteral("addon.enabled.") + otherId, false);
+            st.sync();
+        }
+        bool sawDisable = false;
+        QObject::connect(&mgr, &AddonManager::sourceEnabledChanged, &mgr, [&](const QString& id, bool on) {
+            if (id == otherId && !on) sawDisable = true; });
+        mgr.applyMergedRoster();
+        const bool loaded = spinUntil([&] { return mgr.sourceById(reconf) != nullptr; }, 8000);
+        check("roster merge: a synced add-on this device never cached is fetched and loaded", loaded);
+        check("roster merge: a flag the merge flipped is announced as sourceEnabledChanged", sawDisable);
+
+        for (const QString& u : mgr.remoteSourceUrls()) mgr.removeRemoteSource(u);
+        mgr.setEnabled(reconf, true); mgr.setEnabled(otherId, true);
+        qunsetenv("EB_ADDONS_ROOT");
+        QDir(rootR).removeRecursively();
+    }
+
+    // ---- (c): the startup migrations, through the REAL constructor path ----------------------------------------
+    // EB_ADDONS_ROOT unset so the constructor runs seedDefaultStremioSources. The two seeding steps that would
+    // reach a real add-on server (the Torrentio seed and its host repoint) are latched as already done; the
+    // Cinemeta and Debridio removals run against loopback URLs whose paths carry the names they match on.
+    {
+        const QString cine = host.url("/cinemeta-probe"), debr = host.url("/debridio-probe"), keep = host.url("/other");
+        auto cacheKey = [](const QString& base) {
+            return QStringLiteral("addon.remote.manifest.")
+                 + QString::fromUtf8(QCryptographicHash::hash(base.toUtf8(), QCryptographicHash::Md5).toHex()); };
+        auto manifestFor = [](const char* id) {
+            return QByteArray("{\"id\":\"") + id + "\",\"name\":\"" + id
+                 + "\",\"version\":\"1.0.0\",\"resources\":[\"stream\"],\"types\":[\"movie\"],\"catalogs\":[]}"; };
+        {
+            QSettings st(iniPath, QSettings::IniFormat);
+            for (const char* k : { "addon.stremio.seeded", "addon.torrentio.seeded", "addon.torrentio.host.migrated" })
+                st.setValue(QLatin1String(k), true);
+            for (const char* k : { "addon.debridio.removed", "addon.cinemeta.removed", "addon.cinemeta.removed2" })
+                st.remove(QLatin1String(k));
+            QJsonArray arr; arr.append(cine); arr.append(debr); arr.append(keep);
+            st.setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
+            st.setValue(cacheKey(cine), manifestFor("probe.cine"));
+            st.setValue(cacheKey(debr), manifestFor("probe.debr"));
+            st.setValue(cacheKey(keep), manifestFor("probe.other"));
+            st.sync();
+        }
+        const qint64 before = QDateTime::currentSecsSinceEpoch();
+        QHash<QString, qint64> afterFirst;
+        QString shadowAfterFirst;
+        {
+            AddonManager first;                                        // launch 1: the migrations run
+            spin(300);
+            afterFirst = rosterTombs();
+            shadowAfterFirst = QSettings(iniPath, QSettings::IniFormat).value(AddonRoster::itemsKey()).toString();
+            check("migrations: launch 1 removes the migrated-away sources",
+                  first.remoteSourceUrls() == QStringList({ keep }));
+            check("migrations: a migration's removal writes a tombstone like any removal (Cinemeta and Debridio)",
+                  afterFirst.value(QStringLiteral("probe.cine"), 0) >= before
+                      && afterFirst.value(QStringLiteral("probe.debr"), 0) >= before);
+            check("migrations: they run BEFORE the roster merge is allowed (the constructor opens the gate after)",
+                  AddonRoster::migrationsRun());
+        }
+        {
+            AddonManager second;                                       // launch 2: latched, nothing to do
+            spin(300);
+            const QString shadow2 = QSettings(iniPath, QSettings::IniFormat).value(AddonRoster::itemsKey()).toString();
+            check("migrations: a second launch writes NO tombstone and leaves every existing one's stamp alone",
+                  rosterTombs() == afterFirst);
+            check("migrations: a second launch leaves the roster shadow byte-identical", shadow2 == shadowAfterFirst);
+        }
+        {
+            // Cinemeta comes back — re-added on another device and merged in, or re-added here by hand. A migration
+            // that re-ran would remove it again, every launch, and tombstone it over the user's choice.
+            QSettings st(iniPath, QSettings::IniFormat);
+            QJsonArray arr; arr.append(keep); arr.append(cine);
+            st.setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
+            st.setValue(cacheKey(cine), manifestFor("probe.cine"));
+            st.sync();
+        }
+        {
+            AddonManager third;                                        // launch 3
+            spin(300);
+            check("migrations: a source a migration once removed, re-added later, is NOT removed again",
+                  third.remoteSourceUrls().contains(cine));
+            const QVector<AddonRoster::Record> recs = AddonRoster::records();
+            const AddonRoster::Record* rc = rosterRecord(recs, QStringLiteral("probe.cine"));
+            check("migrations: ...and it syncs as a dated re-add that beats the migration's tombstone",
+                  rc && rc->url == cine && rc->ts > afterFirst.value(QStringLiteral("probe.cine"), 0)
+                      && !rosterTombs().contains(QStringLiteral("probe.cine")));
+            for (const QString& u : third.remoteSourceUrls()) third.removeRemoteSource(u);
+        }
+    }
+}
+
 static int probePrefetch()
 {
     int pass = 0, fail = 0;
@@ -826,6 +1000,7 @@ static int probePrefetch()
     }
 
     probeRemoteReplace(check);
+    probeRoster(check);   // issue #77: the roster writers, the merge landing, the one-shot migrations
 
     QDir(root).removeRecursively();
     qunsetenv("EB_ADDONS_ROOT");

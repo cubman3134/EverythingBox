@@ -74,6 +74,7 @@
 #include "ChannelStore.h"       // issue #179: personal TV channels ride this document
 #include "HomeRows.h"         // issue #333: the per-profile home arrangement, and which sync path owns it
 #include "PerItemStores.h"    // issue #332: THE per-item-store prefix table, walked by section 42
+#include "AddonRoster.h"      // issue #77: the add-on roster section 43 drives (only its migrations gate is called)
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
@@ -95,6 +96,8 @@
 #include <QJsonArray>
 #include <QVector>
 #include <QPair>
+#include <QMap>
+#include <QSet>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -6142,6 +6145,7 @@ int main(int argc, char** argv)
             QStringLiteral("vocabulary/"),     QStringLiteral("audiobookmarks/"),
             QStringLiteral("pad2key/"),        QStringLiteral("missed/"),
             QStringLiteral("homerows/"),
+            QStringLiteral("roster/"),         // issue #77: the add-on roster's stamped shadow (section 43)
         };
         QStringList actual;
         for (const char* raw : peritem::kPrefixes) actual << QString::fromLatin1(raw);
@@ -6176,6 +6180,307 @@ int main(int argc, char** argv)
                                  "pad/left", "padgame/abc/a", "statsPanel/lastTab", "recentlyUsed/x",
                                  "homerowsPanel/lastTab", "speedrun/x", "marksmanship/x" })
             CHECK(SettingsTxn::inScope(QString::fromLatin1(raw)) == true);
+    }
+
+    // ---- 43. The add-on roster syncs as a UNION WITH TOMBSTONES, not a snapshot (issue #77) ---------------
+    //
+    // Before #77 the roster (addon.remote.urls + addon.enabled.<id>) rode the heavy settings bundle, a
+    // last-writer-wins snapshot: a device that pushed late erased a subscription another device had just added.
+    // Now AddonRoster keeps a stamped shadow of it and this document's `roster` section merges that shadow by
+    // favourites' rule. Every case below plays two DEVICES through one ini: a device's state is the roster's
+    // keys (live, cached manifests, shadow, tombstones), captured and restored whole, and each device's
+    // document is what serializeAll produces from its state. Outcomes are asserted through the LIVE keys —
+    // the ones AddonManager actually reads — never through the shadow alone.
+    {
+        const QString X = QStringLiteral("http://127.0.0.1:9/x"), Y = QStringLiteral("http://127.0.0.1:9/y");
+        const QString Z = QStringLiteral("http://127.0.0.1:9/z");
+        const QString X2 = QStringLiteral("http://127.0.0.1:9/x-reconfigured");
+        const QString idX = QStringLiteral("probe.roster.x"), idY = QStringLiteral("probe.roster.y");
+        const QString idZ = QStringLiteral("probe.roster.z");
+        auto isRosterState = [](const QString& k) {
+            return k == QLatin1String("addon.remote.urls") || k.startsWith(QLatin1String("addon.enabled."))
+                || k.startsWith(QLatin1String("addon.remote.manifest.")) || k.startsWith(QLatin1String("roster/"))
+                || k.startsWith(QLatin1String("deleted/roster/"));
+        };
+        using Device = QMap<QString, QVariant>;
+        auto capture = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); Device d;
+            for (const QString& k : raw.allKeys()) if (isRosterState(k)) d.insert(k, raw.value(k));
+            return d;
+        };
+        auto wipeRoster = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QString& k : raw.allKeys()) if (isRosterState(k)) raw.remove(k);
+            raw.sync();
+        };
+        auto load = [&](const Device& d) {
+            wipeRoster();
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (auto it = d.begin(); it != d.end(); ++it) raw.setValue(it.key(), it.value());
+            raw.sync();
+        };
+        // A device that has run this build before: an empty shadow, so its next edit is dated, not backfilled.
+        auto freshDevice = [&]() { wipeRoster(); setRaw(QStringLiteral("roster/all/items"), QStringLiteral("[]")); };
+        auto cacheManifest = [&](const QString& base, const QString& id) {
+            setRaw(QStringLiteral("addon.remote.manifest.") + md5(base),
+                   QStringLiteral("{\"id\":\"%1\",\"name\":\"%1\",\"version\":\"1.0.0\",\"resources\":[\"stream\"],"
+                                  "\"types\":[\"movie\"],\"catalogs\":[]}").arg(id));
+        };
+        auto setLive = [&](const QStringList& urls) { injArr(QStringLiteral("addon.remote.urls"), urls); };
+        auto live = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("addon.remote.urls")).toByteArray()).array())
+                out << v.toString();
+            return out;
+        };
+        auto flagOn = [&](const QString& id) {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return raw.value(QStringLiteral("addon.enabled.") + id, true).toBool();
+        };
+        auto injRecords = [&](const QVector<std::tuple<QString, QString, bool, qint64>>& recs) {
+            QJsonArray a;
+            for (const auto& r : recs)
+            {
+                QJsonObject o; o["key"] = std::get<0>(r); o["url"] = std::get<1>(r);
+                o["enabled"] = std::get<2>(r); o["ts"] = double(std::get<3>(r)); a.append(o);
+            }
+            setRaw(QStringLiteral("roster/all/items"), compact(a));
+        };
+        auto rosterItems = [&](const QJsonObject& doc) {
+            return doc.value(QStringLiteral("roster")).toObject().value(QStringLiteral("all")).toObject()
+                      .value(QStringLiteral("items")).toArray();
+        };
+        auto docHasKey = [&](const QJsonObject& doc, const QString& key) {
+            for (const QJsonValue& v : rosterItems(doc)) if (v.toObject().value(QStringLiteral("key")).toString() == key) return true;
+            return false;
+        };
+        auto docTomb = [&](const QJsonObject& doc, const QString& key) {
+            for (const QJsonValue& v : doc.value(QStringLiteral("roster")).toObject().value(QStringLiteral("all")).toObject()
+                                           .value(QStringLiteral("tombs")).toArray())
+                if (v.toObject().value(QStringLiteral("key")).toString() == key)
+                    return static_cast<qint64>(v.toObject().value(QStringLiteral("ts")).toDouble());
+            return qint64(0);
+        };
+
+        // 43a. ORDERING (#77): a roster section is not merged before this process's add-on migrations have run.
+        //      AddonManager marks that at the end of its constructor; nothing here has constructed one, so the
+        //      gate is still shut. The same document merges once it opens.
+        freshDevice(); cacheManifest(X, idX); setLive({ X });
+        const QJsonObject doc43a = serializeNow();
+        freshDevice(); setLive({ Y });
+        CHECK(!AddonRoster::migrationsRun());
+        mergeDoc(doc43a);
+        CHECK(live() == QStringList({ Y }));                          // gate shut: the peer's roster waits
+        AddonRoster::markMigrationsRun();
+        mergeDoc(doc43a);
+        CHECK(live().contains(X) && live().contains(Y));              // gate open: the same document now merges
+
+        // 43b. A adds X while B adds Y -> both end with X and Y, in both arrival orders.
+        freshDevice(); cacheManifest(X, idX); setLive({ X });
+        const QJsonObject docA = serializeNow(); const Device devA = capture();
+        freshDevice(); cacheManifest(Y, idY); setLive({ Y });
+        const QJsonObject docB = serializeNow(); const Device devB = capture();
+        CHECK(docHasKey(docA, idX) && docHasKey(docB, idY));         // keyed by MANIFEST ID, not by URL
+        load(devB); mergeDoc(docA);
+        CHECK(live() == QStringList({ Y, X }));                       // B kept its own and gained A's
+        load(devA); mergeDoc(docB);
+        CHECK(live() == QStringList({ X, Y }));                       // ...and A the same, the other way round
+
+        // 43c. A removes X after B last synced -> B loses X. Both held X, stamped T-100.
+        freshDevice(); cacheManifest(X, idX); cacheManifest(Y, idY); setLive({ X, Y });
+        injRecords({ { idX, X, true, T - 100 }, { idY, Y, true, T - 100 } });
+        // X's flag has been touched at some point, so a live addon.enabled.<idX> exists. removeRemoteSource keeps
+        // it (a re-add keeps the choice); it must not come back as a NEWER flag-only record that out-dates the
+        // removal's own tombstone and so stops the removal reaching any peer.
+        setRaw(QStringLiteral("addon.enabled.") + idX, QStringLiteral("true"));
+        const Device shared = capture();
+        setLive({ Y });                                               // A removes X (the live write)...
+        const QJsonObject docRemoved = serializeNow();                // ...and the document dates it
+        const Device devAafter = capture();
+        CHECK(docTomb(docRemoved, idX) >= T);                         // a tombstone, stamped at the removal
+        CHECK(!docHasKey(docRemoved, idX));
+        load(shared); mergeDoc(docRemoved);
+        CHECK(live() == QStringList({ Y }));                          // B lost X
+        const QJsonObject docBnoX = serializeNow();
+        CHECK(!docHasKey(docBnoX, idX));                              // ...and does not carry it on (43m pins this)
+        // 43d. ...and B RE-ADDING X later than the removal -> X survives, on B and back on A. The re-add can land
+        //      in the same second as the tombstone; its stamp must still be strictly newer (AddonRoster::reconcile).
+        cacheManifest(X, idX); setLive({ Y, X });                     // a re-add fetches the manifest again, as addRemoteSource does
+        const QJsonObject docReAdd = serializeNow();
+        CHECK(live().contains(X));
+        load(devAafter); mergeDoc(docReAdd);
+        CHECK(live().contains(X) && live().contains(Y));              // the newer re-add beat the older removal
+
+        // 43e. The same manifest id under DIFFERENT URLs on two devices -> ONE entry, the NEWEST URL (#80's rule
+        //      carried across devices). A configured it at T-200 as X, B at T-100 as X2.
+        freshDevice(); cacheManifest(X, idX); setLive({ Y, X }); cacheManifest(Y, idY);
+        injRecords({ { idX, X, true, T - 200 }, { idY, Y, true, T - 300 } });
+        const QJsonObject docOld = serializeNow(); const Device devOld = capture();
+        freshDevice(); cacheManifest(X2, idX); setLive({ X2 });
+        injRecords({ { idX, X2, true, T - 100 } });
+        const QJsonObject docNew = serializeNow(); const Device devNew = capture();
+        load(devOld); mergeDoc(docNew);
+        CHECK(live() == QStringList({ Y, X2 }));                      // replaced IN PLACE, not appended beside it
+        load(devNew); mergeDoc(docOld);
+        CHECK(live() == QStringList({ X2, Y }));                      // the older URL did not come back
+        {
+            int n = 0; for (const QJsonValue& v : rosterItems(serializeNow())) if (v.toObject().value("key").toString() == idX) ++n;
+            CHECK(n == 1);                                            // one record for the add-on
+        }
+
+        // 43f. The enabled flag wins by ts, and rides the same record. X is on at T-300 on B; A turned it OFF at
+        //      T-100. A's newer flip wins on B; B's older state does not undo it on A.
+        freshDevice(); cacheManifest(X, idX); setLive({ X });
+        injRecords({ { idX, X, true, T - 300 } });
+        const QJsonObject docOn = serializeNow(); const Device devOn = capture();
+        setRaw(QStringLiteral("addon.enabled.") + idX, QStringLiteral("false"));
+        injRecords({ { idX, X, false, T - 100 } });
+        const QJsonObject docOff = serializeNow(); const Device devOff = capture();
+        load(devOn); mergeDoc(docOff);
+        CHECK(!flagOn(idX));                                          // the newer OFF arrived
+        load(devOff); mergeDoc(docOn);
+        CHECK(!flagOn(idX));                                          // the older ON did not undo it
+        // ...and a flag flipped by a plain live write (the Add-ons toggle) is dated at the flip.
+        load(devOn); setRaw(QStringLiteral("addon.enabled.") + idX, QStringLiteral("false"));
+        const QJsonObject docFlip = serializeNow();
+        bool flipDated = false;
+        for (const QJsonValue& v : rosterItems(docFlip))
+            if (v.toObject().value("key").toString() == idX && !v.toObject().value("enabled").toBool(true)
+                && v.toObject().value("ts").toDouble() >= double(T)) flipDated = true;
+        CHECK(flipDated);
+
+        // 43g. ORDER-INDEPENDENCE: A-merges-B and B-merges-A leave byte-identical roster sections. The fixture
+        //      includes an EQUAL-ts meeting (X at T-50 on both, different URLs) the tie-break must decide the same
+        //      way from both ends, a tombstone, and entries only one side holds.
+        freshDevice(); cacheManifest(X, idX); cacheManifest(Y, idY); setLive({ X, Y });
+        injRecords({ { idX, X, true, T - 50 }, { idY, Y, true, T - 400 } });
+        injTomb(QStringLiteral("roster/all"), idZ, T - 60);
+        const QJsonObject gA = serializeNow(); const Device gdA = capture();
+        freshDevice(); cacheManifest(X2, idX); cacheManifest(Z, idZ); setLive({ Z, X2 });
+        injRecords({ { idX, X2, false, T - 50 }, { idZ, Z, true, T - 500 } });
+        const QJsonObject gB = serializeNow(); const Device gdB = capture();
+        load(gdA); mergeDoc(gB);
+        const QJsonObject ab = serializeNow().value(QStringLiteral("roster")).toObject(); const QStringList liveAB = live();
+        load(gdB); mergeDoc(gA);
+        const QJsonObject ba = serializeNow().value(QStringLiteral("roster")).toObject(); const QStringList liveBA = live();
+        CHECK(!ab.isEmpty());
+        CHECK(compactO(ab) == compactO(ba));                          // byte-identical, whichever merged whom
+        CHECK(QSet<QString>(liveAB.begin(), liveAB.end()) == QSet<QString>(liveBA.begin(), liveBA.end()));
+        CHECK(!liveAB.contains(Z));                                   // Z's tombstone (T-60) beat its T-500 copy
+        CHECK(liveAB.contains(X) != liveAB.contains(X2));             // the tie produced ONE URL for idX
+
+        // 43h. ONE AUTHORITY: the heavy bundle no longer carries the roster's live keys (its cached manifests
+        //      still ride, which is what lets an old peer's snapshot be keyed by id on arrival — 43i).
+        freshDevice(); cacheManifest(X, idX); setLive({ X }); setRaw(QStringLiteral("addon.enabled.") + idX, QStringLiteral("false"));
+        {
+            const QJsonObject bundle = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();
+            CHECK(!bundle.contains(QStringLiteral("addon.remote.urls")));
+            bool anyFlag = false;
+            for (const QString& k : bundle.keys()) if (k.startsWith(QLatin1String("addon.enabled."))) anyFlag = true;
+            CHECK(!anyFlag);
+            CHECK(bundle.contains(QStringLiteral("addon.remote.manifest.") + md5(X)));
+            for (const QString& k : bundle.keys()) CHECK(!k.startsWith(QLatin1String("roster/")));
+        }
+        // ...and the classification behind it: the shadow is a per-item store (the merge document's, out of the
+        // settings transaction), the live keys are NOT (they stay settings rows a Discard can revert).
+        CHECK(CloudSync::isPerItemStoreKey(QStringLiteral("roster/all/items")));
+        CHECK(!CloudSync::isDeviceLocalKey(QStringLiteral("roster/all/items")));
+        CHECK(!CloudSync::isPerItemStoreKey(QStringLiteral("addon.remote.urls")));
+        CHECK(SettingsTxn::inScope(QStringLiteral("addon.remote.urls")));
+        CHECK(SettingsTxn::inScope(QStringLiteral("addon.enabled.") + idX));
+
+        // 43i. An OLD peer (before #77) still sends its roster in the heavy bundle. Its entries are ADOPTED as adds
+        //      — never written raw over ours, never read as removals, never over a local tombstone.
+        freshDevice(); cacheManifest(Y, idY); setLive({ Y });
+        injRecords({ { idY, Y, true, T - 100 } });
+        injTomb(QStringLiteral("roster/all"), idZ, T - 100);          // this device removed Z
+        {
+            QJsonObject old;
+            old.insert(QStringLiteral("addon.remote.urls"), compact(QJsonArray{ X, Z }));   // no Y: not a removal
+            old.insert(QStringLiteral("addon.enabled.") + idX, QStringLiteral("false"));
+            old.insert(QStringLiteral("addon.remote.manifest.") + md5(X),
+                       QStringLiteral("{\"id\":\"%1\",\"name\":\"x\",\"version\":\"1.0.0\",\"resources\":[\"stream\"],\"types\":[\"movie\"],\"catalogs\":[]}").arg(idX));
+            old.insert(QStringLiteral("addon.remote.manifest.") + md5(Z),
+                       QStringLiteral("{\"id\":\"%1\",\"name\":\"z\",\"version\":\"1.0.0\",\"resources\":[\"stream\"],\"types\":[\"movie\"],\"catalogs\":[]}").arg(idZ));
+            CloudSync::applySettingsJson(QJsonDocument(old).toJson(QJsonDocument::Compact));
+        }
+        CHECK(live().contains(Y));                                    // the snapshot's silence did not remove Y
+        CHECK(live().contains(X));                                    // its X was adopted as an add...
+        CHECK(!flagOn(idX));                                          // ...with the flag it carried
+        CHECK(!live().contains(Z));                                   // ...but not over this device's removal of Z
+        {
+            const QJsonObject d = serializeNow();
+            bool adoptedAtZero = false;
+            for (const QJsonValue& v : rosterItems(d))
+                if (v.toObject().value("key").toString() == idX && v.toObject().value("ts").toDouble() == 0) adoptedAtZero = true;
+            CHECK(adoptedAtZero);                                     // ts 0: any dated edit elsewhere beats it
+        }
+
+        // 43j. A removal made UNDER the API (a settings Discard reverting the list, an older build on this ini)
+        //      is still a dated removal once the next document is built — and a Discard that undoes a removal
+        //      re-adds with a stamp that beats the tombstone it left.
+        freshDevice(); cacheManifest(X, idX); setLive({ X });
+        injRecords({ { idX, X, true, T - 100 } });
+        setLive({});                                                  // the list lost X, with no API call
+        const QJsonObject dj = serializeNow();
+        CHECK(docTomb(dj, idX) >= T && !docHasKey(dj, idX));
+        setLive({ X });                                               // ...and a Discard put it back
+        const QJsonObject dj2 = serializeNow();
+        bool backBeatsTomb = false;
+        for (const QJsonValue& v : rosterItems(dj2))
+            if (v.toObject().value("key").toString() == idX && v.toObject().value("ts").toDouble() > double(docTomb(dj, idX)))
+                backBeatsTomb = true;
+        CHECK(backBeatsTomb);
+        CHECK(docTomb(dj2, idX) == 0);                                // its own tombstone is withdrawn
+
+        // 43k. BACKFILL: the first build with a shadow stamps what is already live at ts 0 and tombstones
+        //      nothing, so a genuine dated removal on another device still wins over it.
+        wipeRoster(); cacheManifest(X, idX); setLive({ X });          // no roster/ key at all: an upgrade
+        const QJsonObject dk = serializeNow();
+        CHECK(docHasKey(dk, idX));
+        for (const QJsonValue& v : rosterItems(dk)) CHECK(v.toObject().value("ts").toDouble() == 0);
+        CHECK(docTomb(dk, idX) == 0);
+        {
+            QJsonObject peer; QJsonObject all; QJsonArray tombs;
+            QJsonObject t; t["key"] = idX; t["ts"] = double(T - 1000); tombs.append(t);
+            all["items"] = QJsonArray{}; all["tombs"] = tombs; peer["all"] = all;
+            QJsonObject d; d["roster"] = peer;
+            mergeDoc(d);
+        }
+        CHECK(!live().contains(X));                                   // a month-old dated removal beats "unknown"
+
+        // 43l. A merge landing in the middle of a settings visit closes the transaction first: the live keys are
+        //      settings rows, and a Discard must not be able to turn a peer's add into a removal.
+        freshDevice(); cacheManifest(Y, idY); setLive({ Y });
+        const QJsonObject docY = serializeNow();
+        freshDevice();
+        SettingsTxn::begin();
+        CHECK(SettingsTxn::active());
+        mergeDoc(docY);
+        CHECK(live().contains(Y));
+        CHECK(!SettingsTxn::active());
+        if (SettingsTxn::active()) SettingsTxn::commit();
+
+        // 43m. The `>=` rule, at its boundary, on the SHADOW as well as the live list: a tombstone stamped at the
+        //      SAME second as the copy it meets suppresses it, and the merge does not keep the suppressed record
+        //      to carry on (the live list alone cannot show that — the projection drops the URL either way).
+        freshDevice(); cacheManifest(X, idX); setLive({ X });
+        injRecords({ { idX, X, true, T - 300 } });
+        {
+            QJsonObject peer; QJsonObject all; QJsonArray tombs;
+            QJsonObject t; t["key"] = idX; t["ts"] = double(T - 300); tombs.append(t);
+            all["items"] = QJsonArray{}; all["tombs"] = tombs; peer["all"] = all;
+            QJsonObject d; d["roster"] = peer;
+            mergeDoc(d);
+        }
+        CHECK(!live().contains(X));
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(!raw.value(QStringLiteral("roster/all/items")).toString().contains(idX));   // not kept in the shadow
+        }
+        CHECK(!docHasKey(serializeNow(), idX));
+
+        wipeRoster();
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

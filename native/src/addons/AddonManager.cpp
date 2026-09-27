@@ -1,4 +1,5 @@
 #include "AddonManager.h"
+#include "../core/AddonRoster.h"   // issue #77: the roster's stamped shadow, touched after every live write
 #include "../core/NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "../core/QuitBudget.h"    // issue #442: a quit ends a blocking fetch on a pool thread
 #include "../core/CatalogMatch.h"
@@ -234,20 +235,12 @@ static QByteArray httpGetBlocking(const QUrl& url, const QByteArray& cfgHeader =
     return data;
 }
 
-// Normalise a user-entered URL to the service base (drop a trailing "/manifest.json" and slash).
-static QString normalizeBase(const QString& raw)
-{
-    QString b = raw.trimmed();
-    if (b.endsWith(QStringLiteral("/manifest.json"))) b.chop(int(strlen("/manifest.json")));
-    while (b.endsWith(QLatin1Char('/'))) b.chop(1);
-    return b;
-}
+// Normalise a user-entered URL to the service base (drop a trailing "/manifest.json" and slash). The rule lives
+// in AddonRoster (issue #77) because the roster merge keys records by the SAME normalised base, and two
+// spellings of it would split one add-on into two records.
+static QString normalizeBase(const QString& raw) { return AddonRoster::normalizeBase(raw); }
 
-static QString manifestCacheKey(const QString& base)
-{
-    const QByteArray h = QCryptographicHash::hash(base.toUtf8(), QCryptographicHash::Md5).toHex();
-    return QStringLiteral("addon.remote.manifest.") + QString::fromUtf8(h);
-}
+static QString manifestCacheKey(const QString& base) { return AddonRoster::manifestCacheKey(base); }
 
 // Per-addon ETag of the last package we pulled from its updateUrl, so an unchanged package answers 304.
 static QString updateEtagKey(const QString& id)
@@ -774,6 +767,10 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
                 : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
+    // Issue #77: stamp the roster's shadow from what is live BEFORE the migrations below touch it. On the first
+    // launch of a build with a roster this is the backfill (ts 0, no tombstones); after that it catches any
+    // edit made underneath us. The migrations' own removals then arrive as dated tombstones.
+    AddonRoster::touched();
     // EB_ADDONS_ROOT is the probes' hermetic-fixture override: with it set, skip every startup network
     // kick (default-source seeding, remote-manifest refresh, addon self-update). A live fetch landing
     // mid-probe fires reload()+sourcesChanged() at an arbitrary moment — which flushes/resweeps the
@@ -784,6 +781,11 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
         refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest
         checkAddonUpdates();         // self-update local addons that publish a newer package (manifest updateUrl)
     }
+    // Issue #77 ORDERING: the one-shot migrations above have now had their say (synchronously - their removals
+    // and latches are written before this line), so a roster merge may run. CloudMerge skips the section
+    // until this is set. Set in the hermetic probe mode too, where there are no migrations to wait for.
+    AddonRoster::markMigrationsRun();
+    snapshotEnabled();
 }
 
 void AddonManager::refreshRemoteManifests()
@@ -886,6 +888,7 @@ void AddonManager::reload()
     // run; it earns its keep once, on the first launch after an install whose keys an earlier build stranded.
     const QStringList ids = installedIds();
     const int restored = BrandMigration::reconcileAddonConfig(AppPaths::dataDir(), ids);
+    snapshotEnabled();   // #77: after the repair above, which can move a flag onto the id in use
     if (restored)
         streamLog(QStringLiteral("addon config: restored %1 stranded setting(s) to the add-on ids in use")
                       .arg(restored));   // COUNT only — these values are user credentials
@@ -2930,6 +2933,7 @@ void AddonManager::addRemoteSource(const QString& url)
         store().setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
         store().setValue(manifestCacheKey(base), data);
         store().sync();
+        AddonRoster::touched();   // #77: stamp the add (or #80 re-configure) in the roster, and arm the push
 
         reload();
         const QString shown = m.name.isEmpty() ? m.id : m.name;
@@ -2953,6 +2957,9 @@ bool AddonManager::removeRemoteSource(const QString& url)
     store().setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
     store().remove(manifestCacheKey(base));
     store().sync();
+    // #77: the roster record goes and a tombstone is written at this second, so a peer's older copy cannot
+    // bring it back. The record already holds its key (the manifest id), so dropping the cache above is safe.
+    AddonRoster::touched();
     reload();
     emit sourcesChanged();
     return true;
@@ -2961,6 +2968,83 @@ bool AddonManager::removeRemoteSource(const QString& url)
 bool AddonManager::isEnabled(const QString& id) const
 {
     return store().value(QStringLiteral("addon.enabled.") + id, true).toBool();
+}
+
+// ---- issue #77: a roster merge landed ----------------------------------------------------------------------
+// CloudMerge projected a peer's roster onto the live keys. Bring the loaded set in line with them: a URL whose
+// manifest this device has never cached is fetched (it is a subscription made elsewhere, not an edit here, so
+// the roster is not touched), a changed URL set reloads, and a flag the merge flipped is announced exactly as
+// setEnabled announces one, so the prefetcher resweeps and the UI drops or serves the source.
+void AddonManager::snapshotEnabled()
+{
+    enabledSeen_.clear();
+    for (const QString& id : installedIds()) enabledSeen_.insert(id, isEnabled(id));
+}
+
+void AddonManager::applyMergedRoster()
+{
+    QVector<QPair<QString, bool>> flipped;
+    for (auto it = enabledSeen_.begin(); it != enabledSeen_.end(); ++it)
+    {
+        const bool now = isEnabled(it.key());
+        if (now != it.value()) flipped.push_back({ it.key(), now });
+    }
+
+    const QStringList urls = remoteSourceUrls();
+    QSet<QString> cached, loadedBases;
+    for (const QString& u : urls)
+        if (!store().value(manifestCacheKey(u)).toByteArray().isEmpty()) cached.insert(u);
+    for (const auto& e : loaded_)
+        if (e->transport == LoadedAddon::RemoteHttp) loadedBases.insert(e->baseUrl);
+
+    if (cached != loadedBases)
+    {
+        streamLog(QStringLiteral("roster merge: remote add-on set changed (%1 -> %2) - reloading")
+                      .arg(loadedBases.size()).arg(cached.size()));
+        reload();
+        emit sourcesChanged();
+    }
+    for (const auto& f : flipped)
+    {
+        streamLog(QStringLiteral("roster merge: %1 %2").arg(f.first, f.second ? QStringLiteral("enabled")
+                                                                                : QStringLiteral("disabled")));
+        if (!f.second)
+        {
+            const QString prefix = f.first + QLatin1Char('|');   // setEnabled's cache drop, same key shape
+            for (auto it = catalogCache_.begin(); it != catalogCache_.end(); )
+                it = it.key().startsWith(prefix) ? catalogCache_.erase(it) : std::next(it);
+        }
+        emit sourceEnabledChanged(f.first, f.second);
+    }
+    snapshotEnabled();
+
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    for (const QString& base : urls)
+    {
+        if (cached.contains(base)) continue;
+        QNetworkRequest rq((QUrl(base + QStringLiteral("/manifest.json"))));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(15000);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError)
+            {
+                streamLog(QStringLiteral("roster merge: manifest fetch failed for a synced add-on: %1")
+                              .arg(NetErrorText::forReply(reply)));
+                return;
+            }
+            const QByteArray data = reply->readAll();
+            if (data.isEmpty() || !buildRemoteAddon(base, data)) return;
+            if (!remoteSourceUrls().contains(base)) return;         // removed again while this was in flight
+            store().setValue(manifestCacheKey(base), data);
+            store().sync();
+            streamLog(QStringLiteral("roster merge: fetched the manifest of a synced add-on - reloading"));
+            reload();
+            emit sourcesChanged();
+        });
+    }
 }
 
 LoadedAddon* AddonManager::metaProviderFor(LoadedAddon* exclude, const QString& type) const
@@ -2986,6 +3070,8 @@ void AddonManager::setEnabled(const QString& id, bool enabled)
 {
     store().setValue(QStringLiteral("addon.enabled.") + id, enabled);
     store().sync();
+    AddonRoster::touched();          // #77: the flag rides the roster record, stamped now
+    enabledSeen_.insert(id, enabled);
     if (!enabled)
     {
         // Drop this source's cached catalogs so nothing stale can be served after it's turned off. Cache keys

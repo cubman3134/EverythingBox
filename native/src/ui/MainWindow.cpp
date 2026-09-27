@@ -154,6 +154,7 @@
 #include "../core/ThemeShots.h"        // #91: a gallery row's screenshot — the cached path, drawn as a thumbnail
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
+#include "../core/AddonRoster.h"   // issue #77: the add-on roster syncs through the merge document
 #include "../core/BrandMigration.h"   // mergeProgress re-runs the stored-add-on-id repair after every merge (#58)
 #include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
 #include "../core/PendingPush.h"   // durable pending cloud push + retry policy (issue #34)
@@ -520,6 +521,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // is the whole contract (SettingsTxn.h), and the two sites must be read together.
     SettingsTxn::setRollbackHook([this] {
         FormFactor::instance().refresh();
+        // #77: a Discard may have reverted the add-on list or a flag. Stamp that as the edit it is, now, so it
+        // wins over the discarded change wherever a push already carried it.
+        AddonRoster::touched();
         showHomeScreen();
     });
 
@@ -2123,6 +2127,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     AnnotationExportAction::setNoticeHook([this](const QString& t) { notify(t); });  // issue #136: the export/note toasts
     AudioBookmarkStore::setChangeHook(armProgressSync); // issue #140: an audio bookmark rides #136's sync category
     PlaylistStore::setChangeHook(armProgressSync);
+    AddonRoster::setChangeHook(armProgressSync);  // issue #77: an add-on subscribed/removed/toggled syncs
     HomeRowStore::setChangeHook(armProgressSync); // issue #161: the home arrangement is user data, so it syncs
     MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
     LaunchOpts::setChangeHook(armProgressSync);     // issue #51: a per-game launch override is user data, so it syncs
@@ -28106,6 +28111,7 @@ void MainWindow::mergeProgress(const QByteArray& json)
     // rest of the session and only come right on the next launch. Idempotent and near-free (it writes only
     // when something actually moved), which is what makes running it on every merge affordable.
     if (!addons_) return;
+    addons_->applyMergedRoster();   // #77: the merge may have added, removed or re-flagged add-ons
     const int repointed = BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), addons_->installedIds());
     if (repointed)
         mwLog(QStringLiteral("addon refs: re-pointed %1 stored reference(s) after a cloud merge").arg(repointed));
