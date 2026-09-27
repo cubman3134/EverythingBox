@@ -338,6 +338,14 @@ void CastFileServer::stop()
     if (server_) server_->close();
     const QList<QTcpSocket*> socks = conns_.keys();
     for (QTcpSocket* s : socks) drop(s);
+    const QList<QTcpSocket*> refused = refusing_.keys();
+    refusing_.clear();
+    for (QTcpSocket* s : refused)
+    {
+        s->disconnect(this);
+        s->abort();
+        s->deleteLater();
+    }
 }
 
 void CastFileServer::drop(QTcpSocket* s)
@@ -358,10 +366,7 @@ void CastFileServer::onNewConnection()
     {
         if (conns_.size() >= kMaxConnections)
         {
-            s->write("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n"
-                     "Connection: close\r\n\r\nbusy\n");
-            connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
-            s->disconnectFromHost();
+            refuse(s);
             continue;
         }
         Conn* c = new Conn;
@@ -380,6 +385,56 @@ void CastFileServer::onNewConnection()
         });
         if (s->bytesAvailable() > 0) onReadyRead(s);
     }
+}
+
+// Over the cap. The 503 goes out at once, but the socket is closed only after the request head has arrived and
+// been read. Closing a socket with request bytes still unread sends a reset instead of a FIN, and a reset makes
+// the client's stack throw away the 503 it has not read yet: the client sees a bare "connection closed" and no
+// answer at all. The old path wrote the 503 and called disconnectFromHost() straight away, which also stops
+// reading, so any request that reached the server before the close went out made it a reset (#457: the probe's
+// cap check failed about 1 run in 10 on Windows; a request already queued at the accept lost the 503 every
+// time). finish() avoids the same trap by reading before it closes.
+//   * A refused connection that never sends a complete head is closed after kRefuseLingerMs.
+//   * At most kMaxRefusing are held this way. Past that (a flood, not a renderer) the next is answered and closed
+//     at once, best effort, holding nothing.
+// None of these count towards connectionCount(): the cap is about connections being served.
+void CastFileServer::refuse(QTcpSocket* s)
+{
+    s->write("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n"
+             "Connection: close\r\n\r\nbusy\n");
+    if (refusing_.size() >= kMaxRefusing)
+    {
+        connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+        s->disconnectFromHost();
+        return;
+    }
+    refusing_.insert(s, QByteArray());
+    connect(s, &QTcpSocket::readyRead, this, [this, s] { onRefusedReadyRead(s); });
+    connect(s, &QTcpSocket::disconnected, this, [this, s] {
+        // The peer left first. Nothing more to read or send; release it (deleteLater: this is its own emission).
+        if (refusing_.remove(s)) s->deleteLater();
+    });
+    QTimer::singleShot(kRefuseLingerMs, s, [this, s] { closeRefused(s); });   // dies with the socket
+    if (s->bytesAvailable() > 0) onRefusedReadyRead(s);
+}
+
+void CastFileServer::onRefusedReadyRead(QTcpSocket* s)
+{
+    const auto it = refusing_.find(s);
+    if (it == refusing_.end()) return;
+    QByteArray& head = it.value();
+    head += s->read(kMaxHeaderBytes + 1 - head.size());
+    if (head.contains("\r\n\r\n") || head.contains("\n\n") || head.size() > kMaxHeaderBytes) closeRefused(s);
+}
+
+void CastFileServer::closeRefused(QTcpSocket* s)
+{
+    if (!refusing_.remove(s)) return;
+    s->disconnect(this);
+    s->readAll();              // nothing unread at the close, so it is a FIN and the 503 ahead of it is delivered
+    if (s->state() == QAbstractSocket::UnconnectedState) { s->deleteLater(); return; }
+    connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+    s->disconnectFromHost();   // flushes the 503 if it has not gone yet, then closes
 }
 
 namespace

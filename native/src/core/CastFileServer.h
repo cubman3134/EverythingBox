@@ -133,6 +133,8 @@ class CastFileServer : public QObject
     Q_OBJECT
 public:
     static constexpr int kMaxConnections = 8;        // a renderer seeking opens a few; more is not a renderer
+    static constexpr int kMaxRefusing = 16;          // refused connections held open until their request is read
+    static constexpr int kRefuseLingerMs = 2000;     // a refused connection that sends no request is closed after this
     static constexpr int kMaxHeaderBytes = 8192;     // a request head bigger than this is not a media fetch
     static constexpr int kHeaderTimeoutMs = 10000;   // a connection that never finishes its head is dropped
     static constexpr qint64 kChunkBytes = 64 * 1024;
@@ -155,6 +157,7 @@ public:
     QHostAddress address() const;
     quint16 port() const;
     int connectionCount() const { return int(conns_.size()); }
+    int refusingCount() const { return int(refusing_.size()); }   // refused (503) connections not yet closed
 
 private:
     struct Conn;
@@ -163,10 +166,14 @@ private:
     void pump(QTcpSocket* s);
     void finish(QTcpSocket* s, const QByteArray& response);
     void drop(QTcpSocket* s);
+    void refuse(QTcpSocket* s);
+    void onRefusedReadyRead(QTcpSocket* s);
+    void closeRefused(QTcpSocket* s);
 
     QTcpServer* server_ = nullptr;
     QByteArray token_;
     QString filePath_;
     QString fileName_;
     QHash<QTcpSocket*, Conn*> conns_;
+    QHash<QTcpSocket*, QByteArray> refusing_;   // over the cap, 503 sent: what has arrived of the request head
 };
