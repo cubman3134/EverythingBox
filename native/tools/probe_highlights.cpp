@@ -191,7 +191,15 @@ int main(int argc, char** argv)
         CHECK(m.caret == 16);
         CHECK(!m.selecting());
         CHECK(m.key(Qt::Key_Escape, text, lines) == ReaderSelection::Result::Exited);
+        // The model REPORTS the exit and does not perform it (issue #451): the host's one exit path
+        // (EbookView::endCursorMode) guards on `active` and takes the caret down, so a model that left first
+        // made that guard a no-op and stranded the caret on the page. probe_readerbookmarks section 7 drives
+        // the real view through it; this pins the half of the contract that lives here.
+        CHECK(m.active);
+        CHECK(m.caret == 16);
+        m.leave();                                              // ...what the host does on Exited
         CHECK(!m.active);
+        CHECK(m.key(Qt::Key_Right, text, lines) == ReaderSelection::Result::Ignored);   // and the mode is over
 
         // 1f. A selection of nothing but space is not a highlight — it is a point anchor, i.e. a bookmark's
         // shape, so a caller that stores it unconditionally cannot write a zero-width highlight.

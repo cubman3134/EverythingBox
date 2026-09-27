@@ -18,7 +18,9 @@
 //                   selection — the host then offers the colour menu. So the whole gesture is
 //                   enter-mode → move → Enter → move → Enter, every step visible and undoable.
 //   Escape / Back   cancel: with a selection in flight it drops the selection and keeps the caret; with no
-//                   selection it leaves cursor mode entirely (so Back never strands you inside the mode).
+//                   selection it asks to leave cursor mode entirely (so Back never strands you inside the
+//                   mode). The model REPORTS that exit (Result::Exited) and the host performs it, so the
+//                   flag, the caret on the page and the chrome's label all change in one place (#451).
 //
 // THE RANGE THE COMMIT YIELDS IS TRIMMED. Moving right by word leaves the caret on the FIRST character of the
 // next word, so the raw span carries the space (and any punctuation) between the two — a highlight that draws
@@ -122,7 +124,7 @@ enum class Result
     Anchored,   // select-from-here: the selection just began at the caret
     Committed,  // the selection is finished — the host offers the colour menu
     Cleared,    // a selection in flight was dropped; the mode is still on, the caret is still there
-    Exited,     // cursor mode is over
+    Exited,     // leave cursor mode: the HOST now leaves (clears caret + selection, tells the chrome) - #451
 };
 
 // The cursor-mode state machine itself. `active` is the mode; `anchor` is where select-from-here happened
@@ -139,6 +141,7 @@ struct Model
     bool selecting() const { return active && anchor >= 0; }
 
     void enter(int at) { active = true; caret = qMax(0, at); anchor = -1; }
+    // Called by the host's ONE exit path (EbookView::endCursorMode), never by key(): see Result::Exited.
     void leave()       { active = false; anchor = -1; }
 
     // The whole key map (see the header comment). `text` is the chapter's plain text in the SAME coordinates
@@ -161,7 +164,10 @@ struct Model
         case Qt::Key_Back:
         case Qt::Key_Backspace:
             if (anchor >= 0) { anchor = -1; return Result::Cleared; }
-            leave();
+            // Report the exit; do NOT leave here (issue #451). Leaving is the HOST's one job - it has a
+            // caret on the page to take down, a selection band to clear and a chrome to tell - and it
+            // guards that job on `active`. Leaving here first turned its guard into a no-op, so the mode
+            // ended while the caret stayed drawn and the themed control went on reading "Selecting".
             return Result::Exited;
         default:
             return Result::Ignored;
