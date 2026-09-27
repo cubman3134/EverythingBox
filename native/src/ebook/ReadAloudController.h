@@ -113,16 +113,18 @@ private:
     QVector<ReadAloud::Utterance> utts_;
     QList<QVoice>    voices_;
 
-    // Queue bookkeeping. `first_` is the utterance the engine's CURRENT queue starts at, so the id Qt reports
-    // in aboutToSynthesize (an index into that queue, reset by stop()) maps to an utterance by simple addition.
+    // Queue bookkeeping. `first_` is the utterance the engine's CURRENT queue starts at, and every
+    // aboutToSynthesize is the next text of that queue starting, so first_ + spoken_ names the utterance.
+    // (Qt's own id is not used: it is not reset by stop() - see onAboutToSynthesize.)
     int  first_   = 0;
     int  queued_  = 0;     // one past the last utterance handed to the engine
-    int  spoken_  = 0;     // how many of the current queue have started
+    int  spoken_  = 0;     // how many of the current queue have started (counted per aboutToSynthesize)
     int  current_ = -1;    // the utterance being spoken
 
     bool active_     = false;
     bool paused_     = false;   // see paused(): ours, because the engine's state enum does not say
     bool restarting_ = false;   // a stop() WE asked for: its Ready is not the end of the book
+    bool pumping_    = false;   // inside pump(): an aboutToSynthesize emitted by enqueue() must not re-enter it
     double speed_    = 1.0;
     int    voiceIdx_ = 0;
 

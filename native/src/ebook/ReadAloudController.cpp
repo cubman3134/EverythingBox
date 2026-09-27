@@ -247,10 +247,27 @@ void ReadAloudController::speakFrom(int index)
     pump();
 }
 
+// Two rules keep the queue in the order it was planned. Both were measured on Windows SAPI with Qt 6.8, where
+// breaking them spoke a chapter's heading and ONE of its paragraphs and skipped the rest (a word-by-word log of
+// sayingWord showed it; the highlight, which followed the ids, never did):
+//   * No re-entry. enqueue() onto an idle engine emits aboutToSynthesize BEFORE it hands the engine the text,
+//     and the slot tops the queue back up - so a pump inside a pump handed the idle engine three texts
+//     innermost-first, and SAPI's say() purges whatever it is already speaking when a new text arrives.
+//   * Nothing more to an engine that still reports Ready. Qt queues a text itself only once the engine is
+//     busy; one handed to an engine it still believes idle goes straight to say(), on top of the last. SAPI
+//     reports busy a few tens of milliseconds later, from its own thread, so there each text is handed over at
+//     the previous one's end (the drained-Ready path below) - a gap of that size, measured, and never a text
+//     purged. An engine that reports busy at once keeps the full look-ahead.
 void ReadAloudController::pump()
 {
+    if (pumping_) return;
+    pumping_ = true;
     while (queued_ < utts_.size() && (queued_ - first_ - spoken_) < kLookahead)
+    {
         tts_->enqueue(utts_[queued_++].text);
+        if (tts_->state() == QTextToSpeech::Ready) break;
+    }
+    pumping_ = false;
 }
 
 void ReadAloudController::onAboutToSynthesize(qsizetype id)
@@ -264,7 +281,10 @@ void ReadAloudController::onAboutToSynthesize(qsizetype id)
     // word. Asked BEFORE the id is mapped, because every emission is a boundary whatever id it carries.
     if (sleepStopAtBoundary(target_ ? target_->raChapterIndex() : -1)) return;
 
-    const int idx = first_ + int(id);
+    // Which utterance this is, by COUNT: the n-th boundary since the queue was (re)started is its n-th text.
+    // Qt's id is not usable for this - it is 0 when a text goes straight to an idle engine, and otherwise a
+    // counter QTextToSpeech never resets on stop(), so after the first restart it names the wrong paragraph.
+    const int idx = first_ + spoken_;
     if (sleep_.armed())
     {
         // While a timer is armed, every boundary is logged with the session clock: the evidence that a stop lands
@@ -279,7 +299,7 @@ void ReadAloudController::onAboutToSynthesize(qsizetype id)
     if (idx < 0 || idx >= utts_.size()) return;
 
     current_ = idx;
-    spoken_  = int(id) + 1;
+    spoken_  = spoken_ + 1;   // counted, not taken from `id` - see the note on idx above
     if (target_) target_->raShowSpoken(utts_[idx].start, utts_[idx].end);
     pump();               // keep the look-ahead full so the next paragraph starts without a gap
     notifyChanged();
