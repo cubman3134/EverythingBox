@@ -8,6 +8,7 @@
 #include "../core/ThemeZip.h"   // #91: the zip install lane, shared with the themed surface
 #include "../core/ThemeShots.h" // #91: a screenshot's fetch, cap and cache — shared with the themed surface
 #include "../addons/AddonManager.h"
+#include "../core/AddonRoster.h"     // #77: the registries the user added are roster records, synced by merge
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -43,20 +44,15 @@
 // unconditional app sources, so a Qt install without qtdeclarative would fail to LINK against the engine.
 static QString themesRoot() { return ThemeRegistry::themesRoot(AppPaths::dataDir()); }
 
-static QSettings& store()
-{
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                       QSettings::IniFormat);
-    return s;
-}
-
 // Decorations share the THEMES registry list, deliberately: they are published in the same index document
 // (issue #187 decision 1), so a user who added a registry for its themes has already added it for its packs.
-// A separate `decorationsExtras` key would mean adding the same URL twice to see both halves of one file.
-static QString extrasKey(RegistryBrowser::Kind kind)
+// A separate decorations list would mean adding the same URL twice to see both halves of one file.
+//
+// The lists themselves are roster records (#77 increment 4) — the one store, merged across devices as a union
+// with tombstones — so an add here is a dated record and a remove a dated tombstone, never a list rewrite.
+static AddonRoster::RegistryList listFor(RegistryBrowser::Kind kind)
 {
-    return kind == RegistryBrowser::Addons ? QStringLiteral("registry/addonsExtras")
-                                           : QStringLiteral("registry/themesExtras");
+    return kind == RegistryBrowser::Addons ? AddonRoster::RegistryList::Addons : AddonRoster::RegistryList::Themes;
 }
 
 QString RegistryBrowser::defaultUrl() const
@@ -65,7 +61,7 @@ QString RegistryBrowser::defaultUrl() const
     // device only from a registry that device has configured, and this list is that set.
     return kind_ == Addons
         ? AddonManager::defaultRegistryUrl()
-        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+        : AddonRoster::builtInRegistryUrl(AddonRoster::RegistryList::Themes);
 }
 
 // <data>/bezels, from DecorationPack rather than spelled here — the same discipline themesRoot() above
@@ -87,8 +83,15 @@ QStringList RegistryBrowser::knownSystemIds() const
     return ids;
 }
 
-QStringList RegistryBrowser::extraRegistries() const { return store().value(extrasKey(kind_)).toStringList(); }
-void RegistryBrowser::saveExtras(const QStringList& list) { store().setValue(extrasKey(kind_), list); store().sync(); }
+QStringList RegistryBrowser::extraRegistries() const { return AddonRoster::registrySources(listFor(kind_)); }
+
+void RegistryBrowser::addExtra(const QString& url)
+{
+    if (kind_ == Addons && addons_) addons_->addExtraRegistry(url);   // ...and a reference waiting on it installs
+    else AddonRoster::addRegistrySource(listFor(kind_), url);
+}
+
+void RegistryBrowser::removeExtra(const QString& url) { AddonRoster::removeRegistrySource(listFor(kind_), url); }
 
 QStringList RegistryBrowser::allRegistries() const
 {
@@ -244,8 +247,7 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     auto commitAdd = [this, addRow, urlEdit] {
         const QString url = urlEdit->text().trimmed();
         if (url.isEmpty()) { addRow->setVisible(false); return; }
-        QStringList extras = extraRegistries();
-        if (!extras.contains(url)) { extras << url; saveExtras(extras); }
+        addExtra(url);
         addRow->setVisible(false);
         renderRegistryRows();
         fetchAll();
@@ -279,9 +281,7 @@ void RegistryBrowser::renderRegistryRows()
             rm->setToolTip(tr("Remove this registry"));
             const QString url = all[i];
             connect(rm, &QPushButton::clicked, this, [this, url] {
-                QStringList extras = extraRegistries();
-                extras.removeAll(url);
-                saveExtras(extras);
+                removeExtra(url);
                 renderRegistryRows();
                 fetchAll();
             });

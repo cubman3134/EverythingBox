@@ -1292,7 +1292,7 @@ void mergeRoster(const QJsonObject& roster)
             // Rebuilt through fromJson/toJson so both sides compare in the one canonical shape (unknown fields
             // from a later build dropped, the url normalised) and the tie-break sees content, not spelling.
             const AddonRoster::Record r = AddonRoster::fromJson(v.toObject());
-            if (r.key.isEmpty()) continue;
+            if (r.key.isEmpty() || AddonRoster::isBuiltInRegistryKey(r.key)) continue;   // a built-in is never a record
             const QJsonObject o = AddonRoster::toJson(r);
             if (!byKey.contains(r.key)) { byKey.insert(r.key, o); continue; }
             if (remoteReplaces(r.ts, static_cast<qint64>(byKey[r.key].value(QStringLiteral("ts")).toDouble()),
@@ -1305,7 +1305,11 @@ void mergeRoster(const QJsonObject& roster)
     ingest(local);
     ingest(so.value(QStringLiteral("items")).toArray());
 
-    const QHash<QString, qint64> tombs = mergeTombs(AddonRoster::tombStore(), so.value(QStringLiteral("tombs")).toArray());
+    // A built-in registry can never be tombstoned (#77): a peer's tombstone for one is not imported at all.
+    QJsonArray peerTombs;
+    for (const QJsonValue& v : so.value(QStringLiteral("tombs")).toArray())
+        if (!AddonRoster::isBuiltInRegistryKey(v.toObject().value(QStringLiteral("key")).toString())) peerTombs.append(v);
+    const QHash<QString, qint64> tombs = mergeTombs(AddonRoster::tombStore(), peerTombs);
 
     QVector<AddonRoster::Record> out;
     for (auto it = byKey.begin(); it != byKey.end(); ++it)

@@ -435,10 +435,13 @@ QByteArray CloudSync::buildSettingsJson()
     //
     // The add-on roster's LIVE keys (addon.remote.urls / addon.enabled.*) are out too (issue #77): the merge
     // document's `roster` section is their one sync authority, and a last-writer-wins copy of them here is
-    // exactly how a late push used to erase a subscription another device had just added.
+    // exactly how a late push used to erase a subscription another device had just added. The registries the
+    // user added (registry/addonsExtras, registry/themesExtras) are out for the same reason: they are roster
+    // records now, and the old keys only exist on a device that has not yet adopted them.
     QJsonObject so;
     for (const QString& k : store().allKeys())
-        if (!isDeviceLocalKey(k) && !isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k))
+        if (!isDeviceLocalKey(k) && !isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k)
+            && !AddonRoster::isLegacyRegistryKey(k))
             so.insert(k, store().value(k).toString());
     return QJsonDocument(so).toJson(QJsonDocument::Compact);
 }
@@ -455,6 +458,7 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
     QString legacyUrls;                    // issue #77: an OLDER peer's roster snapshot, adopted below
     QHash<QString, bool> legacyFlags;
     bool legacyRoster = false;
+    QVector<QPair<AddonRoster::RegistryList, QStringList>> legacyRegistries;   // #77: an older peer's added registries
     for (auto it = so.begin(); it != so.end(); ++it)
     {
         const QString& k = it.key();
@@ -472,6 +476,14 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
                                     QVariant(it.value().toString()).toBool());
             continue;
         }
+        // An older peer's list of added registries: adopted as adds, never written raw over this device's roster.
+        if (AddonRoster::isLegacyRegistryKey(k))
+        {
+            legacyRegistries.push_back({ k == QLatin1String("registry/addonsExtras") ? AddonRoster::RegistryList::Addons
+                                                                                     : AddonRoster::RegistryList::Themes,
+                                         AddonRoster::parseLegacyRegistryValue(it.value().toString()) });
+            continue;
+        }
         store().setValue(k, it.value().toString());
     }
     store().sync();
@@ -479,6 +491,7 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
     // union is the most it can honestly say. What it cannot say — that the old peer REMOVED something — waits
     // for that peer to upgrade and send a dated tombstone through the merge document.
     if (legacyRoster) AddonRoster::adoptLegacySnapshot(legacyUrls, legacyFlags);
+    for (const auto& l : legacyRegistries) AddonRoster::adoptLegacyRegistrySources(l.first, l.second);
 }
 
 static QByteArray buildBundle()
@@ -579,7 +592,8 @@ static QByteArray stateHash()
     // re-upload the heavy bundle. Keeping them out means per-item churn is served solely by the merge doc's
     // own push cadence; the bundle only re-uploads when a genuinely bundle-synced setting or file changes.
     for (const QString& k : store().allKeys())
-        if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k))
+        if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k)
+            && !AddonRoster::isLegacyRegistryKey(k))
             keys << k;   // #77: the roster's live keys are the merge document's, so they are out here too
     keys.sort();
     for (const QString& k : keys)

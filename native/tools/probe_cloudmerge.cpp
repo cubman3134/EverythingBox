@@ -6203,7 +6203,8 @@ int main(int argc, char** argv)
         auto isRosterState = [](const QString& k) {
             return k == QLatin1String("addon.remote.urls") || k.startsWith(QLatin1String("addon.enabled."))
                 || k.startsWith(QLatin1String("addon.remote.manifest.")) || k.startsWith(QLatin1String("roster/"))
-                || k.startsWith(QLatin1String("deleted/roster/"));
+                || k.startsWith(QLatin1String("deleted/roster/"))
+                || k.startsWith(QLatin1String("registry/"));   // #77 inc 4: a pre-roster list of added registries
         };
         using Device = QMap<QString, QVariant>;
         auto capture = [&]() {
@@ -6720,6 +6721,203 @@ int main(int argc, char** argv)
 
         QDir(addonsDir).removeRecursively();
         QDir(themesDir + QStringLiteral("/probe44")).removeRecursively();
+        wipeRoster();
+    }
+
+    // ---- 45. The registries the user ADDED sync through the roster merge (issue #77, increment 4) ---------
+    //
+    // registry/addonsExtras and registry/themesExtras rode the heavy bundle as a last-writer-wins value, so a
+    // late push dropped a registry another device had added — and since increment 2 a synced registry
+    // reference installs only from a registry the receiver has, so a dropped registry also blocked installs.
+    // Now each added registry is a kind-"registrySource" roster record keyed by list + normalised URL, merged by
+    // the same union-with-tombstones rule, and the roster is the one store (AddonRoster::registrySources).
+    {
+        using RL = AddonRoster::RegistryList;
+        const QString R1 = QStringLiteral("https://reg-one.probe.invalid/addons/index.json");
+        const QString R2 = QStringLiteral("https://reg-two.probe.invalid/addons/index.json");
+        const QString R3 = QStringLiteral("https://reg-three.probe.invalid/addons/index.json");
+        const QString R4 = QStringLiteral("https://reg-four.probe.invalid/addons/index.json");
+        const QString T1 = QStringLiteral("https://themes-one.probe.invalid/index.json");
+        const QString T3 = QStringLiteral("https://themes-three.probe.invalid/index.json");
+        const QString addonsKey = QStringLiteral("registry/addonsExtras"), themesKey = QStringLiteral("registry/themesExtras");
+        auto sources = [&](RL l) { return AddonRoster::registrySources(l); };
+        auto sourceTomb = [&](RL l, const QString& url) {
+            qint64 ts = 0;
+            for (const Tombstones::Entry& e : Tombstones::all(AddonRoster::tombStore()))
+                if (e.key == AddonRoster::registrySourceKey(l, url)) ts = e.ts;
+            return ts;
+        };
+        auto sourceTs = [&](RL l, const QString& url) {
+            for (const AddonRoster::Record& r : AddonRoster::records())
+                if (r.key == AddonRoster::registrySourceKey(l, url)) return r.ts;
+            return qint64(-1);
+        };
+        auto rawHas = [&](const QString& k) { QSettings raw(iniPath, QSettings::IniFormat); return raw.contains(k); };
+        auto rosterDoc = [&](const QJsonArray& items, const QJsonArray& tombs) {
+            QJsonObject scope; scope["items"] = items; scope["tombs"] = tombs;
+            QJsonObject roster; roster["all"] = scope;
+            QJsonObject doc; doc["roster"] = roster;
+            return doc;
+        };
+
+        // 45a. A adds R1 while B adds R2 -> both have both, in both arrival orders — and keyed by list + URL.
+        freshDevice(); CHECK(AddonRoster::addRegistrySource(RL::Addons, R1, T - 50));
+        const QJsonObject docA45 = serializeNow(); const Device devA45 = capture();
+        freshDevice(); CHECK(AddonRoster::addRegistrySource(RL::Addons, R2, T - 40));
+        const QJsonObject docB45 = serializeNow(); const Device devB45 = capture();
+        CHECK(docHasKey(docA45, AddonRoster::registrySourceKey(RL::Addons, R1)));
+        CHECK(AddonRoster::registrySourceKey(RL::Addons, R1) == QStringLiteral("registrySource:addons:") + R1);
+        load(devB45); mergeDoc(docA45);
+        CHECK(sources(RL::Addons) == QStringList({ R1, R2 }));      // B kept R2 and gained R1 (oldest first)
+        load(devA45); mergeDoc(docB45);
+        CHECK(sources(RL::Addons) == QStringList({ R1, R2 }));      // ...and A the same, the other way round
+        const QJsonObject rosterAB = serializeNow().value(QStringLiteral("roster")).toObject();
+        load(devB45); mergeDoc(docA45);
+        CHECK(serializeNow().value(QStringLiteral("roster")).toObject() == rosterAB);   // A-merges-B == B-merges-A
+        // The two lists are separate: the same URL added as a THEME registry is a different record.
+        CHECK(AddonRoster::addRegistrySource(RL::Themes, R1, T - 30));
+        CHECK(sources(RL::Themes) == QStringList({ R1 }) && sources(RL::Addons).count(R1) == 1);
+        // The URL is normalised: case in the scheme and host does not make a second registry.
+        CHECK(!AddonRoster::addRegistrySource(RL::Addons, QStringLiteral("  HTTPS://Reg-One.Probe.Invalid/addons/index.json ")));
+        CHECK(sources(RL::Addons).count(R1) == 1);
+
+        // 45b. A REMOVAL tombstones, and a later RE-ADD survives. Both devices hold R1 from T-100.
+        freshDevice(); CHECK(AddonRoster::addRegistrySource(RL::Addons, R1, T - 100));
+        const Device shared45 = capture();
+        CHECK(AddonRoster::removeRegistrySource(RL::Addons, R1, T - 60));   // A removes R1
+        CHECK(sourceTomb(RL::Addons, R1) == T - 60 && !sources(RL::Addons).contains(R1));
+        const QJsonObject docRemoved45 = serializeNow(); const Device devARemoved45 = capture();
+        load(shared45); mergeDoc(docRemoved45);                            // B, which still holds R1, merges
+        CHECK(!sources(RL::Addons).contains(R1));                          // the removal reached B
+        CHECK(sourceTs(RL::Addons, R1) < 0);                               // ...and B does not carry R1 on
+        // B re-adds R1 in the SAME second as the removal: its stamp still beats the tombstone.
+        CHECK(AddonRoster::addRegistrySource(RL::Addons, R1, T - 60));
+        CHECK(sourceTs(RL::Addons, R1) > T - 60 && sources(RL::Addons).contains(R1));
+        const QJsonObject docReadded45 = serializeNow();
+        mergeDoc(docRemoved45);                                            // the removal arriving again changes nothing
+        CHECK(sources(RL::Addons).contains(R1));
+        load(devARemoved45); mergeDoc(docReadded45);                       // ...and A gets it back
+        CHECK(sources(RL::Addons).contains(R1));
+        // A removal of something not held writes nothing.
+        CHECK(!AddonRoster::removeRegistrySource(RL::Addons, R3, T - 10) && sourceTomb(RL::Addons, R3) == 0);
+
+        // 45c. ONE AUTHORITY: the heavy bundle carries neither list key — not even one still sitting in the ini
+        //      from before this build — and the roster document carries the records instead.
+        freshDevice();
+        CHECK(AddonRoster::addRegistrySource(RL::Addons, R1, T - 20));
+        CHECK(AddonRoster::addRegistrySource(RL::Themes, T1, T - 20));
+        {
+            const QJsonObject bundle = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();
+            CHECK(!bundle.contains(addonsKey) && !bundle.contains(themesKey));
+            setRaw(addonsKey, R2); setRaw(themesKey, T3);                  // a pre-roster copy, not yet adopted
+            const QJsonObject bundle2 = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();
+            CHECK(!bundle2.contains(addonsKey) && !bundle2.contains(themesKey));
+            CHECK(AddonRoster::isLegacyRegistryKey(addonsKey) && AddonRoster::isLegacyRegistryKey(themesKey));
+            CHECK(!AddonRoster::isLegacyRegistryKey(QStringLiteral("registry/other")));
+            const QJsonObject d = serializeNow();                          // (this adopts the ini copies, see 45e)
+            CHECK(docHasKey(d, AddonRoster::registrySourceKey(RL::Addons, R1)));
+            CHECK(docHasKey(d, AddonRoster::registrySourceKey(RL::Themes, T1)));
+        }
+
+        // 45d. ONE MERGE brings registry R1 AND a reference to an add-on from R1: by the time the merge returns,
+        //      R1 is configured and the reference is pending an install — so AddonManager::applyMergedRoster,
+        //      which runs right after the merge, installs it rather than listing it (probe_addon installs it
+        //      against a loopback registry).
+        freshDevice();
+        {
+            QJsonObject src; src["key"] = AddonRoster::registrySourceKey(RL::Addons, R1); src["url"] = QString();
+            src["enabled"] = true; src["ts"] = double(T - 5); src["kind"] = QStringLiteral("registrySource");
+            src["list"] = QStringLiteral("addons"); src["source"] = R1;
+            QJsonObject ref; ref["key"] = QStringLiteral("probe.fromr1"); ref["url"] = QString(); ref["enabled"] = true;
+            ref["ts"] = double(T - 5); ref["kind"] = QStringLiteral("registry"); ref["registry"] = R1;
+            ref["entry"] = QStringLiteral("probe.fromr1"); ref["version"] = QStringLiteral("1.0.0");
+            CHECK(!sources(RL::Addons).contains(R1));
+            mergeDoc(rosterDoc(QJsonArray{ src, ref }, QJsonArray{}));
+        }
+        CHECK(sources(RL::Addons).contains(R1));
+        {
+            bool pending = false;
+            for (const AddonRoster::Record& r : AddonRoster::pendingRegistryInstalls())
+                if (r.key == QStringLiteral("probe.fromr1") && r.registry == R1) pending = true;
+            CHECK(pending);
+        }
+        // A build before this one keeps the record but drops the fields it does not know. The KEY still says
+        // what the record is, so the stripped copy reads back as the same registry source.
+        {
+            QJsonObject stripped; stripped["key"] = AddonRoster::registrySourceKey(RL::Themes, T3); stripped["url"] = QString();
+            stripped["enabled"] = true; stripped["ts"] = double(T - 5);
+            const AddonRoster::Record r = AddonRoster::fromJson(stripped);
+            CHECK(r.isRegistrySource() && r.sourceList == QStringLiteral("themes") && r.sourceUrl == T3 && r.url.isEmpty());
+        }
+
+        // 45e. OLD PEERS: a peer on a build before this one still sends its lists in the heavy bundle. They are
+        //      ADOPTED as adds at ts 0 — never written raw, never read as removals, never over a local tombstone.
+        //      A one-entry list arrives as that URL (a QVariant's string form); a comma list is read too.
+        freshDevice();
+        CHECK(AddonRoster::addRegistrySource(RL::Addons, R1, T - 20));
+        CHECK(AddonRoster::addRegistrySource(RL::Addons, R4, T - 30));
+        CHECK(AddonRoster::removeRegistrySource(RL::Addons, R4, T - 25));
+        {
+            QJsonObject old;
+            old.insert(addonsKey, R3 + QStringLiteral(", ") + R4);         // no R1 in it: not a removal
+            old.insert(themesKey, T3);
+            CloudSync::applySettingsJson(QJsonDocument(old).toJson(QJsonDocument::Compact));
+        }
+        CHECK(sources(RL::Addons).contains(R1));                          // the snapshot's silence did not remove R1
+        CHECK(sources(RL::Addons).contains(R3) && sourceTs(RL::Addons, R3) == 0);   // R3 adopted, undated
+        CHECK(!sources(RL::Addons).contains(R4));                         // ...but not over this device's removal of R4
+        CHECK(sourceTs(RL::Addons, R4) < 0);                              // ...not even as a record the list hides
+        CHECK(sources(RL::Themes) == QStringList({ T3 }) && sourceTs(RL::Themes, T3) == 0);
+        CHECK(!rawHas(addonsKey) && !rawHas(themesKey));                  // never written raw
+        // ...and a dated tombstone from another device beats the undated adoption.
+        {
+            QJsonObject tomb; tomb["key"] = AddonRoster::registrySourceKey(RL::Addons, R3); tomb["ts"] = double(T - 90);
+            mergeDoc(rosterDoc(QJsonArray{}, QJsonArray{ tomb }));
+            CHECK(!sources(RL::Addons).contains(R3));
+        }
+        // This device's OWN pre-roster lists are adopted the same way, once, and the old keys removed.
+        freshDevice();
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(addonsKey, QStringList{ R2, R3 }); raw.setValue(themesKey, QStringList{ T1 }); raw.sync();
+        }
+        CHECK(sources(RL::Addons).size() == 2 && sources(RL::Addons).contains(R2) && sources(RL::Addons).contains(R3));
+        CHECK(sourceTs(RL::Addons, R2) == 0 && sources(RL::Themes) == QStringList({ T1 }));
+        CHECK(!rawHas(addonsKey) && !rawHas(themesKey));
+
+        // 45f. The BUILT-IN registries are never records and never tombstoned: not by the user, not by an old
+        //      peer's list, not by a peer's document.
+        freshDevice();
+        const QString builtA = AddonRoster::builtInRegistryUrl(RL::Addons), builtT = AddonRoster::builtInRegistryUrl(RL::Themes);
+        CHECK(builtA.startsWith(QStringLiteral("https://")) && builtT.startsWith(QStringLiteral("https://")) && builtA != builtT);
+        CHECK(!AddonRoster::addRegistrySource(RL::Addons, builtA) && !AddonRoster::addRegistrySource(RL::Themes, builtT));
+        CHECK(!AddonRoster::removeRegistrySource(RL::Addons, builtA) && !AddonRoster::removeRegistrySource(RL::Themes, builtT));
+        CHECK(sourceTomb(RL::Addons, builtA) == 0 && sourceTomb(RL::Themes, builtT) == 0);
+        {
+            QJsonObject old; old.insert(addonsKey, builtA); old.insert(themesKey, builtT);
+            CloudSync::applySettingsJson(QJsonDocument(old).toJson(QJsonDocument::Compact));
+            CHECK(sources(RL::Addons).isEmpty() && sources(RL::Themes).isEmpty());
+        }
+        {
+            QJsonObject rec; rec["key"] = AddonRoster::registrySourceKey(RL::Addons, builtA); rec["url"] = QString();
+            rec["enabled"] = true; rec["ts"] = double(T - 5);
+            QJsonObject tomb; tomb["key"] = AddonRoster::registrySourceKey(RL::Themes, builtT); tomb["ts"] = double(T - 1);
+            mergeDoc(rosterDoc(QJsonArray{ rec }, QJsonArray{ tomb }));
+        }
+        CHECK(sourceTs(RL::Addons, builtA) < 0 && sources(RL::Addons).isEmpty());   // not merged in as a record
+        CHECK(sourceTomb(RL::Themes, builtT) == 0);                                 // ...nor its tombstone
+        // A record for a URL that is built-in NOW (added by hand before it became the built-in): it is not
+        // listed as an added registry, and removing it still writes no tombstone.
+        {
+            QJsonObject rec; rec["key"] = AddonRoster::registrySourceKey(RL::Themes, builtT); rec["url"] = QString();
+            rec["enabled"] = true; rec["ts"] = double(T - 5);
+            QVector<AddonRoster::Record> recs = AddonRoster::records();
+            recs.push_back(AddonRoster::fromJson(rec));
+            AddonRoster::saveRecords(recs);
+        }
+        CHECK(sources(RL::Themes).isEmpty());
+        CHECK(!AddonRoster::removeRegistrySource(RL::Themes, builtT) && sourceTomb(RL::Themes, builtT) == 0);
+
         wipeRoster();
     }
     }

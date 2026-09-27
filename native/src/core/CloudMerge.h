@@ -31,7 +31,7 @@
 //     "presets":  { "<profile>": { "items": [<preset>...],   "tombs": [{key,ts}] } },   // saved filters (#184)
 //     "metaoverrides": { "<hash>": {title,subtitle,overview,image,updatedAt}, ... },  // GLOBAL, like resume
 //     "missed":  { "<profile>": { "<showHash>": <unixSecs> } },       // per-show dismissal watermarks (#25)
-//     "roster":  { "<scope>": { "items": [{key,url,enabled,ts}...], "tombs": [{key,ts}] } },  // add-on roster (#77)
+//     "roster":  { "<scope>": { "items": [{key,url,enabled,ts}...], "tombs": [{key,ts}] } },  // add-on roster + added registries (#77)
 //     "stats":    { "<profile>": { "<device>": { "items/<hash>": <blob>, "cat/<cat>/..": <n> } } },
 //     "playstats":{ "<profile>": { "<device>": { "<hash>/total": <n>, "<hash>/last": <n>, ... } } }
 //   }
@@ -88,6 +88,9 @@
 //                  newest ts, tombstone-vs-ts exactly as favourites; one record carries the URL AND the enabled
 //                  flag. A stamped shadow of addon.remote.urls / addon.enabled.*, projected back onto them after
 //                  the merge (AddonRoster.h), and skipped until this process's add-on migrations have run.
+//                  The same section carries kind "registry" references (increment 2) and kind
+//                  "registrySource" records — the registries the user added, keyed "registrySource:<list>:<url>"
+//                  (increment 4) — under the same rules; a built-in registry is never merged in, nor its tombstone.
 //   * stats/playstats — device-namespaced accumulators: UNION of namespaces, VERBATIM replace of each REMOTE
 //                  namespace (a device only ever writes its own), local namespace untouched — NEVER arithmetic,
 //                  so repeated merges can't double-count.

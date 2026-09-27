@@ -3083,7 +3083,7 @@ QString AddonManager::registryUrlFor(bool uitest, const QString& overrideUrl, bo
     const QString fixture = overrideUrl.trimmed();
     if (ignoredOverride) *ignoredOverride = !fixture.isEmpty() && !uitest;
     if (uitest && !fixture.isEmpty()) return fixture;
-    return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
+    return AddonRoster::builtInRegistryUrl(AddonRoster::RegistryList::Addons);   // one spelling (#77)
 }
 
 QString AddonManager::defaultRegistryUrl()
@@ -3105,18 +3105,26 @@ QString AddonManager::defaultRegistryUrl()
 
 QStringList AddonManager::configuredRegistries()
 {
-    // The registry browser's own list for add-ons: the built-in registry plus registry/addonsExtras.
+    // The registry browser's own list for add-ons: the built-in registry plus the ones the user added — roster
+    // records (#77 increment 4), so a merge that brings a registry has configured it by the time it returns.
     QStringList l;
-    l << defaultRegistryUrl();
-    for (const QString& u : store().value(QStringLiteral("registry/addonsExtras")).toStringList())
-        if (!u.trimmed().isEmpty() && !l.contains(u.trimmed())) l << u.trimmed();
+    l << AddonRoster::normalizeRegistryUrl(defaultRegistryUrl());
+    for (const QString& u : AddonRoster::registrySources(AddonRoster::RegistryList::Addons))
+        if (!l.contains(u)) l << u;
     return l;
 }
 
 bool AddonManager::isRegistryConfigured(const QString& indexUrl)
 {
-    const QString u = indexUrl.trimmed();
+    const QString u = AddonRoster::normalizeRegistryUrl(indexUrl);
     return !u.isEmpty() && configuredRegistries().contains(u);
+}
+
+bool AddonManager::addExtraRegistry(const QString& indexUrl)
+{
+    const bool added = AddonRoster::addRegistrySource(AddonRoster::RegistryList::Addons, indexUrl);
+    if (added) applyMergedRegistryRefs();   // a reference listed only for want of this registry installs now
+    return added;
 }
 
 namespace {

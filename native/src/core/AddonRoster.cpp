@@ -78,6 +78,35 @@ QHash<QString, qint64> localTombs()
     return map;
 }
 
+// ---- registry sources (increment 4) ----
+const QLatin1String kSourcePrefix("registrySource:");
+
+QString listName(AddonRoster::RegistryList l)
+{
+    return l == AddonRoster::RegistryList::Addons ? QStringLiteral("addons") : QStringLiteral("themes");
+}
+
+// The per-list ini key each browser wrote before the roster held these, and an older peer still sends.
+QString legacyListKey(AddonRoster::RegistryList l)
+{
+    return l == AddonRoster::RegistryList::Addons ? QStringLiteral("registry/addonsExtras")
+                                                 : QStringLiteral("registry/themesExtras");
+}
+
+// "registrySource:<list>:<url>" -> list, url. The key is the authority for both.
+bool parseSourceKey(const QString& key, QString* list, QString* url)
+{
+    if (!key.startsWith(kSourcePrefix)) return false;
+    const QString rest = key.mid(kSourcePrefix.size());
+    const int colon = rest.indexOf(QLatin1Char(':'));
+    if (colon <= 0) return false;
+    const QString l = rest.left(colon), u = rest.mid(colon + 1);
+    if ((l != QLatin1String("addons") && l != QLatin1String("themes")) || u.isEmpty()) return false;
+    if (list) *list = l;
+    if (url) *url = u;
+    return true;
+}
+
 bool suppressed(const AddonRoster::Record& r, const QHash<QString, qint64>& tombs)
 {
     // The favourites/presets rule, verbatim: a REAL tombstone at-or-after the record's ts suppresses it. "No
@@ -169,7 +198,197 @@ QJsonObject AddonRoster::toJson(const Record& r)
         o.insert(QStringLiteral("entry"), r.entry);
         o.insert(QStringLiteral("version"), r.version);
     }
+    // ...and only a registry source these. Informational: fromJson reads both back from the key.
+    if (r.isRegistrySource())
+    {
+        o.insert(QStringLiteral("kind"), QStringLiteral("registrySource"));
+        o.insert(QStringLiteral("list"), r.sourceList);
+        o.insert(QStringLiteral("source"), r.sourceUrl);
+    }
     return o;
+}
+
+// ---- the registries the user added (increment 4) -----------------------------------------------------------
+
+QString AddonRoster::builtInRegistryUrl(RegistryList list)
+{
+    return list == RegistryList::Addons
+        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json")
+        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+}
+
+QString AddonRoster::normalizeRegistryUrl(const QString& raw)
+{
+    // Spelled out rather than through QUrl, which would re-encode a path and so change the string a provenance
+    // file already compares against. Only the scheme and host are case-insensitive, so only they are folded —
+    // and not when the authority carries user info, which may be case-sensitive.
+    QString u = raw.trimmed();
+    const int sep = u.indexOf(QStringLiteral("://"));
+    if (sep <= 0) return u;
+    int end = u.indexOf(QLatin1Char('/'), sep + 3);
+    if (end < 0) end = u.size();
+    const QString head = u.left(end);
+    if (head.contains(QLatin1Char('@'))) return u;
+    return head.toLower() + u.mid(end);
+}
+
+bool AddonRoster::isBuiltInRegistry(RegistryList list, const QString& url)
+{
+    const QString n = normalizeRegistryUrl(url);
+    if (n.isEmpty()) return false;
+    if (n == normalizeRegistryUrl(builtInRegistryUrl(list))) return true;
+    if (list != RegistryList::Addons || !qEnvironmentVariableIsSet("EB_UITEST")) return false;
+    const QString fixture = normalizeRegistryUrl(qEnvironmentVariable("EB_ADDON_REGISTRY_URL"));
+    return !fixture.isEmpty() && n == fixture;
+}
+
+QString AddonRoster::registrySourceKey(RegistryList list, const QString& url)
+{
+    return QString(kSourcePrefix) + listName(list) + QLatin1Char(':') + normalizeRegistryUrl(url);
+}
+
+bool AddonRoster::isLegacyRegistryKey(const QString& iniKey)
+{
+    return iniKey == legacyListKey(RegistryList::Addons) || iniKey == legacyListKey(RegistryList::Themes);
+}
+
+bool AddonRoster::isBuiltInRegistryKey(const QString& key)
+{
+    QString list, url;
+    if (!parseSourceKey(key, &list, &url)) return false;
+    return isBuiltInRegistry(list == QLatin1String("addons") ? RegistryList::Addons : RegistryList::Themes, url);
+}
+
+QStringList AddonRoster::parseLegacyRegistryValue(const QString& value)
+{
+    // A settings bundle carries every value as a string. A one-entry list arrives as that URL; a JSON array or
+    // an ini-style comma list is read too. A URL with a comma in it is not a registry index anyone publishes.
+    QStringList out;
+    const QString v = value.trimmed();
+    if (v.isEmpty()) return out;
+    QStringList parts;
+    if (v.startsWith(QLatin1Char('[')))
+        for (const QJsonValue& x : QJsonDocument::fromJson(v.toUtf8()).array()) parts << x.toString();
+    else
+        parts = v.split(QLatin1Char(','));
+    for (const QString& p : parts)
+        if (!p.trimmed().isEmpty() && !out.contains(p.trimmed())) out << p.trimmed();
+    return out;
+}
+
+namespace {
+// The adoption itself: ADDS at ts 0 — never over a tombstone, never a built-in, never a removal.
+bool adoptSources(AddonRoster::RegistryList list, const QStringList& urls)
+{
+    QVector<AddonRoster::Record> recs = AddonRoster::records();
+    const QHash<QString, qint64> tombs = localTombs();
+    bool changed = false;
+    for (const QString& raw : urls)
+    {
+        const QString u = AddonRoster::normalizeRegistryUrl(raw);
+        if (u.isEmpty() || AddonRoster::isBuiltInRegistry(list, u)) continue;   // the built-in is never a record
+        const QString key = AddonRoster::registrySourceKey(list, u);
+        if (tombs.contains(key) || indexByKey(recs, key) >= 0) continue;   // removed here, or already held
+        AddonRoster::Record r;
+        r.key = key;
+        r.sourceList = listName(list);
+        r.sourceUrl = u;
+        r.ts = 0;                                        // undated: any dated edit anywhere beats it
+        recs.push_back(r);
+        changed = true;
+    }
+    if (changed) AddonRoster::saveRecords(recs);
+    return changed;
+}
+
+// This device's own pre-roster lists, adopted ONCE as ts-0 adds and then removed, so the roster is the one
+// store. Run from reconcile(), after its backfill, so an upgrade still backfills the add-on roster at ts 0.
+bool adoptLocalLegacyLists()
+{
+    bool changed = false;
+    for (AddonRoster::RegistryList l : { AddonRoster::RegistryList::Addons, AddonRoster::RegistryList::Themes })
+    {
+        const QString k = legacyListKey(l);
+        if (!store().contains(k)) continue;
+        const QStringList urls = store().value(k).toStringList();
+        store().remove(k);
+        store().sync();
+        if (adoptSources(l, urls)) changed = true;
+    }
+    return changed;
+}
+} // namespace
+
+bool AddonRoster::adoptLegacyRegistrySources(RegistryList list, const QStringList& urls)
+{
+    reconcile();                                        // this device's own edits (and its backfill) first
+    const bool changed = adoptSources(list, urls);
+    if (changed && g_changeHook) g_changeHook();
+    return changed;
+}
+
+QStringList AddonRoster::registrySources(RegistryList list)
+{
+    if (store().contains(legacyListKey(RegistryList::Addons)) || store().contains(legacyListKey(RegistryList::Themes)))
+        reconcile();                                     // adopts them (after the roster's own backfill)
+    const QHash<QString, qint64> tombs = localTombs();
+    QVector<Record> mine;
+    for (const Record& r : records())
+        if (r.isRegistrySource() && r.sourceList == listName(list) && !suppressed(r, tombs)
+            && !isBuiltInRegistry(list, r.sourceUrl))
+            mine.push_back(r);
+    // Oldest first — where the old list put a new registry, at the end — and the same order on every device.
+    std::sort(mine.begin(), mine.end(), [](const Record& a, const Record& b) {
+        return a.ts != b.ts ? a.ts < b.ts : a.key < b.key;
+    });
+    QStringList out;
+    for (const Record& r : mine) out << r.sourceUrl;
+    return out;
+}
+
+bool AddonRoster::addRegistrySource(RegistryList list, const QString& url, qint64 now)
+{
+    const QString u = normalizeRegistryUrl(url);
+    if (u.isEmpty() || isBuiltInRegistry(list, u)) return false;
+    if (now <= 0) now = nowSecs();
+    reconcile(now);                                      // this device's other edits are stamped first
+    QVector<Record> recs = records();
+    const QHash<QString, qint64> tombs = localTombs();
+    const QString key = registrySourceKey(list, u);
+    const int i = indexByKey(recs, key);
+    if (i >= 0 && !suppressed(recs[i], tombs)) return false;   // already configured
+    qint64 ts = now;                                     // strictly newer than what it undoes, so it wins
+    if (i >= 0) { ts = std::max(ts, recs[i].ts + 1); recs.remove(i); }
+    if (tombs.contains(key)) { ts = std::max(ts, tombs.value(key) + 1); Tombstones::remove(tombStore(), key); }
+    Record r;
+    r.key = key;
+    r.sourceList = listName(list);
+    r.sourceUrl = u;
+    r.ts = ts;
+    recs.push_back(r);
+    saveRecords(recs);
+    if (g_changeHook) g_changeHook();
+    return true;
+}
+
+bool AddonRoster::removeRegistrySource(RegistryList list, const QString& url, qint64 now)
+{
+    const QString u = normalizeRegistryUrl(url);
+    if (u.isEmpty() || isBuiltInRegistry(list, u)) return false;   // a built-in is never tombstoned
+    if (now <= 0) now = nowSecs();
+    reconcile(now);
+    QVector<Record> recs = records();
+    const QHash<QString, qint64> tombs = localTombs();
+    const QString key = registrySourceKey(list, u);
+    const int i = indexByKey(recs, key);
+    if (i < 0) return false;                             // not configured: nothing to remove
+    qint64 ts = std::max(now, recs[i].ts + 1);
+    if (tombs.contains(key)) ts = std::max(ts, tombs.value(key) + 1);
+    Tombstones::record(tombStore(), key, ts);
+    recs.remove(i);
+    saveRecords(recs);
+    if (g_changeHook) g_changeHook();
+    return true;
 }
 
 AddonRoster::Record AddonRoster::fromJson(const QJsonObject& o)
@@ -177,6 +396,14 @@ AddonRoster::Record AddonRoster::fromJson(const QJsonObject& o)
     Record r;
     r.key = o.value(QStringLiteral("key")).toString();
     if (r.key.isEmpty()) return Record{};
+    // A registry source (increment 4) is read from its KEY, not its fields: a build before this one keeps the
+    // record but drops the fields it does not know, and what it hands back must still be a registry source.
+    if (parseSourceKey(r.key, &r.sourceList, &r.sourceUrl))
+    {
+        const qint64 sts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+        r.ts = sts > 0 ? sts : 0;
+        return r;                                        // no url, no flag, no reference: one kind per record
+    }
     r.url = normalizeBase(o.value(QStringLiteral("url")).toString());
     r.enabled = o.value(QStringLiteral("enabled")).toBool(true);
     const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
@@ -477,7 +704,9 @@ bool AddonRoster::reconcile(qint64 now)
     }
 
     if (changed) saveRecords(recs);
-    return changed && !(backfill && recs.isEmpty() && live.isEmpty() && flags.isEmpty());
+    // 4. This device's own pre-roster registry lists (increment 4), adopted once, after the backfill above.
+    const bool adoptedLists = adoptLocalLegacyLists();
+    return (changed && !(backfill && recs.isEmpty() && live.isEmpty() && flags.isEmpty())) || adoptedLists;
 }
 
 void AddonRoster::touched()
@@ -528,7 +757,7 @@ bool AddonRoster::project(bool dryRun)
     QVector<FlagWrite> flagWrites;
     for (const Record& r : recs)
     {
-        if (keyIsUrl(r) || suppressed(r, tombs) || sideloaded.contains(r.key)) continue;
+        if (r.isRegistrySource() || keyIsUrl(r) || suppressed(r, tombs) || sideloaded.contains(r.key)) continue;
         const QString k = QString(kEnabledPrefix) + r.key;
         const bool cur = s.contains(k) ? s.value(k).toBool() : true;   // absent = enabled (AddonManager's default)
         if (cur != r.enabled) flagWrites.push_back({ k, r.enabled });

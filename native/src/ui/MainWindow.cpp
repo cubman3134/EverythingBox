@@ -9882,12 +9882,10 @@ void MainWindow::presentAddonRegistry()
     stack_->setCurrentWidget(themedPanelHost_);
     updateNavForPage();
 
-    // Configured registries: the built-in add-on index + any user-saved extras (kept in the ini by the classic
-    // browser). We render entries from them but omit the add/remove-registry management UI (source management only).
-    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
-    QStringList regs; regs << addonsRegistryDefaultUrl();
-    for (const QString& u : iniStore.value(QStringLiteral("registry/addonsExtras")).toStringList())
-        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+    // Configured registries: the built-in add-on index + the ones the user added (roster records, #77 — the same
+    // set a synced reference's install checks). We render entries from them but omit the add/remove-registry
+    // management UI (source management only).
+    const QStringList regs = AddonManager::configuredRegistries();
 
     struct RegFetch { int pending = 0; QVector<QPair<QJsonObject, QString>> entries; };
     auto st = std::make_shared<RegFetch>();
@@ -10041,13 +10039,9 @@ void MainWindow::presentThemeRegistry()
     stack_->setCurrentWidget(themedPanelHost_);
     updateNavForPage();
 
-    // The built-in themes index + any user-saved extras (the same ini key the classic browser writes, so a
+    // The built-in themes index + the ones the user added (the same list the classic browser writes, so a
     // registry added there shows up here). Management of that list stays on the classic surface.
-    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
-    QStringList regs;
-    regs << QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
-    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
-        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+    const QStringList regs = themeRegistryUrls();
 
     // `problems` is (registry, reason) for a registry that ANSWERED and turned out not to be serving a theme
     // index this app understands — a different fact from "no themes", and #174 is that the two used to be the
@@ -10497,7 +10491,7 @@ int MainWindow::decorationPackCount() const
 // navigated away is dropped.
 //
 // Packs live in the SAME index document as themes2, under `decorations`, so this reads the same registry
-// list (the `registry/themesExtras` ini key the classic browser writes). An installed pack's row carries
+// list (the themes list of added registries the classic browser writes). An installed pack's row carries
 // REMOVE rather than a dead "Installed ✓": a pack is bulk artwork on a device whose disk is often a stick,
 // and the panel it was installed from is where anyone will look to take it back off.
 void MainWindow::presentDecorationRegistry()
@@ -10515,11 +10509,7 @@ void MainWindow::presentDecorationRegistry()
     stack_->setCurrentWidget(themedPanelHost_);
     updateNavForPage();
 
-    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
-    QStringList regs;
-    regs << QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
-    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
-        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+    const QStringList regs = themeRegistryUrls();   // the themes list: one registry format, one list (#187)
 
     struct DecoFetch { int pending = 0; QVector<QPair<DecorationPack::Entry, QString>> entries;
                        QVector<QPair<QString, QString>> problems; };

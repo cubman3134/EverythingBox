@@ -11,6 +11,7 @@
 // that must not fork is the rule, and the rule lives in core.
 #include "MainWindow.h"
 
+#include "../core/AddonRoster.h"         // #77: the registries the user added are roster records
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ProfileStore.h"        // the preview writes the per-PROFILE theme choice, like the picker
@@ -26,28 +27,21 @@
 #include <QString>
 #include <QStringList>
 
-// The built-in theme registry. Spelled here as well as in MainWindow.cpp's gallery panel because this is
-// where the EXTRAS list is read, and a function that returns "the registries" while omitting the built-in
-// one is a trap for the next caller. Both spellings are the same string, and probe coverage of the host
-// rule does not depend on which one a call site used.
+// The built-in theme registry — AddonRoster's spelling, the one every browser uses (#77), since the list of
+// added registries is a roster record set that must never hold it.
 static QString builtInThemeIndexUrl()
 {
-    return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+    return AddonRoster::builtInRegistryUrl(AddonRoster::RegistryList::Themes);
 }
 
-// The registries the USER added — the `registry/themesExtras` ini key the classic browser writes, which is
-// deliberately the same list the decorations gallery reads (one community registry format, not two).
+// The registries the USER added — the THEMES list of roster records (#77) the classic browser writes, which
+// is deliberately the same list the decorations gallery reads (one community registry format, not two).
 //
 // This is the list the download host rule takes: an entry may point its archive at the index's own host, or
 // at a host the user chose by adding that registry. Nowhere else.
 QStringList MainWindow::themeExtraRegistryUrls() const
 {
-    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                       QSettings::IniFormat);
-    QStringList out;
-    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
-        if (!u.trimmed().isEmpty() && !out.contains(u.trimmed())) out << u.trimmed();
-    return out;
+    return AddonRoster::registrySources(AddonRoster::RegistryList::Themes);
 }
 
 QStringList MainWindow::themeRegistryUrls() const
