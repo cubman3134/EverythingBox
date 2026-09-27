@@ -421,8 +421,9 @@ public:
     void applyMergedRoster();
 
     // ---- issue #77, increment 2: registry installs sync as references, and code never syncs ----------------
-    // The built-in add-on registry, and every registry this device has configured (the built-in one plus the
-    // user's registry/addonsExtras). RegistryBrowser lists the same set.
+    // The built-in add-on registry, and every registry this device has configured (the built-in one plus the ones
+    // the user added, which are roster records since increment 4 — AddonRoster::registrySources). RegistryBrowser
+    // lists the same set. All normalised (AddonRoster::normalizeRegistryUrl), and compared that way.
     static QString defaultRegistryUrl();
     // PURE (#98's rule, BuildbotInstall::policyFor): the built-in registry URL for a given environment. `uitest` =
     // EB_UITEST is set, `overrideUrl` = EB_ADDON_REGISTRY_URL. The override is honoured ONLY under EB_UITEST — a
@@ -432,6 +433,9 @@ public:
     static QString registryUrlFor(bool uitest, const QString& overrideUrl, bool* ignoredOverride = nullptr);
     static QStringList configuredRegistries();
     static bool isRegistryConfigured(const QString& indexUrl);
+    // The user adds an add-on registry (the registry browser's Add): a dated roster record — and then a reference
+    // that was only LISTED for want of this registry installs now, as it would had the registry arrived by merge.
+    bool addExtraRegistry(const QString& indexUrl);
 
     // THE add-on install rule for a registry entry, shared by the registry browser (a user's Install press) and
     // a synced reference's install on another device, so the two cannot drift. Pure. Returns the files to fetch

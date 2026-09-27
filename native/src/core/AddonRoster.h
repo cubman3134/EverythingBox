@@ -42,6 +42,17 @@
 // installs it FROM THAT REGISTRY, through the same install path the registry browser uses, and only when it has
 // that registry configured itself. A sideloaded folder add-on is device-only and is not in the roster at all.
 //
+// REGISTRY SOURCES (increment 4). The registries the user ADDED — add-on registries and theme registries — are
+// roster records too, of kind "registrySource", keyed by the list and the normalised index URL
+// ("registrySource:addons:<url>" / "registrySource:themes:<url>"). One kind, told apart by a field: every rule
+// is the same for both lists, so two kinds would be two copies of the same code. The key carries the list and
+// the URL, so a record whose extra fields a build before this one dropped still reads back as what it is.
+// THE ROSTER IS THE STORE: registrySources() is what every browser reads, addRegistrySource()/
+// removeRegistrySource() are the only writers (a dated record, or a dated tombstone), and the old list keys
+// (registry/addonsExtras, registry/themesExtras) are gone — a device's own copy is adopted once as ts-0 adds, and
+// an older peer's copy arriving in its heavy bundle is adopted the same way, never written raw. The BUILT-IN
+// registries are never records and can never be tombstoned: they are always configured, whatever a peer says.
+//
 // QtCore only, over the shared portable everythingbox.ini, like every other store.
 #pragma once
 #include <QString>
@@ -71,7 +82,41 @@ namespace AddonRoster
         QString entry;        // the registry entry's id — the folder it installs into
         QString version;      // the version the RECORDING device installed; informational, never compared
         bool isRegistry() const { return !registry.isEmpty(); }
+        // kind "registrySource" (increment 4): a registry the user added. Both are derived from the KEY, which is
+        // the authority; empty on every other record.
+        QString sourceList;   // "addons" or "themes"
+        QString sourceUrl;    // the registry's index URL, normalised
+        bool isRegistrySource() const { return !sourceList.isEmpty(); }
     };
+
+    // ---- the registries the user added (increment 4) --------------------------------------------------------
+    // Two lists. Themes also serve decoration packs: one community registry format, one list (#187).
+    enum class RegistryList { Addons, Themes };
+    // The built-in index of each list. Never a roster record, never tombstoned; always configured.
+    QString builtInRegistryUrl(RegistryList list);
+    // True for the built-in index — and, for add-ons under EB_UITEST, for the EB_ADDON_REGISTRY_URL fixture that
+    // stands in for it (AddonManager::registryUrlFor).
+    bool isBuiltInRegistry(RegistryList list, const QString& url);
+    QString normalizeRegistryUrl(const QString& raw);          // trimmed; scheme and host lower-cased
+    QString registrySourceKey(RegistryList list, const QString& url);
+    // The user-added registries of `list`: normalised, built-ins excluded, oldest first (ts, then key) — the
+    // same order on every device. Adopts this device's old list key first, once (see REGISTRY SOURCES).
+    QStringList registrySources(RegistryList list);
+    // A dated record (strictly newer than any tombstone on it), or a dated tombstone (strictly newer than the
+    // record); both fire the change hook. Refused, with nothing written, for an empty URL or a built-in; add is a
+    // no-op for a registry already held, remove for one not held. `now` <= 0 = the current epoch second.
+    bool addRegistrySource(RegistryList list, const QString& url, qint64 now = 0);
+    bool removeRegistrySource(RegistryList list, const QString& url, qint64 now = 0);
+    // The old per-list ini keys — carved out of the heavy bundle both ways (CloudSync).
+    bool isLegacyRegistryKey(const QString& iniKey);
+    // A roster key naming a BUILT-IN registry as a source: never merged in, as a record or as a tombstone.
+    bool isBuiltInRegistryKey(const QString& key);
+    // An OLDER peer's list, or this device's own pre-roster list: ADDS at ts 0 — never over a tombstone, never a
+    // built-in, never a removal. This device's own edits are reconciled first; the change hook fires when a record
+    // was added, and so does the return value.
+    bool adoptLegacyRegistrySources(RegistryList list, const QStringList& urls);
+    // The value an older build's bundle carries for such a key (a QVariant's string form), as a list of URLs.
+    QStringList parseLegacyRegistryValue(const QString& value);
 
     // ---- the add-ons in THIS device's folder (issue #77, increment 2) --------------------------------------
     // Add-on CODE never rides sync. What a folder add-on is decides what syncs about it:

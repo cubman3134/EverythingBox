@@ -13,7 +13,7 @@
 // which paths may become filenames or how an install lands on disk.
 //
 // Decorations are served from the SAME index document as themes2, under their own key, so they share this
-// dialog's registry list (the `registry/themesExtras` ini key) rather than growing a second one — a user
+// dialog's registry list (the THEMES list of added registries, AddonRoster) rather than growing a second one — a user
 // who adds a registry gets its themes AND its packs, which is the only arrangement that is not a surprise.
 #pragma once
 #include "../core/DecorationPack.h"  // DecorationPack::Entry — the parsed shape the decorations path works in
@@ -98,8 +98,9 @@ private:
     };
 
     QString defaultUrl() const;            // the built-in cubman3134 registry
-    QStringList extraRegistries() const;   // user-added registries
-    void saveExtras(const QStringList& list);
+    QStringList extraRegistries() const;   // user-added registries — roster records, synced (#77)
+    void addExtra(const QString& url);     // a dated roster record (add-ons: and a listed reference installs)
+    void removeExtra(const QString& url);  // a dated tombstone
     QStringList allRegistries() const;     // default + extras
 
     void renderRegistryRows();             // (re)draw the list of configured registries

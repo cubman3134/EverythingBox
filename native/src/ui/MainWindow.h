@@ -1268,7 +1268,7 @@ private:
     // literals at the call sites because the classic surface needs the same three answers, and a second copy
     // of "which registries" or "which themes ship with the app" is how the two surfaces start disagreeing
     // about what may be updated.
-    QStringList themeRegistryUrls() const;      // the built-in index + the user's `registry/themesExtras`
+    QStringList themeRegistryUrls() const;      // the built-in index + the ones the user added (AddonRoster)
     QStringList themeExtraRegistryUrls() const; // ONLY the user's, which is what the download host rule takes
     QStringList bundledThemeFolders() const;    // the themes that ship inside the app — never updated, never removed
     // Remove an installed theme, refusing a bundled one (ThemeRegistry owns every refusal, so both surfaces

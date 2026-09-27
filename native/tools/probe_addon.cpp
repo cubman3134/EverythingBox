@@ -731,14 +731,20 @@ struct RegistryHost
                 const QByteArray path = buf->left(end).split('\n').value(0).trimmed().split(' ').value(1);
                 hits << QString::fromUtf8(path);
                 QByteArray body; QByteArray status = "200 OK";
-                if (path == "/reg/index.json")
-                    body = "{\"addons\":[{\"id\":\"probe.regaddon\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\","
-                           "\"files\":[\"probe.regaddon/manifest.json\",\"probe.regaddon/main.js\"]}]}";
-                else if (path == "/reg/probe.regaddon/manifest.json")
-                    body = "{\"id\":\"probe.regaddon\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\",\"type\":\"media-source\","
+                // /reg/ serves probe.regaddon; /reg2/, /reg3/ (issue #77 increment 4) serve probe.regaddon2, ...3 —
+                // one registry per path, so a test can hold one configured here and another not.
+                const int slash = path.indexOf('/', 1);
+                const QByteArray reg = (path.startsWith("/reg") && slash > 0) ? path.mid(1, slash - 1) : QByteArray();
+                const QByteArray rest = slash > 0 ? path.mid(slash + 1) : QByteArray();
+                const QByteArray id = "probe.regaddon" + reg.mid(3);
+                if (!reg.isEmpty() && rest == "index.json")
+                    body = "{\"addons\":[{\"id\":\"" + id + "\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\","
+                           "\"files\":[\"" + id + "/manifest.json\",\"" + id + "/main.js\"]}]}";
+                else if (!reg.isEmpty() && rest == id + "/manifest.json")
+                    body = "{\"id\":\"" + id + "\",\"name\":\"Reg Addon\",\"version\":\"2.0.0\",\"type\":\"media-source\","
                            "\"entry\":\"main.js\",\"permissions\":[],"
                            "\"catalogs\":[{\"id\":\"movies\",\"name\":\"Movies\",\"type\":\"movie\"}]}";
-                else if (path == "/reg/probe.regaddon/main.js")
+                else if (!reg.isEmpty() && rest == id + "/main.js")
                     body = "function getCatalog(){return JSON.stringify({title:'r',items:[],hasMore:false});}\n";
                 else { status = "404 Not Found"; body = "nope"; }
                 c->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
@@ -862,11 +868,8 @@ static void probeRegistrySync(const std::function<void(const char*, bool)>& chec
               && pending[0].state == AddonManager::PendingRegistryRef::UnknownRegistry
               && AddonManager::pendingRefText(pending[0]).contains(QStringLiteral("127.0.0.1")));
     }
-    {
-        QSettings st(iniPath, QSettings::IniFormat);
-        st.setValue(QStringLiteral("registry/addonsExtras"), QStringList{ idx });   // the user adds the registry here too
-        st.sync();
-    }
+    // The user adds the registry here too (a roster record since #77 increment 4 — the one store).
+    AddonRoster::addRegistrySource(AddonRoster::RegistryList::Addons, idx);
     mgr.applyMergedRoster();
     const bool installed = spinUntil([&] { return mgr.sourceById(rid) != nullptr; }, 10000);
     check("registry receive: with the registry configured, the reference is INSTALLED from the registry", installed);
@@ -925,6 +928,86 @@ static void probeRegistrySync(const std::function<void(const char*, bool)>& chec
                                             [&](bool kk, const QString&) { k = kk; fin = true; });
                     return fin && !k; }());
         Tombstones::remove(AddonRoster::tombStore(), rid);
+    }
+
+    // (e) #77 increment 4: the registries the user added are ROSTER records. ONE MERGE that brings registry R2 AND
+    //     a reference to an add-on from R2 installs the add-on: the merge has configured R2 by the time
+    //     applyMergedRoster — which runs right after it — looks. And a reference LISTED for want of registry R3
+    //     installs the moment the user adds R3 here.
+    {
+        using RL = AddonRoster::RegistryList;
+        const QString idx2 = host.url("/reg2/index.json"), idx3 = host.url("/reg3/index.json");
+        const QString rid2 = QStringLiteral("probe.regaddon2"), rid3 = QStringLiteral("probe.regaddon3");
+        auto peerRecord = [](const QString& key, const QString& kind, const QString& registry, const QString& entry, qint64 ts) {
+            // A record exactly as a peer's roster section carries it, read the way CloudMerge::mergeRoster reads it.
+            QJsonObject o;
+            o.insert(QStringLiteral("key"), key); o.insert(QStringLiteral("url"), QString());
+            o.insert(QStringLiteral("enabled"), true); o.insert(QStringLiteral("ts"), double(ts));
+            o.insert(QStringLiteral("kind"), kind);
+            if (kind == QLatin1String("registry"))
+            {
+                o.insert(QStringLiteral("registry"), registry); o.insert(QStringLiteral("entry"), entry);
+                o.insert(QStringLiteral("version"), QStringLiteral("1.0.0"));
+            }
+            else
+            {
+                o.insert(QStringLiteral("list"), QStringLiteral("addons")); o.insert(QStringLiteral("source"), registry);
+            }
+            return AddonRoster::fromJson(o);
+        };
+        check("registry source: before the merge, R2 is not configured here", !AddonManager::isRegistryConfigured(idx2));
+        {
+            // What the merge saves: BOTH records, in one write.
+            QVector<AddonRoster::Record> recs = AddonRoster::records();
+            recs.push_back(peerRecord(QStringLiteral("registrySource:addons:") + idx2, QStringLiteral("registrySource"), idx2, QString(), t0));
+            recs.push_back(peerRecord(rid2, QStringLiteral("registry"), idx2, rid2, t0));
+            AddonRoster::saveRecords(recs);
+        }
+        mgr.applyMergedRoster();
+        const bool inst2 = spinUntil([&] { return mgr.sourceById(rid2) != nullptr; }, 10000);
+        check("registry source: ONE merge bringing registry R2 AND a reference from R2 INSTALLS it (not listed)",
+              inst2 && AddonManager::isRegistryConfigured(idx2) && mgr.pendingRegistryRefs().isEmpty());
+        check("registry source: ...from R2, the loopback fixture registry",
+              host.hits.contains(QStringLiteral("/reg2/index.json")) && host.hits.contains(QStringLiteral("/reg2/probe.regaddon2/main.js")));
+
+        {
+            QVector<AddonRoster::Record> recs = AddonRoster::records();
+            recs.push_back(peerRecord(rid3, QStringLiteral("registry"), idx3, rid3, t0));
+            AddonRoster::saveRecords(recs);
+        }
+        mgr.applyMergedRoster();
+        spin(600);
+        {
+            const auto pending = mgr.pendingRegistryRefs();
+            check("registry source: a reference from a registry this device lacks is LISTED, not fetched",
+                  !host.hits.contains(QStringLiteral("/reg3/index.json")) && mgr.sourceById(rid3) == nullptr
+                  && pending.size() == 1 && pending[0].key == rid3
+                  && pending[0].state == AddonManager::PendingRegistryRef::UnknownRegistry);
+        }
+        const bool added3 = mgr.addExtraRegistry(idx3);
+        qint64 ts3 = -1;
+        for (const AddonRoster::Record& r : AddonRoster::records())
+            if (r.isRegistrySource() && r.sourceUrl == idx3) ts3 = r.ts;
+        check("registry source: the user adding R3 here is a dated roster record", added3 && ts3 >= t0);
+        const bool inst3 = spinUntil([&] { return mgr.sourceById(rid3) != nullptr; }, 10000);
+        check("registry source: ...and the reference that was waiting on R3 installs at once", inst3);
+
+        // The built-in registry is never a record and never tombstoned; it stays configured whatever happens.
+        const QString builtIn = AddonManager::defaultRegistryUrl();
+        check("registry source: the built-in registry cannot be added as a record",
+              !AddonRoster::addRegistrySource(RL::Addons, builtIn));
+        check("registry source: ...nor removed: no tombstone is written",
+              !AddonRoster::removeRegistrySource(RL::Addons, builtIn)
+              && [&] { for (const Tombstones::Entry& e : Tombstones::all(AddonRoster::tombStore()))
+                           if (e.key == AddonRoster::registrySourceKey(RL::Addons, builtIn)) return false;
+                       return true; }());
+        check("registry source: ...and it is always configured", AddonManager::isRegistryConfigured(builtIn));
+        check("registry source: removing R2 unconfigures it (a dated tombstone)",
+              AddonRoster::removeRegistrySource(RL::Addons, idx2) && !AddonManager::isRegistryConfigured(idx2));
+
+        mgr.removeAddon(rid2);
+        mgr.removeAddon(rid3);
+        AddonRoster::removeRegistrySource(RL::Addons, idx3);
     }
 
     // SIDELOADED: an .addon package installs with no provenance — even one that carries a forged provenance file —
@@ -1027,11 +1110,7 @@ static void probeRegistrySync(const std::function<void(const char*, bool)>& chec
         st.sync();
     }
 
-    {
-        QSettings st(iniPath, QSettings::IniFormat);
-        st.remove(QStringLiteral("registry/addonsExtras"));
-        st.sync();
-    }
+    AddonRoster::removeRegistrySource(AddonRoster::RegistryList::Addons, idx);
     qunsetenv("EB_ADDONS_ROOT");
     QDir(rootR).removeRecursively();
 }
