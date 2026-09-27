@@ -39,8 +39,17 @@ public:
     const QString& id() const { return id_; }
 
     // Config is shared with the settings UI; one key scheme so both read/write the same place.
-    static QString readConfig(const QString& addonId, const QString& key, const QString& defaultValue = {});
-    static void writeConfig(const QString& addonId, const QString& key, const QString& value);
+    // `type` is the manifest's AddonSetting::type. A "password" field is stored DEVICE-LOCAL (issue #77) —
+    // see core/AddonConfigKeys.h — so a caller that knows the field's type must pass it, or it reads and
+    // writes the synced key. The two AddonSetting overloads below are the way to not forget.
+    static QString readConfig(const QString& addonId, const QString& key, const QString& defaultValue = QString(),
+                              const QString& type = QString());
+    static void writeConfig(const QString& addonId, const QString& key, const QString& value,
+                            const QString& type = QString());
+    static QString readSetting(const QString& addonId, const AddonSetting& s)
+    { return readConfig(addonId, s.key, s.defaultValue, s.type); }
+    static void writeSetting(const QString& addonId, const AddonSetting& s, const QString& value)
+    { writeConfig(addonId, s.key, value, s.type); }
 
 private:
     static QString sanitize(const QString& key);
@@ -49,4 +58,5 @@ private:
     QSet<QString> permissions_;
     QString storageDir_;
     QHash<QString, QString> configDefaults_; // key -> manifest default
+    QHash<QString, QString> configTypes_;    // key -> manifest type (a "password" is read device-local, #77)
 };

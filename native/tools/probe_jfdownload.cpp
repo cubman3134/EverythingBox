@@ -1374,7 +1374,8 @@ static void sectionNoCarrier()
     CHECK(modern.indexOf(exclude, cloud) < transfer && modern.indexOf(exclude, transfer) > transfer);
     CHECK(!modern.contains("<include"));
 
-    // CloudSync's bundle: every directory it zips is one of the two it has always zipped.
+    // CloudSync's bundle: every directory it zips is the one it still zips. It used to be two — addons/ left the
+    // bundle with issue #77 (add-on code never rides sync), so the only directory left is themes/.
     const QString cloudSync = QString::fromUtf8(readSource(QStringLiteral("src/core/CloudSync.cpp")));
     CHECK(!cloudSync.isEmpty());
     const QRegularExpression call(QStringLiteral("zipAddDir\\(z,[^;]*QStringLiteral\\(\"([^\"]*)\"\\)\\s*[,)]"));
@@ -1382,7 +1383,7 @@ static void sectionNoCarrier()
     for (auto m = call.globalMatch(cloudSync); m.hasNext();) zipped << m.next().captured(1);
     zipped.removeDuplicates();
     zipped.sort();
-    CHECK(zipped == (QStringList{ QStringLiteral("addons"), QStringLiteral("themes") }));
+    CHECK(zipped == (QStringList{ QStringLiteral("themes") }));
 
     // No source but the manager names the file: a new carrier would have to.
     QStringList namers;

@@ -4,6 +4,10 @@
 #include "Tombstones.h"
 
 #include <QSettings>
+#include <QSaveFile>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QJsonDocument>
@@ -29,6 +33,7 @@ const QLatin1String kEnabledPrefix("addon.enabled.");
 
 std::function<void()> g_changeHook;
 bool g_migrationsRun = false;
+QString g_addonsRoot;   // empty = <data>/addons
 
 qint64 nowSecs() { return QDateTime::currentSecsSinceEpoch(); }
 
@@ -98,6 +103,16 @@ int indexByKey(const QVector<AddonRoster::Record>& recs, const QString& key)
 // twin, because the live flag is keyed by manifest id.
 bool keyIsUrl(const AddonRoster::Record& r) { return r.key.contains(QStringLiteral("://")); }
 
+// The manifest ids of this device's SIDELOADED folder add-ons (issue #77, increment 2). Device-only: the roster
+// neither records nor projects anything about them, their on/off flag included.
+QSet<QString> sideloadedIds(const QVector<AddonRoster::LocalAddon>& locals)
+{
+    QSet<QString> out;
+    for (const AddonRoster::LocalAddon& a : locals)
+        if (a.sideloaded()) out.insert(a.id);
+    return out;
+}
+
 } // namespace
 
 QString AddonRoster::itemsKey()
@@ -146,6 +161,14 @@ QJsonObject AddonRoster::toJson(const Record& r)
     o.insert(QStringLiteral("url"), r.url);
     o.insert(QStringLiteral("enabled"), r.enabled);
     o.insert(QStringLiteral("ts"), static_cast<double>(r.ts));
+    // Only a registry record carries these, so every other record serialises exactly as increment 1 wrote it.
+    if (r.isRegistry())
+    {
+        o.insert(QStringLiteral("kind"), QStringLiteral("registry"));
+        o.insert(QStringLiteral("registry"), r.registry);
+        o.insert(QStringLiteral("entry"), r.entry);
+        o.insert(QStringLiteral("version"), r.version);
+    }
     return o;
 }
 
@@ -158,7 +181,113 @@ AddonRoster::Record AddonRoster::fromJson(const QJsonObject& o)
     r.enabled = o.value(QStringLiteral("enabled")).toBool(true);
     const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
     r.ts = ts > 0 ? ts : 0;
+    // A record is ONE kind. A registry reference with a URL, or without an entry to install, is read as the
+    // plain record it otherwise is rather than guessed at.
+    if (o.value(QStringLiteral("kind")).toString() == QLatin1String("registry") && r.url.isEmpty())
+    {
+        r.registry = o.value(QStringLiteral("registry")).toString().trimmed();
+        r.entry = o.value(QStringLiteral("entry")).toString();
+        r.version = o.value(QStringLiteral("version")).toString();
+        if (r.registry.isEmpty() || r.entry.isEmpty()) { r.registry.clear(); r.entry.clear(); r.version.clear(); }
+    }
     return r;
+}
+
+// ---- the folder add-ons (issue #77, increment 2) -----------------------------------------------------------
+
+QString AddonRoster::provenanceFileName() { return QStringLiteral(".registry-origin.json"); }
+
+AddonRoster::Provenance AddonRoster::readProvenance(const QString& addonDir)
+{
+    Provenance p;
+    QFile f(addonDir + QLatin1Char('/') + provenanceFileName());
+    if (!f.open(QIODevice::ReadOnly)) return p;
+    const QJsonObject o = QJsonDocument::fromJson(f.read(64 * 1024)).object();
+    p.registry = o.value(QStringLiteral("registry")).toString().trimmed();
+    p.entry = o.value(QStringLiteral("entry")).toString();
+    p.version = o.value(QStringLiteral("version")).toString();
+    p.installedAt = static_cast<qint64>(o.value(QStringLiteral("installedAt")).toDouble());
+    if (!p.valid()) return Provenance{};
+    return p;
+}
+
+bool AddonRoster::writeProvenance(const QString& addonDir, const Provenance& p)
+{
+    if (!p.valid()) return false;
+    QJsonObject o;
+    o.insert(QStringLiteral("registry"), p.registry);
+    o.insert(QStringLiteral("entry"), p.entry);
+    o.insert(QStringLiteral("version"), p.version);
+    o.insert(QStringLiteral("installedAt"), static_cast<double>(p.installedAt));
+    QSaveFile f(addonDir + QLatin1Char('/') + provenanceFileName());
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    return f.commit();
+}
+
+bool AddonRoster::isFirstPartyId(const QString& manifestId)
+{
+    // The previous brand's namespace counts too: a bundled add-on may still carry it until the id migration is
+    // confirmed, and no third-party package may install under either (AddonManager::installPackage refuses it).
+    return manifestId.startsWith(QLatin1String(AppBrand::kAddonPrefix))
+        || manifestId.startsWith(QLatin1String(AppBrand::Legacy::kAddonPrefix));
+}
+
+void AddonRoster::setAddonsRoot(const QString& root) { g_addonsRoot = root; }
+
+QString AddonRoster::addonsRoot()
+{
+    return g_addonsRoot.isEmpty() ? AppPaths::dataDir() + QStringLiteral("/addons") : g_addonsRoot;
+}
+
+QVector<AddonRoster::LocalAddon> AddonRoster::localAddons()
+{
+    QVector<LocalAddon> out;
+    const QFileInfoList dirs = QDir(addonsRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo& d : dirs)
+    {
+        // _storage is add-on-private storage, and a dot-folder is an install's staging area; neither is an add-on.
+        if (d.fileName() == QLatin1String("_storage") || d.fileName().startsWith(QLatin1Char('.'))) continue;
+        QFile mf(d.absoluteFilePath() + QStringLiteral("/manifest.json"));
+        if (!mf.open(QIODevice::ReadOnly)) continue;
+        LocalAddon a;
+        a.dir = d.absoluteFilePath();
+        a.id = QJsonDocument::fromJson(mf.readAll()).object().value(QStringLiteral("id")).toString();
+        if (a.id.isEmpty()) a.id = d.fileName();
+        a.firstParty = isFirstPartyId(a.id);
+        if (!a.firstParty) a.provenance = readProvenance(a.dir);
+        out.push_back(a);
+    }
+    return out;
+}
+
+QVector<AddonRoster::Record> AddonRoster::pendingRegistryInstalls()
+{
+    const QVector<Record> recs = records();
+    const QHash<QString, qint64> tombs = localTombs();
+    QSet<QString> ids, folders;
+    for (const LocalAddon& a : localAddons()) { ids.insert(a.id); folders.insert(QFileInfo(a.dir).fileName()); }
+    QVector<Record> out;
+    for (const Record& r : recs)
+        if (r.isRegistry() && !suppressed(r, tombs) && !ids.contains(r.key) && !folders.contains(r.entry))
+            out.push_back(r);
+    return out;
+}
+
+void AddonRoster::recordRemoval(const QString& key)
+{
+    if (key.isEmpty()) return;
+    const qint64 now = nowSecs();
+    reconcile(now);                                     // this device's other edits are stamped first
+    QVector<Record> recs = records();
+    const QHash<QString, qint64> tombs = localTombs();
+    const int i = indexByKey(recs, key);
+    qint64 ts = now;
+    if (i >= 0) ts = std::max(ts, recs[i].ts + 1);
+    if (tombs.contains(key)) ts = std::max(ts, tombs.value(key) + 1);
+    Tombstones::record(tombStore(), key, ts);
+    if (i >= 0) { recs.remove(i); saveRecords(recs); }
+    if (g_changeHook) g_changeHook();
 }
 
 QVector<AddonRoster::Record> AddonRoster::records()
@@ -214,6 +343,8 @@ bool AddonRoster::reconcile(qint64 now)
     const QStringList live = liveUrls();
     const QSet<QString> liveSet(live.begin(), live.end());
     const QHash<QString, bool> flags = liveFlags();
+    const QVector<LocalAddon> locals = localAddons();
+    const QSet<QString> sideloaded = sideloadedIds(locals);
 
     // 1. Every live URL has a record.
     for (const QString& u : live)
@@ -255,6 +386,49 @@ bool AddonRoster::reconcile(qint64 now)
         changed = true;
     }
 
+    // 1b. Every registry-installed folder has a kind-"registry" record (issue #77, increment 2). The record is
+    //     the REFERENCE — registry, entry, version — and never the code. The opposite direction is deliberately
+    //     absent: a registry record with no folder here is NOT a removal, because it is just as often a
+    //     reference from another device that this one has not installed (yet, or ever — its registry may not be
+    //     configured here). A real uninstall says so through recordRemoval().
+    for (const LocalAddon& a : locals)
+    {
+        if (a.firstParty || !a.provenance.valid()) continue;
+        const int j = indexByKey(recs, a.id);
+        if (j >= 0)
+        {
+            if (!recs[j].url.isEmpty()) continue;       // a remote record already owns this key: one kind each
+            if (recs[j].registry == a.provenance.registry && recs[j].entry == a.provenance.entry)
+            {
+                // Installed, yet suppressed by our own tombstone: re-installed after a removal. As for a URL.
+                if (!backfill && suppressed(recs[j], tombs))
+                {
+                    recs[j].ts = editStamp(&recs[j], recs[j].key);
+                    clearTomb(recs[j].key);
+                    changed = true;
+                }
+                continue;
+            }
+            // A flag-only record gaining its reference, or a re-install from a different registry.
+            recs[j].registry = a.provenance.registry;
+            recs[j].entry = a.provenance.entry;
+            recs[j].version = a.provenance.version;
+            if (!backfill) { recs[j].ts = editStamp(&recs[j], a.id); clearTomb(a.id); }
+            changed = true;
+            continue;
+        }
+        Record n;
+        n.key = a.id;
+        n.enabled = flags.value(a.id, true);
+        n.registry = a.provenance.registry;
+        n.entry = a.provenance.entry;
+        n.version = a.provenance.version;
+        n.ts = backfill ? 0 : editStamp(nullptr, a.id);
+        if (!backfill) clearTomb(a.id);
+        recs.push_back(n);
+        changed = true;
+    }
+
     // 2. A record whose URL left the live list was removed here — outside AddonManager's API when it gets this
     //    far (a Discard, an older build) — so it is a removal, dated now. Not on a backfill: see above.
     if (!backfill)
@@ -280,6 +454,7 @@ bool AddonRoster::reconcile(qint64 now)
     // 3. Every live flag has a record, and a flipped flag is an edit.
     for (auto it = flags.begin(); it != flags.end(); ++it)
     {
+        if (sideloaded.contains(it.key())) continue;    // device-only: its flag is not the roster's business
         const int j = indexByKey(recs, it.key());
         if (j < 0)
         {
@@ -346,18 +521,41 @@ bool AddonRoster::project(bool dryRun)
 
     bool changed = (out != live);
 
+    const QVector<LocalAddon> locals = localAddons();
+    const QSet<QString> sideloaded = sideloadedIds(locals);
+
     struct FlagWrite { QString key; bool value; };
     QVector<FlagWrite> flagWrites;
     for (const Record& r : recs)
     {
-        if (keyIsUrl(r) || suppressed(r, tombs)) continue;
+        if (keyIsUrl(r) || suppressed(r, tombs) || sideloaded.contains(r.key)) continue;
         const QString k = QString(kEnabledPrefix) + r.key;
         const bool cur = s.contains(k) ? s.value(k).toBool() : true;   // absent = enabled (AddonManager's default)
         if (cur != r.enabled) flagWrites.push_back({ k, r.enabled });
     }
     if (!flagWrites.isEmpty()) changed = true;
 
+    // A registry-installed folder whose record a tombstone has removed — uninstalled on another device, or here
+    // through a merge of our own older state — is uninstalled here too. Only a folder carrying provenance: a
+    // sideloaded folder that happens to share the id is this device's own, and nothing synced may delete it.
+    QStringList uninstall;
+    for (const LocalAddon& a : locals)
+    {
+        if (a.firstParty || !a.provenance.valid() || !tombs.contains(a.id)) continue;
+        const int i = indexByKey(recs, a.id);
+        if (i < 0 || suppressed(recs[i], tombs)) uninstall << a.dir;
+    }
+    if (!uninstall.isEmpty()) changed = true;
+
     if (dryRun || !changed) return changed;
+
+    for (const QString& dir : uninstall)
+    {
+        // Provenance first: if the folder then refuses to delete (a file held open), what is left is a plain
+        // device-only folder — not a registry install the next reconcile would read as a re-install and re-add.
+        QFile::remove(dir + QLatin1Char('/') + provenanceFileName());
+        QDir(dir).removeRecursively();
+    }
 
     if (out != live)
     {
@@ -376,6 +574,7 @@ void AddonRoster::adoptLegacySnapshot(const QString& urlsJson, const QHash<QStri
     reconcile();                                        // this device's own edits are stamped first
     QVector<Record> recs = records();
     const QHash<QString, qint64> tombs = localTombs();
+    const QSet<QString> sideloaded = sideloadedIds(localAddons());   // #77 inc 2: device-only, never adopted
     bool changed = false;
 
     const QJsonArray arr = QJsonDocument::fromJson(urlsJson.toUtf8()).array();
@@ -403,7 +602,9 @@ void AddonRoster::adoptLegacySnapshot(const QString& urlsJson, const QHash<QStri
     }
     for (auto it = enabled.begin(); it != enabled.end(); ++it)
     {
-        if (it.key().isEmpty() || indexByKey(recs, it.key()) >= 0 || tombs.contains(it.key())) continue;
+        if (it.key().isEmpty() || indexByKey(recs, it.key()) >= 0 || tombs.contains(it.key())
+            || sideloaded.contains(it.key()))
+            continue;
         Record n;
         n.key = it.key();
         n.enabled = it.value();

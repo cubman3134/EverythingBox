@@ -75,6 +75,9 @@
 #include "HomeRows.h"         // issue #333: the per-profile home arrangement, and which sync path owns it
 #include "PerItemStores.h"    // issue #332: THE per-item-store prefix table, walked by section 42
 #include "AddonRoster.h"      // issue #77: the add-on roster section 43 drives (only its migrations gate is called)
+#include "AddonConfigKeys.h"  // issue #77 inc 3: the password-field key spelling section 44h asserts through
+#include "miniz.h"            // issue #77 inc 2: section 44 reads and writes real bundle zips
+#include <cstring>
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
 #include "StoredUrl.h"          // issue #200: the credential rule §34 drives as a pure function
 #include "CredentialScrub.h"    // issue #200: the one-time sweep of what earlier builds already wrote (§35f)
@@ -6481,6 +6484,244 @@ int main(int argc, char** argv)
         CHECK(!docHasKey(serializeNow(), idX));
 
         wipeRoster();
+
+    // ---- 44. Add-on CODE never rides sync; registry installs sync as REFERENCES; passwords stay (issue #77) ----
+    //
+    // Increments 2 and 3. Until now the heavy bundle zipped addons/ minus the first-party folders, so third-party
+    // add-on code — registry-installed and sideloaded — was uploaded and then unpacked on every other device.
+    // Now: (a) no addons/ entry leaves in a bundle; (b) an older peer's addons/ entries are refused on arrival;
+    // (c) the fingerprint ignores addons/; (d)-(g) a registry install is a kind-"registry" roster record that
+    // round-trips, a sideloaded one is not in the roster at all, and a tombstone uninstalls only a registry
+    // folder; (h) an add-on's PASSWORD field is device-local while its other fields still sync.
+    {
+        const QString dataDir = AppPaths::dataDir();
+        const QString addonsDir = dataDir + QStringLiteral("/addons");
+        const QString themesDir = dataDir + QStringLiteral("/themes");
+        auto writeFile = [](const QString& path, const QByteArray& bytes) {
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            QFile f(path);
+            return f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(bytes) == bytes.size();
+        };
+        auto makeAddon = [&](const QString& folder, const QString& id) {
+            return writeFile(addonsDir + QLatin1Char('/') + folder + QStringLiteral("/manifest.json"),
+                             QStringLiteral("{\"id\":\"%1\",\"name\":\"%1\",\"version\":\"1.0.0\",\"type\":\"media-source\","
+                                            "\"entry\":\"main.js\"}").arg(id).toUtf8())
+                && writeFile(addonsDir + QLatin1Char('/') + folder + QStringLiteral("/main.js"),
+                             QByteArray("function getCatalog(){return '{}';}\n"));
+        };
+        const QString regUrl = QStringLiteral("https://registry.probe.invalid/addons/index.json");
+        auto stampRegistry = [&](const QString& folder, const QString& version) {
+            AddonRoster::Provenance p;
+            p.registry = regUrl; p.entry = folder; p.version = version; p.installedAt = T;
+            return AddonRoster::writeProvenance(addonsDir + QLatin1Char('/') + folder, p);
+        };
+        auto zipNames = [](const QByteArray& zip) {
+            QStringList out;
+            mz_zip_archive z; std::memset(&z, 0, sizeof(z));
+            if (!mz_zip_reader_init_mem(&z, zip.constData(), size_t(zip.size()), 0)) return out;
+            for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i)
+            {
+                mz_zip_archive_file_stat st;
+                if (mz_zip_reader_file_stat(&z, i, &st)) out << QString::fromUtf8(st.m_filename);
+            }
+            mz_zip_reader_end(&z);
+            return out;
+        };
+        auto makeZip = [](const QVector<QPair<QString, QByteArray>>& files) {
+            mz_zip_archive z; std::memset(&z, 0, sizeof(z));
+            mz_zip_writer_init_heap(&z, 0, 0);
+            for (const auto& f : files)
+                mz_zip_writer_add_mem(&z, f.first.toUtf8().constData(), f.second.constData(), size_t(f.second.size()),
+                                      MZ_DEFAULT_COMPRESSION);
+            void* buf = nullptr; size_t sz = 0;
+            mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
+            const QByteArray out(static_cast<const char*>(buf), int(sz));
+            mz_zip_writer_end(&z);
+            if (buf) mz_free(buf);
+            return out;
+        };
+        auto records44 = [&](const QString& key) {
+            for (const AddonRoster::Record& r : AddonRoster::records()) if (r.key == key) return r;
+            return AddonRoster::Record{};
+        };
+        const QString idReg = QStringLiteral("probe.sync.registry"), idSide = QStringLiteral("probe.sync.sideloaded");
+        const QString idFp = QString::fromLatin1(AppBrand::kAddonPrefix) + QStringLiteral("probefirstparty");
+        QDir(addonsDir).removeRecursively();
+
+        // 44a. The bundle carries NO addons/ entry — not the registry folder, not the sideloaded one, not the
+        //      first-party one — while themes/ still rides (so the zip is not simply empty).
+        CHECK(makeAddon(QStringLiteral("probe.sync.registry"), idReg) && stampRegistry(QStringLiteral("probe.sync.registry"), QStringLiteral("1.0.0")));
+        CHECK(makeAddon(QStringLiteral("probe.sync.sideloaded"), idSide));
+        CHECK(makeAddon(QStringLiteral("probefirstparty"), idFp));
+        CHECK(writeFile(themesDir + QStringLiteral("/probe44/theme.txt"), QByteArray("theme bytes")));
+        {
+            const QStringList names = zipNames(CloudSync::buildStateBundle());
+            CHECK(names.contains(QStringLiteral("settings.json")));
+            CHECK(names.contains(QStringLiteral("themes/probe44/theme.txt")));
+            bool anyAddon = false;
+            for (const QString& n : names) if (n.startsWith(QLatin1String("addons"))) anyAddon = true;
+            CHECK(!anyAddon);
+        }
+
+        // 44b. An OLDER peer's bundle still packs add-on code. Every addons/ entry is refused — counted, logged
+        //      once, and written nowhere — while the rest of the bundle applies as before.
+        {
+            QFile::remove(dataDir + QStringLiteral("/stream_debug.log"));
+            const QByteArray oldPeer = makeZip({
+                { QStringLiteral("meta.json"), QByteArray("{}") },
+                { QStringLiteral("settings.json"), QByteArray("{\"probe44/fromPeer\":\"yes\"}") },
+                { QStringLiteral("addons/x/main.js"), QByteArray("evil();") },
+                { QStringLiteral("addons/x/manifest.json"), QByteArray("{\"id\":\"x\"}") },
+                { QStringLiteral("addons/probe.sync.sideloaded/main.js"), QByteArray("overwritten();") },
+                { QStringLiteral("themes/probe44/peer.txt"), QByteArray("peer theme") } });
+            int refused = -1;
+            CHECK(CloudSync::applyStateBundle(oldPeer, &refused));
+            CHECK(refused == 3);
+            CHECK(!QFileInfo::exists(addonsDir + QStringLiteral("/x")));
+            QFile side(addonsDir + QStringLiteral("/probe.sync.sideloaded/main.js"));
+            CHECK(side.open(QIODevice::ReadOnly) && !side.readAll().contains("overwritten"));
+            CHECK(QFileInfo::exists(themesDir + QStringLiteral("/probe44/peer.txt")));
+            CHECK(QSettings(iniPath, QSettings::IniFormat).value(QStringLiteral("probe44/fromPeer")).toString() == QStringLiteral("yes"));
+            QFile log(dataDir + QStringLiteral("/stream_debug.log"));
+            const QByteArray logBytes = log.open(QIODevice::ReadOnly) ? log.readAll() : QByteArray();
+            CHECK(logBytes.count("add-on code never rides sync") == 1);     // ONE line for the bundle, not one per file
+            CHECK(logBytes.contains("ignored 3 add-on file(s)"));
+        }
+
+        // 44c. The fingerprint ignores addons/: installing or editing an add-on is not an unsynced change. A theme
+        //      edit still is (the negative control).
+        {
+            const QByteArray fp0 = CloudSync::stateFingerprint();
+            CHECK(writeFile(addonsDir + QStringLiteral("/probe.sync.sideloaded/extra.js"), QByteArray("x")));
+            CHECK(makeAddon(QStringLiteral("probe.sync.new"), QStringLiteral("probe.sync.new")));
+            CHECK(CloudSync::stateFingerprint() == fp0);
+            QDir(addonsDir + QStringLiteral("/probe.sync.new")).removeRecursively();
+            CHECK(writeFile(themesDir + QStringLiteral("/probe44/theme.txt"), QByteArray("edited theme")));
+            CHECK(CloudSync::stateFingerprint() != fp0);
+        }
+
+        // 44d. A registry install is a kind-"registry" REFERENCE in the roster — registry, entry, version — and it
+        //      round-trips: a device without the folder merges it into its own shadow, lists it as pending (the
+        //      merge never fetches), and carries it on unchanged.
+        freshDevice();
+        const QJsonObject docReg = serializeNow();
+        QJsonObject regItem;
+        for (const QJsonValue& v : rosterItems(docReg))
+            if (v.toObject().value(QStringLiteral("key")).toString() == idReg) regItem = v.toObject();
+        CHECK(regItem.value(QStringLiteral("kind")).toString() == QStringLiteral("registry"));
+        CHECK(regItem.value(QStringLiteral("registry")).toString() == regUrl);
+        CHECK(regItem.value(QStringLiteral("entry")).toString() == QStringLiteral("probe.sync.registry"));
+        CHECK(regItem.value(QStringLiteral("version")).toString() == QStringLiteral("1.0.0"));
+        CHECK(regItem.value(QStringLiteral("url")).toString().isEmpty());
+        CHECK(regItem.value(QStringLiteral("ts")).toDouble() >= double(T));  // a dated add, not a backfill
+        {
+            // Every non-registry record serialises exactly as increment 1 wrote it (no kind/registry fields), so
+            // an equal-ts tie-break against an increment-1 peer compares the same bytes.
+            for (const QJsonValue& v : rosterItems(docReg))
+                if (v.toObject().value(QStringLiteral("key")).toString() != idReg)
+                    CHECK(!v.toObject().contains(QStringLiteral("kind")) && !v.toObject().contains(QStringLiteral("registry")));
+        }
+        QDir(addonsDir + QStringLiteral("/probe.sync.registry")).removeRecursively();   // device B: not installed
+        freshDevice();
+        mergeDoc(docReg);
+        {
+            const AddonRoster::Record r = records44(idReg);
+            CHECK(r.isRegistry() && r.registry == regUrl && r.entry == QStringLiteral("probe.sync.registry")
+                  && r.version == QStringLiteral("1.0.0"));
+            bool pending = false;
+            for (const AddonRoster::Record& p : AddonRoster::pendingRegistryInstalls()) if (p.key == idReg) pending = true;
+            CHECK(pending);                                           // listed for AddonManager to install or list
+            CHECK(!QFileInfo::exists(addonsDir + QStringLiteral("/probe.sync.registry")));   // the merge fetched nothing
+            QJsonObject carried;
+            for (const QJsonValue& v : rosterItems(serializeNow()))
+                if (v.toObject().value(QStringLiteral("key")).toString() == idReg) carried = v.toObject();
+            CHECK(compactO(carried) == compactO(regItem));            // carried on byte for byte, never re-dated
+            CHECK(docTomb(serializeNow(), idReg) == 0);               // and a missing folder is NOT a removal
+        }
+
+        // 44e. A sideloaded add-on is DEVICE-ONLY: no record, even with its on/off flag flipped here — and a peer's
+        //      record for the same id does not reach its local flag.
+        freshDevice();
+        setRaw(QStringLiteral("addon.enabled.") + idSide, QStringLiteral("false"));
+        {
+            const QJsonObject d = serializeNow();
+            CHECK(!docHasKey(d, idSide));
+            QJsonObject peer; QJsonObject all; QJsonArray items;
+            QJsonObject o; o["key"] = idSide; o["url"] = QString(); o["enabled"] = true; o["ts"] = double(T + 1000);
+            items.append(o); all["items"] = items; all["tombs"] = QJsonArray{}; peer["all"] = all;
+            QJsonObject doc; doc["roster"] = peer;
+            mergeDoc(doc);
+            CHECK(!flagOn(idSide));                                   // the peer's newer "on" did not touch it
+        }
+        // ...while a FIRST-PARTY add-on's flag still syncs (it ships with the build on every device).
+        setRaw(QStringLiteral("addon.enabled.") + idFp, QStringLiteral("false"));
+        CHECK(docHasKey(serializeNow(), idFp));
+
+        // 44f. A TOMBSTONE UNINSTALLS a registry add-on — and only a registry one: a sideloaded folder whose id a
+        //      tombstone names is this device's own, and nothing synced may delete it.
+        freshDevice();
+        CHECK(makeAddon(QStringLiteral("probe.sync.registry"), idReg) && stampRegistry(QStringLiteral("probe.sync.registry"), QStringLiteral("1.0.0")));
+        serializeNow();                                               // stamped as a dated add here
+        {
+            QJsonObject peer; QJsonObject all; QJsonArray tombs;
+            QJsonObject t1; t1["key"] = idReg; t1["ts"] = double(T + 5000); tombs.append(t1);
+            QJsonObject t2; t2["key"] = idSide; t2["ts"] = double(T + 5000); tombs.append(t2);
+            all["items"] = QJsonArray{}; all["tombs"] = tombs; peer["all"] = all;
+            QJsonObject d; d["roster"] = peer;
+            mergeDoc(d);
+        }
+        CHECK(!QFileInfo::exists(addonsDir + QStringLiteral("/probe.sync.registry")));         // uninstalled
+        CHECK(QFileInfo::exists(addonsDir + QStringLiteral("/probe.sync.sideloaded/manifest.json")));   // untouched
+        CHECK(!docHasKey(serializeNow(), idReg));                     // and not resurrected by the next reconcile
+
+        // 44g. An uninstall HERE is a dated tombstone (recordRemoval), strictly newer than the record it removes.
+        freshDevice();
+        injTomb(QStringLiteral("roster/all"), idReg, T - 10);         // an older removal, re-installed since
+        CHECK(makeAddon(QStringLiteral("probe.sync.registry"), idReg) && stampRegistry(QStringLiteral("probe.sync.registry"), QStringLiteral("1.0.0")));
+        const QJsonObject dInstalled = serializeNow();
+        CHECK(docHasKey(dInstalled, idReg) && docTomb(dInstalled, idReg) == 0);   // a re-install withdraws the old tomb
+        qint64 installedTs = 0;
+        for (const QJsonValue& v : rosterItems(dInstalled))
+            if (v.toObject().value(QStringLiteral("key")).toString() == idReg) installedTs = qint64(v.toObject().value(QStringLiteral("ts")).toDouble());
+        QDir(addonsDir + QStringLiteral("/probe.sync.registry")).removeRecursively();
+        AddonRoster::recordRemoval(idReg);
+        const QJsonObject dRemoved = serializeNow();
+        CHECK(!docHasKey(dRemoved, idReg));
+        CHECK(docTomb(dRemoved, idReg) > installedTs && installedTs >= T);
+
+        // 44h. PASSWORDS stay on the device. A field the add-on declares `type: password` is stored under the
+        //      device-local key (AddonConfigKeys::keyFor — the writer's own spelling), which is carved out both
+        //      ways; its other fields keep syncing.
+        {
+            const QString aid = QStringLiteral("probe.sync.creds");
+            const QString pwKey = AddonConfigKeys::keyFor(aid, QStringLiteral("password"), QStringLiteral("password"));
+            const QString apiKey = AddonConfigKeys::keyFor(aid, QStringLiteral("apikey"), QStringLiteral("text"));
+            CHECK(pwKey != apiKey && pwKey.startsWith(QLatin1String("addonsecret/")));
+            CHECK(apiKey == QStringLiteral("addoncfg/probe.sync.creds/apikey"));
+            setRaw(pwKey, QStringLiteral("pw-fixture-44h"));
+            setRaw(apiKey, QStringLiteral("api-fixture-44h"));
+            setRaw(AddonConfigKeys::migratedStampKey(aid, QStringLiteral("password")), QString::number(T));
+            CHECK(CloudSync::isDeviceLocalKey(pwKey));
+            CHECK(CloudSync::isDeviceLocalKey(AddonConfigKeys::migratedStampKey(aid, QStringLiteral("password"))));
+            CHECK(!CloudSync::isDeviceLocalKey(apiKey));
+            const QByteArray exported = CloudSync::buildSettingsJson();
+            CHECK(!exported.contains("pw-fixture-44h"));             // not in the export
+            CHECK(!exported.contains("addonsecret"));
+            CHECK(exported.contains("api-fixture-44h"));              // a non-password field still syncs
+            // ...and on the way in, a peer's copy of a device-local key is refused.
+            QJsonObject in; in.insert(pwKey, QStringLiteral("peer-pw-44h")); in.insert(apiKey, QStringLiteral("peer-api-44h"));
+            CloudSync::applySettingsJson(QJsonDocument(in).toJson(QJsonDocument::Compact));
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(raw.value(pwKey).toString() == QStringLiteral("pw-fixture-44h"));
+            CHECK(raw.value(apiKey).toString() == QStringLiteral("peer-api-44h"));
+            raw.remove(pwKey); raw.remove(apiKey); raw.remove(AddonConfigKeys::migratedStampKey(aid, QStringLiteral("password")));
+            raw.sync();
+        }
+
+        QDir(addonsDir).removeRecursively();
+        QDir(themesDir + QStringLiteral("/probe44")).removeRecursively();
+        wipeRoster();
+    }
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

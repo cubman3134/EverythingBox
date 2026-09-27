@@ -55,6 +55,12 @@ public:
     // The sync fingerprint (checkStatus's localChanged gate). Excludes both the device-local carve-out and the
     // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
     static QByteArray stateFingerprint();
+    // The heavy bundle's writer and reader, exposed so the headless probe can assert what the zip carries and
+    // what applying one writes, without a transport (issue #77: no add-on code in either direction).
+    // `refusedAddonFiles`, when given, receives how many addons/ entries an older peer's bundle carried and
+    // were refused rather than written.
+    static QByteArray buildStateBundle();
+    static bool applyStateBundle(const QByteArray& zip, int* refusedAddonFiles = nullptr);
     // checkStatus's st.localChanged, answered WITHOUT a network trip: does the local state still match the
     // baseline the last successful sync recorded? The push funnel consults it so a failed push that had
     // nothing to send does not inflate the pending record (#34 review, minor 4), and the probe uses it to

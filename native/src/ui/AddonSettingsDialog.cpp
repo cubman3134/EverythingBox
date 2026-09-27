@@ -29,7 +29,7 @@ AddonSettingsDialog::AddonSettingsDialog(const AddonManifest& manifest, QWidget*
     auto* form = new QFormLayout();
     for (const AddonSetting& s : manifest_.settings)
     {
-        const QString stored = AddonContext::readConfig(manifest_.id, s.key, s.defaultValue);
+        const QString stored = AddonContext::readSetting(manifest_.id, s);   // a password reads device-local (#77)
 
         QWidget* editor = nullptr;
         if (s.type == QStringLiteral("checkbox"))
@@ -62,7 +62,7 @@ AddonSettingsDialog::AddonSettingsDialog(const AddonManifest& manifest, QWidget*
 
     auto* note = new QLabel(
         tr("Credentials are stored on this device (plaintext in everythingbox.ini) and are only sent where the "
-           "addon’s script chooses to use them."),
+           "addon’s script chooses to use them. Password fields are not synced to your other devices."),
         this);
     note->setWordWrap(true);
     v->addWidget(note);
@@ -84,7 +84,7 @@ void AddonSettingsDialog::save()
             value = cb->isChecked() ? QStringLiteral("true") : QStringLiteral("false");
         else if (auto* le = qobject_cast<QLineEdit*>(editor))
             value = le->text();
-        AddonContext::writeConfig(manifest_.id, s.key, value);
+        AddonContext::writeSetting(manifest_.id, s, value);   // a password stays on this device (#77)
     }
     accept();
 }

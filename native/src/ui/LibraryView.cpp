@@ -71,6 +71,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     sourceList_ = new QListWidget(split);
     itemList_ = new QListWidget(split);
     split->addWidget(sourceList_);
+    sourceList_->setWordWrap(true);   // #77: the "Not synced" section's one-line reason wraps rather than clips
     split->addWidget(itemList_);
     split->setStretchFactor(1, 1);
     split->setSizes({ 240, 800 });
@@ -138,23 +139,50 @@ void LibraryView::refreshSources()
       sourceRefs_.push_back(nullptr); }
 
     // All media sources are listed; the checkbox enables/disables each one (persisted).
-    for (LoadedAddon* s : mgr_->sources())
-    {
+    auto addSource = [this](LoadedAddon* s) {
         QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
         if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
         auto* item = new QListWidgetItem(name, sourceList_);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(mgr_->isEnabled(s->manifest.id) ? Qt::Checked : Qt::Unchecked);
         sourceRefs_.push_back(s);
+    };
+    // A section line (issue #77): no flags at all, so it can never become current — the keyboard and the pad
+    // step over it — and its null ref is told apart from the Local ROMs row by its row number.
+    auto addSection = [this](const QString& text) {
+        auto* h = new QListWidgetItem(text, sourceList_);
+        h->setFlags(Qt::NoItemFlags);
+        sourceRefs_.push_back(nullptr);
+    };
+    // Issue #77: an add-on installed on THIS device from a file is listed last, under "Not synced", with the
+    // one line that says why — its code never syncs, and there is no registry for another device to get it from.
+    QVector<LoadedAddon*> deviceOnly;
+    for (LoadedAddon* s : mgr_->sources())
+    {
+        if (mgr_->isDeviceOnly(s)) deviceOnly << s;
+        else addSource(s);
+    }
+    if (!deviceOnly.isEmpty())
+    {
+        addSection(tr("Not synced"));
+        addSection(AddonManager::notSyncedReason());
+        for (LoadedAddon* s : deviceOnly) addSource(s);
+    }
+    // ...and a registry add-on installed on another device that this one has not installed: listed, with why.
+    const QVector<AddonManager::PendingRegistryRef> pending = mgr_->pendingRegistryRefs();
+    if (!pending.isEmpty())
+    {
+        addSection(tr("From your other devices"));
+        for (const AddonManager::PendingRegistryRef& p : pending) addSection(AddonManager::pendingRefText(p));
     }
     populating_ = false;
 
     // Default to the first add-on (row 0 is the synthetic "Local ROMs" entry); selecting Local ROMs is what
     // creates/scans the ROM tree, so we don't do that work unless the user asks for it.
-    if (sourceList_->count() > 1)
-        sourceList_->setCurrentRow(1);
-    else
-        sourceList_->setCurrentRow(0); // only Local ROMs is present
+    int first = 0;
+    for (int r = 1; r < sourceRefs_.size() && first == 0; ++r)
+        if (sourceRefs_[r]) first = r;
+    sourceList_->setCurrentRow(first); // 0 when only Local ROMs is present
 }
 
 void LibraryView::onSourceChanged()
@@ -163,6 +191,7 @@ void LibraryView::onSourceChanged()
     if (row < 0 || row >= sourceRefs_.size()) return;
 
     LoadedAddon* s = sourceRefs_[row];
+    if (!s && row != 0) return;                                  // a section line (#77), never an add-on
     if (!s) { pendingReqId_ = -1; showLocalSystems(); return; } // the synthetic "Local ROMs" source
     localMode_ = false;
     if (!mgr_->isEnabled(s->manifest.id))
@@ -195,6 +224,7 @@ void LibraryView::doSearch()
     const QString q = search_->text().trimmed();
 
     // Local ROMs: filter the whole library by title (empty query -> back to the systems list).
+    if (!sourceRefs_[row] && row != 0) return;                  // a section line (#77)
     if (!sourceRefs_[row])
     {
         if (q.isEmpty()) { showLocalSystems(); return; }

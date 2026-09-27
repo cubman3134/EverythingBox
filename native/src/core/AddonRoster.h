@@ -37,6 +37,11 @@
 // run against this ini. The very first reconcile (no shadow yet) is a BACKFILL: it stamps what is there at
 // ts 0 ("unknown time"), so any real tombstone or dated edit on another device beats it.
 //
+// REGISTRY REFERENCES (increment 2). Add-on code never rides sync. A folder add-on installed from a registry is
+// a kind-"registry" record — registry index URL, entry id, the version installed — and a receiving device
+// installs it FROM THAT REGISTRY, through the same install path the registry browser uses, and only when it has
+// that registry configured itself. A sideloaded folder add-on is device-only and is not in the roster at all.
+//
 // QtCore only, over the shared portable everythingbox.ini, like every other store.
 #pragma once
 #include <QString>
@@ -58,7 +63,58 @@ namespace AddonRoster
         QString url;          // the remote source's base URL; empty = an enabled flag only
         bool    enabled = true;
         qint64  ts = 0;       // epoch seconds of the edit; 0 = backfilled or adopted, time unknown
+        // kind "registry" (issue #77, increment 2): a folder add-on installed from a registry, synced as a
+        // REFERENCE — never as code. A receiving device installs it from `registry` itself, and only when it
+        // has that registry configured too. Empty on every other record, and then not serialised at all, so an
+        // increment-1 record keeps its exact bytes (the merge's equal-ts tie-break compares canonical bytes).
+        QString registry;     // the registry's index.json URL
+        QString entry;        // the registry entry's id — the folder it installs into
+        QString version;      // the version the RECORDING device installed; informational, never compared
+        bool isRegistry() const { return !registry.isEmpty(); }
     };
+
+    // ---- the add-ons in THIS device's folder (issue #77, increment 2) --------------------------------------
+    // Add-on CODE never rides sync. What a folder add-on is decides what syncs about it:
+    //   * first-party (the reserved id prefix): ships with the build; its on/off flag syncs, nothing else;
+    //   * registry-installed (its folder holds a provenance file): syncs as a kind-"registry" record;
+    //   * sideloaded (anything else — a local .addon import, a folder dropped in): DEVICE-ONLY. It is kept
+    //     out of the roster entirely, flag included, and the add-on list shows it under "Not synced".
+    // The provenance file is written by the registry install, is part of the folder, and so goes with it: an
+    // uninstall, or a local .addon import over the same id, leaves no stale claim behind.
+    struct Provenance
+    {
+        QString registry;     // the registry index URL it was installed from
+        QString entry;        // the registry entry id
+        QString version;      // the version actually installed (the downloaded manifest's own "version")
+        qint64  installedAt = 0;
+        bool valid() const { return !registry.isEmpty() && !entry.isEmpty(); }
+    };
+    struct LocalAddon
+    {
+        QString dir;          // absolute folder path
+        QString id;           // its manifest.json "id" (the folder name when the manifest has none)
+        bool    firstParty = false;
+        Provenance provenance;   // valid() = registry-installed
+        bool sideloaded() const { return !firstParty && !provenance.valid(); }
+    };
+    QString provenanceFileName();                    // the file inside an add-on folder that records its origin
+    Provenance readProvenance(const QString& addonDir);
+    bool writeProvenance(const QString& addonDir, const Provenance& p);
+    bool isFirstPartyId(const QString& manifestId);  // the reserved namespace, current or previous brand
+    // Where the folder add-ons live. AddonManager sets its own root (EB_ADDONS_ROOT in the probes); unset, it is
+    // <data>/addons.
+    void setAddonsRoot(const QString& root);
+    QString addonsRoot();
+    QVector<LocalAddon> localAddons();               // every folder under the root that has a manifest.json
+
+    // A registry record this device does not have installed: no folder add-on with its key as manifest id, and
+    // no folder named after its entry. Suppressed records are not pending. Sorted by key.
+    QVector<Record> pendingRegistryInstalls();
+    // An explicit removal (AddonManager::removeAddon of a registry-installed add-on). A registry record's
+    // absence from the folder can mean "not installed here YET" — a reference from a device whose registry this
+    // one lacks — so reconcile() never infers a removal from it; the uninstall says so itself. Tombstones `key`
+    // at a stamp newer than its record, drops the record, and fires the change hook.
+    void recordRemoval(const QString& key);
 
     // ---- names ---------------------------------------------------------------------------------------------
     QString itemsKey();                              // "roster/<scope>/items"
@@ -84,8 +140,11 @@ namespace AddonRoster
 
     // Write the shadow onto the live keys: surviving URLs keep their place, a reconfigured one is replaced in
     // place, a suppressed one is dropped (with its cached manifest), new ones are appended in key order, and
-    // each flag is written where it differs. With dryRun nothing is written. Returns true when the live keys
-    // change (or would).
+    // each flag is written where it differs. A registry-installed folder whose record a tombstone removed is
+    // UNINSTALLED (its provenance file first, so a folder that will not delete is left behind as a device-only
+    // add-on rather than one the next reconcile would re-add). Installing a registry record this device lacks
+    // is not done here: that is a network fetch, and AddonManager::applyMergedRoster does it. With dryRun
+    // nothing is written. Returns true when the live keys or the folders change (or would).
     bool project(bool dryRun = false);
 
     // An OLD peer's heavy-bundle snapshot (its addon.remote.urls JSON text and its addon.enabled.* flags):
