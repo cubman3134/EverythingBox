@@ -14,7 +14,8 @@
 //   E. What the cast picker may offer (a local file, a remote url, a header-gated one, nothing).
 //   F. The server over a real socket: full GET and HEAD, the three range shapes, 416, multi-range, 404/405, the
 //      head cap, the connection cap, bind refusals, revoke (404 at once, a streaming body cut) and stop (port
-//      closed).
+//      closed). The cap's 503 must arrive even when the request is already queued as the server accepts (#457):
+//      closing over an unread request is a reset, and a reset threw the 503 away.
 //   G. CastManager::castLocalFile against a fake DLNA renderer: the URL it is handed serves the file byte-exact,
 //      and stopCasting closes it. A public target is refused before anything listens.
 //   H. Quit: with a client mid-download under back-pressure, aboutToQuit stops the server inside the #442 budget.
@@ -145,6 +146,49 @@ void spin(int ms)
     QEventLoop loop;
     QTimer::singleShot(ms, &loop, &QEventLoop::quit);
     loop.exec();
+}
+
+// Run the event loop until `done()` holds or `ms` pass, and say whether it held. A bounded wait on something
+// observable, not a sleep followed by a check.
+template <typename F>
+bool waitUntil(F done, int ms = 5000)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!done())
+    {
+        if (t.elapsed() >= ms) return false;
+        spin(5);
+    }
+    return true;
+}
+
+// roundTrip, but the request is already waiting in the server's receive queue when the server accepts: the
+// handshake and the write both complete in the kernel's backlog before this thread's event loop runs the server.
+// Then read until the server closes. This is the ordering that turned a refusal's close into a reset (#457).
+Resp queuedRoundTrip(quint16 port, const QByteArray& raw, int timeoutMs = 8000)
+{
+    QTcpSocket s;
+    Resp r;
+    s.connectToHost(QHostAddress(QHostAddress::LocalHost), port);
+    if (!s.waitForConnected(3000)) return r;
+    s.write(raw);
+    s.waitForBytesWritten(3000);
+    QByteArray all = s.readAll();
+    if (s.state() == QAbstractSocket::ConnectedState)
+    {
+        QEventLoop loop;
+        QObject::connect(&s, &QTcpSocket::readyRead, &loop, [&] { all += s.readAll(); });
+        QObject::connect(&s, &QTcpSocket::disconnected, &loop, [&] { all += s.readAll(); loop.quit(); });
+        QObject::connect(&s, &QAbstractSocket::errorOccurred, &loop, [&](QAbstractSocket::SocketError) {
+            all += s.readAll(); loop.quit(); });
+        QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    all += s.readAll();
+    r = parse(all);
+    r.connected = true;
+    return r;
 }
 
 IfaceAddr ia(const char* name, const char* ip, int prefix, bool up = true, bool loop = false, bool running = true)
@@ -575,13 +619,56 @@ int main(int argc, char** argv)
                 idle.emplace_back(new QTcpSocket);
                 idle.back()->connectToHost(QHostAddress(QHostAddress::LocalHost), port);
             }
-            spin(300);
-            CHECK(srv.connectionCount() == CastFileServer::kMaxConnections);
+            CHECK(waitUntil([&] { return srv.connectionCount() == CastFileServer::kMaxConnections; }));
             r = roundTrip(port, get(path));
             CHECK(r.status == 503);
+            CHECK(r.body == "busy\n");
+            // #457: the request is already queued when the server accepts. Closing over it unread made the close a
+            // reset, and the reset discarded the 503 before the client read it. Every one must arrive.
+            int queued503 = 0;
+            for (int i = 0; i < 20; ++i)
+            {
+                const Resp q = queuedRoundTrip(port, get(path));
+                if (q.status == 503 && q.body == "busy\n") ++queued503;
+            }
+            std::printf("F: a refusal whose request was queued before the accept: 503 in %d of 20\n", queued503);
+            CHECK(queued503 == 20);
+            CHECK(waitUntil([&] { return srv.refusingCount() == 0; }));
+            CHECK(srv.connectionCount() == CastFileServer::kMaxConnections);
+            // A refused connection that never sends a request still gets its 503, and is closed within the linger.
+            {
+                QTcpSocket quiet;
+                QByteArray got;
+                bool closed = false;
+                QObject::connect(&quiet, &QTcpSocket::readyRead, [&] { got += quiet.readAll(); });
+                QObject::connect(&quiet, &QTcpSocket::disconnected, [&] { got += quiet.readAll(); closed = true; });
+                quiet.connectToHost(QHostAddress(QHostAddress::LocalHost), port);
+                CHECK(waitUntil([&] { return srv.refusingCount() == 1; }));
+                CHECK(waitUntil([&] { return closed; }, CastFileServer::kRefuseLingerMs + 3000));
+                CHECK(parse(got).status == 503);
+                CHECK(waitUntil([&] { return srv.refusingCount() == 0; }));
+            }
+            // A flood of refusals holds at most kMaxRefusing sockets; the rest are still answered 503.
+            {
+                const int n = CastFileServer::kMaxRefusing + 3;
+                std::vector<std::unique_ptr<QTcpSocket>> quiet;
+                std::vector<QByteArray> got(n);
+                for (int i = 0; i < n; ++i)
+                {
+                    quiet.emplace_back(new QTcpSocket);
+                    QTcpSocket* q = quiet.back().get();
+                    QObject::connect(q, &QTcpSocket::readyRead, [q, &got, i] { got[i] += q->readAll(); });
+                    q->connectToHost(QHostAddress(QHostAddress::LocalHost), port);
+                }
+                CHECK(waitUntil([&] {
+                    for (const QByteArray& g : got) if (!g.endsWith("busy\n")) return false;
+                    return true; }));
+                CHECK(srv.refusingCount() == CastFileServer::kMaxRefusing);
+                for (auto& q : quiet) q->abort();
+                CHECK(waitUntil([&] { return srv.refusingCount() == 0; }));
+            }
             for (auto& s : idle) s->abort();
-            spin(300);
-            CHECK(srv.connectionCount() == 0);
+            CHECK(waitUntil([&] { return srv.connectionCount() == 0; }));
             r = roundTrip(port, get(path, "Range: bytes=0-0\r\n"));
             CHECK(r.status == 206);
         }
