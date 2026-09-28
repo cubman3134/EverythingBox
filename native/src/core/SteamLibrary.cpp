@@ -87,9 +87,28 @@ static bool isHiddenTool(const QString& name)
     return false;
 }
 
+QString SteamLibrary::manifestInstallDir(const QString& acfText)
+{
+    // "installdir"  "Half-Life 2" — the folder name under <library>/steamapps/common. VDF escapes a backslash
+    // as "\\"; a folder name has none in practice, but unescape it the way libraryRoots() does for paths.
+    static const QRegularExpression re(QStringLiteral("\"installdir\"\\s*\"([^\"]*)\""),
+                                       QRegularExpression::CaseInsensitiveOption);
+    const auto m = re.match(acfText);
+    if (!m.hasMatch()) return QString();
+    QString dir = m.captured(1).trimmed();
+    dir.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+    return dir;
+}
+
+QString SteamLibrary::installPath(const QString& libraryRoot, const QString& installdir)
+{
+    if (libraryRoot.isEmpty() || installdir.isEmpty()) return QString();
+    return QDir::cleanPath(libraryRoot + QStringLiteral("/steamapps/common/") + installdir);
+}
+
 QVector<SteamGame> SteamLibrary::installedGames()
 {
-    QHash<QString, QString> byId; // appid -> name (dedupes a game that appears in two libraries)
+    QHash<QString, SteamGame> byId; // appid -> game (dedupes a game that appears in two libraries)
     const QRegularExpression reId(QStringLiteral("\"appid\"\\s*\"(\\d+)\""),
                                   QRegularExpression::CaseInsensitiveOption);
     const QRegularExpression reName(QStringLiteral("\"name\"\\s*\"([^\"]*)\""));
@@ -108,18 +127,28 @@ QVector<SteamGame> SteamLibrary::installedGames()
             const auto nm = reName.match(text);
             const QString name = nm.hasMatch() ? nm.captured(1) : idm.captured(1);
             if (isHiddenTool(name)) continue;
-            byId.insert(idm.captured(1), name);
+            SteamGame g{ idm.captured(1), name };
+            g.installDir = installPath(root, manifestInstallDir(text));
+            byId.insert(g.appid, g);
         }
     }
 
     QVector<SteamGame> out;
     out.reserve(byId.size());
     for (auto it = byId.constBegin(); it != byId.constEnd(); ++it)
-        out.push_back({ it.key(), it.value() });
+        out.push_back(it.value());
     std::sort(out.begin(), out.end(), [](const SteamGame& a, const SteamGame& b) {
         return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
     });
     return out;
+}
+
+QString SteamLibrary::installDirFor(const QString& appid)
+{
+    if (appid.isEmpty()) return QString();
+    for (const SteamGame& g : installedGames())
+        if (g.appid == appid) return g.installDir;
+    return QString();
 }
 
 QString SteamLibrary::posterUrl(const QString& appid)

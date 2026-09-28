@@ -886,6 +886,45 @@ int main(int argc, char** argv)
               && bnetItem->pcSources.at(0).launchUrl == BattleNetLibrary::launchUri(QStringLiteral("wow")));
     }
 
+    // ---- appmanifest_<id>.acf: the install folder (issue #61) -----------------------------------------------
+    // A Steam launch watch falls back to "a process under the game's install folder" when RunningAppID is
+    // absent, so the folder must come out of the manifest exactly. The fixture is the shape Steam writes: the
+    // top-level AppState block, "installdir" among the other keys, a nested UserConfig block after it.
+    {
+        const QString acf = QStringLiteral(
+            "\"AppState\"\n"
+            "{\n"
+            "\t\"appid\"\t\t\"620\"\n"
+            "\t\"Universe\"\t\t\"1\"\n"
+            "\t\"LauncherPath\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\\\\steam.exe\"\n"
+            "\t\"name\"\t\t\"Portal 2\"\n"
+            "\t\"StateFlags\"\t\t\"4\"\n"
+            "\t\"installdir\"\t\t\"Portal 2\"\n"
+            "\t\"LastUpdated\"\t\t\"1717000000\"\n"
+            "\t\"SizeOnDisk\"\t\t\"12884901888\"\n"
+            "\t\"UserConfig\"\n"
+            "\t{\n"
+            "\t\t\"language\"\t\t\"english\"\n"
+            "\t}\n"
+            "}\n");
+        CHECK(SteamLibrary::manifestInstallDir(acf) == QStringLiteral("Portal 2"));
+        // Key case does not matter (older clients wrote "InstallDir"); no installdir -> empty.
+        CHECK(SteamLibrary::manifestInstallDir(QStringLiteral("\"AppState\"{\"appid\" \"10\" \"InstallDir\" \"Counter-Strike\"}"))
+              == QStringLiteral("Counter-Strike"));
+        CHECK(SteamLibrary::manifestInstallDir(QStringLiteral("\"AppState\"{\"appid\" \"10\" \"name\" \"X\"}")).isEmpty());
+        CHECK(SteamLibrary::manifestInstallDir(QString()).isEmpty());
+        // The folder lives under <library>/steamapps/common; either part missing -> no path.
+        CHECK(SteamLibrary::installPath(QStringLiteral("D:/SteamLibrary"), QStringLiteral("Portal 2"))
+              == QStringLiteral("D:/SteamLibrary/steamapps/common/Portal 2"));
+        CHECK(SteamLibrary::installPath(QStringLiteral("D:/SteamLibrary/"), QStringLiteral("Portal 2"))
+              == QStringLiteral("D:/SteamLibrary/steamapps/common/Portal 2"));
+        CHECK(SteamLibrary::installPath(QString(), QStringLiteral("Portal 2")).isEmpty());
+        CHECK(SteamLibrary::installPath(QStringLiteral("D:/SteamLibrary"), QString()).isEmpty());
+        // A positional {appid, name} still builds, with no install folder.
+        const SteamGame owned{ QStringLiteral("620"), QStringLiteral("Portal 2") };
+        CHECK(owned.installDir.isEmpty() && owned.available);
+    }
+
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }
     std::fprintf(stderr, "IMPORTERS: %d check(s) failed\n", failures);
     return 1;

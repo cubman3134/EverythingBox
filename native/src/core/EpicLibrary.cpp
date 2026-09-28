@@ -13,6 +13,11 @@
 // ProgramData isn't set.
 static QString defaultManifestsRoot()
 {
+    // EB_UITEST_EPIC_MANIFESTS (issue #61's live drive): a UI-test run reads a fixture manifests dir instead of
+    // the machine's real Epic library, so a watched launch can be driven against a fixture game. Honoured only
+    // with the test channel on (the #80 / #98 shape).
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("EB_UITEST_EPIC_MANIFESTS"))
+        return QDir::fromNativeSeparators(qEnvironmentVariable("EB_UITEST_EPIC_MANIFESTS"));
 #ifdef Q_OS_WIN
     const auto env = QProcessEnvironment::systemEnvironment();
     QString pd = env.value(QStringLiteral("ProgramData"));

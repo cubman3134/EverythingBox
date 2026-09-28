@@ -14967,7 +14967,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                                       ? resumeKey.mid(QStringLiteral("steam:").size())
                                       : path.section(QLatin1Char('/'), -1);
             const QString url = SteamLibrary::launchUrl(appid);
-            QDesktopServices::openUrl(QUrl(url));
+            handOffStoreLaunch(url, QStringLiteral("steam:") + appid);   // #61: openUrl + play-time watch
             RecentStore::add({ url, title, QStringLiteral("steamgame"), thumb, QStringLiteral("steam:") + appid });
             statusBar()->showMessage(tr("Launching “%1” via Steam…").arg(title), 5000);
             return;
@@ -14980,7 +14980,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                                         ? resumeKey.mid(QStringLiteral("epic:").size())
                                         : path.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
             const QString url = EpicLibrary::launchUrl(appName);
-            QDesktopServices::openUrl(QUrl(url));
+            handOffStoreLaunch(url, QStringLiteral("epic:") + appName);  // #61: openUrl + play-time watch
             RecentStore::add({ url, title, QStringLiteral("epicgame"), thumb, QStringLiteral("epic:") + appName });
             statusBar()->showMessage(tr("Launching “%1” via Epic…").arg(title), 5000);
             return;
@@ -20235,7 +20235,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // (kind "epicgame", key "epic:<AppName>") so it resumes from the Recent tab and re-launches via the URI.
     if (item.url.startsWith(QStringLiteral("com.epicgames.launcher://")))
     {
-        QDesktopServices::openUrl(QUrl(item.url));
+        handOffStoreLaunch(item.url, item.id);   // #61: the same openUrl, plus a play-time watch
         const QString appName = item.url.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
         const QString key = item.id.startsWith(QStringLiteral("epic:"))
                                 ? item.id : QStringLiteral("epic:") + appName;
@@ -20244,10 +20244,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         return;
     }
     // A Steam game: hand it to the Steam client to launch (it handles install/run). Fire-and-forget — the Steam
-    // client owns the process (no play-time tracking on this path).
+    // client owns the process; #61 watches for the game to time the session (not for a steam://install/).
     if (item.url.startsWith(QStringLiteral("steam://")))
     {
-        QDesktopServices::openUrl(QUrl(item.url));
+        handOffStoreLaunch(item.url, item.id);
         const bool installing = item.url.startsWith(QStringLiteral("steam://install/"));
         // A RUN records a Recent (kind "steamgame", key "steam:<appid>", capsule thumb) so it resumes from the
         // Recent tab and re-launches via SteamLibrary::launchUrl. An install handoff is not a play -> no Recent.
