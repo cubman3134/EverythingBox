@@ -824,7 +824,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // — see armSubtitleFetch). Auto-apply an add-on match in the preferred language when one exists. Needs a
         // Stremio-addressable id (the /subtitles route is by type/id) and an enabled subtitle add-on.
         if (Settings::subtitlesOnByDefault() && !subCtx_.imdbStreamId.isEmpty()
-            && !SubtitleFetcher::configured() && addons_ && addons_->hasSubtitleProvider(subCtx_.type))
+            && !SubtitleFetcher::canDownload() && addons_ && addons_->hasSubtitleProvider(subCtx_.type))
         {
             const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
                                                                    subCtx_.localPath);
@@ -17391,7 +17391,7 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
     subCtx_.type = (t == QStringLiteral("episode") || t == QStringLiteral("tv")
                     || t == QStringLiteral("series")) ? QStringLiteral("series") : t;
     if (subCtx_.type.isEmpty()) subCtx_.type = QStringLiteral("movie");
-    subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
+    subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::canDownload()
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }
 
@@ -18325,17 +18325,24 @@ void MainWindow::showSubtitleMenu()
     });
     rightCol->addWidget(loadBtn);
     subRightCol_ << loadBtn;
-    if (SubtitleFetcher::configured() && !(subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()))
+    // #81: an API key (the user's, or the one built into this release) is all SEARCHING needs, so both rows
+    // appear on that alone; a download without a stored login asks for one first (MainWindowSubtitleLogin.cpp).
+    if (SubtitleFetcher::canSearch() && !(subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()))
     {
         auto* dlBtn = rowButton(tr("🔍  Download from OpenSubtitles"), false);
         connect(dlBtn, &QPushButton::clicked, this, [this] {
             hideSubtitleMenu();
-            notify(tr("Searching OpenSubtitles for a subtitle…"), 0);
-            subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
-                               [this](const QString& srt) {
-                if (!srt.isEmpty()) { player_->addSubtitle(srt); notify(tr("Subtitle added."), 3000); }
-                else notify(tr("No matching subtitle found on OpenSubtitles."), kFeedbackLong);
-            });
+            auto run = [this] {
+                notify(tr("Searching OpenSubtitles for a subtitle…"), 0);
+                subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
+                                   [this](const QString& srt) {
+                    if (!srt.isEmpty()) { player_->addSubtitle(srt); notify(tr("Subtitle added."), 3000); }
+                    else notify(tr("No matching subtitle found on OpenSubtitles."), kFeedbackLong);
+                });
+            };
+            // This row downloads straight away, so without a login it asks for one before it starts.
+            if (SubtitleFetcher::canDownload()) run();
+            else promptOpenSubtitlesLogin(false, run);
         });
         rightCol->addWidget(dlBtn);
         subRightCol_ << dlBtn;
@@ -18365,7 +18372,7 @@ void MainWindow::showSubtitleMenu()
         rightCol->addWidget(pickBtn);
         subRightCol_ << pickBtn;
     }
-    else if (!SubtitleFetcher::configured())
+    else if (!SubtitleFetcher::canSearch())
     {
         // Unconfigured: the whole OpenSubtitles block above is absent, so the feature would be INVISIBLE —
         // nothing tells you it exists or what it wants. A non-interactive hint row says both. It uses the
@@ -18375,7 +18382,7 @@ void MainWindow::showSubtitleMenu()
         // This arm is now guarded on `configured()` alone: the composite guard above ALSO fails for a
         // perfectly configured user opening a plain local file (openVideoPath clears subCtx_, so there is no
         // title/IMDB id), and telling them to add credentials they already have is wrong advice.
-        auto* hint = new QLabel(tr("🔎  Search subtitles… (add OpenSubtitles credentials in Settings)"), card);
+        auto* hint = new QLabel(tr("🔎  Search subtitles… (add an OpenSubtitles API key in Settings)"), card);
         hint->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
         hint->setWordWrap(true);
         rightCol->addWidget(hint);
@@ -18477,27 +18484,9 @@ void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& lis
             if (notifier_) notifier_->hideNotice();   // backed out: nothing will replace the sticky notice
             return;
         }
-        const SubtitleCandidate c = picks.at(row);
-        notify(tr("Downloading subtitle…"), 0);                        // sticky until the result lands
-        subFetcher_->downloadChoice(c.fileId, lang, [this, lang, cacheKey](const QString& srt) {
-            if (srt.isEmpty()) { notify(tr("Couldn't download that subtitle."), kFeedbackLong); return; }
-            // Overwrite the cache entry for this (identifier, language): the user's correction WINS over
-            // whatever the auto-pick chose, and it sticks on every replay of this video. The key was PINNED
-            // when the search was requested — subCtx_ is deliberately not read here, because a download that
-            // lands after the user backed out and opened something else would otherwise file this .srt under
-            // the new video's key (or the degenerate "title:" of a cleared context) and poison it for good.
-            if (subCache_) subCache_->put(cacheKey, srt);
-            // Attaching is a separate question from caching. The download is valid for the video it was
-            // requested for, so it is always cached; but pasting it onto whatever is playing NOW would be
-            // wrong if that is a different video. Re-compose the CURRENT key and attach only if it still
-            // matches the pinned one — same context ⇒ same key. If it drifted, the .srt is already cached and
-            // will load on that video's next play, so nothing is lost by staying quiet.
-            const QString nowIdent = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
-                                                                      subCtx_.localPath);
-            if (SubtitleCache::keyFor(nowIdent, lang) != cacheKey) { if (notifier_) notifier_->hideNotice(); return; }
-            player_->addSubtitle(srt);
-            notify(tr("Subtitle added."), 3000);
-        });
+        // Download, cache under the PINNED key, attach if still current — and, with no login stored, ask for one
+        // first (#81). All in MainWindowSubtitleLogin.cpp.
+        downloadChosenSubtitle(picks.at(row).fileId, lang, cacheKey, /*afterLogin=*/false);
     }, this);
 }
 
@@ -22627,6 +22616,11 @@ void MainWindow::openGeneralSettings()
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
         auto textf  = [&rows](const QString& id, const QString& label, const QString& value, bool masked = false) {
             PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked; rows << r; };
+        // #81: over a client-id / secret / API-key row whose BUILT-IN value is the one in use, the row says so
+        // instead of "—". Display only (PanelRow::placeholder): the row still holds the user's own, empty, value,
+        // stays editable, and whatever the user types there wins. Twin: the classic rows' placeholder text.
+        auto builtinHint = [&rows](bool active) {
+            if (active && !rows.isEmpty()) rows.last().placeholder = tr("Built in (you can use your own)"); };
         auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
             PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
 
@@ -23170,6 +23164,7 @@ void MainWindow::openGeneralSettings()
         // --- Auto-download from OpenSubtitles (the password is masked — dots in the row; the OSK is unchanged) ---
         sep(tr("Auto-download from OpenSubtitles"));
         textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
+        builtinHint(SubtitleFetcher::usingBuiltinKey());
         textf(QStringLiteral("os.user"), tr("Username"), Settings::openSubUsername());
         textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword(), /*masked=*/true);
         // --- Reading (issue #135). Font / size / line spacing / margins / justify / reading theme for the ebook
@@ -23237,7 +23232,9 @@ void MainWindow::openGeneralSettings()
         // --- Trakt.tv ---
         sep(tr("Trakt.tv"));
         textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
+        builtinHint(TraktClient::usingBuiltin());
         textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret(), /*masked=*/true);
+        builtinHint(TraktClient::usingBuiltin() && !TraktClient::appCredentials().secret.isEmpty());
         action(QStringLiteral("trakt.connect"), TraktClient::connected() ? tr("Disconnect from Trakt")
                                                                           : tr("Connect to Trakt"));
         // The watched-history import (#23). An ACTION, not a toggle: it is something the user asks for
@@ -23265,11 +23262,14 @@ void MainWindow::openGeneralSettings()
              tr("Sync chapters read and episodes watched to your AniList list. Create a free API client at "
                 "anilist.co (Settings > Developer > Create New Client), set its redirect URL to "
                 "the loopback address 127.0.0.1 , paste the Client ID + Secret below, then Connect."), QString());
-        textf(QStringLiteral("anilist.id"), tr("Client ID"), AniListTracker::clientId());
+        // The TYPED values (#81): clientId() would read a built-in client back out into the row.
+        textf(QStringLiteral("anilist.id"), tr("Client ID"), AniListTracker::typedClientId());
+        builtinHint(AniListTracker::usingBuiltin());
         // MASKED. It is the user's own OAuth secret and the row must not read it back out on a TV in a
         // living room. It is also carved out of the sync bundle entirely (CloudSync::isDeviceLocalKey).
-        textf(QStringLiteral("anilist.secret"), tr("Client secret"), AniListTracker::clientSecret(),
+        textf(QStringLiteral("anilist.secret"), tr("Client secret"), AniListTracker::typedClientSecret(),
               /*masked=*/true);
+        builtinHint(AniListTracker::usingBuiltin() && !AniListTracker::clientSecret().isEmpty());
         action(QStringLiteral("anilist.connect"), AniListTracker::isConnected()
                    ? tr("Disconnect from AniList") : tr("Connect to AniList"));
         // The queue depth is the only thing that distinguishes "connected and delivering" from "connected
@@ -23287,11 +23287,14 @@ void MainWindow::openGeneralSettings()
                 "at myanimelist.net (Account Settings > API > Create ID), set its redirect URL to the "
                 "loopback address http://127.0.0.1 , paste the Client ID below, then Connect. Leave the "
                 "secret empty if your client has none."), QString());
-        textf(QStringLiteral("mal.id"), tr("Client ID"), MyAnimeListTracker::clientId());
+        textf(QStringLiteral("mal.id"), tr("Client ID"), MyAnimeListTracker::typedClientId());
+        builtinHint(MyAnimeListTracker::usingBuiltin());
         // MASKED, for the reason AniList's is: it is the user's own OAuth secret and the row must not read
-        // it back out on a TV in a living room. Carved out of the sync bundle entirely.
-        textf(QStringLiteral("mal.secret"), tr("Client secret (optional)"), MyAnimeListTracker::clientSecret(),
+        // it back out on a TV in a living room. Carved out of the sync bundle entirely. The built-in client is a
+        // public one with no secret, so this row never says "Built in".
+        textf(QStringLiteral("mal.secret"), tr("Client secret (optional)"), MyAnimeListTracker::typedClientSecret(),
               /*masked=*/true);
+        builtinHint(MyAnimeListTracker::usingBuiltin() && !MyAnimeListTracker::clientSecret().isEmpty());
         action(QStringLiteral("mal.connect"), MyAnimeListTracker::isConnected()
                    ? tr("Disconnect from MyAnimeList") : tr("Connect to MyAnimeList"));
         info(QStringLiteral("mal.data"), tr("MyAnimeList"), malStatusLine());
@@ -26415,27 +26418,31 @@ void MainWindow::openGeneralSettings()
         osHeading->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;"));
         v->addWidget(osHeading);
         auto* osNote = new QLabel(tr("When “show subtitles by default” is on and a video has none in your "
-                                     "language, fetch one automatically. Get a free API key at "
-                                     "opensubtitles.com (Consumers → New consumer) and sign in with your "
-                                     "OpenSubtitles account — a login is required to download."));
+                                     "language, fetch one automatically. Searching needs only an API key: "
+                                     "get a free one at opensubtitles.com (Consumers → New consumer), or use "
+                                     "the one built into this release where there is one. Downloading needs "
+                                     "your OpenSubtitles account; the first download asks for it."));
         osNote->setWordWrap(true);
         osNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(osNote);
 
+        // builtin (#81): the value in use is the one built into this release, so the EMPTY field says so through
+        // its placeholder. The field still holds the user's own value and stays editable; typing wins.
         auto addCredRow = [this, v](const QString& label, const QString& value, bool secret,
-                                    std::function<void(const QString&)> save) {
+                                    std::function<void(const QString&)> save, bool builtin = false) {
             auto* row = new QHBoxLayout();
             auto* l = new QLabel(label); l->setMinimumWidth(90);
             row->addWidget(l);
             auto* edit = new QLineEdit(value);
             edit->setMinimumHeight(30);
             if (secret) edit->setEchoMode(QLineEdit::Password);
+            if (builtin) edit->setPlaceholderText(tr("Built in (you can use your own)"));
             connect(edit, &QLineEdit::textChanged, this, [save](const QString& t) { save(t); }); // save as typed
             row->addWidget(edit, 1);
             v->addLayout(row);
         };
         addCredRow(tr("API key:"), Settings::openSubApiKey(), false,
-                   [](const QString& t) { Settings::setOpenSubApiKey(t); });
+                   [](const QString& t) { Settings::setOpenSubApiKey(t); }, SubtitleFetcher::usingBuiltinKey());
         addCredRow(tr("Username:"), Settings::openSubUsername(), false,
                    [](const QString& t) { Settings::setOpenSubUsername(t); });
         addCredRow(tr("Password:"), Settings::openSubPassword(), true,
@@ -26454,9 +26461,10 @@ void MainWindow::openGeneralSettings()
         tkNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(tkNote);
         addCredRow(tr("Client ID:"), Settings::traktClientId(), false,
-                   [](const QString& t) { Settings::setTraktClientId(t); });
+                   [](const QString& t) { Settings::setTraktClientId(t); }, TraktClient::usingBuiltin());
         addCredRow(tr("Client secret:"), Settings::traktClientSecret(), true,
-                   [](const QString& t) { Settings::setTraktClientSecret(t); });
+                   [](const QString& t) { Settings::setTraktClientSecret(t); },
+                   TraktClient::usingBuiltin() && !TraktClient::appCredentials().secret.isEmpty());
 
         auto* tkStatus = new QLabel(TraktClient::connected() ? tr("✓ Connected to Trakt.") : tr("Not connected."));
         tkStatus->setWordWrap(true);
@@ -26545,10 +26553,12 @@ void MainWindow::openGeneralSettings()
         // The labels are qualified with "AniList" rather than reusing Trakt's "Client ID:" so the two pairs
         // are distinguishable on a form that now carries both - and so the parity gate's twin patterns name
         // exactly one control each.
-        addCredRow(tr("AniList Client ID:"), AniListTracker::clientId(), false,
-                   [](const QString& t) { AniListTracker::setClientId(t); });
-        addCredRow(tr("AniList Client secret:"), AniListTracker::clientSecret(), true,
-                   [](const QString& t) { AniListTracker::setClientSecret(t); });
+        // The TYPED values (#81) — clientId() would read a built-in client back out into the field.
+        addCredRow(tr("AniList Client ID:"), AniListTracker::typedClientId(), false,
+                   [](const QString& t) { AniListTracker::setClientId(t); }, AniListTracker::usingBuiltin());
+        addCredRow(tr("AniList Client secret:"), AniListTracker::typedClientSecret(), true,
+                   [](const QString& t) { AniListTracker::setClientSecret(t); },
+                   AniListTracker::usingBuiltin() && !AniListTracker::clientSecret().isEmpty());
 
         auto* alStatus = new QLabel(AniListTracker::isConnected() ? tr("\u2713 Connected to AniList.")
                                                                   : tr("Not connected."));
@@ -26609,10 +26619,11 @@ void MainWindow::openGeneralSettings()
         v->addWidget(mlNote);
         // Qualified with "MyAnimeList" for the reason the AniList pair is qualified: the form now carries
         // three "Client ID:" rows and the parity gate's twin patterns must name exactly one control each.
-        addCredRow(tr("MyAnimeList Client ID:"), MyAnimeListTracker::clientId(), false,
-                   [](const QString& t) { MyAnimeListTracker::setClientId(t); });
-        addCredRow(tr("MyAnimeList Client secret:"), MyAnimeListTracker::clientSecret(), true,
-                   [](const QString& t) { MyAnimeListTracker::setClientSecret(t); });
+        addCredRow(tr("MyAnimeList Client ID:"), MyAnimeListTracker::typedClientId(), false,
+                   [](const QString& t) { MyAnimeListTracker::setClientId(t); }, MyAnimeListTracker::usingBuiltin());
+        addCredRow(tr("MyAnimeList Client secret:"), MyAnimeListTracker::typedClientSecret(), true,
+                   [](const QString& t) { MyAnimeListTracker::setClientSecret(t); },
+                   MyAnimeListTracker::usingBuiltin() && !MyAnimeListTracker::clientSecret().isEmpty());
 
         auto* mlStatus = new QLabel(MyAnimeListTracker::isConnected()
                                         ? tr("\u2713 Connected to MyAnimeList.") : tr("Not connected."));

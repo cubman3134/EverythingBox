@@ -45,4 +45,40 @@ namespace BuiltinSecret
         }
         return QString::fromUtf8(blob);
     }
+
+    // ---- #81: which identity a client presents — the user's own, the built-in one, or none ----------------
+    // Where a resolved credential came from. A settings row reads this to say "Built in (you can use your own)"
+    // when, and only when, the value in use is the embedded one.
+    enum class Source { None, User, Builtin };
+
+    struct Resolved
+    {
+        QString id;       // the client id / API key
+        QString secret;   // its secret; empty for a single-value credential or a client that has none
+        Source  source = Source::None;
+        bool usable() const { return !id.isEmpty(); }
+    };
+
+    // THE ONE PRECEDENCE RULE, shared by Trakt, OpenSubtitles, AniList and MyAnimeList: the user's own value,
+    // then the built-in one, then nothing. Pure, so every client reaches it the same way and a probe can pin it.
+    //
+    // It chooses by the ID, and the secret goes WITH its id. A secret belongs to one application: pairing the
+    // user's typed id with the built-in secret (or the reverse) is a credential no service would accept, and it
+    // would look configured while failing every request. So a user who typed an id gets their own pair, even
+    // if they left its secret empty (the client then reports itself not configured, which is true); a user who
+    // typed nothing gets the built-in pair; a typed secret with no id beside it is not an identity at all.
+    // The user's values are only READ here — nothing on this path ever writes, copies or clears them.
+    inline Resolved resolve(const QString& userId, const QString& userSecret,
+                            const QString& builtinId, const QString& builtinSecret)
+    {
+        if (!userId.trimmed().isEmpty())    return { userId.trimmed(), userSecret, Source::User };
+        if (!builtinId.trimmed().isEmpty()) return { builtinId, builtinSecret, Source::Builtin };
+        return { QString(), QString(), Source::None };
+    }
+
+    // The single-value form (an API key with no secret).
+    inline Resolved resolve(const QString& userKey, const QString& builtinKey)
+    {
+        return resolve(userKey, QString(), builtinKey, QString());
+    }
 }

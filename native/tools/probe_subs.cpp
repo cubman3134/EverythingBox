@@ -1,16 +1,27 @@
 // Headless probe for the subtitle accuracy cores: the OpenSubtitles OSDb hash, the match chain (tier ORDER
-// and which tiers are emitted at all), the cache-identifier precedence, and the download cache.
+// and which tiers are emitted at all), the cache-identifier precedence, and the download cache. Since #81 also
+// the transport's search/download split and the built-in API key, against a loopback fake OpenSubtitles.
 // Prints SUBS-OK on success; any failure prints SUBS-FAIL <cond> (line) and exits non-zero.
 #include "SubtitleHash.h"
 #include "SubtitleCache.h"
 #include "SubtitleFetcher.h"
+#include "BuiltinCredentials.h"   // #81: the built-in key, from the FIXTURE header (tools/fixtures/builtin81)
+#include "Settings.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QHostAddress>
+#include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QByteArray>
 #include <QStringList>
+#include <QVector>
 #include <cstdio>
+#include <functional>
 #include <utility>   // std::swap
 
 static int failures = 0;
@@ -32,6 +43,121 @@ static QString refHash(const QByteArray& head, const QByteArray& tail, qint64 si
     };
     addAll(head); addAll(tail);
     return QStringLiteral("%1").arg(h, 16, 16, QLatin1Char('0'));
+}
+
+// ---- #81: a loopback stand-in for OpenSubtitles ---------------------------------------------------------
+// NOT OPENSUBTITLES. A deliberately small HTTP/1.1 server on 127.0.0.1: one request per connection,
+// Content-Length bodies only. It answers the four request shapes SubtitleFetcher makes (login, search,
+// download, and the file the download link names) and RECORDS the method, path and the two headers that
+// matter of every request. Header names are matched case-insensitively (Qt 6 lower-cases what it writes).
+static const char* const kFixtureOsKey  = "TEST-OPENSUBTITLES-KEY";   // the fixture header's built-in key
+static const char* const kUserOsKey     = "user-typed-os-key";
+static const char* const kFixtureOsUser = "fixture-os-user";
+static const char* const kFixtureOsPass = "fixture-os-password";
+static const char* const kStubToken     = "STUB-OS-TOKEN";
+
+class OsStub : public QTcpServer
+{
+public:
+    struct Seen { QByteArray method; QByteArray path; QByteArray apiKey; QByteArray authorization; QByteArray body; };
+    QVector<Seen> seen;
+
+    int countOf(const QByteArray& method, const QByteArray& pathPrefix) const
+    {
+        int n = 0;
+        for (const Seen& s : seen) if (s.method == method && s.path.startsWith(pathPrefix)) ++n;
+        return n;
+    }
+    // True when every request of this shape satisfies pred, and there is at least one.
+    bool all(const QByteArray& method, const QByteArray& pathPrefix, const std::function<bool(const Seen&)>& pred) const
+    {
+        int n = 0;
+        for (const Seen& s : seen)
+        {
+            if (s.method != method || !s.path.startsWith(pathPrefix)) continue;
+            ++n;
+            if (!pred(s)) return false;
+        }
+        return n > 0;
+    }
+
+protected:
+    void incomingConnection(qintptr handle) override
+    {
+        auto* sock = new QTcpSocket(this);
+        sock->setSocketDescriptor(handle);
+        connect(sock, &QTcpSocket::readyRead, this, [this, sock] {
+            sock->setProperty("buf", sock->property("buf").toByteArray() + sock->readAll());
+            const QByteArray buf = sock->property("buf").toByteArray();
+            const int headEnd = buf.indexOf("\r\n\r\n");
+            if (headEnd < 0) return;
+            const QList<QByteArray> lines = buf.left(headEnd).split('\n');
+            const QList<QByteArray> reqLine = lines.value(0).trimmed().split(' ');
+            Seen s;
+            s.method = reqLine.value(0);
+            s.path = reqLine.value(1);
+            int wantBody = 0;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const QByteArray l = lines.at(i).trimmed();
+                const QByteArray lower = l.toLower();
+                if (lower.startsWith("api-key:")) s.apiKey = l.mid(8).trimmed();
+                if (lower.startsWith("authorization:")) s.authorization = l.mid(14).trimmed();
+                if (lower.startsWith("content-length:")) wantBody = l.mid(15).trimmed().toInt();
+            }
+            s.body = buf.mid(headEnd + 4);
+            if (s.body.size() < wantBody) return;   // the rest of the body is still on its way
+            sock->setProperty("buf", QByteArray());
+            seen.push_back(s);
+
+            int status = 200;
+            QByteArray type = "application/json";
+            QByteArray reply = "{}";
+            if (s.method == "POST" && s.path == "/api/v1/login")
+            {
+                if (s.body.contains("refuse-this-password")) { status = 401; reply = R"({"message":"Error, invalid username/password"})"; }
+                // base_url names a REAL host on purpose: under a loopback root the fetcher must not follow it.
+                else reply = QByteArray(R"({"token":")") + kStubToken + R"(","base_url":"vip-api.opensubtitles.com","status":200})";
+            }
+            else if (s.method == "GET" && s.path.startsWith("/api/v1/subtitles"))
+            {
+                reply = R"({"total_count":2,"data":[)"
+                        R"({"attributes":{"language":"en","release":"Fixture.Release.720p","download_count":7,)"
+                        R"("files":[{"file_id":1002,"file_name":"fixture-720p.srt"}]}},)"
+                        R"({"attributes":{"language":"en","release":"Fixture.Release.1080p","download_count":42,)"
+                        R"("files":[{"file_id":1001,"file_name":"fixture-1080p.srt"}]}}]})";
+            }
+            else if (s.method == "POST" && s.path == "/api/v1/download")
+            {
+                reply = "{\"link\":\"http://127.0.0.1:" + QByteArray::number(serverPort())
+                      + "/files/1001.srt\",\"remaining\":19}";
+            }
+            else if (s.method == "GET" && s.path == "/files/1001.srt")
+            {
+                type = "text/plain";
+                reply = "1\r\n00:00:01,000 --> 00:00:02,000\r\nFIXTURE SUBTITLE LINE\r\n";
+            }
+            else
+                status = 404;
+
+            const QByteArray out = "HTTP/1.1 " + QByteArray::number(status) + " X\r\nContent-Type: " + type
+                                 + "\r\nContent-Length: " + QByteArray::number(reply.size())
+                                 + "\r\nConnection: close\r\n\r\n" + reply;
+            sock->write(out);
+            sock->flush();
+            sock->disconnectFromHost();
+        });
+        connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+    }
+};
+
+static bool waitFor(const std::function<bool()>& done, int ms = 5000)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!done() && t.elapsed() < ms)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return done();
 }
 
 int main(int argc, char** argv)
@@ -199,6 +325,168 @@ int main(int argc, char** argv)
             c.clear();
             CHECK(c.lookup(SubtitleCache::keyFor(QStringLiteral("tt1"), QStringLiteral("en"))).isEmpty());
         }
+    }
+
+    // --- #81: search with an API key alone, download behind a login, and the built-in key -------------------
+    // Everything below talks to OsStub, a fake OpenSubtitles on 127.0.0.1 that this probe opens itself. The key
+    // is the FIXTURE's (tools/fixtures/builtin81/BuiltinSecrets.h: "TEST-OPENSUBTITLES-KEY"), the login is made
+    // up, and nothing here is printed: a recorded header holds the key and a recorded body the password.
+    {
+        using Result = SubtitleFetcher::DownloadResult;
+        QStandardPaths::setTestModeEnabled(true);   // the downloaded .srt goes to a test cache, not the user's
+
+        // 1. Where requests go. Only a loopback http root, and only under EB_UITEST, replaces production.
+        const QString prod = QStringLiteral("https://api.opensubtitles.com/api/v1");
+        CHECK(SubtitleFetcher::apiRootFor(false, QStringLiteral("http://127.0.0.1:8123")) == prod);
+        CHECK(SubtitleFetcher::apiRootFor(true, QString()) == prod);
+        CHECK(SubtitleFetcher::apiRootFor(true, QStringLiteral("http://example.com:8123")) == prod);
+        CHECK(SubtitleFetcher::apiRootFor(true, QStringLiteral("https://127.0.0.1:8123")) == prod);
+        CHECK(SubtitleFetcher::apiRootFor(true, QStringLiteral("http://u:p@127.0.0.1:8123")) == prod);
+        CHECK(SubtitleFetcher::apiRootFor(true, QStringLiteral("http://127.0.0.1:8123/"))
+              == QStringLiteral("http://127.0.0.1:8123/api/v1"));
+
+        // 2. The key: the fixture's built-in one decodes exactly, and is used when the user has none.
+        CHECK(BuiltinCredentials::builtinOpenSubtitles().id == QLatin1String(kFixtureOsKey));
+        Settings::setOpenSubApiKey(QString());
+        Settings::setOpenSubUsername(QString());
+        Settings::setOpenSubPassword(QString());
+        CHECK(SubtitleFetcher::apiKey().id == QLatin1String(kFixtureOsKey));
+        CHECK(SubtitleFetcher::usingBuiltinKey());
+        CHECK(SubtitleFetcher::canSearch());       // an API key is all a search needs...
+        CHECK(!SubtitleFetcher::canDownload());    // ...and a download needs a login too
+        CHECK(Settings::openSubApiKey().isEmpty()); // resolving never writes the built-in into the user's row
+
+        OsStub stub;
+        CHECK(stub.listen(QHostAddress::LocalHost));
+        const QByteArray base = "http://127.0.0.1:" + QByteArray::number(stub.serverPort());
+        qputenv("EB_UITEST", "1");
+        qputenv("EB_UITEST_OPENSUBTITLES_BASE", base);
+        CHECK(SubtitleFetcher::apiRoot() == QString::fromLatin1(base) + QStringLiteral("/api/v1"));
+
+        QStringList logLines;
+        {
+            SubtitleFetcher f;
+            QObject::connect(&f, &SubtitleFetcher::log, [&](const QString& l) { logLines << l; });
+
+            // 3. SEARCH WITH THE KEY ONLY sends no login request, and returns the fake's rows.
+            bool got = false;
+            QVector<SubtitleCandidate> rows;
+            f.searchList(QStringLiteral("tt0133093"), QStringLiteral("The Matrix"), QStringLiteral("eng"), QString(),
+                         [&](const QVector<SubtitleCandidate>& l) { rows = l; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(rows.size() == 2);
+            CHECK(!rows.isEmpty() && rows.first().fileId == 1001);          // most-downloaded first
+            CHECK(stub.countOf("GET", "/api/v1/subtitles") == 1);
+            CHECK(stub.countOf("POST", "/api/v1/login") == 0);               // no login for a search
+            CHECK(stub.all("GET", "/api/v1/subtitles",
+                           [](const OsStub::Seen& s) { return s.apiKey == kFixtureOsKey; }));  // the built-in key
+            CHECK(stub.all("GET", "/api/v1/subtitles",
+                           [](const OsStub::Seen& s) { return s.authorization.isEmpty(); }));  // and no bearer
+
+            // 4. DOWNLOAD WITHOUT A LOGIN reports NeedsLogin — the window's prompt path — and sends NOTHING.
+            const int before = stub.seen.size();
+            Result r = Result::Ok;
+            QString srt;
+            got = false;
+            f.downloadChoice(1001, QStringLiteral("eng"), [&](const QString& p, Result res) { srt = p; r = res; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(r == Result::NeedsLogin);
+            CHECK(srt.isEmpty());
+            CHECK(stub.seen.size() == before);
+
+            // ...and the automatic on-open fetch, which downloads without asking, does nothing at all.
+            got = false;
+            f.fetch(QStringLiteral("tt0133093"), QStringLiteral("The Matrix"), QStringLiteral("eng"),
+                    [&](const QString& p) { srt = p; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(srt.isEmpty());
+            CHECK(stub.seen.size() == before);
+
+            // 5. DOWNLOAD WITH A LOGIN works: one login, then /download with its bearer, then the file.
+            Settings::setOpenSubUsername(QString::fromLatin1(kFixtureOsUser));
+            Settings::setOpenSubPassword(QString::fromLatin1(kFixtureOsPass));
+            CHECK(SubtitleFetcher::canDownload());
+            got = false;
+            f.downloadChoice(1001, QStringLiteral("eng"), [&](const QString& p, Result res) { srt = p; r = res; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(r == Result::Ok);
+            CHECK(!srt.isEmpty());
+            {
+                QFile sf(srt);
+                CHECK(sf.open(QIODevice::ReadOnly));
+                CHECK(sf.readAll().contains("FIXTURE SUBTITLE LINE"));
+            }
+            QFile::remove(srt);
+            CHECK(stub.countOf("POST", "/api/v1/login") == 1);
+            CHECK(stub.countOf("POST", "/api/v1/download") == 1);
+            CHECK(stub.countOf("GET", "/files/1001.srt") == 1);
+            CHECK(stub.all("POST", "/api/v1/download",
+                           [](const OsStub::Seen& s) { return s.authorization == "Bearer " + QByteArray(kStubToken); }));
+            // The login's base_url names a real host; under the loopback root it is ignored, so everything above
+            // reached the stub. (Had it been followed, /download would have gone to the internet instead.)
+
+            // A search made while a login IS stored still makes no login request of its own.
+            const int logins = stub.countOf("POST", "/api/v1/login");
+            got = false;
+            f.searchList(QStringLiteral("tt0133093"), QString(), QStringLiteral("eng"), QString(),
+                         [&](const QVector<SubtitleCandidate>& l) { rows = l; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(stub.countOf("POST", "/api/v1/login") == logins);
+        }
+
+        // 6. A login OpenSubtitles refuses is LoginRefused, not "no subtitle" (a fresh fetcher: no cached token).
+        {
+            SubtitleFetcher f;
+            QObject::connect(&f, &SubtitleFetcher::log, [&](const QString& l) { logLines << l; });
+            Settings::setOpenSubPassword(QStringLiteral("refuse-this-password"));
+            Result r = Result::Ok;
+            bool got = false;
+            f.downloadChoice(1001, QStringLiteral("eng"), [&](const QString&, Result res) { r = res; got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(r == Result::LoginRefused);
+            CHECK(stub.countOf("POST", "/api/v1/download") == 1);   // no download after a refused login
+        }
+
+        // 7. THE USER'S KEY WINS over the built-in one, on the wire.
+        {
+            Settings::setOpenSubApiKey(QString::fromLatin1(kUserOsKey));
+            CHECK(SubtitleFetcher::apiKey().id == QLatin1String(kUserOsKey));
+            CHECK(!SubtitleFetcher::usingBuiltinKey());
+            SubtitleFetcher f;
+            bool got = false;
+            const int n = stub.countOf("GET", "/api/v1/subtitles");
+            f.searchList(QStringLiteral("tt0133093"), QString(), QStringLiteral("eng"), QString(),
+                         [&](const QVector<SubtitleCandidate>&) { got = true; });
+            CHECK(waitFor([&] { return got; }));
+            CHECK(stub.countOf("GET", "/api/v1/subtitles") == n + 1);
+            CHECK(stub.seen.last().apiKey == kUserOsKey);
+            // Clearing the user's key falls back to the built-in one again; nothing was overwritten.
+            Settings::setOpenSubApiKey(QString());
+            CHECK(SubtitleFetcher::apiKey().id == QLatin1String(kFixtureOsKey));
+        }
+
+        // 8. With neither key there is nothing to search with (the one rule, asked directly: this build
+        // embeds the fixture, so "no built-in" cannot be staged through the real slot).
+        {
+            const BuiltinSecret::Resolved none = BuiltinSecret::resolve(QString(), QString());
+            CHECK(!none.usable());
+            CHECK(none.source == BuiltinSecret::Source::None);
+            CHECK(BuiltinSecret::resolve(QStringLiteral("   "), QString()).source == BuiltinSecret::Source::None);
+        }
+
+        // 9. Nothing the fetcher logged carries the key, the password or the token.
+        for (const QString& l : logLines)
+        {
+            CHECK(!l.contains(QLatin1String(kFixtureOsKey)));
+            CHECK(!l.contains(QLatin1String(kFixtureOsPass)));
+            CHECK(!l.contains(QStringLiteral("refuse-this-password")));
+            CHECK(!l.contains(QLatin1String(kStubToken)));
+        }
+
+        qunsetenv("EB_UITEST_OPENSUBTITLES_BASE");
+        qunsetenv("EB_UITEST");
+        Settings::setOpenSubUsername(QString());
+        Settings::setOpenSubPassword(QString());
     }
 
     if (failures == 0) { std::puts("SUBS-OK"); return 0; }

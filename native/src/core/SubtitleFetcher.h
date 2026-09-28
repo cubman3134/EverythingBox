@@ -4,9 +4,12 @@
 // a title query. Everything runs async on the GUI thread; the result callback fires with a local .srt path
 // (empty on failure or when unconfigured). This class is pure transport — the download cache is app-owned.
 //
-// OpenSubtitles requires an app API key (register once, free) for search, and the user's account (a login
-// token is required to download). Credentials come from Settings; the feature is dormant until they're set.
+// OpenSubtitles needs an application API key for everything, and the user's own account only to DOWNLOAD
+// (#81). So the two are separate questions here: canSearch() is "an API key is in use" (the one the user typed,
+// else the one built into this release), and canDownload() adds "and a username + password are stored". A
+// search never logs in; the first download without a login reports NeedsLogin so the window can ask for one.
 #pragma once
+#include "BuiltinSecretBlob.h"   // BuiltinSecret::Resolved: the API key in use, and whether it is built in
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -31,8 +34,27 @@ class SubtitleFetcher : public QObject
 public:
     explicit SubtitleFetcher(QObject* parent = nullptr);
 
-    // True once an API key + username + password are all present in Settings.
-    static bool configured();
+    // #81's split. canSearch: an API key is in use (the user's, else the built-in one); no account needed.
+    // canDownload: that, plus the user's OpenSubtitles username and password. The automatic on-open fetch
+    // asks canDownload (it downloads without asking anybody); the manual picker asks canSearch and prompts
+    // for a login at the first download.
+    static bool canSearch();
+    static bool canDownload();
+    // The API key every request carries, resolved by BuiltinSecret::resolve over the user's typed key and the
+    // built-in one. usingBuiltinKey() is what the settings row asks before it says "Built in".
+    static BuiltinSecret::Resolved apiKey();
+    static bool usingBuiltinKey();
+
+    // Where requests go. Production is always https://api.opensubtitles.com/api/v1. A test rig may point the
+    // app at a LOOPBACK fake instead (EB_UITEST_OPENSUBTITLES_BASE, e.g. http://127.0.0.1:8123), and only
+    // with EB_UITEST set: an ordinary run ignores the variable, as #98's EB_UITEST_BUILDBOT_BASE is ignored,
+    // and a non-loopback value is ignored even under EB_UITEST, because this decides where an API key and a
+    // password are sent. apiRootFor is the pure policy; apiRoot() applies it to the environment.
+    static QString apiRootFor(bool uitest, const QString& overrideBase);
+    static QString apiRoot();
+
+    // How a download ended, so the window can tell "needs your login" from "failed".
+    enum class DownloadResult { Ok, NeedsLogin, LoginRefused, Failed };
 
     // Fetch a subtitle. imdbStreamId: "tt123" (movie) or "ttShow:season:episode" (episode); title is used
     // for a query search when there's no IMDB id. langCode is the ISO-639 code from Settings ("eng"/"en"…),
@@ -49,9 +71,10 @@ public:
     // first) instead of auto-picking one — the manual picker's source of choices. Empty on any failure.
     void searchList(const QString& imdbStreamId, const QString& title, const QString& langCode,
                     const QString& localPath, std::function<void(const QVector<SubtitleCandidate>&)> cb);
-    // Download one specific row the user chose from searchList().
+    // Download one specific row the user chose from searchList(). With no login stored this makes NO request
+    // and answers NeedsLogin; a login OpenSubtitles refuses answers LoginRefused. srtPath is set only for Ok.
     void downloadChoice(qint64 fileId, const QString& langCode,
-                        std::function<void(const QString& srtPath)> cb);
+                        std::function<void(const QString& srtPath, DownloadResult result)> cb);
 
     // The identifier the download cache should key on for this request: whichever tier will actually match —
     // "hash:<osdb>" when the file is hashable, else the imdb stream id, else "title:<title>". The hash:/title:
@@ -70,7 +93,9 @@ signals:
     void log(const QString& line); // status for the debug log; credentials are never included
 
 private:
-    void ensureLogin(std::function<void(bool ok)> done);
+    // Log in once and keep the token. refused is true when OpenSubtitles answered and said no (401/403), as
+    // opposed to not answering at all.
+    void ensureLogin(std::function<void(bool ok, bool refused)> done);
     // Run a /subtitles GET with the given query string (already URL-encoded); parse the best file id.
     void searchQuery(const QString& query, const QString& lang,
                      std::function<void(qint64 fileId)> done);
@@ -89,5 +114,6 @@ private:
 
     QNetworkAccessManager* nam_ = nullptr;
     QString token_;   // login token (in-memory; re-fetched on expiry / 401)
-    QString apiHost_; // API host from /login (defaults to api.opensubtitles.com)
+    QString root_;    // where /login goes: apiRoot() at construction
+    QString apiBase_; // where everything else goes: root_, or the host /login named (a VIP host)
 };

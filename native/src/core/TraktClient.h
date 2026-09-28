@@ -11,9 +11,11 @@
 // live in exactly one place; the wire FORMAT of everything read — the calendar, the cache, and the OAuth
 // token reply — lives in TraktRead, which is pure and probe-covered.
 //
-// The app has no built-in Trakt client id, so the user registers a free Trakt API app and pastes its
-// client id + secret into Settings; tokens are stored + refreshed automatically. All empty => Trakt is off.
+// Which Trakt API application the requests present (#81): the client id + secret the user typed into Settings,
+// else the pair built into this release (native/secrets/trakt.secrets), else none and Trakt is off. The user's
+// pair always wins. Tokens are stored + refreshed automatically.
 #pragma once
+#include "BuiltinSecretBlob.h" // BuiltinSecret::Resolved — the client id + secret in use, and where from
 #include "SingleFlight.h" // the token-refresh queue: one /oauth/token refresh, however many callers
 #include "TraktRead.h"    // CalendarEntry — the read layer's struct, returned by value below
 #include "TraktSync.h"    // TraktListEntry + the paging/reconciliation rules the fetch loop runs on
@@ -32,7 +34,11 @@ class TraktClient : public QObject
 public:
     explicit TraktClient(QObject* parent = nullptr);
 
-    static bool configured();   // client id + secret present
+    static bool configured();   // a client id + secret are in use (the user's, else the built-in pair)
+    // The client id + secret every request presents, resolved by BuiltinSecret::resolve over the user's typed
+    // pair and the built-in one. usingBuiltin() is what a settings row asks before it says "Built in".
+    static BuiltinSecret::Resolved appCredentials();
+    static bool usingBuiltin();
     static bool connected();    // an access token is stored
 
     void connectAccount();      // begin the device-code flow (emits deviceCode, then connected/connectError)

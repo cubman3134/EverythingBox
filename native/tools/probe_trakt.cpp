@@ -25,6 +25,9 @@
 //
 // Prints TRAKT-OK on success; any failure prints TRAKT-FAIL <cond> and exits non-zero.
 #include "SingleFlight.h"
+#include "BuiltinCredentials.h"   // #81: the built-in pair, from the FIXTURE header (tools/fixtures/builtin81)
+#include "Settings.h"
+#include "TraktClient.h"
 #include "TraktMissed.h"
 #include "TraktRead.h"
 #include "TraktSync.h"
@@ -1801,6 +1804,73 @@ int main(int argc, char** argv)
             // show on the device with the slower clock, and then the next merge would put it back.
             CHECK(!trakt::missedDismissExpired(now + 5 * kDay, now));
         }
+    }
+
+    // ---- #81: the built-in Trakt client, behind the user's own -------------------------------------------
+    // Compiled against the FIXTURE BuiltinSecrets.h (tools/fixtures/builtin81), whose Trakt slots hold the
+    // made-up pair TEST-TRAKT-ID / TEST-TRAKT-SECRET. The ini is this process's scratch one.
+    {
+        using BuiltinSecret::Source;
+        const QString fixId = QStringLiteral("TEST-TRAKT-ID"), fixSecret = QStringLiteral("TEST-TRAKT-SECRET");
+
+        // The fixture decodes to its plaintext exactly: the C++ reverse still mirrors the CMake forward.
+        const BuiltinSecret::Resolved b = BuiltinCredentials::builtinTrakt();
+        CHECK(b.id == fixId);
+        CHECK(b.secret == fixSecret);
+        CHECK(b.source == Source::Builtin);
+
+        // 1. Nothing typed: the built-in pair is used, Trakt is configured, and the row says "Built in".
+        Settings::setTraktClientId(QString());
+        Settings::setTraktClientSecret(QString());
+        BuiltinSecret::Resolved c = TraktClient::appCredentials();
+        CHECK(c.id == fixId);
+        CHECK(c.secret == fixSecret);
+        CHECK(c.source == Source::Builtin);
+        CHECK(TraktClient::configured());
+        CHECK(TraktClient::usingBuiltin());
+        // ...and resolving it wrote nothing into the user's own keys.
+        CHECK(Settings::traktClientId().isEmpty());
+        CHECK(Settings::traktClientSecret().isEmpty());
+
+        // 2. THE USER'S PAIR WINS over the built-in one.
+        Settings::setTraktClientId(QStringLiteral("user-trakt-id"));
+        Settings::setTraktClientSecret(QStringLiteral("user-trakt-secret"));
+        c = TraktClient::appCredentials();
+        CHECK(c.id == QLatin1String("user-trakt-id"));
+        CHECK(c.secret == QLatin1String("user-trakt-secret"));
+        CHECK(c.source == Source::User);
+        CHECK(TraktClient::configured());
+        CHECK(!TraktClient::usingBuiltin());
+
+        // 3. The secret goes WITH its id: a typed id with no secret is the user's (incomplete) pair, never the
+        // user's id beside the built-in secret, which no service would accept.
+        Settings::setTraktClientSecret(QString());
+        c = TraktClient::appCredentials();
+        CHECK(c.id == QLatin1String("user-trakt-id"));
+        CHECK(c.secret.isEmpty());
+        CHECK(c.source == Source::User);
+        CHECK(!TraktClient::configured());
+        // ...and a stray secret with no id beside it is not an identity: the built-in pair stands.
+        Settings::setTraktClientId(QString());
+        Settings::setTraktClientSecret(QStringLiteral("stray-secret"));
+        c = TraktClient::appCredentials();
+        CHECK(c.id == fixId);
+        CHECK(c.secret == fixSecret);
+        CHECK(Settings::traktClientSecret() == QLatin1String("stray-secret"));   // still the user's, untouched
+
+        // 4. Neither: not configured. This build embeds the fixture, so "no built-in" is asked of the one rule
+        // every client resolves through, with the same arguments an empty slot would give it.
+        const BuiltinSecret::Resolved none = BuiltinSecret::resolve(QString(), QString(), QString(), QString());
+        CHECK(none.source == Source::None);
+        CHECK(!none.usable());
+        CHECK(none.id.isEmpty() && none.secret.isEmpty());
+        CHECK(BuiltinSecret::resolve(QStringLiteral("  "), QString(), QString(), QString()).source == Source::None);
+        CHECK(BuiltinSecret::resolve(QString(), QString(), fixId, fixSecret).source == Source::Builtin);
+        CHECK(BuiltinSecret::resolve(QStringLiteral("u"), QStringLiteral("s"), fixId, fixSecret).id
+              == QLatin1String("u"));
+
+        Settings::setTraktClientId(QString());
+        Settings::setTraktClientSecret(QString());
     }
 
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }

@@ -2,6 +2,7 @@
 #include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "BuiltinCredentials.h" // #81: the user's client id + secret, else the built-in pair
 #include "Settings.h"
 
 #include <QNetworkAccessManager>
@@ -72,7 +73,7 @@ QNetworkRequest req(const QString& path, bool auth)
     QNetworkRequest r{ QUrl(QString::fromLatin1(kBase) + path) };
     r.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     r.setRawHeader("trakt-api-version", "2");
-    r.setRawHeader("trakt-api-key", Settings::traktClientId().toUtf8());
+    r.setRawHeader("trakt-api-key", TraktClient::appCredentials().id.toUtf8());
     r.setTransferTimeout(20000);
     if (auth) r.setRawHeader("Authorization", QByteArray("Bearer ") + Settings::traktAccessToken().toUtf8());
     return r;
@@ -97,9 +98,19 @@ TraktClient::TraktClient(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
+// #81: the identity every Trakt request presents. The user's typed pair wins; with none typed, the pair built
+// into this release; with neither, Trakt is off. Read per call, so a pair typed in Settings takes effect at once.
+BuiltinSecret::Resolved TraktClient::appCredentials()
+{
+    return BuiltinCredentials::trakt(Settings::traktClientId(), Settings::traktClientSecret());
+}
+
+bool TraktClient::usingBuiltin() { return appCredentials().source == BuiltinSecret::Source::Builtin; }
+
 bool TraktClient::configured()
 {
-    return !Settings::traktClientId().isEmpty() && !Settings::traktClientSecret().isEmpty();
+    const BuiltinSecret::Resolved c = appCredentials();
+    return !c.id.isEmpty() && !c.secret.isEmpty();
 }
 
 bool TraktClient::connected() { return !Settings::traktAccessToken().isEmpty(); }
@@ -107,7 +118,7 @@ bool TraktClient::connected() { return !Settings::traktAccessToken().isEmpty(); 
 void TraktClient::connectAccount()
 {
     if (!configured()) { emit connectError(tr("Enter your Trakt client id and secret first.")); return; }
-    const QJsonObject body{ { QStringLiteral("client_id"), Settings::traktClientId() } };
+    const QJsonObject body{ { QStringLiteral("client_id"), appCredentials().id } };
     QNetworkReply* r = nam_->post(req(QStringLiteral("/oauth/device/code"), false),
                                   QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(r, &QNetworkReply::finished, this, [this, r] {
@@ -134,8 +145,8 @@ void TraktClient::pollDeviceToken(const QString& deviceCode, int intervalSec)
         pollElapsed_ += intervalSec;
         if (pollElapsed_ > pollExpiresIn_) { emit connectError(tr("Trakt activation timed out — try again.")); return; }
         const QJsonObject body{ { QStringLiteral("code"), deviceCode },
-                                { QStringLiteral("client_id"), Settings::traktClientId() },
-                                { QStringLiteral("client_secret"), Settings::traktClientSecret() } };
+                                { QStringLiteral("client_id"), appCredentials().id },
+                                { QStringLiteral("client_secret"), appCredentials().secret } };
         QNetworkReply* r = nam_->post(req(QStringLiteral("/oauth/device/token"), false),
                                       QJsonDocument(body).toJson(QJsonDocument::Compact));
         connect(r, &QNetworkReply::finished, this, [this, r, deviceCode, intervalSec] {
@@ -217,8 +228,8 @@ void TraktClient::ensureValidToken(std::function<void(bool)> done)
     if (!tokenRefresh_.join(std::move(done))) return;
 
     const QJsonObject body{ { QStringLiteral("refresh_token"), Settings::traktRefreshToken() },
-                            { QStringLiteral("client_id"), Settings::traktClientId() },
-                            { QStringLiteral("client_secret"), Settings::traktClientSecret() },
+                            { QStringLiteral("client_id"), appCredentials().id },
+                            { QStringLiteral("client_secret"), appCredentials().secret },
                             { QStringLiteral("redirect_uri"), QStringLiteral("urn:ietf:wg:oauth:2.0:oob") },
                             { QStringLiteral("grant_type"), QStringLiteral("refresh_token") } };
     QNetworkReply* r = nam_->post(req(QStringLiteral("/oauth/token"), false),

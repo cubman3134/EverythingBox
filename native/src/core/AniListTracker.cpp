@@ -1,4 +1,5 @@
 #include "AniListTracker.h"
+#include "BuiltinCredentials.h" // #81: the user's client, else the built-in one
 #include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "TrackerLinks.h"
 #include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with MyAnimeList
@@ -76,16 +77,22 @@ AniListTracker::~AniListTracker() { closeLoopback(); }
 
 // ---- configuration + credentials -------------------------------------------------------------------
 
-QString AniListTracker::clientId()
+// THE #81 SEAM, filled: the user's typed pair, else the embedded one (BuiltinSecret::resolve). This is still the
+// one place in the app that decides what "the AniList client id" means; the ini underneath is TrackerQueue's.
+BuiltinSecret::Resolved AniListTracker::credentials()
 {
-    // THE #81 SEAM. The zero-config follow-up replaces this body with "typed value, else the embedded
-    // BuiltinSecrets slot" and touches nothing else in the feature. See tracker::builtinSecretIdSlot().
-    // The ini access underneath moved to TrackerQueue in #326; the SEAM did not move, because this is still
-    // the one place in the app that decides what "the AniList client id" means.
-    return TrackerQueue::clientId(Id::AniList);
+    return BuiltinCredentials::aniList(typedClientId(), typedClientSecret());
 }
 
-QString AniListTracker::clientSecret() { return TrackerQueue::clientSecret(Id::AniList); }
+QString AniListTracker::clientId() { return credentials().id; }
+
+QString AniListTracker::clientSecret() { return credentials().secret; }
+
+QString AniListTracker::typedClientId() { return TrackerQueue::clientId(Id::AniList); }
+
+QString AniListTracker::typedClientSecret() { return TrackerQueue::clientSecret(Id::AniList); }
+
+bool AniListTracker::usingBuiltin() { return credentials().source == BuiltinSecret::Source::Builtin; }
 
 void AniListTracker::setClientId(const QString& v) { TrackerQueue::setClientId(Id::AniList, v); }
 

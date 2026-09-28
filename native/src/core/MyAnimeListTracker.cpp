@@ -1,4 +1,5 @@
 #include "MyAnimeListTracker.h"
+#include "BuiltinCredentials.h" // #81: the user's client, else the built-in one
 #include "TrackerLinks.h"
 #include "TrackerQueue.h"   // the ONE queue, credential store and drain loop, shared with AniList
 
@@ -72,15 +73,21 @@ MyAnimeListTracker::~MyAnimeListTracker() { closeLoopback(); }
 
 // ---- configuration + credentials -------------------------------------------------------------------
 
-QString MyAnimeListTracker::clientId()
+// THE #81 SEAM, the AniList one's twin, filled: the user's typed pair, else the embedded public client.
+BuiltinSecret::Resolved MyAnimeListTracker::credentials()
 {
-    // THE #81 SEAM, the AniList one's twin: the zero-config follow-up replaces this body with "typed value,
-    // else the embedded BuiltinSecrets slot" and touches nothing else in the feature. The ini access
-    // underneath moved to TrackerQueue in #326; the seam did not.
-    return TrackerQueue::clientId(Id::MyAnimeList);
+    return BuiltinCredentials::myAnimeList(typedClientId(), typedClientSecret());
 }
 
-QString MyAnimeListTracker::clientSecret() { return TrackerQueue::clientSecret(Id::MyAnimeList); }
+QString MyAnimeListTracker::clientId() { return credentials().id; }
+
+QString MyAnimeListTracker::clientSecret() { return credentials().secret; }
+
+QString MyAnimeListTracker::typedClientId() { return TrackerQueue::clientId(Id::MyAnimeList); }
+
+QString MyAnimeListTracker::typedClientSecret() { return TrackerQueue::clientSecret(Id::MyAnimeList); }
+
+bool MyAnimeListTracker::usingBuiltin() { return credentials().source == BuiltinSecret::Source::Builtin; }
 
 void MyAnimeListTracker::setClientId(const QString& v)
 {

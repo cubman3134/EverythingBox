@@ -1154,6 +1154,12 @@ int main(int argc, char** argv)
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/token")) == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/user"))  == true);
         CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("ra/hardcore")) == false);
+        // The OpenSubtitles login (#81): asked for at a device's first download, never synced. The API key and
+        // the subtitle preferences beside it still sync. Exact leaves, not a "subs/" prefix.
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subs/osUser")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subs/osPass")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subs/osApiKey")) == false);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("subs/language")) == false);
         {
             // OUTBOUND: none of it is in the bundle, including the profile-scoped cursor just written.
             const QJsonObject bt = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();

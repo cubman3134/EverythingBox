@@ -49,6 +49,9 @@
 //
 // Prints TRACKER-OK on success; any failure prints TRACKER-FAIL <cond> and exits non-zero.
 #include "Tracker.h"
+#include "AniListTracker.h"       // #81: clientId()/clientSecret() resolved against the FIXTURE built-ins
+#include "BuiltinCredentials.h"
+#include "MyAnimeListTracker.h"
 #include "TrackerFanout.h"
 #include "TrackerLinks.h"
 #include "TrackerQueue.h"
@@ -3210,6 +3213,81 @@ int main(int argc, char** argv)
         qunsetenv("EB_KITSU_AUTH");
         TrackerQueue::clearTokens(Id::Kitsu);
         TrackerQueue::forgetAccount(Id::Kitsu);
+    }
+
+    // ---- #81 / #156: the built-in AniList and MyAnimeList clients, behind the user's own ----------------
+    // Compiled against the FIXTURE BuiltinSecrets.h (tools/fixtures/builtin81): AniList's slots hold
+    // TEST-ANILIST-ID / TEST-ANILIST-SECRET and MyAnimeList's holds TEST-MAL-ID (a public client: no secret).
+    {
+        using BuiltinSecret::Source;
+        const QString aId = QStringLiteral("TEST-ANILIST-ID"), aSecret = QStringLiteral("TEST-ANILIST-SECRET");
+        const QString mId = QStringLiteral("TEST-MAL-ID");
+
+        // The fixture decodes exactly.
+        CHECK(BuiltinCredentials::builtinAniList().id == aId);
+        CHECK(BuiltinCredentials::builtinAniList().secret == aSecret);
+        CHECK(BuiltinCredentials::builtinMyAnimeList().id == mId);
+        CHECK(BuiltinCredentials::builtinMyAnimeList().secret.isEmpty());
+
+        // ---- AniList ----
+        AniListTracker::setClientId(QString());
+        AniListTracker::setClientSecret(QString());
+        // 1. Nothing typed: the built-in pair.
+        CHECK(AniListTracker::clientId() == aId);
+        CHECK(AniListTracker::clientSecret() == aSecret);
+        CHECK(AniListTracker::isConfigured());
+        CHECK(AniListTracker::usingBuiltin());
+        CHECK(AniListTracker::typedClientId().isEmpty());       // what the settings row shows: still empty
+        CHECK(AniListTracker::typedClientSecret().isEmpty());
+        // 2. THE USER'S PAIR WINS.
+        AniListTracker::setClientId(QStringLiteral("user-anilist-id"));
+        AniListTracker::setClientSecret(QStringLiteral("user-anilist-secret"));
+        CHECK(AniListTracker::clientId() == QLatin1String("user-anilist-id"));
+        CHECK(AniListTracker::clientSecret() == QLatin1String("user-anilist-secret"));
+        CHECK(AniListTracker::credentials().source == Source::User);
+        CHECK(!AniListTracker::usingBuiltin());
+        CHECK(AniListTracker::isConfigured());
+        // 3. A typed id without its secret is the user's incomplete pair, never mixed with the built-in secret.
+        AniListTracker::setClientSecret(QString());
+        CHECK(AniListTracker::clientId() == QLatin1String("user-anilist-id"));
+        CHECK(AniListTracker::clientSecret().isEmpty());
+        CHECK(!AniListTracker::isConfigured());
+        // 4. Cleared again: back to the built-in pair, and nothing of it was written into the user's keys.
+        AniListTracker::setClientId(QString());
+        CHECK(AniListTracker::clientId() == aId);
+        CHECK(TrackerQueue::clientId(Id::AniList).isEmpty());
+        CHECK(TrackerQueue::clientSecret(Id::AniList).isEmpty());
+
+        // ---- MyAnimeList ----
+        MyAnimeListTracker::setClientId(QString());
+        MyAnimeListTracker::setClientSecret(QString());
+        // 1. Nothing typed: the built-in public client, with no secret.
+        CHECK(MyAnimeListTracker::clientId() == mId);
+        CHECK(MyAnimeListTracker::clientSecret().isEmpty());
+        CHECK(MyAnimeListTracker::isConfigured());
+        CHECK(MyAnimeListTracker::usingBuiltin());
+        CHECK(MyAnimeListTracker::typedClientId().isEmpty());
+        // 2. THE USER'S CLIENT WINS, with or without a secret of its own.
+        MyAnimeListTracker::setClientId(QStringLiteral("user-mal-id"));
+        CHECK(MyAnimeListTracker::clientId() == QLatin1String("user-mal-id"));
+        CHECK(MyAnimeListTracker::clientSecret().isEmpty());
+        CHECK(!MyAnimeListTracker::usingBuiltin());
+        MyAnimeListTracker::setClientSecret(QStringLiteral("user-mal-secret"));
+        CHECK(MyAnimeListTracker::clientSecret() == QLatin1String("user-mal-secret"));
+        // 3. A user secret with no id beside it does not ride along with the built-in client.
+        MyAnimeListTracker::setClientId(QString());
+        CHECK(MyAnimeListTracker::clientId() == mId);
+        CHECK(MyAnimeListTracker::clientSecret().isEmpty());
+        CHECK(MyAnimeListTracker::typedClientSecret() == QLatin1String("user-mal-secret"));   // kept, untouched
+
+        // ---- neither: not configured (the one rule, asked directly; this build embeds the fixture) ----
+        CHECK(BuiltinSecret::resolve(QString(), QString(), QString(), QString()).source == Source::None);
+        CHECK(!BuiltinSecret::resolve(QString(), QString(), QString(), QString()).usable());
+
+        AniListTracker::setClientId(QString());
+        AniListTracker::setClientSecret(QString());
+        MyAnimeListTracker::setClientId(QString());
+        MyAnimeListTracker::setClientSecret(QString());
     }
 
     if (failures == 0) { std::puts("TRACKER-OK"); return 0; }

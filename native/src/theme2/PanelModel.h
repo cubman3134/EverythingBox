@@ -27,6 +27,10 @@ struct PanelRow {
     bool enabled = true;
     bool destructive = false; // styled with the warning accent (Uninstall)
     bool masked = false;      // TextField: render the value as dots (credentials) — the OSK editor is unchanged
+    // TextField: what the row says while its value is EMPTY, in place of the dim "—". Display only: it is never
+    // the value, never the editor's initial text, and never written anywhere. #81's "Built in (you can use
+    // your own)" over a client-id row whose built-in value is the one in use is what it exists for.
+    QString placeholder;
 
     // An optional picture for the row, as a LOCAL FILE PATH — the theme gallery's screenshot thumbnails
     // (issue #91). Never a remote url: the QML would then do its own unbounded, unjudged download, and the
@@ -50,6 +54,7 @@ struct PanelRow {
         m.insert(QStringLiteral("enabled"), enabled);
         m.insert(QStringLiteral("destructive"), destructive);
         m.insert(QStringLiteral("masked"), masked);
+        m.insert(QStringLiteral("placeholder"), placeholder);
         // Marshaled as a file: URL, not as the path. A bare path assigned to an Image's `source` is resolved
         // against the QML file's own base url — which turns an absolute Windows path into a nonsense url and
         // a POSIX one into a file with too many slashes — and getting that wrong is a picture that silently

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.338 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.339 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -721,6 +721,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/LastFmClient.cpp       src/core/LastFmClient.h        # ...and its second (#192 inc 2):
                                                                        # signed calls + the #81 app key
         src/core/BuiltinSecretBlob.h     # the ONE runtime de-obfuscator, shared with the addon creds
+        # #81: the app's own Trakt / OpenSubtitles / AniList / MyAnimeList identity, each a fallback behind the
+        # user's typed value. The one unit that reads those four slots out of the generated header.
+        src/core/BuiltinCredentials.cpp  src/core/BuiltinCredentials.h
         # DISCORD RICH PRESENCE: the pure rules; the seam, transport and orchestrator land in later
         # tasks. Presence.h is listed beside its TU the way Scrobble.h is above.
         src/core/Presence.cpp src/core/Presence.h
@@ -995,6 +998,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
         src/ui/AddonConfigurePanel.cpp src/ui/AddonConfigurePanel.h   # #80: the nav-kit waiting card that finishes it
         src/ui/MainWindowWatchTogether.cpp                 # "Watch together" MainWindow members, same rule (#86)
+        src/ui/MainWindowSubtitleLogin.cpp                 # #81: OpenSubtitles' download-time sign-in, same rule
         src/ui/MainWindowTrackers.cpp                      # anime/manga tracker MainWindow members, same rule (#156)
         src/ui/MainWindowCustomCores.cpp                   # custom-core settings surface, same reason (#98)
         src/ui/MainWindowChannelGuide.cpp                  # the channel guide + interstitial MainWindow members (#179 inc 2)
@@ -2856,9 +2860,19 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/TraktRead.cpp src/core/TraktRead.h
         src/core/TraktSync.cpp src/core/TraktSync.h
         src/core/TraktMissed.cpp src/core/TraktMissed.h
-        src/core/SingleFlight.h)
-    target_include_directories(probe_trakt PRIVATE src src/core)
-    target_link_libraries(probe_trakt PRIVATE Qt6::Core)
+        src/core/SingleFlight.h
+        # #81: which client id + secret TraktClient presents - the user's pair, else the built-in one. The
+        # client itself is linked so the probe asks the REAL accessor; Settings.cpp (the user's pair) pulls
+        # FormFactor.cpp, the same pairing as probe_subs.
+        src/core/TraktClient.cpp src/core/TraktClient.h
+        src/core/BuiltinCredentials.cpp src/core/BuiltinCredentials.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    # tools/fixtures/builtin81 holds a FIXTURE BuiltinSecrets.h with made-up TEST-* values, and it is the ONLY
+    # place this target looks for that header - ${EB_SECRETS_GEN_DIR} is deliberately NOT on the list (see
+    # the fixture's own header comment, and probe_scrobble's tools/fixtures/lastfm for the precedent).
+    target_include_directories(probe_trakt PRIVATE src src/core src/theme2 tools/fixtures/builtin81)
+    target_link_libraries(probe_trakt PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test of the ANIME/MANGA TRACKER seam (issue #156): the AniList OAuth bodies and token
     # reply, the three GraphQL documents, the 30-second debounce (on a fake clock), the offline queue
@@ -2884,9 +2898,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         # ...except KitsuTracker, since #330: its requests are driven against a loopback stub that records
         # every header, so "every Kitsu request carries the User-Agent" and "a Cloudflare challenge is not a
         # wrong password" are asserted on the real transport, not on a transcription of it.
-        src/core/KitsuTracker.cpp src/core/KitsuTracker.h)
-    target_include_directories(probe_tracker PRIVATE src src/core)
-    target_link_libraries(probe_tracker PRIVATE Qt6::Core Qt6::Network)
+        src/core/KitsuTracker.cpp src/core/KitsuTracker.h
+        # #81 / #156: AniList's and MyAnimeList's clientId()/clientSecret() - the user's pair, else the
+        # built-in one - asked of the REAL accessors, so both trackers are linked (QDesktopServices -> Gui).
+        src/core/AniListTracker.cpp src/core/AniListTracker.h
+        src/core/MyAnimeListTracker.cpp src/core/MyAnimeListTracker.h
+        src/core/BuiltinCredentials.cpp src/core/BuiltinCredentials.h)
+    # The FIXTURE BuiltinSecrets.h (made-up TEST-* values) and never ${EB_SECRETS_GEN_DIR}; see probe_trakt.
+    target_include_directories(probe_tracker PRIVATE src src/core tools/fixtures/builtin81)
+    target_link_libraries(probe_tracker PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for PC-game identity + source selection (the merged PC Games folder), and for the
     # remap that moves the user's per-item records onto the merged id (pc-games T3). PcGameRemap works at
@@ -3272,8 +3292,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SubtitleCache.cpp src/core/SubtitleCache.h
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/Settings.cpp src/core/Settings.h
-        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
-    target_include_directories(probe_subs PRIVATE src src/core src/theme2)
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        # #81: the API key in use (the user's, else the built-in one), and the search/download split driven
+        # against a loopback fake OpenSubtitles.
+        src/core/BuiltinCredentials.cpp src/core/BuiltinCredentials.h)
+    # The FIXTURE BuiltinSecrets.h (made-up TEST-* values) and never ${EB_SECRETS_GEN_DIR}; see probe_trakt.
+    target_include_directories(probe_subs PRIVATE src src/core src/theme2 tools/fixtures/builtin81)
     target_link_libraries(probe_subs PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the intro/credits segment core: the three providers (.edl / chapters / learned),

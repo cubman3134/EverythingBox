@@ -120,3 +120,36 @@ Each provider's API terms govern use of these credentials:
 
 Respect each provider's terms of service and rate limits when redistributing a build
 that embeds credentials.
+
+---
+
+Embedded application credentials (tracking and subtitles, issue #81)
+
+APPLIES ONCE THE OWNER ADDS THE KEY. Until the repository owner registers these
+applications and adds their values to the release build secrets, no build embeds
+any of them: the slots below are empty and every one of these features runs on the
+values the user types in Settings, exactly as before.
+
+When a slot is filled, a released build carries the project's own registered
+application identity for that service, obfuscated in the binary (a speed bump, not
+secrecy) and revocable. The user's own value in Settings always wins over it, and
+none of these is a user account: signing in, and each account's own limits, stay
+the user's.
+
+  Trakt           An API application's client id + secret (native/secrets/
+                  trakt.secrets). Governed by the Trakt API terms of use.
+                  https://trakt.tv/terms
+  OpenSubtitles   A consumer API key (opensubtitles.secrets). Enough to search;
+                  downloading still signs in with the user's own OpenSubtitles
+                  account and counts against that account's quota. Governed by
+                  the OpenSubtitles.com terms and its REST API consumer terms.
+                  https://www.opensubtitles.com
+  AniList         An API client's id + secret (anilist.secrets). Governed by the
+                  AniList terms of service and API terms.
+                  https://anilist.co/terms  ·  https://docs.anilist.co
+  MyAnimeList     A public API client's id (mal.secrets; MAL's public clients
+                  have no secret). Governed by the MyAnimeList API License and
+                  Developer Agreement. https://myanimelist.net/apiconfig
+
+Each slot is filled only after the owner has confirmed that distributing that
+value inside a GPL binary is acceptable under the service's terms.

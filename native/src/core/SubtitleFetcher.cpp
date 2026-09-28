@@ -1,4 +1,5 @@
 #include "SubtitleFetcher.h"
+#include "BuiltinCredentials.h" // #81: the user's API key, else the one built into this release
 #include "NetErrorText.h"   // issue #435: what a failed request may say on screen, and in a log
 #include "Settings.h"
 #include "SubtitleHash.h"
@@ -10,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QUrl>
 #include <QUrlQuery>
 #include <QFile>
 #include <QDir>
@@ -22,7 +24,7 @@
 #include <utility>
 
 namespace {
-constexpr const char* kDefaultHost = "api.opensubtitles.com";
+constexpr const char* kProductionRoot = "https://api.opensubtitles.com/api/v1";
 
 // The API wants ISO 639-1 (2-letter). Settings stores 3-letter codes ("eng"); map the ones the UI offers,
 // pass a 2-letter code through unchanged, and default to English when there's no preference.
@@ -57,22 +59,49 @@ QString imdbNum(const QString& ttId)
 } // namespace
 
 SubtitleFetcher::SubtitleFetcher(QObject* parent)
-    : QObject(parent), apiHost_(QString::fromLatin1(kDefaultHost)) {}
+    : QObject(parent), root_(apiRoot()), apiBase_(root_) {}
 
-bool SubtitleFetcher::configured()
+BuiltinSecret::Resolved SubtitleFetcher::apiKey()
 {
-    return !Settings::openSubApiKey().isEmpty()
-        && !Settings::openSubUsername().isEmpty()
-        && !Settings::openSubPassword().isEmpty();
+    return BuiltinCredentials::openSubtitles(Settings::openSubApiKey());
+}
+
+bool SubtitleFetcher::usingBuiltinKey() { return apiKey().source == BuiltinSecret::Source::Builtin; }
+
+bool SubtitleFetcher::canSearch() { return apiKey().usable(); }
+
+bool SubtitleFetcher::canDownload()
+{
+    return canSearch() && !Settings::openSubUsername().isEmpty() && !Settings::openSubPassword().isEmpty();
+}
+
+QString SubtitleFetcher::apiRootFor(bool uitest, const QString& overrideBase)
+{
+    const QString production = QString::fromLatin1(kProductionRoot);
+    const QString o = overrideBase.trimmed();
+    if (!uitest || o.isEmpty()) return production;
+    // LOOPBACK ONLY, enforced rather than documented: this decides where the API key, and at the first
+    // download the user's password, are sent. http because the fake is a plain local listener.
+    const QUrl u(o);
+    if (!u.isValid() || u.scheme() != QLatin1String("http") || !u.userInfo().isEmpty()) return production;
+    if (u.host() != QLatin1String("127.0.0.1") && u.host() != QLatin1String("localhost")) return production;
+    QString r = o;
+    while (r.endsWith(QLatin1Char('/'))) r.chop(1);
+    return r + QStringLiteral("/api/v1");
+}
+
+QString SubtitleFetcher::apiRoot()
+{
+    return apiRootFor(qEnvironmentVariableIsSet("EB_UITEST"), qEnvironmentVariable("EB_UITEST_OPENSUBTITLES_BASE"));
 }
 
 // Every request carries the API key + a descriptive User-Agent (OpenSubtitles requires one). GET search and
 // POST download both need it; authenticated calls add the bearer token.
-static QNetworkRequest makeRequest(const QString& host, const QString& path, bool withToken,
+static QNetworkRequest makeRequest(const QString& base, const QString& path, bool withToken,
                                    const QString& token)
 {
-    QNetworkRequest rq{ QUrl(QStringLiteral("https://%1/api/v1%2").arg(host, path)) };
-    rq.setRawHeader("Api-Key", Settings::openSubApiKey().toUtf8());
+    QNetworkRequest rq{ QUrl(base + path) };
+    rq.setRawHeader("Api-Key", SubtitleFetcher::apiKey().id.toUtf8());
     rq.setHeader(QNetworkRequest::UserAgentHeader,
                  QStringLiteral("EverythingBox v%1").arg(QCoreApplication::applicationVersion()));
     rq.setRawHeader("Accept", "application/json");
@@ -139,17 +168,16 @@ QString SubtitleFetcher::cacheIdentifier(const QString& imdbStreamId, const QStr
 void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, const QString& langCode,
                             const QString& localPath, std::function<void(const QString&)> cb)
 {
-    if (!configured()) { cb(QString()); return; }
+    // The automatic fetch DOWNLOADS without asking anyone, so it needs everything a download needs: with no
+    // login stored it does nothing at all (not even the search it could make), and the add-on tier stands in.
+    if (!canDownload()) { cb(QString()); return; }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     const QString lang = apiLang(langCode);
     const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
     if (queries.isEmpty()) { cb(QString()); return; }
 
-    auto walk = std::make_shared<QStringList>(queries);
-    ensureLogin([this, walk, lang, cb](bool ok) {
-        if (!ok) { cb(QString()); return; }
-        stepFetch(walk, 0, lang, cb);   // walk the tiers in precision order; the first file id wins
-    });
+    // Search first, log in only once there is something to download (#81): searching needs no account.
+    stepFetch(std::make_shared<QStringList>(queries), 0, lang, cb);
 }
 
 // Try tier `i`; on a miss, recurse to `i+1`. Deliberately a NAMED member rather than a self-referencing
@@ -177,7 +205,10 @@ void SubtitleFetcher::stepFetch(std::shared_ptr<QStringList> queries, int i, con
         if (fileId > 0)
         {
             emit log(QStringLiteral("subs: matched on the %1 tier").arg(tier));
-            download(fileId, lang, cb);
+            ensureLogin([this, fileId, lang, cb](bool ok, bool) {
+                if (!ok) { cb(QString()); return; }
+                download(fileId, lang, cb);
+            });
             return;
         }
         emit log(QStringLiteral("subs: no %1 match, trying the next tier").arg(tier));
@@ -196,17 +227,15 @@ void SubtitleFetcher::searchList(const QString& imdbStreamId, const QString& tit
                                  const QString& localPath,
                                  std::function<void(const QVector<SubtitleCandidate>&)> cb)
 {
-    if (!configured()) { cb({}); return; }
+    // An API key is all a search needs (#81). No login request is made here, even with a login stored:
+    // the account is asked for only when the user picks a row to download.
+    if (!canSearch()) { cb({}); return; }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     const QString lang = apiLang(langCode);
     const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
     if (queries.isEmpty()) { cb({}); return; }
-    auto walk = std::make_shared<QStringList>(queries);
-    ensureLogin([this, walk, cb](bool ok) {
-        if (!ok) { cb({}); return; }
-        // Same precision order as fetch(); the first tier with ANY row is the one the user picks from.
-        stepSearch(walk, 0, cb);
-    });
+    // Same precision order as fetch(); the first tier with ANY row is the one the user picks from.
+    stepSearch(std::make_shared<QStringList>(queries), 0, cb);
 }
 
 // The searchList counterpart of stepFetch — same no-self-owning-function rule (see stepFetch's comment).
@@ -228,21 +257,31 @@ void SubtitleFetcher::stepSearch(std::shared_ptr<QStringList> queries, int i,
 }
 
 void SubtitleFetcher::downloadChoice(qint64 fileId, const QString& langCode,
-                                     std::function<void(const QString&)> cb)
+                                     std::function<void(const QString&, DownloadResult)> cb)
 {
-    if (!configured() || fileId <= 0) { cb(QString()); return; }
+    if (!canSearch() || fileId <= 0) { cb(QString(), DownloadResult::Failed); return; }
+    // No login stored: say so WITHOUT a request. The window turns this into the sign-in prompt, stores what the
+    // user types where Settings keeps it, and calls back in.
+    if (!canDownload())
+    {
+        emit log(QStringLiteral("subs: downloading needs an OpenSubtitles login"));
+        cb(QString(), DownloadResult::NeedsLogin);
+        return;
+    }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     const QString lang = apiLang(langCode);
-    ensureLogin([this, fileId, lang, cb](bool ok) {
-        if (!ok) { cb(QString()); return; }
-        download(fileId, lang, cb);
+    ensureLogin([this, fileId, lang, cb](bool ok, bool refused) {
+        if (!ok) { cb(QString(), refused ? DownloadResult::LoginRefused : DownloadResult::Failed); return; }
+        download(fileId, lang, [cb](const QString& srt) {
+            cb(srt, srt.isEmpty() ? DownloadResult::Failed : DownloadResult::Ok);
+        });
     });
 }
 
-void SubtitleFetcher::ensureLogin(std::function<void(bool)> done)
+void SubtitleFetcher::ensureLogin(std::function<void(bool, bool)> done)
 {
-    if (!token_.isEmpty()) { done(true); return; }
-    QNetworkRequest rq = makeRequest(QString::fromLatin1(kDefaultHost), QStringLiteral("/login"), false, {});
+    if (!token_.isEmpty()) { done(true, false); return; }
+    QNetworkRequest rq = makeRequest(root_, QStringLiteral("/login"), false, {});
     rq.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     QJsonObject body{ { QStringLiteral("username"), Settings::openSubUsername() },
                       { QStringLiteral("password"), Settings::openSubPassword() } };
@@ -251,25 +290,31 @@ void SubtitleFetcher::ensureLogin(std::function<void(bool)> done)
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
+            const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             emit log(QStringLiteral("subs: login failed (%1)").arg(NetErrorText::logText(reply)));
-            done(false);
+            done(false, code == 401 || code == 403);
             return;
         }
         const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
         token_ = o.value(QStringLiteral("token")).toString();
         // /login returns the host to use for subsequent calls (e.g. a VIP host); default to the standard one.
+        // Not under a test rig's loopback root: a fake answering with a real host must not send anything there.
         const QString base = o.value(QStringLiteral("base_url")).toString();
-        if (!base.isEmpty()) apiHost_ = QString(base).remove(QStringLiteral("https://")).remove(QStringLiteral("/"));
-        if (token_.isEmpty()) { emit log(QStringLiteral("subs: login returned no token")); done(false); return; }
+        if (!base.isEmpty() && root_ == QLatin1String(kProductionRoot))
+        {
+            const QString host = QString(base).remove(QStringLiteral("https://")).remove(QStringLiteral("/"));
+            if (!host.isEmpty()) apiBase_ = QStringLiteral("https://%1/api/v1").arg(host);
+        }
+        if (token_.isEmpty()) { emit log(QStringLiteral("subs: login returned no token")); done(false, false); return; }
         emit log(QStringLiteral("subs: logged in to OpenSubtitles"));
-        done(true);
+        done(true, false);
     });
 }
 
 void SubtitleFetcher::searchQuery(const QString& query, const QString& lang,
                                   std::function<void(qint64)> done)
 {
-    QNetworkRequest rq = makeRequest(apiHost_, QStringLiteral("/subtitles?") + query, true, token_);
+    QNetworkRequest rq = makeRequest(apiBase_, QStringLiteral("/subtitles?") + query, true, token_);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, lang, done] {
         reply->deleteLater();
@@ -305,7 +350,7 @@ void SubtitleFetcher::searchQuery(const QString& query, const QString& lang,
 void SubtitleFetcher::searchCandidates(const QString& query,
                                        std::function<void(const QVector<SubtitleCandidate>&)> done)
 {
-    QNetworkRequest rq = makeRequest(apiHost_, QStringLiteral("/subtitles?") + query, true, token_);
+    QNetworkRequest rq = makeRequest(apiBase_, QStringLiteral("/subtitles?") + query, true, token_);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, done] {
         reply->deleteLater();
@@ -349,7 +394,7 @@ void SubtitleFetcher::searchCandidates(const QString& query,
 void SubtitleFetcher::download(qint64 fileId, const QString& lang,
                                std::function<void(const QString&)> done)
 {
-    QNetworkRequest rq = makeRequest(apiHost_, QStringLiteral("/download"), true, token_);
+    QNetworkRequest rq = makeRequest(apiBase_, QStringLiteral("/download"), true, token_);
     rq.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     QJsonObject body{ { QStringLiteral("file_id"), fileId },
                       { QStringLiteral("sub_format"), QStringLiteral("srt") } };

@@ -176,19 +176,19 @@ namespace tracker
         return key.startsWith(stateKeyPrefix()) || isTokenKey(key);
     }
 
-    // ---- the #81 BuiltinSecrets follow-up ---------------------------------------------------------------
-    // The zero-config version of this feature embeds the app's own AniList client id + secret the way
-    // ScreenScraper's dev credentials are embedded, and falls back to the user's typed pair. These are the
-    // SLOT NAMES that change is a one-line edit against, written now so the later change does not have to
-    // invent them and does not have to migrate anything:
+    // ---- the #81 BuiltinSecrets slots ---------------------------------------------------------------------
+    // The zero-config version of this feature: the app's own AniList client id + secret (and MyAnimeList's
+    // public client id) are embedded at build time, and the user's typed pair still wins over them. The slots:
     //
-    //   native/secrets/anilist.secrets     EB_ANILIST_ID  / EB_ANILIST_SECRET
+    //   native/secrets/anilist.secrets     clientId / clientSecret
+    //   native/secrets/mal.secrets         clientId                  (a public client: no secret)
     //   BuiltinSecrets.h.in                kAniList_Id_A / kAniList_Id_B  (+ _ALen / _BLen)
     //                                      kAniList_Secret_A / kAniList_Secret_B (+ _ALen / _BLen)
+    //                                      kMal_Id_A / kMal_Id_B (+ _ALen / _BLen)
     //
-    // The one-line change is in AniListTracker::clientId()/clientSecret(): prefer the user's typed value,
-    // else the embedded slot. Nothing else moves — the token exchange, the storage and the carve-outs are
-    // already written in terms of those two accessors rather than the Settings keys.
+    // They are read in core/BuiltinCredentials.cpp and resolved in AniListTracker::credentials() /
+    // MyAnimeListTracker::credentials(). The token exchange, the storage and the carve-outs are written in
+    // terms of clientId()/clientSecret(), so none of them moved; the settings rows read typedClientId().
     inline QString builtinSecretIdSlot()     { return QStringLiteral("kAniList_Id"); }
     inline QString builtinSecretSecretSlot() { return QStringLiteral("kAniList_Secret"); }
 
