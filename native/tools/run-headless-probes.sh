@@ -1039,6 +1039,7 @@ echo
 # emission at all, which is the half that a later edit silently undoes.
 echo "=== themed handler deferral ==="
 MWCPP="$HERE/../src/ui/MainWindow.cpp"
+TD_MWP="$HERE/../src/ui/MainWindowPanels.cpp"   # #186: showThemedXmb()'s handlers moved here
 HVCPP="$HERE/../src/ui/HomeView.cpp"
 td_fail=0
 td_note() { echo "  $1"; td_fail=1; }
@@ -1046,10 +1047,10 @@ td_note() { echo "  $1"; td_fail=1; }
 # Line-comments stripped FIRST. Every one of these functions now carries a comment block that names
 # NavMenu::pick / Osk::getText / PasscodePad::ask at length — explaining why they are NOT called there — so a gate
 # that searched the raw text would fail on its own documentation.
-if [ ! -f "$MWCPP" ] || [ ! -f "$HVCPP" ]; then
-  echo "FAIL: themed handler deferral (MainWindow.cpp or HomeView.cpp not found under $HERE/../src/ui)"; fail=1
+if [ ! -f "$MWCPP" ] || [ ! -f "$TD_MWP" ] || [ ! -f "$HVCPP" ]; then
+  echo "FAIL: themed handler deferral (MainWindow.cpp, MainWindowPanels.cpp or HomeView.cpp not found under $HERE/../src/ui)"; fail=1
 else
-  mw_src="$(sed -E 's://.*$::' "$MWCPP")"
+  mw_src="$(sed -E 's://.*$::' "$MWCPP" "$TD_MWP")"
   hv_src="$(sed -E 's://.*$::' "$HVCPP")"
   # One file-scope function body, from its definition line to the column-0 `}` that closes it.
   td_body() { printf '%s\n' "$2" | awk -v sig="$1" '
@@ -3124,15 +3125,16 @@ echo
 echo "=== themed Download offer (#372) ==="
 DO_V="$HERE/../src/ui/HomeView.cpp"
 DO_M="$HERE/../src/ui/MainWindow.cpp"
+DO_MP="$HERE/../src/ui/MainWindowPanels.cpp"   # #186: the chooser block (showThemedXmb) moved here
 DO_X="$HERE/../src/theme2/qml/elements/Xmb.qml"
 do_fail=0
 do_note() { echo "  $1"; do_fail=1; }
-if [ ! -f "$DO_V" ] || [ ! -f "$DO_M" ] || [ ! -f "$DO_X" ]; then
-  echo "FAIL: themed Download offer (HomeView.cpp / MainWindow.cpp / Xmb.qml not found under $HERE/../src)"; fail=1
+if [ ! -f "$DO_V" ] || [ ! -f "$DO_M" ] || [ ! -f "$DO_MP" ] || [ ! -f "$DO_X" ]; then
+  echo "FAIL: themed Download offer (HomeView.cpp / MainWindow.cpp / MainWindowPanels.cpp / Xmb.qml not found under $HERE/../src)"; fail=1
 else
   do_v="$(mktemp)"; do_m="$(mktemp)"; do_x="$(mktemp)"; do_fn="$(mktemp)"
   sed -E 's://.*$::' "$DO_V" > "$do_v"
-  sed -E 's://.*$::' "$DO_M" > "$do_m"
+  sed -E 's://.*$::' "$DO_M" "$DO_MP" > "$do_m"
   sed -E 's://.*$::' "$DO_X" > "$do_x"
   # One function's body: from the line that STARTS with its signature to the first lone closing brace.
   do_body() { awk -v sig="$2" 'index($0, sig) == 1 { p = 1 } p { print } p && /^\}/ { exit }' "$1" </dev/null > "$do_fn"; }
@@ -3457,8 +3459,9 @@ echo
 # and windowless. Naming the hole beats a heuristic that would pretend to cover it.
 echo "=== appearance theme-gallery reachability ==="
 GAL_MW="$HERE/../src/ui/MainWindow.cpp"
-if [ ! -f "$GAL_MW" ]; then
-  echo "FAIL: appearance theme-gallery reachability (MainWindow.cpp not found at $GAL_MW)"
+GAL_PN="$HERE/../src/ui/MainWindowPanels.cpp"   # #186: openAppearance() moved here
+if [ ! -f "$GAL_MW" ] || [ ! -f "$GAL_PN" ]; then
+  echo "FAIL: appearance theme-gallery reachability (MainWindow.cpp or MainWindowPanels.cpp not found under $HERE/../src/ui)"
   fail=1
 else
   gal_bad=0
@@ -3467,7 +3470,7 @@ else
   # holding a `//` loses its terminator. MainWindow.cpp has neither today — 77 `/* … */`, every one opened
   # and closed on its own line — and both failure modes OVER-strip, which can only produce a false FAIL.
   # That is the safe direction for a gate; under-stripping is the direction that lets a comment pass as code.
-  gal_src="$(sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$GAL_MW" | sed -E 's://.*$::')"
+  gal_src="$(sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$GAL_MW" "$GAL_PN" | sed -E 's://.*$::')"
 
   # `grep -q` is deliberately NOT used on this stream, and that is not a style choice. This script runs under
   # `set -o pipefail` (top of file). grep -q exits the instant it matches, which SIGPIPEs the producer feeding
@@ -3587,6 +3590,7 @@ tp_note() { echo "  $1"; tp_fail=1; }
 # The host files that reach the themed scene. Every setProperty RECEIVER in these is classified below.
 TP_HOSTS=(
   "$HERE/../src/ui/MainWindow.cpp"
+  "$HERE/../src/ui/MainWindowPanels.cpp"
   "$HERE/../src/ui/MainWindowTimelineMarks.cpp"
   "$HERE/../src/ui/MainWindowWatchTogether.cpp"
   "$HERE/../src/theme2/ThemeEngine.cpp"
@@ -3600,6 +3604,7 @@ TP_ROOTS=(
   'MainWindow.cpp:r'
   'MainWindow.cpp:rr'
   'MainWindow.cpp:dr'
+  'MainWindowPanels.cpp:r'
   'MainWindowTimelineMarks.cpp:r'
   'MainWindowWatchTogether.cpp:r'
   'ThemeEngine.cpp:r'
