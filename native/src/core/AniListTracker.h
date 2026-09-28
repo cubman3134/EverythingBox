@@ -24,6 +24,7 @@
 // tracker::classifySend answers "what does this failure mean?" for both trackers at once. What is still
 // AniList's own is what genuinely differs — GraphQL instead of REST, no PKCE, and anilist::sendPolicy().
 #pragma once
+#include "BuiltinSecretBlob.h" // BuiltinSecret::Resolved: the client in use, and whether it is the built-in one
 #include "SingleFlight.h"   // ensureValidToken's one-refresh-many-waiters queue, shared with TraktClient
 #include "Tracker.h"
 #include "TrackerQueue.h"   // the shared queue, credential store and drain loop (#326)
@@ -49,13 +50,20 @@ public:
     ~AniListTracker() override;
 
     // ---- statics, for the settings surfaces (which have no instance to ask) --------------------------
-    static bool isConfigured();   // a client id + secret are present
+    static bool isConfigured();   // a client id + secret are in use (the user's, else the built-in pair)
     static bool isConnected();    // an access token is stored
-    // The user's typed client id / secret. The #81 BuiltinSecrets follow-up is a ONE-LINE change inside each
-    // of these two — "return typed value, else the embedded slot" — which is why nothing else in this file
-    // reads the Settings keys directly. Slot names: tracker::builtinSecretIdSlot() / …SecretSlot().
+    // The client id / secret every request presents (#81): the user's typed pair, else the pair built into
+    // this release, else empty. Resolved by BuiltinSecret::resolve; nothing else in this file reads the keys.
     static QString clientId();
     static QString clientSecret();
+    static BuiltinSecret::Resolved credentials();
+    // What the USER typed, with no built-in considered. The settings rows show and edit THESE: a row showing
+    // clientId() would read the embedded value back out, and an edit started from it would save the built-in
+    // as if the user had typed it.
+    static QString typedClientId();
+    static QString typedClientSecret();
+    // True when the client in use is the built-in one: what a settings row asks before it says "Built in".
+    static bool usingBuiltin();
     // The two setters the settings surfaces call. They live HERE rather than in Settings.cpp, unlike the
     // Trakt pair, for the reason the getters do: the #81 follow-up has to be able to change what "the
     // client id" MEANS in one place, and a Settings accessor writing the same ini key from another file

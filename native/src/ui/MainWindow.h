@@ -2437,6 +2437,12 @@ private:
     // download is a further round-trip), so a late reply can never cache under the wrong video's key.
     void presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang,
                                    const QString& cacheKey);
+    // #81 (MainWindowSubtitleLogin.cpp): download + cache + attach the row the user picked; with no login
+    // stored, ask for one first and retry the same row. afterLogin marks the retry, so a second refusal ends.
+    void downloadChosenSubtitle(qint64 fileId, const QString& lang, const QString& cacheKey, bool afterLogin);
+    // Ask for the OpenSubtitles username + password with the nav-kit Osk (non-blocking, never nested), store
+    // them where the Settings rows keep them, then run `then`. refused: the stored login was just refused.
+    void promptOpenSubtitlesLogin(bool refused, std::function<void()> then);
     // "Choose source…" on a catalog item that resolves through the Stremio stream add-ons: list every
     // candidate release and let the user pick one, instead of taking whatever the auto rule ranked first.
     void chooseStreamSource(const MediaItem& item);

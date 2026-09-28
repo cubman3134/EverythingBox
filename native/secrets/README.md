@@ -44,6 +44,41 @@ build"* and offers nothing else, and ListenBrainz is unaffected. `probe_scrobble
 provider, against a fixture header (`native/tools/fixtures/lastfm/BuiltinSecrets.h`) carrying an obviously
 fake key and an in-process loopback fake service.
 
+## Tracking and subtitles: the app's own identity (issue #81)
+
+Four more slots, each a **fallback behind the user's own value**. Every one of these services already works
+with values the user types in Settings; a filled slot only means a user who types nothing gets a working
+default. The rule is the same for all four, and lives in one place (`BuiltinSecret::resolve`, in
+`src/core/BuiltinSecretBlob.h`): **the user's value, then the built-in one, then "not configured"**. The
+user's value always wins, and the built-in is never written into the user's settings. The slots are read in
+`src/core/BuiltinCredentials.cpp` and nowhere else.
+
+| File | Keys | What it is | Where the owner registers it | Terms that apply |
+| --- | --- | --- | --- | --- |
+| `trakt.secrets` | `clientId`, `clientSecret` | A Trakt **API application** (the device-code flow needs both). Scrobbling, the calendar and the history import then work after a plain **Connect to Trakt**. | <https://trakt.tv/oauth/applications> (redirect URI `urn:ietf:wg:oauth:2.0:oob`) | Trakt API terms of use, <https://trakt.tv/terms> |
+| `opensubtitles.secrets` | `apiKey` | An OpenSubtitles **consumer API key**. Enough to **search**. Downloading still needs the user's own OpenSubtitles account, which the app asks for at the first download. | <https://www.opensubtitles.com> → Consumers → New consumer | OpenSubtitles.com terms and its REST API consumer terms |
+| `anilist.secrets` | `clientId`, `clientSecret` | An AniList **API client** (AniList issues no public clients, so both are needed). | <https://anilist.co/settings/developer> (redirect URL: the loopback address `http://127.0.0.1`) | AniList terms of service and API terms, <https://anilist.co/terms> |
+| `mal.secrets` | `clientId` | A MyAnimeList **public** API client (PKCE). Public clients have no secret, so there is no secret key; a user's own client may still carry one. | <https://myanimelist.net/apiconfig> (Account Settings > API > Create ID; redirect URL `http://127.0.0.1`) | MyAnimeList API License and Developer Agreement |
+
+Example `trakt.secrets`:
+
+```
+clientId=YOUR_TRAKT_CLIENT_ID
+clientSecret=YOUR_TRAKT_CLIENT_SECRET
+```
+
+**To fill a slot** (the repository owner's to do, once per service): register the application above, confirm
+that shipping its value inside a GPL binary is acceptable under that service's terms, write the value(s) into
+the file here, and re-configure. Release builds get them the same way once the release workflow writes these
+files from repository secrets (that CI step is a separate increment of #81 and is not written yet).
+
+**With the slots empty** (every clone, and CI) nothing changes for anybody: each Settings row is the empty field
+it always was, and each feature waits for the user's own values. When a slot is filled and the user has typed
+nothing, the matching Settings rows read *"Built in (you can use your own)"* and stay editable; typing a value
+there makes the user's win. `probe_trakt`, `probe_tracker` and `probe_subs` exercise all of this against a
+fixture header (`native/tools/fixtures/builtin81/BuiltinSecrets.h`) carrying obviously fake `TEST-*` values,
+and `probe_subs` drives OpenSubtitles against a loopback fake service.
+
 
 Example `screenscraper.secrets`:
 

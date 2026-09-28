@@ -33,6 +33,7 @@
 // written from MAL's published API v2 reference, and the probe and live drive were answered by a local
 // fixture server (EB_MAL_ENDPOINT / EB_MAL_AUTH).
 #pragma once
+#include "BuiltinSecretBlob.h" // BuiltinSecret::Resolved: the client in use, and whether it is the built-in one
 #include "SingleFlight.h"   // ensureValidToken's one-refresh-many-waiters queue, shared with TraktClient
 #include "Tracker.h"
 #include "TrackerQueue.h"   // the shared queue, credential store and drain loop (#326)
@@ -58,13 +59,19 @@ public:
     ~MyAnimeListTracker() override;
 
     // ---- statics, for the settings surfaces (which have no instance to ask) --------------------------
-    static bool isConfigured();   // a client id is present
+    static bool isConfigured();   // a client id is in use (the user's, else the built-in one)
     static bool isConnected();    // an access token is stored
-    // The user's typed client id / secret. MAL issues PUBLIC clients as well as confidential ones, and a
-    // public one has NO secret at all — so `configured` is the id alone, and an empty secret is omitted
-    // from the grant rather than sent blank (tracker::mal::tokenExchangeBody).
+    // The client id / secret every request presents (#81): the user's typed pair, else the built-in client,
+    // else empty. MAL issues PUBLIC clients as well as confidential ones, and a public one has NO secret at
+    // all, so `configured` is the id alone, and an empty secret is omitted from the grant rather than sent
+    // blank (tracker::mal::tokenExchangeBody). The built-in client is a public one: it has no secret slot.
     static QString clientId();
     static QString clientSecret();
+    static BuiltinSecret::Resolved credentials();
+    // What the USER typed, with no built-in considered: what the settings rows show and edit.
+    static QString typedClientId();
+    static QString typedClientSecret();
+    static bool usingBuiltin();
     static void setClientId(const QString& v);
     static void setClientSecret(const QString& v);
 

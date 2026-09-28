@@ -184,6 +184,13 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         // the token was uncarved until #94 touched this area.)
         QStringLiteral("ra/token"),
         QStringLiteral("ra/user"),
+        // The OpenSubtitles LOGIN (#81): the username and password the first download asks for, and the rows in
+        // Settings edit. A password must not ride a sync bundle, and #81 made this account a per-device thing:
+        // any device can SEARCH with an API key alone, and each one asks for the login at its own first download.
+        // Exact leaves, not a "subs/" prefix: the API key (subs/osApiKey) and every subtitle PREFERENCE under
+        // subs/* still sync.
+        QStringLiteral("subs/osUser"),
+        QStringLiteral("subs/osPass"),
         // Trakt read-layer state (#23). Matched as EXACT leaves, never as a "trakt/" prefix, because
         // trakt/clientId and trakt/clientSecret are typed by the user and DO sync — set the app up
         // once, and it is set up everywhere.

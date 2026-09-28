@@ -433,13 +433,15 @@ Rectangle {
                             MouseArea { anchors.fill: parent; onPressed: root.inlineFinish(false) }
                         }
 
-                        // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
+                        // TextField: current text (masked to dots for credentials), or — dim — the row's placeholder
+                        // when it is empty (#81: "Built in (you can use your own)"), else "—". Display only.
                         Text {
                             visible: del.kind === root.kTextField && !(del.sel && root.inlineEditing)
                             anchors.verticalCenter: parent.verticalCenter
                             readonly property bool has: del.rowData && del.rowData.value !== ""
                             readonly property bool masked: del.rowData && del.rowData.masked === true
-                            text: !has ? "—"
+                            readonly property string hint: (del.rowData && del.rowData.placeholder) ? del.rowData.placeholder : ""
+                            text: !has ? (hint !== "" ? hint : "—")
                                        : (masked ? "•".repeat(Math.min(24, String(del.rowData.value).length))
                                                  : del.rowData.value)
                             color: has ? root.cText : root.cDim
