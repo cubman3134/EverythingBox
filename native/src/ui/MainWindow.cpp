@@ -22731,6 +22731,14 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("remote.filedrop"), tr("Receive files over the network (file drop)"),
                Settings::fileDropEnabled());
         info(QStringLiteral("remote.filedrop.url"), tr("Open in a browser"), fileDropStatusText());
+        // #80: everythingbox:// links. Classic twin in the QWidget builder below (GS_TWINS). Off by default; the
+        // OS registration is per user, and every link still asks before installing anything (MainWindowDeepLink.cpp).
+        sep(tr("Add-on links"));
+        toggle(QStringLiteral("deeplink.enabled"), tr("Open everythingbox:// links"), Settings::deepLinksEnabled());
+        info(QStringLiteral("deeplink.hint"),
+             tr("Lets an add-on's website hand its install link straight to EverythingBox. Every link still shows "
+                "what it would install and where it comes from, and nothing is installed until you press Install."),
+             QString());
         // --- Play on device (issue #143). Twins in the QWidget builder below (GS_TWINS). The name row is what
         // OTHER boxes show in their picker; the picker row is the way in when nothing is playing (during
         // playback the same targets are on the cast button). ---
@@ -23632,6 +23640,7 @@ void MainWindow::openGeneralSettings()
                             on ? RemoteServer::lanUrl(static_cast<quint16>(Settings::remoteControlPort()))
                                : tr("Turn on to get a URL"));
                 }
+                else if (id == QStringLiteral("deeplink.enabled")) setDeepLinksFromUi(on);   // #80
                 else if (id == QStringLiteral("remote.filedrop")) {
                     setFileDropFromUi(on);             // #115: starts the listener if needed, and says so
                     setInfo(QStringLiteral("remote.filedrop.url"), tr("Open in a browser"), fileDropStatusText());
@@ -24724,6 +24733,20 @@ void MainWindow::openGeneralSettings()
             setFileDropFromUi(c);
             dropUrl->setText(dropUrlText());
         });
+        // #80: the classic twin of the themed deeplink.enabled row (GS_TWINS) -- same Setting, same setter.
+        // The label is built first: it contains "//", and the GS_TWINS gate reads this file with // comments
+        // stripped, so the construction names the variable instead.
+        const QString linksLabel = tr("Open everythingbox:// links");
+        auto* linksOn = new QCheckBox(linksLabel);
+        linksOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        linksOn->setChecked(Settings::deepLinksEnabled());
+        v->addWidget(linksOn);
+        auto* linksNote = new QLabel(tr("Lets an add-on's website hand its install link straight to EverythingBox. "
+                                        "Every link still asks before installing anything. Off by default."));
+        linksNote->setWordWrap(true);
+        linksNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(linksNote);
+        connect(linksOn, &QCheckBox::toggled, this, [this](bool c) { setDeepLinksFromUi(c); });
         v->addSpacing(10);
 
         // --- Play on device (issue #143): the classic twin of the themed builder's playon.* rows — same

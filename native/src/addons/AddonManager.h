@@ -21,6 +21,7 @@
 #include <vector>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 // The outcome of resolving a playable: the url, its mime, and the HTTP request headers that url needs
 // (behaviorHints.proxyHeaders.request — empty for every torrent/debrid source, non-empty for the
@@ -374,6 +375,28 @@ public:
     void addRemoteSource(const QString& url);          // fetch its manifest, persist the URL, reload (async)
     bool removeRemoteSource(const QString& baseUrl);   // drop the URL (and its cached manifest)
     QStringList remoteSourceUrls() const;
+
+    // ---- issue #80: the deep-link confirmation's look at a manifest BEFORE anything is installed ----
+    // What a remote manifest declares about itself, for the everythingbox:// confirmation card. Fetching it
+    // persists nothing and changes nothing: only the card's Install press reaches addRemoteSource.
+    struct RemotePreview
+    {
+        bool        ok = false;
+        QString     error;          // a plain sentence for the screen when !ok (NetErrorText, never Qt's text)
+        QString     id, name, host;
+        QStringList resources;      // what it says it provides (catalog, stream, meta, subtitles, chapters, …)
+        QStringList catalogTypes;   // the media types its catalogs list
+        QStringList permissions;    // a native manifest's declared permissions
+    };
+    // The same request addRemoteSource makes (user agent, no-less-safe redirects), with a size cap and a
+    // deadline of its own, since nobody chose to fetch this one. `done` runs once, on this object's thread,
+    // unless the manager is destroyed first. Returns the reply so a superseded caller may abort it.
+    static constexpr qint64 kMaxPreviewBytes = 1024 * 1024;
+    static constexpr int    kPreviewTimeoutMs = 15000;
+    QNetworkReply* fetchRemotePreview(const QString& manifestUrl,
+                                      const std::function<void(const RemotePreview&)>& done);
+    // The card's facts from a manifest body (pure; no network). !ok when it is not a valid add-on manifest.
+    static RemotePreview describeRemoteManifest(const QString& manifestUrl, const QByteArray& json);
 
     // ---- issue #80: re-configuring a remote add-on REPLACES it ----
     // A configure page hands out a NEW manifest URL for the SAME add-on (Torrentio with other options), so

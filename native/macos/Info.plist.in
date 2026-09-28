@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS Info.plist template for the EverythingBox app bundle.
+
+  WHY A CUSTOM TEMPLATE. Issue #80: the bundle has to DECLARE the everythingbox URL scheme
+  (CFBundleURLTypes) for LaunchServices to hand a clicked link to the app, which then arrives as a
+  QFileOpenEvent (native/src/core/DeepLinkChannel.cpp). Qt's stock macOS template has no such key.
+  Everything else below is Qt 6.8's own template (cmake/macos/Info.plist.app.in), less the keys that
+  would be written empty here, so the Qt-managed keys keep behaving exactly as they did by default.
+
+  The scheme is registered by the bundle itself, so on macOS the "Open everythingbox links" setting
+  decides whether a received link is acted on; there is nothing to write or remove.
+
+  HOW IT IS SUBSTITUTED. Qt's _qt_internal_copy_info_plist() runs configure_file(@ONLY) over this
+  file, then CMake runs its own pass for the MACOSX_BUNDLE_* placeholders. Both passes read this
+  comment too (see native/ios/Info.plist.in for how that once broke the iOS configure), so the
+  placeholders are named bare here and never spelled out.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+
+    <key>CFBundleExecutable</key>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+
+    <key>CFBundleVersion</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+
+    <key>CFBundleIconFile</key>
+    <string>${MACOSX_BUNDLE_ICON_FILE}</string>
+
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleAllowMixedLocalizations</key>
+    <true/>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+
+    <!-- Issue #80: everythingbox://addon/<encoded https manifest URL>. Always confirmed in-app. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>EverythingBox add-on link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>everythingbox</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -27,6 +27,7 @@
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 namespace FileDrop { class Uploads; }  // issue #115: held by shared_ptr only
 class LaunchWatcher;                   // issue #61: held by shared_ptr only
+class DeepLinkChannel;                 // issue #80: everythingbox:// links reach the window through it
 #include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
@@ -109,6 +110,9 @@ public:
     // chooseProfileAtStart: show the "Who's using…" picker inline after the window opens (0 or >1 profiles).
     explicit MainWindow(bool chooseProfileAtStart = false, QWidget* parent = nullptr);
     ~MainWindow() override; // out-of-line so unique_ptr<AddonManager> is destroyed where it's complete
+    // everythingbox:// deep links (issue #80), MainWindowDeepLink.cpp. main() hands over the channel once the
+    // window exists: links then arrive here, each behind a confirmation card (nothing installs without Install).
+    void startDeepLinks(DeepLinkChannel* channel);
 
     // What panelReturnTo_ WAS, classified at the moment the settings exit gate closed — see leaveSettingsArea,
     // which is where this is produced and consumed. It lives up here only because moc will not parse a type
@@ -1253,6 +1257,9 @@ private:
     void confirmRemoveAddon(const QString& sourceId);            // nested confirm (Info + destructive Action)
     void presentAddByUrl();                                      // nested TextField + Add -> addRemoteSource (async)
     void openAddonConfigure(const QString& sourceId);            // #80 "Configure on website…" (MainWindowAddonConfigure.cpp)
+    void handleDeepLink(const QString& manifestUrl);             // #80 a validated everythingbox:// link (MainWindowDeepLink.cpp)
+    void handleDeepLinkRefusal(int refusal);                     // #80 a link the parser refused: say why, install nothing
+    void setDeepLinksFromUi(bool on);                            // #80 both settings builders' "Open everythingbox:// links"
     void presentAddonRegistry();                                 // the add-on registry "store" as a nested panel
     void installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId); // registry install
     void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place

@@ -423,6 +423,11 @@ namespace Settings
     // control). Every upload route is token-gated by the existing pairing. Default OFF.
     bool fileDropEnabled();                      // key "remote/fileDrop", default false
     void setFileDropEnabled(bool on);
+    // everythingbox:// links (issue #80): whether THIS machine's OS is told to open them with this app (the
+    // per-user registration in DeepLinkRegistration). Default OFF. Device-local by its key: a registration is a
+    // fact about this machine, so it must never ride the settings sync to another one.
+    bool deepLinksEnabled();                     // key "device/deepLinks", default false
+    void setDeepLinksEnabled(bool on);
 
     // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
     // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.

@@ -43,11 +43,13 @@
 #include "core/PerfTrace.h"
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 #include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
+#include "core/DeepLinkChannel.h" // issue #80: everythingbox:// links, handed to the running app or held for this one
+#include <QSslConfiguration>
 #include "core/QuitSignals.h"  // issue #409: SIGTERM/SIGINT/SIGHUP close the window instead of being dropped
 #include "core/QuitBudget.h"   // issue #442: the exit waits on the thread pool for a bounded time, never a fetch
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.6.343";
+static constexpr const char* kAppVersion = "0.6.344";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -217,6 +219,25 @@ int main(int argc, char** argv)
 #endif
 
     EBPerfApp app(argc, argv);
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // Issue #80: everythingbox:// links. The OS starts a new process per link; when EverythingBox is already
+    // running, this one hands the (parsed, validated) manifest URL to it over a per-user local socket and ends
+    // HERE, before any of the startup below — no log trim, no migrations, no second UI-test pipe. Otherwise the
+    // link is held and the running window asks about it once a profile is open (MainWindowDeepLink.cpp).
+    DeepLinkChannel deepLinks;
+    if (deepLinks.handOffFromArguments(QCoreApplication::arguments())) return 0;
+    const bool deepLinksListening = deepLinks.listen(DeepLinkChannel::serverName());
+#endif
+#if QT_CONFIG(ssl)
+    // Test-only seam (issue #80's live drive): trust ONE extra certificate authority, so a loopback https
+    // fixture can stand in for an add-on host. Honoured only with the UI-test channel on; never in production.
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("EB_UITEST_EXTRA_CA"))
+    {
+        QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
+        ssl.addCaCertificates(qEnvironmentVariable("EB_UITEST_EXTRA_CA"));
+        QSslConfiguration::setDefaultConfiguration(ssl);
+    }
+#endif
     // Issue #442. Declared right here so it is destroyed after the window and before the QApplication, whose
     // destructor waits on the global thread pool with no limit. aboutToQuit ends every add-on fetch the pool is
     // waiting on (QuitBudget.h); the gate then gives the pool a bounded wait once the event loop has returned.
@@ -447,6 +468,11 @@ int main(int argc, char** argv)
 
     MainWindow window(chooseProfile);
     window.setWindowTitle(QString::fromLatin1(AppBrand::kDisplayName)); // chrome only — no path meaning
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (!deepLinksListening)
+        qWarning("DeepLink: could not listen for links handed over by a second process");
+    window.startDeepLinks(&deepLinks);   // #80: held links are delivered once the window is up
+#endif
 #if defined(Q_OS_UNIX) && !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
     // Issue #409: a logout, `systemctl --user stop` or `kill <pid>` sends SIGTERM and SIGKILLs a few seconds later.
     // Take the same road as the window's close button, so closeEvent flushes the resume position, writes battery
