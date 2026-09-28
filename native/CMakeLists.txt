@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.345 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.346 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1045,6 +1045,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # #118: the settings surface for a store backend (detection / sign-in / the releases link).
         # Its own TU for the same reason as the two above.
         src/ui/MainWindowStoreBackend.cpp
+        # #186 increment 1: openGeneralSettings() - BOTH builders' General page, ~5,000 lines - moved out of
+        # MainWindow.cpp verbatim. MainWindowInternal.h holds the file-scope helpers the two TUs share, defined once.
+        src/ui/MainWindowSettingsGeneral.cpp src/ui/MainWindowInternal.h
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/AttractOverlay.cpp src/ui/AttractOverlay.h  # issue #54: the full-screen Ken-Burns slideshow overlay
         src/ui/Notifier.cpp       src/ui/Notifier.h

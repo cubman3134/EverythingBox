@@ -2145,10 +2145,11 @@ echo
 echo "=== trakt import wiring ==="
 TKC="$HERE/../src/core/TraktClient.cpp"
 TKM="$HERE/../src/ui/MainWindow.cpp"
+TKM_GS="$HERE/../src/ui/MainWindowSettingsGeneral.cpp"   # #186: both builders' Trakt rows moved here with openGeneralSettings()
 tk_fail=0
 tk_note() { echo "  $1"; tk_fail=1; }
-if [ ! -f "$TKC" ] || [ ! -f "$TKM" ]; then
-  echo "FAIL: trakt import wiring (TraktClient.cpp or MainWindow.cpp not found)"; fail=1
+if [ ! -f "$TKC" ] || [ ! -f "$TKM" ] || [ ! -f "$TKM_GS" ]; then
+  echo "FAIL: trakt import wiring (TraktClient.cpp, MainWindow.cpp or MainWindowSettingsGeneral.cpp not found)"; fail=1
 else
   # Comments stripped into temp files; both sources DISCUSS the flat legacy keys and the old behaviour at
   # length, and prose naming them must never trip a gate about what the code does.
@@ -2160,7 +2161,7 @@ else
   # the first draft failed only on MainWindow.cpp, the one file big enough to lose the race.)
   tk_ctmp="$(mktemp)"; tk_mtmp="$(mktemp)"
   sed -E 's://.*$::' "$TKC" > "$tk_ctmp"
-  sed -E 's://.*$::' "$TKM" > "$tk_mtmp"
+  sed -E 's://.*$::' "$TKM" "$TKM_GS" > "$tk_mtmp"
   tk_has() { [ "$(grep -c -- "$2" "$1")" -gt 0 ]; }
 
   # 1. The cursor is written through the per-profile key builder, never as a literal. The two flat names may
@@ -2389,11 +2390,11 @@ echo
 #   * themed-only: NONE. Every themed control row currently has a classic twin, which is the point of the fix
 #     this gate defends. The list below is empty on purpose, not missing.
 echo "=== general settings builder parity ==="
-GSM="$HERE/../src/ui/MainWindow.cpp"
+GSM="$HERE/../src/ui/MainWindowSettingsGeneral.cpp"   # #186: openGeneralSettings() moved out of MainWindow.cpp
 gs_fail=0
 gs_note() { echo "  $1"; gs_fail=1; }
 if [ ! -f "$GSM" ]; then
-  echo "FAIL: general settings builder parity (MainWindow.cpp not found at $GSM)"; fail=1
+  echo "FAIL: general settings builder parity (MainWindowSettingsGeneral.cpp not found at $GSM)"; fail=1
 else
   # id|pattern. The pattern is the CONSTRUCTION the classic builder must contain for that themed row, matched
   # as a fixed string (grep -F) so parentheses, quotes and ellipses need no escaping. Where two classic controls
