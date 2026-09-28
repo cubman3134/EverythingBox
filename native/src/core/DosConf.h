@@ -40,6 +40,7 @@
 #include <QJsonValue>
 #include <QList>
 #include <QMap>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -604,6 +605,7 @@ namespace DosConf
     {
         QString     id;      // "gm" | "mt32" — the stored setting value
         QString     label;   // "Roland MT-32"
+        QString     shortLabel; // "MT-32" — the launch report line's name; falls back to `label`
         QString     value;   // what the core option is set to when the files are present
         QStringList files;   // ALL of these must be in the system folder
         QString     note;    // why EverythingBox cannot provide them ("these ROMs are copyrighted")
@@ -613,6 +615,9 @@ namespace DosConf
     {
         QString           option;    // "dosbox_pure_midi"
         QList<MidiDevice> devices;
+        // The recipe's own default device id, the LAST layer of resolveMidi() below. Empty (the shipped msdos
+        // recipe sets none) means the core decides, which is the pre-#191 launch.
+        QString           defaultDevice;
         bool isNull() const { return option.isEmpty() || devices.isEmpty(); }
     };
 
@@ -621,6 +626,7 @@ namespace DosConf
         MidiSpec s;
         const QJsonObject o = v.toObject();
         s.option = o.value(QStringLiteral("option")).toString().trimmed();
+        s.defaultDevice = o.value(QStringLiteral("default")).toString().trimmed().toLower();
         for (const QJsonValue& dv : o.value(QStringLiteral("devices")).toArray())
         {
             if (!dv.isObject()) continue;
@@ -628,6 +634,7 @@ namespace DosConf
             MidiDevice m;
             m.id    = d.value(QStringLiteral("id")).toString().trimmed().toLower();
             m.label = d.value(QStringLiteral("label")).toString().trimmed();
+            m.shortLabel = d.value(QStringLiteral("short")).toString().trimmed();
             m.value = d.value(QStringLiteral("value")).toString().trimmed();
             m.note  = d.value(QStringLiteral("note")).toString().trimmed();
             for (const QJsonValue& fv : d.value(QStringLiteral("files")).toArray())
@@ -697,5 +704,94 @@ namespace DosConf
         s += title.isEmpty() ? QStringLiteral(" The game will play through its default audio instead.")
                              : QStringLiteral(" “%1” will play through its default audio instead.").arg(title);
         return s;
+    }
+
+    // ---- The per-game MIDI device (issue #191, the #51 half) ----------------------------------------------
+    // WHICH device a launch uses, and WHERE it came from. Three layers, the first one that names a device THE
+    // RECIPE DECLARES wins:
+    //   1. this game's own choice      (LaunchOpts::Override::midiDevice, the #51 per-game store)
+    //   2. the MS-DOS setting          (Settings::dosMidiDevice, Settings > MS-DOS MIDI device)
+    //   3. the recipe's own default    (MidiSpec::defaultDevice; the shipped msdos recipe sets none)
+    // An EMPTY game choice is "Default (use MS-DOS setting)": not an override, so layer 2 decides. A value the
+    // recipe does not declare (a device a user recipe has since dropped, a stale sync) is not an override
+    // either — it falls through exactly the way LaunchOpts::resolveCore ignores a core that is no longer a
+    // candidate, so a stale value can never cost the user the device they set for the whole system.
+    enum class MidiSource { None, Game, System, Recipe };
+
+    struct MidiChoice
+    {
+        const MidiDevice* device = nullptr;   // points into the MidiSpec it was resolved from
+        MidiSource        source = MidiSource::None;
+    };
+
+    inline MidiChoice resolveMidi(const MidiSpec& s, const QString& gameChoice, const QString& systemChoice)
+    {
+        MidiChoice c;
+        if (s.isNull()) return c;
+        if ((c.device = midiDevice(s, gameChoice)))      { c.source = MidiSource::Game;   return c; }
+        if ((c.device = midiDevice(s, systemChoice)))    { c.source = MidiSource::System; return c; }
+        if ((c.device = midiDevice(s, s.defaultDevice))) { c.source = MidiSource::Recipe; return c; }
+        return c;
+    }
+
+    // The launch report's MIDI line: the device, and which layer chose it. Empty when no device is in play
+    // (the core decides, as before #191, and there is nothing to report).
+    //   MIDI: MT-32 (this game)
+    //   MIDI: General MIDI (MS-DOS setting)
+    inline QString midiReportLine(const MidiChoice& c)
+    {
+        if (!c.device) return QString();
+        const MidiDevice& d = *c.device;
+        const QString name = !d.shortLabel.isEmpty() ? d.shortLabel : !d.label.isEmpty() ? d.label : d.id;
+        QString where;
+        switch (c.source)
+        {
+            case MidiSource::Game:   where = QStringLiteral("this game");      break;
+            case MidiSource::System: where = QStringLiteral("MS-DOS setting"); break;
+            case MidiSource::Recipe: where = QStringLiteral("recipe default"); break;
+            case MidiSource::None:   return QString();
+        }
+        return QStringLiteral("MIDI: %1 (%2)").arg(name, where);
+    }
+
+    // THE WHOLE LAUNCH DECISION, pure. The resolved device — and only the resolved device — is the one whose
+    // files are checked, whose option is seeded and whose files the message names. A per-game MT-32 with its
+    // ROMs missing therefore says exactly what the MS-DOS setting would have said for it, and the game still
+    // launches, on its default audio: a missing asset is never a reason to refuse a launch.
+    struct MidiLaunch
+    {
+        MidiChoice             choice;
+        QString                report;    // midiReportLine(choice); "" when no device is in play
+        QStringList            missing;   // the resolved device's files that are NOT in the system folder
+        QMap<QString, QString> options;   // the option to seed — only when nothing is missing
+        QString                message;   // midiMessage() naming the missing files and the folder; "" otherwise
+    };
+
+    inline MidiLaunch midiLaunch(const MidiSpec& s, const QString& gameChoice, const QString& systemChoice,
+                                 const std::function<bool(const QString&)>& exists, const QString& folderPath,
+                                 const QString& gameTitle)
+    {
+        MidiLaunch L;
+        L.choice = resolveMidi(s, gameChoice, systemChoice);
+        if (!L.choice.device) return L;
+        const MidiDevice& d = *L.choice.device;
+        L.report  = midiReportLine(L.choice);
+        L.missing = missingMidiFiles(d, exists);
+        if (L.missing.isEmpty()) L.options = midiOptions(s, d.id, exists);
+        else                     L.message = midiMessage(d, L.missing, folderPath, gameTitle);
+        return L;
+    }
+
+    // What the game's options chooser offers for its MIDI device: "Default (use MS-DOS setting)" first, which
+    // stores the EMPTY value (no override), then every device the recipe declares, in the recipe's order.
+    // EMPTY for a spec with no devices — every system but MS-DOS — and an empty list is how the chooser knows
+    // not to show the entry at all. Pairs of (label, stored id).
+    inline QList<QPair<QString, QString>> gameMidiChoices(const MidiSpec& s)
+    {
+        QList<QPair<QString, QString>> out;
+        if (s.isNull()) return out;
+        out.push_back({ QStringLiteral("Default (use MS-DOS setting)"), QString() });
+        for (const MidiDevice& d : s.devices) out.push_back({ d.label.isEmpty() ? d.id : d.label, d.id });
+        return out;
     }
 }

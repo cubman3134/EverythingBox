@@ -9848,10 +9848,19 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
     // because those rows are fixed; this one is not.
     const int portRow = portId.isEmpty() ? -1 : int(rows.size());
     if (portRow >= 0) rows << tr("🖥   Native port…");
-    new NavMenu(it.title, rows, [this, it, isDownloads, romhackSystem, portId, portRow](int row) {
+    // #191: the game's MIDI device, for an MS-DOS game on a core with a MIDI option. This menu is the CLASSIC
+    // layout's only per-game menu (it has no Launch options editor and no Start panel), so without this row
+    // the per-game device would exist on one layout only. Appended and TAKEN like the port row above.
+    const QString midiKey = resumeKeyFor(it);
+    const bool midiOffered = !romhackSystem.isEmpty() && !midiKey.isEmpty() && gameMidiOffered_
+                             && gameMidiOffered_(midiKey, romhackSystem);
+    const int midiRow = midiOffered ? int(rows.size()) : -1;
+    if (midiRow >= 0) rows << tr("🎵   MIDI device…");
+    new NavMenu(it.title, rows, [this, it, isDownloads, romhackSystem, portId, portRow, midiRow, midiKey](int row) {
         // Runs after this overlay has closed, like the romhack arm below: MainWindow answers it with a
         // confirmation card and then an install, and neither may open under a menu that is still up.
         if (portRow >= 0 && row == portRow) { emit nativePortRequested(it, portId); return; }
+        if (midiRow >= 0 && row == midiRow) { emit gameMidiRequested(midiKey, romhackSystem); return; }
         switch (row)
         {
         // A merged PC game carries no url — which copy runs is decided now, from the library as it is now.
@@ -11500,7 +11509,13 @@ bool HomeView::isThemedInfoLeaf(int idx) const
 // "Launch options…" detail action (issue #51): overrides only make sense for a game that resolves to a system
 // with candidate cores or a standalone emulator, so a metadata-only game entry (no local file, no system)
 // gets no pill and the launchopts editor is never reachable with nothing to edit.
-static const GameSystem* systemForGameItem(const MediaItem& it)
+//
+// `levelSystemId` (#191) is the console LEVEL the row is listed in (currentLevelSystemId), the last resort for
+// a game with a file but neither a system hint nor a telling extension. An MS-DOS game is a FOLDER, so a DOS
+// game in a console's Recent/Downloaded folder resolved to nothing and never got the pill — the same
+// fallback emuMenuContext already takes for the Start panel. Only for a row with a url: a metadata-only entry
+// still gets no pill.
+static const GameSystem* systemForGameItem(const MediaItem& it, const QString& levelSystemId = QString())
 {
     if (it.type != QStringLiteral("game")) return nullptr;
     const GameSystem* sys = nullptr;
@@ -11514,6 +11529,7 @@ static const GameSystem* systemForGameItem(const MediaItem& it)
         const QString ext = QFileInfo(it.url).suffix().toLower();
         if (!ext.isEmpty()) sys = SystemCatalog::forExtension(ext);
     }
+    if (!sys && !levelSystemId.isEmpty() && !it.url.isEmpty()) sys = SystemCatalog::byId(levelSystemId);
     // Only offer overrides where there is something to override: candidate cores (libretro) or a standalone
     // emulator. A system with neither has no lever the store could set.
     if (sys && (sys->cores.isEmpty() && sys->externalEmulator.isEmpty())) return nullptr;
@@ -11525,7 +11541,7 @@ static const GameSystem* systemForGameItem(const MediaItem& it)
 QString HomeView::themedLeafSystemId(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return QString();
-    const GameSystem* sys = systemForGameItem(items_[browseRowMap_[idx]]);
+    const GameSystem* sys = systemForGameItem(items_[browseRowMap_[idx]], currentLevelSystemId());
     return sys ? sys->id : QString();
 }
 
@@ -11860,7 +11876,7 @@ QVariantMap HomeView::themedDetailData(int idx, requests::StatusTrigger trigger)
     // "Launch options…" (issue #51): per-game core / standalone emulator / extra args. Offered only on a game
     // that resolves to a system with something to override, so it never appears on a movie or a metadata-only
     // game entry. The host (MainWindow) opens a NavOverlay editor and writes LaunchOptionsStore.
-    if (systemForGameItem(it)) verbs << QStringLiteral("launchopts");
+    if (systemForGameItem(it, currentLevelSystemId())) verbs << QStringLiteral("launchopts");
     // "Other versions" (issue #50): reaches the region/revision variants that region-collapsing hid at scan
     // time, so a collapsed game's losers are never orphaned. Offered ONLY when collapsing is on AND this game
     // actually has sibling variants on disk (re-derived cheaply from its own folder) — otherwise the pill

@@ -1544,6 +1544,16 @@ private:
     // Does the emulator this game resolves to declare ANY content-install recipe? A row for an emulator with
     // no recipe would be a lever that cannot do anything, so it is not offered.
     static bool emulatorHasContentRecipes(const QString& emulatorId);
+    // Per-game MIDI device (issue #191), defined in MainWindowRetroComputers.cpp. The same two per-game surfaces
+    // as #189's levers above, one handler: a NavMenu of "Default (use MS-DOS setting)" plus the devices the
+    // system's recipe declares, written to the game's #51 LaunchOptionsStore record (so it syncs like them).
+    // Offered only where systemOffersGameMidi(): the game resolves to a libretro core whose recipe entry has a
+    // `midi` block, i.e. an MS-DOS game on dosbox_pure. `core` is that resolved core ("" for a standalone or
+    // RetroPark target, which offers nothing).
+    void editGameMidiDevice(QString key, QString systemId, QString core);
+    static bool    systemOffersGameMidi(const QString& systemId, const QString& core);
+    static QString gameMidiLeverValue(const LaunchOpts::Override& ov, const QString& systemId, const QString& core);
+    void wireGameMidiDoor();   // #191: the game menu's "MIDI device…" row (HomeView), the classic layout's door
     void showOtherVersions(QString gamePath);  // the region/revision "Other versions" picker (NavMenu, issue #50)
     // Bulk edit (issue #65): a re-presenting nav-kit CHECKLIST over the current level's leaves (seeded with the
     // item the "Select…" verb came from), then a single action applied to the whole selection — favourite /

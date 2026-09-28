@@ -65,7 +65,8 @@ bool contentEqual(const Override& a, const Override& b)
     return a.core == b.core && a.emulatorId == b.emulatorId && a.extraArgs == b.extraArgs
         && a.backend == b.backend    // Slice 2a: the backend is a lever like the others
         && a.contentUpdate == b.contentUpdate && a.contentDlc == b.contentDlc   // issue #189
-        && a.bootFile == b.bootFile; // #190: which program inside a folder game this row boots
+        && a.bootFile == b.bootFile  // #190: which program inside a folder game this row boots
+        && a.midiDevice == b.midiDevice; // #191: this game's MIDI device
 }
 
 } // namespace
@@ -76,7 +77,8 @@ bool Override::isEmpty() const
     // husk — otherwise ensureCache() would drop it and get() would lose the choice on the next read.
     return core.isEmpty() && emulatorId.isEmpty() && extraArgs.isEmpty() && backend.isEmpty()
         && contentUpdate.isEmpty() && contentDlc.isEmpty()   // issue #189: both content levers are full levers
-        && bootFile.isEmpty();
+        && bootFile.isEmpty()
+        && midiDevice.isEmpty();   // #191: a MIDI-only override is a real record, not a husk
 }
 
 // ---- pure: canonical record <-> JSON ----------------------------------------------------------------------
@@ -91,6 +93,7 @@ Override LaunchOpts::fromJson(const QJsonObject& o)
     ov.contentUpdate = o.value(QStringLiteral("contentUpdate")).toString();   // issue #189
     ov.contentDlc    = o.value(QStringLiteral("contentDlc")).toString();
     ov.bootFile   = o.value(QStringLiteral("bootFile")).toString();
+    ov.midiDevice = o.value(QStringLiteral("midiDevice")).toString();   // #191
     ov.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return ov;
 }
@@ -105,6 +108,7 @@ Override LaunchOpts::normalized(const Override& ov)
     n.contentUpdate = ov.contentUpdate.trimmed();          // issue #189: the update version pin ("" / "none" / a pin)
     n.contentDlc    = ov.contentDlc.trimmed().toLower();   // one spelling per state: "off" / "on", never "Off"
     n.bootFile   = ov.bootFile.trimmed();
+    n.midiDevice = ov.midiDevice.trimmed().toLower();   // #191: one spelling, the MS-DOS setting's ("mt32")
     n.updatedAt  = ov.updatedAt;
     return n;
 }
@@ -123,6 +127,7 @@ QJsonObject LaunchOpts::toJson(const Override& in)
     if (!ov.contentUpdate.isEmpty()) o.insert(QStringLiteral("contentUpdate"), ov.contentUpdate);   // issue #189
     if (!ov.contentDlc.isEmpty())    o.insert(QStringLiteral("contentDlc"), ov.contentDlc);
     if (!ov.bootFile.isEmpty())   o.insert(QStringLiteral("bootFile"), ov.bootFile);
+    if (!ov.midiDevice.isEmpty()) o.insert(QStringLiteral("midiDevice"), ov.midiDevice);   // #191
     o.insert(QStringLiteral("updatedAt"), static_cast<double>(ov.updatedAt));
     return o;
 }

@@ -109,7 +109,7 @@ What the shipped mapping carries onto DOSBox-Pure:
 | `[cpu] core` | `dosbox_pure_cpu_core` | `dynamic*` → dynamic, `full` → normal, plus `auto`, `normal`, `simple` |
 | `[sblaster] sbtype` | `dosbox_pure_sblaster_type` | `sb1` … `sb16`, `gb`, `none` |
 | `[sblaster] oplmode` | `dosbox_pure_sblaster_adlib_mode` | `auto`, `cms`, `opl2`, `dualopl2`, `opl3`, `opl3gold`, `none` |
-| `[midi] mididevice` | — | deliberately **not** translated: the MIDI device is a setting, because it depends on which ROMs or soundfont you supplied (below) |
+| `[midi] mididevice` | — | deliberately **not** translated: the MIDI device is a setting (for MS-DOS, or per game), because it depends on which ROMs or soundfont you supplied (below) |
 | `[autoexec]` | — | mounting and start-up commands are the emulator's own job |
 | everything else | — | reported as ignored, by name |
 
@@ -163,6 +163,43 @@ Settings ▸ General ▸ **MS-DOS MIDI device** (on both layouts):
 If a file is missing the launch is **not** refused: the game plays through its default audio, and the message
 names the file(s) that were wanted and the folder they go in. The device choices themselves come from the
 recipe, so a new one is a data file rather than a rebuild.
+
+### One game on a different device
+
+The MS-DOS setting is for the whole system; any single game can override it. Pick **MIDI device** from any
+of the game's own menus:
+
+* the game's **Launch options…** (its detail page);
+* **Start** on the game ▸ **Emulation settings**, with **Applies to: This game**;
+* on the classic layout, the game's menu (the one with Play, Favorite and Romhacks…) ▸ **MIDI device…**.
+
+All three edit the same per-game setting. The entry is there only for an MS-DOS game running on DOSBox-Pure,
+the core whose MIDI option it sets. It offers:
+
+| Choice | What the game uses |
+|---|---|
+| **Default (use MS-DOS setting)** | whatever the MS-DOS setting says. This stores nothing: it is "no override" |
+| **General MIDI (SoundFont)** / **Roland MT-32** | that device, whatever the MS-DOS setting says |
+
+At launch the device is resolved in this order, and the first one that names a device the recipe offers wins:
+
+1. the game's own choice;
+2. the MS-DOS setting;
+3. the recipe's `default` (the shipped recipe sets none, so with nothing chosen anywhere the core decides).
+
+A game set to a device the recipe no longer offers falls through to the MS-DOS setting rather than losing its
+sound. The same file check applies to whichever device was resolved: a game set to MT-32 with the ROMs
+missing gets the same message, naming `MT32_CONTROL.ROM` and `MT32_PCM.ROM` and the folder, and still plays on
+its default audio. The log line for the launch says where the device came from:
+
+```
+game: MIDI: MT-32 (this game) unavailable — missing MT32_CONTROL.ROM, MT32_PCM.ROM in C:\EverythingBox\system
+game: MIDI: General MIDI (MS-DOS setting) -> dosbox_pure_midi=DOSBOX.SF2
+```
+
+The per-game choice is stored with the game's other launch options, so it syncs between devices the same way
+they do. **Clear launch options** clears it along with the rest. It applies to DOSBox-Pure; a standalone DOSBox
+takes its MIDI device from its own `dosbox.conf`.
 
 
 ## Amstrad CPC in detail
@@ -284,9 +321,11 @@ Inside a `cores[]` entry:
   it. `transform` is `"cycles"` (the `cycles=` grammar) or `"none"`, which means "we know about this key and
   deliberately do not translate it" and reports the `note` instead.
 * `midi` — the MT-32 / General MIDI assets (issue #191): `option` (the core option that selects a device)
-  and `devices`, a list of `{ id, label, value, files, note }`. `files` is ALL-OF, unlike `firmware`'s
+  and `devices`, a list of `{ id, label, short?, value, files, note }`. `files` is ALL-OF, unlike `firmware`'s
   any-of: an MT-32 needs both of its ROMs. `note` says why EverythingBox cannot provide the file, which is
-  never the same reason twice. Nothing here is ever downloaded.
+  never the same reason twice. `short` is the name the launch log line uses ("MT-32"), falling back to
+  `label`. An optional `default` (a device `id`) is the last layer of the per-game resolution above; the
+  shipped recipe has none. Nothing here is ever downloaded.
 * `bootCommand` — how this core gets its typed boot command. `"amsdos"` means "read it out of the Amstrad
   disk's own catalogue"; empty means the core needs none. It names a *mechanism*, not a literal command,
   because the command is a property of the disk and a recipe is a property of the system.

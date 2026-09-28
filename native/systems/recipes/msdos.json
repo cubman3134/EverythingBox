@@ -108,6 +108,7 @@
           {
             "id": "gm",
             "label": "General MIDI (SoundFont)",
+            "short": "General MIDI",
             "value": "DOSBOX.SF2",
             "files": ["DOSBOX.SF2"],
             "note": "EverythingBox doesn't bundle a soundfont; supply one of your own and give it that name"
@@ -115,6 +116,7 @@
           {
             "id": "mt32",
             "label": "Roland MT-32",
+            "short": "MT-32",
             "value": "MT32_CONTROL.ROM",
             "files": ["MT32_CONTROL.ROM", "MT32_PCM.ROM"],
             "note": "these ROMs are copyrighted"
