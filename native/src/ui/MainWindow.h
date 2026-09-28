@@ -26,6 +26,7 @@
 #include "../core/LibraryBundle.h"    // LibraryBundle::Receipt / Progress are by-value members (issue #127)
 #include "../core/PlayOnDevice.h"    // PlayOn::Handoff / Peer / Target are by-value parameters (issue #143)
 namespace FileDrop { class Uploads; }  // issue #115: held by shared_ptr only
+class LaunchWatcher;                   // issue #61: held by shared_ptr only
 #include "../core/Audiobookshelf.h"   // issue #197: Abs::Track / Abs::Chapter, held per open book
 #include "../media/LrcLyrics.h"   // trackLyrics_ is a value member (issue #142)
 #include "../media/LyricSources.h" // LyricSources::Choice is a by-value parameter (issue #142)
@@ -515,6 +516,12 @@ private:
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,
     // or the wrong exe). Tell the user and offer to open its folder or pick a different exe.
     void onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe);
+    // Store-launch play time (issue #61). DEFINED IN src/ui/MainWindowLaunchWatch.cpp. Hands a steam:// or
+    // com.epicgames.launcher:// URI to the OS exactly as before and, for a RUN (never steam://install/), watches
+    // for the game so the session lands in PlayStats under the per-launcher id ("steam:<appid>" / "epic:<AppName>",
+    // `id` when it already is one) - the id the Recent records, and the identity a GOG session banks under.
+    void handOffStoreLaunch(const QString& url, const QString& id);
+    std::shared_ptr<LaunchWatcher> launchWatcher_;   // created on the first watched launch
     // Run a PC game's setup, monitor the installer process, and when it finishes locate the installed game
     // (wherever the user pointed it) and launch it. gameDir is our extracted repack folder (a common install
     // target); the installer's registered InstallLocation is also checked so custom paths are found.

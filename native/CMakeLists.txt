@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.340 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.341 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -963,6 +963,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SaveMeta.cpp     src/core/SaveMeta.h      # save baseline/metadata store (save-sync T4)
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
         src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
+        src/core/LaunchWatch.cpp  src/core/LaunchWatch.h     # store-launch play time: the pure watch (#61)
+        src/core/LaunchSamplers.cpp src/core/LaunchSamplers.h # ...and its Windows samplers (#61)
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
         src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
@@ -992,6 +994,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowTimelineMarks.cpp
         src/ui/TimelineMarks.h   # the pure time -> pixel geometry both bars lay their marks out with
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowLaunchWatch.cpp                   # store-launch play time: the MainWindow half (#61)
         src/ui/MainWindowCast.cpp                          # casting a local file: the MainWindow half (#72)
         src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
@@ -2351,6 +2354,14 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_stats PRIVATE src src/core src/theme2)
     target_link_libraries(probe_stats PRIVATE Qt6::Core)
+
+    # Store-launch play time (issue #61): the pure launch-watch state machine (pending -> running -> exited /
+    # timed out), the install-dir prefix rule, Steam's RunningAppID rule, which launch URLs get a watch, and the
+    # watcher's one-timer lifetime. Injected samples and clock -- no registry, no process list, no Steam or Epic.
+    add_executable(probe_launchwatch tools/probe_launchwatch.cpp
+        src/core/LaunchWatch.cpp src/core/LaunchWatch.h)
+    target_include_directories(probe_launchwatch PRIVATE src src/core)
+    target_link_libraries(probe_launchwatch PRIVATE Qt6::Core)
 
     # PlaylistStore category migration: the data-safety core of category-scoped playlists — a legacy
     # catalogKey-shaped blob folds to categoryKey (video/audio/game/reading via core/MediaCategories.h), one-shot

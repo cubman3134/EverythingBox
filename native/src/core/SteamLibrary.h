@@ -20,6 +20,10 @@ struct SteamGame
     // refresh (issue #62). Default true — a game a live scan actually read — so every existing construction
     // (installedGames / parseOwnedGames, all positional {appid,name}) keeps meaning "available".
     bool    available = true;
+    // Absolute install folder, <library>/steamapps/common/<installdir> from the game's appmanifest_<id>.acf
+    // (issue #61: a launch watch looks for the game's process under it when Steam's RunningAppID is absent).
+    // Empty for an owned-not-installed game. Added LAST so the positional `{ appid, name }` still compiles.
+    QString installDir;
 };
 
 namespace SteamLibrary
@@ -29,6 +33,15 @@ namespace SteamLibrary
     QString posterUrl(const QString& appid);  // local librarycache art if present, else the Steam CDN URL
     QString launchUrl(const QString& appid);  // steam://rungameid/<appid>
     QString installUrl(const QString& appid); // steam://install/<appid>  (the owned-not-installed handoff)
+
+    // The raw "installdir" value of an appmanifest_<id>.acf body (the folder name under steamapps/common), or
+    // empty when the manifest has none. Pure; exposed so probe_importers can pin it on a fixture ACF.
+    QString manifestInstallDir(const QString& acfText);
+    // <libraryRoot>/steamapps/common/<installdir>, or empty when either part is empty.
+    QString installPath(const QString& libraryRoot, const QString& installdir);
+    // The install folder of an installed game by appid, scanning the libraries as installedGames() does.
+    // Empty when the game is not installed here (or Steam is not).
+    QString installDirFor(const QString& appid);
 
     // Owned library via the Steam Web API (IPlayerService/GetOwnedGames). Requires a user-supplied Web API key
     // and 64-bit SteamID (NEVER embedded). Owned = {appid,name} per owned game (sorted by name), TTL-cached
