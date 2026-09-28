@@ -2,7 +2,6 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
-#include <QDir>
 #include <QUrl>
 
 #include "AppBrand.h"
@@ -230,6 +229,11 @@ QString windowsClassKey(const QString& scheme)
     return isValidScheme(scheme) ? QStringLiteral("Software\\Classes\\") + scheme : QString();
 }
 
+// A Windows path, whatever host builds the plan: the plan is data about the Windows registry, so its separators
+// are backslashes on every OS (QDir::toNativeSeparators would leave '/' alone off Windows, and the probe that
+// pins this plan runs on Linux in CI).
+static QString windowsPath(const QString& p) { return QString(p).replace(QLatin1Char('/'), QLatin1Char('\\')); }
+
 QString windowsOpenCommand(const QString& exePath)
 {
     // Quoted, so a space (C:\Program Files\…) and a non-ASCII profile name are fine. A quote would end the
@@ -237,7 +241,7 @@ QString windowsOpenCommand(const QString& exePath)
     // path: either one refuses.
     if (exePath.isEmpty() || exePath.contains(QLatin1Char('"'))) return QString();
     for (const QChar c : exePath) if (c.unicode() < 0x20 || c.unicode() == 0x7f) return QString();
-    return QLatin1Char('"') + QDir::toNativeSeparators(exePath) + QStringLiteral("\" \"%1\"");
+    return QLatin1Char('"') + windowsPath(exePath) + QStringLiteral("\" \"%1\"");
 }
 
 QVector<RegOp> windowsRegisterPlan(const QString& scheme, const QString& exePath)
@@ -245,7 +249,7 @@ QVector<RegOp> windowsRegisterPlan(const QString& scheme, const QString& exePath
     const QString key = windowsClassKey(scheme);
     const QString cmd = windowsOpenCommand(exePath);
     if (key.isEmpty() || cmd.isEmpty()) return {};
-    const QString exe = QDir::toNativeSeparators(exePath);
+    const QString exe = windowsPath(exePath);
     return {
         { RegOp::SetValue, key, QString(), QStringLiteral("URL:%1 link").arg(QLatin1String(AppBrand::kDisplayName)) },
         { RegOp::SetValue, key, QStringLiteral("URL Protocol"), QString() },

@@ -384,7 +384,7 @@ static void registration()
               QStringLiteral("every op stays under Software\\Classes\\<scheme>: %1").arg(o.key));
     check(DeepLink::windowsOpenCommand(QStringLiteral("C:/x/EverythingBox.exe"))
               == QStringLiteral("\"C:\\x\\EverythingBox.exe\" \"%1\""),
-          QStringLiteral("command: native separators, both halves quoted"));
+          QStringLiteral("command: backslashes on every host (the plan is Windows data), both halves quoted"));
 
     const QVector<Op> off = DeepLink::windowsUnregisterPlan(QStringLiteral("everythingbox"));
     check(off.size() == 1 && off[0].kind == Op::DeleteTree && off[0].key == k,
