@@ -397,7 +397,10 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
         it.type         = QString::fromLatin1(kMusicPlayAlbumType);
         it.mime         = QString::fromLatin1(kMusicPlayAlbumPrefix) + b->key;
         it.title        = QObject::tr("Play album");
-        it.subtitle     = joinDot({ QObject::tr("%n track(s)", "", b->trackCount),
+        // (#194, offline fallback) The reason line FIRST when the preferred copy cannot be reached right now
+        // — "Playing your local copy (Navidrome is unreachable)" — so what the press will do is said before
+        // it is done. Empty in the ordinary case, and then this is the line it always was.
+        it.subtitle     = joinDot({ sources.reason, QObject::tr("%n track(s)", "", b->trackCount),
                                     fmtDuration(b->durationSec) });
         it.thumbnailUrl = art;
         cat.items.push_back(it);                 // no url: the surface routes it by mime, not as a file
@@ -415,7 +418,19 @@ MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& al
     {
         for (const MusicAlbumSource& s : sources.instances)
         {
-            if (s.chosen || s.albumKey.isEmpty()) continue;
+            if (s.albumKey.isEmpty()) continue;
+            // (#194, offline fallback) A copy whose supplier is not answering is LISTED — the user should
+            // see where the record lives and why it is not playing from there — but on a row of its own type
+            // that plays nothing (kMusicUnreachableType; HomeView answers it with a sentence). The chosen copy
+            // is listed only in that state: when it is reachable "Play album" above already is it.
+            if (s.unreachable)
+            {
+                cat.items.push_back(actionRow(kMusicUnreachableType, kMusicUnreachablePrefix, s.albumKey,
+                                              QObject::tr("Play from %1 (unreachable)").arg(s.label),
+                                              s.detail, art));
+                continue;
+            }
+            if (s.chosen) continue;
             cat.items.push_back(actionRow(kMusicAltSourceType, kMusicAltSourcePrefix, s.albumKey,
                                           QObject::tr("Play from %1").arg(s.label), s.detail, art));
         }

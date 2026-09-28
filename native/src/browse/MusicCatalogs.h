@@ -143,6 +143,14 @@ namespace browse
     inline const char* kMusicAltSourcePrefix  = "musicaltsource:";
     inline const char* kMusicUnmergePrefix    = "musicunmerge:";
     inline const char* kMusicMergeAlbumPrefix = "musicmergealbum:";
+    //   kMusicUnreachableType  (#194, offline fallback) a copy whose supplier is not answering right now,
+    //                          "Play from X (unreachable)". LISTED, so the user sees where the record lives and
+    //                          why it is not playing from there, but it CANNOT BE CHOSEN: activating it says
+    //                          the copy is unreachable and plays nothing. A "_" row rather than an "info" row
+    //                          because the themed column holds "info" rows back beside real ones — the mark
+    //                          would exist on the classic layout only.
+    inline const char* kMusicUnreachableType   = "_musicunreachable";
+    inline const char* kMusicUnreachablePrefix = "musicunreachable:";
 
     inline const char* kMusicPlayArtistPrefix    = "musicplayartist:";
     inline const char* kMusicShuffleArtistPrefix = "musicshuffleartist:";
@@ -290,6 +298,9 @@ namespace browse
         QString detail;         // quality facts, WHERE THEY ARE FREE — track count, and the file format when
                                 // the supplier's own rows carry one. Empty is fine and common.
         bool    chosen = false; // the instance this level is being rendered from
+        // (#194, offline fallback) This copy's supplier did not answer its last request, or there is no
+        // network at all, and the copy is not on this disk. It is shown "(unreachable)" and cannot be chosen.
+        bool    unreachable = false;
     };
 
     struct MusicAlbumSources
@@ -300,6 +311,10 @@ namespace browse
         // There are OTHER suppliers configured, so "this is the same album as…" is worth offering even though
         // nothing merged. Off by default, which is the single-source install.
         bool offerManualMerge = false;
+        // (#194, offline fallback) Why "Play album" will not open the preferred copy right now — "Playing your
+        // local copy (Navidrome is unreachable)" — or, when nothing can be reached, which source is down.
+        // Empty whenever the preferred copy is reachable, which is the ordinary case.
+        QString reason;
     };
 
     MediaCatalog musicAlbumCatalog(const MusicLibrary::Index& idx, const QString& albumKey,

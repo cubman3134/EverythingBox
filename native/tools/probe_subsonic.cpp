@@ -2421,6 +2421,301 @@ static void testServerMusicColdAlbum368(CoverStub& stub)
     CHECK(!cl.hasStreamUrl(t1));
 }
 
+// ==================================================================================================
+// #194 — THE OFFLINE FALLBACK'S INPUT, AND THE SUBSONIC QUALITY LINE
+// ==================================================================================================
+// Three questions the pure pick (probe_musicid / probe_musicsources) cannot answer on its own:
+//   1. WHERE REACHABILITY COMES FROM. Each music supplier's REAL client, asked a real question over a real
+//      socket, files the answer: a refused connection marks that supplier unreachable, and a later reply
+//      from the same box - even a 404 - marks it reachable again. Nothing pings; nothing guesses.
+//   2. WHAT THE PICKER SAYS. An unreachable copy is shown "(unreachable)" as an inert row that cannot be
+//      chosen, and the Play row carries the reason line.
+//   3. THE SUBSONIC QUALITY LINE. getAlbum's `suffix` and `bitRate` become the format and bitrate the other
+//      suppliers already report - on the tracks, and on the album only where every track agrees.
+#include "MusicReach.h"
+#include <QNetworkReply>
+
+static void testUnreachableClassifier194()
+{
+    // The network layer, the proxy, and a gateway's 5xx: the box did not answer.
+    for (QNetworkReply::NetworkError e : { QNetworkReply::ConnectionRefusedError, QNetworkReply::RemoteHostClosedError,
+                                           QNetworkReply::HostNotFoundError, QNetworkReply::TimeoutError,
+                                           QNetworkReply::OperationCanceledError, QNetworkReply::SslHandshakeFailedError,
+                                           QNetworkReply::TemporaryNetworkFailureError, QNetworkReply::UnknownNetworkError,
+                                           QNetworkReply::ProxyConnectionRefusedError, QNetworkReply::ProxyTimeoutError,
+                                           QNetworkReply::InternalServerError, QNetworkReply::ServiceUnavailableError,
+                                           QNetworkReply::UnknownServerError })
+        CHECK(MusicReach::isUnreachableError(int(e)));
+    // An answer, however unwelcome: the box is up.
+    for (QNetworkReply::NetworkError e : { QNetworkReply::NoError, QNetworkReply::ContentNotFoundError,
+                                           QNetworkReply::AuthenticationRequiredError,
+                                           QNetworkReply::ContentAccessDenied, QNetworkReply::UnknownContentError,
+                                           QNetworkReply::ProtocolFailure })
+        CHECK(!MusicReach::isUnreachableError(int(e)));
+
+    // The registry: unknown is reachable; a failure marks, a later answer clears; offline downs every remote.
+    MusicReach::reset();
+    CHECK(MusicReach::current().reaches(QStringLiteral("srv")));
+    const quint64 g0 = MusicReach::generation();
+    MusicReach::noteAnswer(QStringLiteral("srv"), int(QNetworkReply::ConnectionRefusedError));
+    CHECK(!MusicReach::current().reaches(QStringLiteral("srv")));
+    CHECK(MusicReach::generation() != g0);
+    MusicReach::noteAnswer(QStringLiteral("srv"), int(QNetworkReply::ContentNotFoundError));
+    CHECK(MusicReach::current().reaches(QStringLiteral("srv")));
+    MusicReach::setOffline(true);
+    CHECK(!MusicReach::current().reaches(QStringLiteral("srv")));
+    CHECK(MusicReach::current().reaches(QString()));   // a local copy needs no network
+    MusicReach::setOffline(false);
+    MusicReach::noteAnswer(QString(), int(QNetworkReply::ConnectionRefusedError));   // "" is never filed
+    CHECK(MusicReach::current().unreachable.isEmpty());
+    MusicReach::reset();
+}
+
+// A loopback port nothing is listening on: taken, then released.
+static quint16 deadLoopbackPort194()
+{
+    QTcpServer s;
+    if (!s.listen(QHostAddress::LocalHost, 0)) return 0;
+    const quint16 p = s.serverPort();
+    s.close();
+    return p;
+}
+
+static void testReachFromEachClient194(const QString& liveShelfId)
+{
+    const quint16 port = deadLoopbackPort194();
+    CHECK(port != 0);
+    if (port == 0) return;
+    const QString deadRoot = QStringLiteral("http://127.0.0.1:%1").arg(port);
+
+    // One of each supplier, pointed at the dead port.
+    SubsonicServer srv;
+    srv.name = QStringLiteral("Down 194"); srv.url = deadRoot;
+    srv.username = QLatin1String(kUser); srv.password = QLatin1String(kPassword); srv.allowPlainHttp = true;
+    const QString subId = SubsonicServerStore::add(srv);
+    CHECK(!subId.isEmpty());
+
+    JellyfinServer jf;
+    jf.id = QStringLiteral("fedcba9876543210fedcba9876543210"); jf.name = QStringLiteral("Down JF 194");
+    jf.url = deadRoot; jf.userId = QStringLiteral("u1"); jf.userName = QStringLiteral("probe");
+    jf.token = QLatin1String(kJfToken); jf.allowPlainHttp = true; jf.enabled = true;
+    CHECK(JellyfinServerStore::add(jf));
+
+    ServerMusicClient::Shelf live, down;
+    live.id = liveShelfId; live.name = QStringLiteral("Fixture shelf"); live.catalogId = QStringLiteral("music");
+    for (const ServerMusicClient::Shelf& s : ServerMusicClient::instance().shelves())
+        if (s.id == liveShelfId) live = s;
+    down.id = QStringLiteral("probe-shelf-down-194"); down.name = QStringLiteral("Down shelf");
+    down.baseUrl = deadRoot; down.catalogId = QStringLiteral("music");
+    ServerMusicClient::instance().setShelves({ live, down });
+
+    auto askAll = [&] {
+        int pending = 3;
+        SubsonicClient::instance().fetchAlbumTracks(
+            Subsonic::qualify(subId, Subsonic::Kind::Album, QStringLiteral("al-194")),
+            [&](const SubsonicClient::Result&) { --pending; });
+        JellyfinMusicClient::instance().fetchAlbumTracks(Jellyfin::qualify(jf.id, QStringLiteral("b194")),
+            [&](const JellyfinMusicClient::Result&) { --pending; });
+        ServerMusicClient::instance().fetchArtistAlbums(
+            ServerMusic::qualify(down.id, ServerMusic::Kind::Artist, QStringLiteral("ar-1")),
+            [&](const ServerMusicClient::Result&) { --pending; });
+        CHECK(waitFor([&] { return pending == 0; }, 15000));
+    };
+
+    MusicReach::reset();
+    askAll();
+    const MusicId::Reachability r1 = MusicReach::current();
+    std::printf("194 reach: dead port -> subsonic %d, jellyfin %d, shelf %d (0 = unreachable)\n",
+                int(r1.reaches(subId)), int(r1.reaches(jf.id)), int(r1.reaches(down.id)));
+    CHECK(!r1.reaches(subId));
+    CHECK(!r1.reaches(jf.id));
+    CHECK(!r1.reaches(down.id));
+    // Only the suppliers that failed: the live ones this probe has been talking to are untouched.
+    CHECK(r1.reaches(liveShelfId));
+
+    // THE BOX COMES BACK on the same address. A later request that gets ANY answer — the stub says 404 to
+    // every one of these — marks each supplier reachable again.
+    CoverStub back;
+    CHECK(back.listen(QHostAddress::LocalHost, port));
+    back.root = deadRoot;
+    if (!back.isListening()) return;
+    askAll();
+    const MusicId::Reachability r2 = MusicReach::current();
+    std::printf("194 reach: box back -> subsonic %d, jellyfin %d, shelf %d (1 = reachable)\n",
+                int(r2.reaches(subId)), int(r2.reaches(jf.id)), int(r2.reaches(down.id)));
+    CHECK(r2.reaches(subId));
+    CHECK(r2.reaches(jf.id));
+    CHECK(r2.reaches(down.id));
+    CHECK(r2.unreachable.isEmpty());
+
+    ServerMusicClient::instance().setShelves({ live });
+    MusicReach::reset();
+}
+
+static void testQualityLine194()
+{
+    const QString A = QStringLiteral("5e5e5e5e-1111-4222-8333-194194194194");
+    auto albumWith = [&](const char* songsXml) {
+        Subsonic::RemoteArtist ra; ra.id = QStringLiteral("ar-1"); ra.name = QStringLiteral("Amber");
+        MusicLibrary::Index idx = Subsonic::indexOfArtists(A, { ra });
+        Subsonic::RemoteAlbum rb; rb.id = QStringLiteral("al-9"); rb.name = QStringLiteral("Tideline");
+        rb.artist = QStringLiteral("Amber");
+        Subsonic::fillArtistAlbums(idx, A, idx.artists.at(0).key, { rb });
+        Subsonic::fillAlbumTracks(idx, A, idx.artists.at(0).albums.at(0).key,
+                                  Subsonic::readSongs(parsedOk(songsXml)));
+        return idx.artists.at(0).albums.at(0);
+    };
+
+    // The parse: both fields, as the server spells them (bitRate is kbps already).
+    {
+        const QVector<Subsonic::RemoteSong> s = Subsonic::readSongs(parsedOk(
+            "<subsonic-response status=\"ok\"><album id=\"al-9\">"
+            "<song id=\"s-1\" title=\"A\" track=\"1\" suffix=\"flac\" bitRate=\"1011\"/>"
+            "<song id=\"s-2\" title=\"B\" track=\"2\"/>"
+            "</album></subsonic-response>"));
+        CHECK(s.size() == 2);
+        CHECK(s[0].suffix == QStringLiteral("flac") && s[0].bitRateKbps == 1011);
+        CHECK(s[1].suffix.isEmpty() && s[1].bitRateKbps == 0);   // MISSING: nothing, not a guess
+    }
+    // The JSON spelling of the same reply reads the same.
+    {
+        const QVector<Subsonic::RemoteSong> s = Subsonic::readSongs(parsedOk(
+            "{\"subsonic-response\":{\"status\":\"ok\",\"album\":{\"id\":\"al-9\",\"song\":["
+            "{\"id\":\"s-1\",\"title\":\"A\",\"track\":1,\"suffix\":\"mp3\",\"bitRate\":320}]}}}"));
+        CHECK(s.size() == 1 && s[0].suffix == QStringLiteral("mp3") && s[0].bitRateKbps == 320);
+    }
+
+    // formatOfSuffix: a plain extension, upper-cased; anything else claims nothing.
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral("flac")) == QStringLiteral("FLAC"));
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral(" Opus ")) == QStringLiteral("OPUS"));
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral("m4a")) == QStringLiteral("M4A"));
+    CHECK(Subsonic::formatOfSuffix(QString()).isEmpty());
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral("mp3?x=1")).isEmpty());
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral("../a")).isEmpty());
+    CHECK(Subsonic::formatOfSuffix(QStringLiteral("toolongext")).isEmpty());
+
+    // An album whose tracks agree: the album claims it, and so does each track.
+    {
+        const MusicLibrary::Album b = albumWith(
+            "<subsonic-response status=\"ok\"><album id=\"al-9\">"
+            "<song id=\"s-2\" title=\"B\" track=\"2\" suffix=\"flac\" bitRate=\"1011\"/>"
+            "<song id=\"s-1\" title=\"A\" track=\"1\" suffix=\"FLAC\" bitRate=\"1011\"/>"
+            "</album></subsonic-response>");
+        std::printf("194 quality: agreeing album -> format '%s' bitrate %d\n",
+                    qPrintable(b.format), b.bitrateKbps);
+        CHECK(b.format == QStringLiteral("FLAC"));
+        CHECK(b.bitrateKbps == 1011);
+        CHECK(b.tracks.size() == 2 && b.tracks[0].format == QStringLiteral("FLAC") && b.tracks[0].bitrateKbps == 1011);
+    }
+    // Missing everywhere: nothing on the album or its tracks — the line stays the track count alone.
+    {
+        const MusicLibrary::Album b = albumWith(
+            "<subsonic-response status=\"ok\"><album id=\"al-9\">"
+            "<song id=\"s-1\" title=\"A\" track=\"1\"/><song id=\"s-2\" title=\"B\" track=\"2\"/>"
+            "</album></subsonic-response>");
+        CHECK(b.format.isEmpty() && b.bitrateKbps == 0);
+        CHECK(b.tracks.size() == 2 && b.tracks[0].format.isEmpty() && b.tracks[0].bitrateKbps == 0);
+    }
+    // Tracks that disagree: the album claims NEITHER fact that differs, and keeps the one that agrees.
+    {
+        const MusicLibrary::Album b = albumWith(
+            "<subsonic-response status=\"ok\"><album id=\"al-9\">"
+            "<song id=\"s-1\" title=\"A\" track=\"1\" suffix=\"flac\" bitRate=\"320\"/>"
+            "<song id=\"s-2\" title=\"B\" track=\"2\" suffix=\"mp3\" bitRate=\"320\"/>"
+            "</album></subsonic-response>");
+        CHECK(b.format.isEmpty());
+        CHECK(b.bitrateKbps == 320);
+        const MusicLibrary::Album c = albumWith(
+            "<subsonic-response status=\"ok\"><album id=\"al-9\">"
+            "<song id=\"s-1\" title=\"A\" track=\"1\" suffix=\"flac\" bitRate=\"900\"/>"
+            "<song id=\"s-2\" title=\"B\" track=\"2\" suffix=\"flac\"/>"
+            "</album></subsonic-response>");
+        CHECK(c.format == QStringLiteral("FLAC"));
+        CHECK(c.bitrateKbps == 0);   // one track did not say: the album cannot claim a number
+    }
+}
+
+static void testPickerMarksUnreachable194()
+{
+    const QString A = QStringLiteral("5e5e5e5e-1111-4222-8333-194194194195");
+    Subsonic::RemoteArtist ra; ra.id = QStringLiteral("ar-1"); ra.name = QStringLiteral("Fixture Band");
+    MusicLibrary::Index idx = Subsonic::indexOfArtists(A, { ra });
+    Subsonic::RemoteAlbum rb; rb.id = QStringLiteral("al-1"); rb.name = QStringLiteral("Offline Album");
+    rb.artist = QStringLiteral("Fixture Band"); rb.songCount = 3;
+    Subsonic::fillArtistAlbums(idx, A, idx.artists.at(0).key, { rb });
+    const QString key = idx.artists.at(0).albums.at(0).key;
+
+    auto rowsOf = [](const MediaCatalog& c, const QString& type) {
+        QVector<MediaItem> out;
+        for (const MediaItem& it : c.items) if (it.type == type) out.push_back(it);
+        return out;
+    };
+
+    // Everything reachable: the level is exactly what it was.
+    browse::MusicAlbumSources ok;
+    ok.instances.push_back({ key, QStringLiteral("Navidrome"), QString(), true, false });
+    ok.instances.push_back({ QStringLiteral("L\x1F""t\x1F""x"), QStringLiteral("This device"), QString(), false, false });
+    const MediaCatalog c0 = browse::musicAlbumCatalog(idx, key, {}, ok);
+    const QString unreachableType = QString::fromLatin1(browse::kMusicUnreachableType);
+    CHECK(rowsOf(c0, QString::fromLatin1(browse::kMusicAltSourceType)).size() == 1);
+    CHECK(rowsOf(c0, unreachableType).isEmpty());
+    const QString playSubtitle0 = c0.items.isEmpty() ? QString() : c0.items.first().subtitle;
+
+    // The preferred copy is down and the local one plays: the Play row says so, the down copy is listed
+    // "(unreachable)" on a row that plays nothing, and the reachable one is still a real choice. Not an
+    // "info" row: the themed column holds those back beside real rows, so the mark would be classic-only.
+    browse::MusicAlbumSources fb = ok;
+    fb.instances[0].unreachable = true;
+    fb.reason = QStringLiteral("Playing your local copy (Navidrome is unreachable)");
+    const MediaCatalog c1 = browse::musicAlbumCatalog(idx, key, {}, fb);
+    CHECK(!c1.items.isEmpty() && c1.items.first().type == QString::fromLatin1(browse::kMusicPlayAlbumType));
+    CHECK(!c1.items.isEmpty() && c1.items.first().subtitle.startsWith(fb.reason));
+    CHECK(!c1.items.isEmpty() && c1.items.first().subtitle != playSubtitle0);
+    const QVector<MediaItem> info1 = rowsOf(c1, unreachableType);
+    CHECK(info1.size() == 1);
+    CHECK(!info1.isEmpty() && info1.first().title == QStringLiteral("Play from Navidrome (unreachable)"));
+    CHECK(!info1.isEmpty() && info1.first().url.isEmpty());   // no file to open
+    CHECK(rowsOf(c1, QStringLiteral("info")).isEmpty());      // never held back on the themed column
+    CHECK(rowsOf(c1, QString::fromLatin1(browse::kMusicAltSourceType)).size() == 1);
+
+    // A NON-preferred copy that is down: marked, and cannot be chosen — no alt-source row for it at all.
+    browse::MusicAlbumSources other = ok;
+    other.instances[1].unreachable = true;
+    const MediaCatalog c2 = browse::musicAlbumCatalog(idx, key, {}, other);
+    CHECK(rowsOf(c2, QString::fromLatin1(browse::kMusicAltSourceType)).isEmpty());
+    const QVector<MediaItem> info2 = rowsOf(c2, unreachableType);
+    CHECK(info2.size() == 1 && info2.first().title == QStringLiteral("Play from This device (unreachable)"));
+    CHECK(!c2.items.isEmpty() && c2.items.first().subtitle == playSubtitle0);   // no reason: nothing fell back
+}
+
+// The host wiring, pinned the way #417's doors are: the ONE door every album play goes through asks the
+// reachability gate before it opens anything, and files a fallback play under the names the gate chose.
+static void testHostWired194()
+{
+    QFile hv(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/ui/HomeView.cpp"));
+    CHECK(hv.open(QIODevice::ReadOnly));
+    const QString h = QString::fromUtf8(hv.readAll()).remove(QLatin1Char('\r'));
+    QFile mw(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/ui/MainWindow.cpp"));
+    CHECK(mw.open(QIODevice::ReadOnly));
+    const QString m = QString::fromUtf8(mw.readAll()).remove(QLatin1Char('\r'));
+    // The gate is the FIRST thing openMusicAlbum does — ahead of the index lookup that builds the queue.
+    const int door = m.indexOf(QStringLiteral("void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPath)"));
+    CHECK(door >= 0);
+    const int gate  = m.indexOf(QStringLiteral("if (home_ && home_->divertMusicAlbumPlay(albumKey, startPath)) return;"), door);
+    const int build = m.indexOf(QStringLiteral("MusicSupply::indexFor(albumKey).album(albumKey)"), door);
+    CHECK(gate > door && build > gate);
+    CHECK(m.contains(QStringLiteral("home_->takeMusicPlayAliases(albumKey)")));
+    CHECK(m.contains(QStringLiteral("adoptMusicPlayAliases(urlAliases);")));
+    // ...and every decision the gate makes comes back through the door marked as decided, never around it.
+    CHECK(h.contains(QStringLiteral("bool HomeView::divertMusicAlbumPlay(const QString& albumKey, const QString& startPath)")));
+    CHECK(h.contains(QStringLiteral("passMusicAlbumPlay(key, MusicFallback::startFor(p, startPath));")));
+    // ...and a copy marked unreachable plays NOTHING when pressed: its type is answered with a sentence.
+    const int at = h.indexOf(QStringLiteral("if (it.type == QString::fromLatin1(browse::kMusicUnreachableType))"));
+    CHECK(at >= 0);
+    const QString arm = at >= 0 ? h.mid(at, 200) : QString();
+    CHECK(arm.contains(QStringLiteral("showToast(")) && !arm.contains(QStringLiteral("playMusic")));
+}
+
 static void testCoverAnswers370()
 {
     CoverStub stub;
@@ -2450,6 +2745,7 @@ static void testCoverAnswers370()
     testCoverStateHoldsNoCredential(stub, serverId);
     testCoverAnswerRules();
     testServerMusicColdAlbum368(stub);   // last: it re-lists the shelf, which the cover cases above read as cold
+    testReachFromEachClient194(QLatin1String(kShelfId));   // #194: after every cover case; it re-points the shelf list
 }
 
 // ==================================================================================================
@@ -3060,6 +3356,10 @@ int main(int argc, char** argv)
     test193();
     // ---- #417: a queue entry prefers its downloaded copy when it is OPENED, not when it was built ------
     test417();
+    testUnreachableClassifier194();
+    testQualityLine194();
+    testPickerMarksUnreachable194();
+    testHostWired194();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");

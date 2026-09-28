@@ -21,6 +21,7 @@
 // Prints MUSICSOURCES-OK on success; any failure prints MUSICSOURCES-FAIL <cond> and exits non-zero.
 #include "Jellyfin.h"
 #include "JellyfinMusic.h"
+#include "MusicFallback.h"
 #include "MusicId.h"
 #include "MusicMerge.h"
 #include "MusicRemap.h"
@@ -30,6 +31,8 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QSet>
+#include <algorithm>
 #include <QFile>
 #include <QString>
 #include <QStringList>
@@ -650,8 +653,9 @@ int main(int argc, char** argv)
         CHECK(loB != nullptr);
         CHECK(MusicMerge::qualityBits(*loB) == QStringList({ QStringLiteral("FLAC") }));
 
-        // A SUBSONIC copy reports no container through the API this app uses, so it claims NOTHING. A
-        // picker that guessed here would be inventing the one distinction it exists to draw.
+        // A SUBSONIC copy whose songs carry no `suffix` / `bitRate` claims NOTHING (this fixture's tracks
+        // were never fetched). A picker that guessed here would be inventing the one distinction it exists
+        // to draw. What a copy whose songs DO say claims is probe_subsonic's testQualityLine194.
         const MusicLibrary::Album* suB = albumIn(sub, subTen);
         CHECK(suB != nullptr);
         CHECK(MusicMerge::qualityBits(*suB).isEmpty());
@@ -690,6 +694,179 @@ int main(int argc, char** argv)
         const MusicLibrary::Album* mxB = albumIn(mixed, mixedKey);
         CHECK(mxB != nullptr && mxB->format.isEmpty() && mxB->bitrateKbps == 0);
         CHECK(MusicMerge::qualityBits(*mxB).isEmpty());
+    }
+
+    // =====================================================================================================
+    // 10. THE OFFLINE FALLBACK (#194): a merged album whose preferred copy cannot be reached plays from one
+    //     that can — under the merged record's own track names, without moving the row or anything banked.
+    // =====================================================================================================
+    {
+        const QString subA = QStringLiteral("0a0a0a0a-1111-4222-8333-444444444444");
+        const QString subB = QStringLiteral("0b0b0b0b-1111-4222-8333-444444444444");
+        // The same record in three places: this disk, Navidrome A (preferred), and Navidrome B.
+        MusicLibrary::Index loc;
+        const QString locKey = QStringLiteral("FB\x1F""t\x1F""offline album");
+        loc.artists.push_back(mkArtist(QStringLiteral("fixture band"), QStringLiteral("Fixture Band"),
+            { mkAlbum(locKey, QStringLiteral("Fixture Band"), QStringLiteral("Offline Album"), 2020, 3,
+                      QStringLiteral("C:/Music/Fixture Band/Offline Album/0")) }));
+        auto serverIndex = [](const QString& srv, const char* prefix) {
+            Subsonic::RemoteArtist ra; ra.id = QStringLiteral("ar-1"); ra.name = QStringLiteral("Fixture Band");
+            MusicLibrary::Index idx = Subsonic::indexOfArtists(srv, { ra });
+            Subsonic::RemoteAlbum rb; rb.id = QStringLiteral("al-1"); rb.name = QStringLiteral("Offline Album");
+            rb.artist = QStringLiteral("Fixture Band"); rb.year = 2020; rb.songCount = 3;
+            Subsonic::fillArtistAlbums(idx, srv, idx.artists.at(0).key, { rb });
+            QVector<Subsonic::RemoteSong> songs;
+            static const char* names[] = { "Once", "Even Flow", "Alive" };
+            for (int i = 1; i <= 3; ++i)
+            {
+                Subsonic::RemoteSong s;
+                s.id = QString::fromLatin1(prefix) + QString::number(i);
+                s.title = QString::fromLatin1(names[i - 1]); s.track = i; s.disc = 1;
+                songs.push_back(s);
+            }
+            // The server lists them out of order; the index sorts them. The match is by number, not position.
+            std::reverse(songs.begin(), songs.end());
+            Subsonic::fillAlbumTracks(idx, srv, idx.artists.at(0).albums.at(0).key, songs);
+            return idx;
+        };
+        const MusicLibrary::Index a = serverIndex(subA, "tr-");
+        const MusicLibrary::Index b = serverIndex(subB, "tb-");
+        const QString aKey = a.artists.at(0).albums.at(0).key;
+        const QString bKey = b.artists.at(0).albums.at(0).key;
+
+        const QVector<MusicMerge::Source> srcs3{ { QString(), &loc }, { subA, &a }, { subB, &b } };
+        const MusicMerge::Merged m = MusicMerge::merge(srcs3, subA);
+        const QStringList inst = m.albumInstances(aKey);
+        CHECK(inst.size() == 3 && inst.first() == aKey);   // the row is keyed on the preferred copy
+
+        auto tracksOf = [](const MusicLibrary::Album* al) {
+            QVector<MusicRemap::TrackId> out;
+            if (al) for (const MusicLibrary::IndexTrack& t : al->tracks)
+                out.push_back(MusicRemap::TrackId{ t.track, t.title, QString(), t.path });
+            return out;
+        };
+        const QVector<const MusicLibrary::Index*> byKey{ &loc, &a, &b };
+        auto copiesOf = [&](const QStringList& keys, const QSet<QString>& onDisk) {
+            QVector<MusicFallback::Copy> out;
+            for (const QString& k : keys)
+            {
+                MusicFallback::Copy c;
+                c.key = k; c.sourceId = m.sourceOf.value(k); c.onDisk = onDisk.contains(k);
+                for (const MusicLibrary::Index* ix : byKey)
+                    if (const MusicLibrary::Album* al = albumIn(*ix, k)) c.tracks = tracksOf(al);
+                out.push_back(c);
+            }
+            return out;
+        };
+        const QVector<MusicFallback::Copy> copies = copiesOf(inst, {});
+        auto downSet = [](const QStringList& ids) {
+            MusicId::Reachability r;
+            for (const QString& id : ids) r.unreachable.insert(id);
+            return r;
+        };
+        const QString aT1 = Subsonic::qualify(subA, Subsonic::Kind::Track, QStringLiteral("tr-1"));
+        const QString aT2 = Subsonic::qualify(subA, Subsonic::Kind::Track, QStringLiteral("tr-2"));
+        const QString aT3 = Subsonic::qualify(subA, Subsonic::Kind::Track, QStringLiteral("tr-3"));
+        const QString lT1 = QStringLiteral("C:/Music/Fixture Band/Offline Album/01.flac");
+        const QString lT2 = QStringLiteral("C:/Music/Fixture Band/Offline Album/02.flac");
+        const QString lT3 = QStringLiteral("C:/Music/Fixture Band/Offline Album/03.flac");
+
+        // The merge-side remap table before anything went down: what "no remap triggered" is measured against.
+        auto groupsOf = [&](const MusicMerge::Merged& mm) {
+            QVector<MusicRemap::AlbumGroup> gs;
+            for (auto it = mm.albumGroup.constBegin(); it != mm.albumGroup.constEnd(); ++it)
+            {
+                MusicRemap::AlbumGroup g;
+                for (const MusicFallback::Copy& c : copiesOf(it.value(), {}))
+                    g.instances.push_back(MusicRemap::Instance{ c.key, c.tracks });
+                gs.push_back(g);
+            }
+            return gs;
+        };
+        const QHash<QString, QString> tableBefore = MusicRemap::tableFor(groupsOf(m)).map;
+
+        // PREFERRED REACHABLE -> UNCHANGED: the preferred copy, no identities, no reason.
+        {
+            const MusicFallback::Plan p = MusicFallback::plan(copies, subA, MusicId::Reachability{});
+            CHECK(p.via == MusicFallback::Via::Preferred && !p.fallback() && p.pick.index == 0);
+            CHECK(p.identities.isEmpty());
+            CHECK(MusicFallback::startFor(p, aT2) == aT2);
+            // Server B being down is nothing to do with it.
+            CHECK(MusicFallback::plan(copies, subA, downSet({ subB })).pick.index == 0);
+        }
+
+        // PREFERRED UNREACHABLE, WITH A LOCAL COPY -> THE LOCAL COPY, filed under A's track names.
+        {
+            const MusicFallback::Plan p = MusicFallback::plan(copies, subA, downSet({ subA }));
+            CHECK(p.fallback() && p.via == MusicFallback::Via::Local);
+            CHECK(copies.at(p.pick.index).key == locKey);
+            CHECK(copies.at(p.pick.preferred).key == aKey);
+            // IDENTITY FIELDS UNCHANGED BY A FALLBACK: every local track answers to the merged record's own
+            // track — the one its resume position, listening seconds and speed are already filed under.
+            CHECK(p.identities.size() == 3);
+            CHECK(p.identities.value(lT1) == aT1);
+            CHECK(p.identities.value(lT2) == aT2);
+            CHECK(p.identities.value(lT3) == aT3);
+            // ...and a track row pressed on the album page (it names A's track) starts the queue there.
+            CHECK(MusicFallback::startFor(p, aT2) == lT2);
+            CHECK(MusicFallback::startFor(p, QString()).isEmpty());
+            CHECK(MusicFallback::startFor(p, QStringLiteral("sub\x1Fnope")).isEmpty());
+        }
+
+        // PREFERRED UNREACHABLE, NO LOCAL COPY, A DOWNLOADED ONE -> THE DOWNLOAD.
+        {
+            const QVector<MusicFallback::Copy> noLocal = copiesOf({ aKey, bKey }, { bKey });
+            const MusicFallback::Plan p = MusicFallback::plan(noLocal, subA, downSet({ subA, subB }));
+            CHECK(p.fallback() && p.via == MusicFallback::Via::Downloaded && p.pick.index == 1);
+            CHECK(p.identities.value(Subsonic::qualify(subB, Subsonic::Kind::Track, QStringLiteral("tb-2"))) == aT2);
+            // THE PREFERRED COPY DOWNLOADED WHOLE plays itself, server or no server.
+            const QVector<MusicFallback::Copy> ownDl = copiesOf({ aKey, locKey }, { aKey });
+            const MusicFallback::Plan q = MusicFallback::plan(ownDl, subA, downSet({ subA }));
+            CHECK(!q.fallback() && q.via == MusicFallback::Via::Preferred && q.pick.index == 0);
+        }
+
+        // ONLY ANOTHER SERVER REACHABLE -> THAT SERVER.
+        {
+            const QVector<MusicFallback::Copy> noLocal = copiesOf({ aKey, bKey }, {});
+            const MusicFallback::Plan p = MusicFallback::plan(noLocal, subA, downSet({ subA }));
+            CHECK(p.fallback() && p.via == MusicFallback::Via::Server && p.pick.index == 1);
+            CHECK(p.identities.value(Subsonic::qualify(subB, Subsonic::Kind::Track, QStringLiteral("tb-3"))) == aT3);
+        }
+
+        // NONE REACHABLE -> NOTHING, naming the preferred copy's source.
+        {
+            const QVector<MusicFallback::Copy> noLocal = copiesOf({ aKey, bKey }, {});
+            const MusicFallback::Plan p = MusicFallback::plan(noLocal, subA, downSet({ subA, subB }));
+            CHECK(p.via == MusicFallback::Via::Nothing && p.pick.none());
+            CHECK(p.pick.preferred == 0 && noLocal.at(p.pick.preferred).sourceId == subA);
+            CHECK(p.identities.isEmpty());
+        }
+
+        // A PREFERRED COPY WHOSE TRACK LIST WAS NEVER FETCHED: the local copy still plays, and nothing is
+        // guessed about names — the ordinary merge remap moves such a record once both lists are known.
+        {
+            QVector<MusicFallback::Copy> cold = copies;
+            cold[0].tracks.clear();
+            const MusicFallback::Plan p = MusicFallback::plan(cold, subA, downSet({ subA }));
+            CHECK(p.via == MusicFallback::Via::Local && p.identities.isEmpty());
+        }
+
+        // NO REMAP TRIGGERED. The row is still keyed on A whatever is reachable (merge() never reads
+        // reachability), so the merge-side remap table is byte-for-byte what it was — nothing banked moves
+        // to the local copy while the server is down, and nothing has to move back when it returns.
+        {
+            const MusicMerge::Merged again = MusicMerge::merge(srcs3, subA);
+            CHECK(again.albumInstances(aKey) == inst);
+            CHECK(MusicRemap::tableFor(groupsOf(again)).map == tableBefore);
+            // The fallback's names only ever point AT the merged record's tracks, never away from them: no
+            // track of A is a source in it, so handing it to the player cannot re-file anything of A's.
+            const MusicFallback::Plan p = MusicFallback::plan(copies, subA, downSet({ subA }));
+            for (auto it = p.identities.cbegin(); it != p.identities.cend(); ++it)
+            {
+                CHECK(!Subsonic::isQualified(it.key()) || Subsonic::serverOf(it.key()) != subA);
+                CHECK(it.value() == aT1 || it.value() == aT2 || it.value() == aT3);
+            }
+        }
     }
 
     // ---- ONE SUPPLIER COUNT, TWO THRESHOLDS (issue #384) ----------------------------------------------------

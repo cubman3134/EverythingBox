@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.341 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.342 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -809,6 +809,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         # seconds, a speed, a sync offset) onto the copy the preference now picks, so changing
         # "Play music from" does not strand it under the previous pick (#194 increment 2).
         src/core/MusicRemap.cpp          src/core/MusicRemap.h
+        # ...and when a merged album's preferred server is not answering, MusicReach says so (from the
+        # suppliers' own replies) and MusicFallback plans the play from a copy that can be reached (#194).
+        src/core/MusicReach.h            src/core/MusicFallback.h
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -994,6 +997,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowTimelineMarks.cpp
         src/ui/TimelineMarks.h   # the pure time -> pixel geometry both bars lay their marks out with
         src/ui/MainWindowPlayOn.cpp                        # "Play on device" MainWindow members, off the busiest TU (#143)
+        src/ui/MainWindowMusicFallback.cpp                 # the offline fallback's MainWindow member (#194)
         src/ui/MainWindowLaunchWatch.cpp                   # store-launch play time: the MainWindow half (#61)
         src/ui/MainWindowCast.cpp                          # casting a local file: the MainWindow half (#72)
         src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)

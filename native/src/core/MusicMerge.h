@@ -115,12 +115,16 @@ namespace MusicMerge
     // display order, and returns an EMPTY LIST rather than a guess when it cannot claim any:
     //
     //   * a supplier that filled Album::format / Album::bitrateKbps (Jellyfin's MediaSources, the server
-    //     shelf's own meta) is simply believed;
+    //     shelf's own meta, a Subsonic server's getAlbum `suffix` and `bitRate`) is simply believed;
     //   * a LOCAL copy has neither field set (MusicLibrary.h says why), so the format is derived from the
     //     first track's `sourcePath` extension — which is exact, and is what the album level already showed
     //     before this increment existed;
-    //   * anything else contributes nothing. A Subsonic album reports no container at all through the API
-    //     this app uses, so its line stays the track count alone, which is the truth.
+    //   * anything else contributes nothing. A SUBSONIC album contributes what its songs say once its track
+    //     list has been fetched (#194): the format each song's `suffix` names and the server's `bitRate`,
+    //     set on the album only where every track agrees (Subsonic::fillAlbumTracks). Before that fetch —
+    //     and for a server that sends neither field — its line stays the track count alone, which is the
+    //     truth. The bitrate is the FILE's: a stream capped by "Server streaming quality" (#193) is
+    //     converted on the fly and is not what the copy is.
     //
     // A path is recognised BY SHAPE — it holds a directory separator and no 0x1F — rather than by asking a
     // protocol module whether the key is one of its own. That keeps this file free of every supplier

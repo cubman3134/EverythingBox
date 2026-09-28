@@ -479,6 +479,7 @@ QVector<Subsonic::RemoteSong> Subsonic::readSongs(const Node& root)
         s.disc        = n->attrInt(QStringLiteral("discNumber"));
         s.year        = n->attrInt(QStringLiteral("year"));
         s.durationSec = n->attrInt(QStringLiteral("duration"));
+        s.bitRateKbps = n->attrInt(QStringLiteral("bitRate"));
         if (s.id.isEmpty()) continue;
         // A "child" row can be a FOLDER (getMusicDirectory lists both). A directory has no duration and no
         // suffix and must never reach a queue as if it were audio.
@@ -580,6 +581,17 @@ void Subsonic::adoptAlbum(MusicLibrary::Index& idx, const QString& serverId, con
     fillAlbumTracks(idx, serverId, albumKey, songs);
 }
 
+QString Subsonic::formatOfSuffix(const QString& suffix)
+{
+    // A plain extension or nothing. The picker's line exists to tell a FLAC from a 128k MP3, so a value that
+    // is not recognisably an extension is an absence, never a badge.
+    const QString s = suffix.trimmed();
+    if (s.isEmpty() || s.size() > 8) return QString();
+    for (const QChar c : s)
+        if (!(c.isLetterOrNumber() && c.unicode() < 0x80)) return QString();
+    return s.toUpper();
+}
+
 void Subsonic::fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId, const QString& albumKey,
                                const QVector<RemoteSong>& songs)
 {
@@ -591,6 +603,12 @@ void Subsonic::fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId
 
     QVector<MusicLibrary::IndexTrack> tracks;
     int maxDisc = 1;
+    // (#194) What this copy IS, as one claim about the record — only where every track agrees. The same
+    // rule JellyfinMusic::fillAlbumTracks applies, for the same reason: one MP3 among the FLACs makes "a
+    // FLAC copy" false, and a picker that said it would be telling the user the opposite of the truth.
+    QString format;
+    int     bitrate = 0;
+    bool    first = true, formatAgrees = true, bitrateAgrees = true;
     for (const RemoteSong& s : songs)
     {
         const QString path = qualify(serverId, Kind::Track, s.id);
@@ -608,6 +626,14 @@ void Subsonic::fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId
         t.track       = s.track;
         t.durationSec = s.durationSec;
         t.hasCover    = false;   // there is no local file to re-read art out of; the cover is fetched
+        t.format      = formatOfSuffix(s.suffix);
+        t.bitrateKbps = s.bitRateKbps > 0 ? s.bitRateKbps : 0;
+        if (first) { format = t.format; bitrate = t.bitrateKbps; first = false; }
+        else
+        {
+            if (t.format != format)       formatAgrees = false;
+            if (t.bitrateKbps != bitrate) bitrateAgrees = false;
+        }
         if (s.disc > maxDisc) maxDisc = s.disc;
         tracks.push_back(t);
     }
@@ -628,6 +654,8 @@ void Subsonic::fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId
     // Now that the tracks are here, the count is the tracks themselves — so a server that under-reported
     // songCount cannot leave a subtitle disagreeing with the list under it.
     target->trackCount = int(tracks.size());
+    target->format      = formatAgrees ? format : QString();
+    target->bitrateKbps = bitrateAgrees ? bitrate : 0;
     int secs = 0;
     for (const MusicLibrary::IndexTrack& t : tracks) secs += t.durationSec;
     if (secs > 0) target->durationSec = secs;
@@ -677,6 +705,8 @@ MusicLibrary::IndexTrack songRow(const QString& serverId, const Subsonic::Remote
     t.track       = s.track;
     t.durationSec = s.durationSec;
     t.hasCover    = false;
+    t.format      = Subsonic::formatOfSuffix(s.suffix);            // #194: what the server says it holds
+    t.bitrateKbps = s.bitRateKbps > 0 ? s.bitRateKbps : 0;
     return t;
 }
 
