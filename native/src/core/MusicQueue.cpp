@@ -63,18 +63,8 @@ QVector<Entry> forLibrary(const MusicLibrary::Index& idx)
     return out;
 }
 
-void shuffle(QVector<Entry>& q, quint32 seed)
-{
-    QRandomGenerator rng(seed);
-    for (int i = q.size() - 1; i > 0; --i)
-    {
-        // ANY slot at or below i — the whole queue, not this track's record. Restricting the draw to the run
-        // of entries sharing q[i]'s album is what a per-album shuffle is, and it produces a queue that never
-        // crosses a record boundary, which is the case this feature exists to create.
-        const int j = int(rng.bounded(quint32(i + 1)));
-        if (j != i) std::swap(q[i], q[j]);
-    }
-}
+// shuffle() is defined in the header (#465): probe_musicsources shuffles a fallback artist queue with the
+// very same function, and it cannot link this file (Index::artist/album live in MusicLibrary.cpp).
 
 quint32 randomSeed() { return QRandomGenerator::global()->generate(); }
 

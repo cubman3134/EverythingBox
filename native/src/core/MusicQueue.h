@@ -43,8 +43,10 @@
 #pragma once
 #include "MusicLibrary.h"
 
+#include <QRandomGenerator>
 #include <QString>
 #include <QVector>
+#include <utility>
 
 namespace MusicQueue
 {
@@ -80,7 +82,20 @@ namespace MusicQueue
     QVector<Entry> forLibrary(const MusicLibrary::Index& idx);
 
     // Fisher-Yates over the WHOLE queue, in place. Deterministic in `seed`. A queue of 0 or 1 is a no-op.
-    void shuffle(QVector<Entry>& q, quint32 seed);
+    // Inline, not in MusicQueue.cpp, so a pure probe that cannot link the index lookups can call the SAME
+    // shuffle the app does (#465: an artist queue built from fallback copies is shuffled by this, unchanged).
+    inline void shuffle(QVector<Entry>& q, quint32 seed)
+    {
+        QRandomGenerator rng(seed);
+        for (int i = int(q.size()) - 1; i > 0; --i)
+        {
+            // ANY slot at or below i — the whole queue, not this track's record. Restricting the draw to the
+            // run of entries sharing q[i]'s album is what a per-album shuffle is, and it produces a queue that
+            // never crosses a record boundary, which is the case this feature exists to create.
+            const int j = int(rng.bounded(quint32(i + 1)));
+            if (j != i) std::swap(q[i], q[j]);
+        }
+    }
 
     // A fresh seed from the process RNG. Separated from shuffle() so the pure function has no hidden input.
     quint32 randomSeed();

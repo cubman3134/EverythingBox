@@ -24,6 +24,7 @@
 #include "MusicFallback.h"
 #include "MusicId.h"
 #include "MusicMerge.h"
+#include "MusicQueue.h"
 #include "MusicRemap.h"
 #include "MusicSuppliers.h"
 #include "ServerMusic.h"
@@ -866,6 +867,333 @@ int main(int argc, char** argv)
                 CHECK(!Subsonic::isQualified(it.key()) || Subsonic::serverOf(it.key()) != subA);
                 CHECK(it.value() == aT1 || it.value() == aT2 || it.value() == aT3);
             }
+        }
+    }
+
+    // =====================================================================================================
+    // 11. A WHOLE ARTIST (#465): "Play all" / "Shuffle all" on a merged artist pick EACH record's copy through
+    //     the album rule above, skip (and name) a record nothing can play, and bound what they wait for.
+    // =====================================================================================================
+    {
+        const QString nav  = QStringLiteral("0c0c0c0c-1111-4222-8333-444444444444");   // "Navidrome", preferred
+        const QString nav2 = QStringLiteral("0d0d0d0d-1111-4222-8333-444444444444");   // a second server
+        const QString band = QStringLiteral("Fixture Band");
+        // This disk holds two of the band's records; Navidrome holds those two AND a third.
+        const QString lA = QStringLiteral("FB\x1F""t\x1F""album a"), lB = QStringLiteral("FB\x1F""t\x1F""album b");
+        MusicLibrary::Index loc;
+        loc.artists.push_back(mkArtist(QStringLiteral("fixture band"), band,
+            { mkAlbum(lA, band, QStringLiteral("Album A"), 2018, 3, QStringLiteral("C:/Music/FB/A/0")),
+              mkAlbum(lB, band, QStringLiteral("Album B"), 2019, 3, QStringLiteral("C:/Music/FB/B/0")) }));
+        // A Subsonic server's copy of the band. Record "Album X" has id al-x and year 2018 + (X - 'A').
+        auto serverIndex = [&band](const QString& srv, const QStringList& titles, bool withTracks) {
+            Subsonic::RemoteArtist ra; ra.id = QStringLiteral("ar-9"); ra.name = band;
+            MusicLibrary::Index idx = Subsonic::indexOfArtists(srv, { ra });
+            QVector<Subsonic::RemoteAlbum> rbs;
+            for (const QString& title : titles)
+            {
+                const int n = title.back().toLatin1() - 'A';
+                Subsonic::RemoteAlbum rb;
+                rb.id = QStringLiteral("al-") + QChar(QLatin1Char(char('a' + n)));
+                rb.name = title; rb.artist = band; rb.year = 2018 + n; rb.songCount = 3;
+                rbs.push_back(rb);
+            }
+            Subsonic::fillArtistAlbums(idx, srv, idx.artists.at(0).key, rbs);
+            if (withTracks)
+                for (const Subsonic::RemoteAlbum& rb : rbs)
+                {
+                    QVector<Subsonic::RemoteSong> songs;
+                    static const char* names[] = { "Once", "Even Flow", "Alive" };
+                    for (int t = 1; t <= 3; ++t)
+                    {
+                        Subsonic::RemoteSong s;
+                        s.id = rb.id + QStringLiteral("-") + QString::number(t);
+                        s.title = QString::fromLatin1(names[t - 1]); s.track = t; s.disc = 1;
+                        songs.push_back(s);
+                    }
+                    Subsonic::fillAlbumTracks(idx, srv, Subsonic::qualify(srv, Subsonic::Kind::Album, rb.id), songs);
+                }
+            return idx;
+        };
+        const QStringList abc{ QStringLiteral("Album A"), QStringLiteral("Album B"), QStringLiteral("Album C") };
+        const MusicLibrary::Index srv     = serverIndex(nav, abc, true);
+        const MusicLibrary::Index srvCold = serverIndex(nav, abc, false);   // no record opened yet
+        const MusicLibrary::Index srv2    = serverIndex(nav2, { QStringLiteral("Album C") }, true);
+        const QString sA  = Subsonic::qualify(nav, Subsonic::Kind::Album, QStringLiteral("al-a"));
+        const QString sB  = Subsonic::qualify(nav, Subsonic::Kind::Album, QStringLiteral("al-b"));
+        const QString sC  = Subsonic::qualify(nav, Subsonic::Kind::Album, QStringLiteral("al-c"));
+        const QString s2C = Subsonic::qualify(nav2, Subsonic::Kind::Album, QStringLiteral("al-c"));
+        auto trk = [](const QString& server, const char* id) {
+            return Subsonic::qualify(server, Subsonic::Kind::Track, QString::fromLatin1(id));
+        };
+
+        auto tracksOf = [](const MusicLibrary::Album* al) {
+            QVector<MusicRemap::TrackId> out;
+            if (al) for (const MusicLibrary::IndexTrack& t : al->tracks)
+                out.push_back(MusicRemap::TrackId{ t.track, t.title, QString(), t.path });
+            return out;
+        };
+        // The artist's records as HomeView::musicArtistAlbumsOf hands them over: the MERGED artist's albums in
+        // its own order, each with its copies primary first (HomeView::musicCopiesOf's shape).
+        auto artistOf = [&](const QVector<MusicMerge::Source>& srcs, MusicMerge::Merged& m) {
+            m = MusicMerge::merge(srcs, nav);
+            QVector<MusicFallback::ArtistAlbum> out;
+            const MusicLibrary::Artist* a = nullptr;
+            for (const MusicLibrary::Artist& x : m.idx.artists)
+                if (MusicId::normalizeArtist(x.name) == MusicId::normalizeArtist(band)) a = &x;
+            if (!a) return out;
+            for (const MusicLibrary::Album& b : a->albums)
+            {
+                MusicFallback::ArtistAlbum aa;
+                aa.key = b.key; aa.title = b.title;
+                for (const QString& k : m.albumInstances(b.key))
+                {
+                    MusicFallback::Copy c;
+                    c.key = k; c.sourceId = m.sourceOf.value(k);
+                    for (const MusicMerge::Source& s : srcs)
+                        if (const MusicLibrary::Album* al = albumIn(*s.index, k)) c.tracks = tracksOf(al);
+                    aa.copies.push_back(c);
+                }
+                out.push_back(aa);
+            }
+            return out;
+        };
+        // The one record-to-entries builder, spelt as MusicQueue::forAlbum spells it (that links
+        // MusicLibrary.cpp; this probe does not — see albumIn).
+        auto entriesFrom = [](const QVector<const MusicLibrary::Index*>& ixs) {
+            return [ixs](const QString& key) {
+                QVector<MusicQueue::Entry> out;
+                for (const MusicLibrary::Index* ix : ixs)
+                    if (const MusicLibrary::Album* b = albumIn(*ix, key))
+                        for (const MusicLibrary::IndexTrack& t : b->tracks)
+                            out.push_back(MusicQueue::Entry{ t.path, t.title, b->albumArtist, b->key });
+                return out;
+            };
+        };
+        auto down = [](const QStringList& ids) {
+            MusicId::Reachability r;
+            for (const QString& id : ids) r.unreachable.insert(id);
+            return r;
+        };
+        auto label = [&](const QString& id) {
+            return id == nav ? QStringLiteral("Navidrome") : id == nav2 ? QStringLiteral("Attic") : id;
+        };
+
+        MusicMerge::Merged m;
+        const QVector<MusicMerge::Source> srcs{ { QString(), &loc }, { nav, &srv } };
+        const QVector<MusicFallback::ArtistAlbum> artist = artistOf(srcs, m);
+        CHECK(artist.size() == 3);
+        CHECK(artist.size() == 3 && artist.at(0).key == sA && artist.at(1).key == sB && artist.at(2).key == sC);
+        CHECK(artist.size() == 3 && artist.at(0).copies.size() == 2 && artist.at(2).copies.size() == 1);
+
+        // PREFERRED SERVER UNREACHABLE: the two records this disk holds play from it, the third is SKIPPED
+        // and NAMED — and the queue is not refused for it.
+        {
+            const MusicFallback::ArtistPlan p = MusicFallback::planArtist(artist, nav, down({ nav }));
+            CHECK(p.changed() && p.fallbacks == 2);
+            CHECK(p.play.size() == 2);
+            CHECK(p.play.size() == 2 && p.play.at(0).playKey == lA && p.play.at(1).playKey == lB);
+            CHECK(p.play.size() == 2 && p.play.at(0).albumKey == sA && p.play.at(1).albumKey == sB);
+            CHECK(p.play.size() == 2 && p.play.at(0).plan.via == MusicFallback::Via::Local);
+            CHECK(p.skipped == QStringList{ QStringLiteral("Album C") });
+            CHECK(p.downSources == QStringList{ nav });
+            CHECK(MusicFallback::artistSentence(p, label) == QStringLiteral("Skipped \"Album C\" (Navidrome is unreachable)"));
+            // THE SAME PICK THE ALBUM'S OWN PLAY WOULD MAKE, record by record — one rule, not two.
+            for (int i = 0; i < p.play.size(); ++i)
+            {
+                const MusicFallback::Plan one = MusicFallback::plan(artist.at(i).copies, nav, down({ nav }));
+                CHECK(one.pick.index >= 0 && artist.at(i).copies.at(one.pick.index).key == p.play.at(i).playKey);
+                CHECK(one.identities == p.play.at(i).plan.identities);
+            }
+
+            const MusicFallback::ArtistQueue q = MusicFallback::artistQueue(p, entriesFrom({ &loc, &srv }));
+            CHECK(q.entries.size() == 6);
+            for (const MusicQueue::Entry& e : q.entries)
+                CHECK(e.path.startsWith(QStringLiteral("C:/Music/FB/")) && (e.albumKey == lA || e.albumKey == lB));
+            // IDENTITY UNCHANGED: every queued track answers to the MERGED record's own track — the one its
+            // favourite, listening seconds, resume point and scrobbles are already filed under.
+            CHECK(q.identities.size() == 6);
+            CHECK(q.identities.value(QStringLiteral("C:/Music/FB/A/01.flac")) == trk(nav, "al-a-1"));
+            CHECK(q.identities.value(QStringLiteral("C:/Music/FB/A/03.flac")) == trk(nav, "al-a-3"));
+            CHECK(q.identities.value(QStringLiteral("C:/Music/FB/B/02.flac")) == trk(nav, "al-b-2"));
+            for (const MusicQueue::Entry& e : q.entries) CHECK(q.identities.contains(e.path));
+            for (auto it = q.identities.cbegin(); it != q.identities.cend(); ++it)
+            {
+                CHECK(!Subsonic::isQualified(it.key()));                        // never re-files a server track
+                CHECK(Subsonic::isQualified(it.value()) && Subsonic::serverOf(it.value()) == nav);
+            }
+            // ...and the merge itself does not move: the rows are still keyed on Navidrome's copies.
+            MusicMerge::Merged again;
+            const QVector<MusicFallback::ArtistAlbum> after = artistOf(srcs, again);
+            CHECK(after.size() == 3 && after.at(0).key == sA && again.albumInstances(sA) == m.albumInstances(sA));
+
+            // SHUFFLE ONLY REORDERS THE SAME SET — the app's own shuffle, over the queue the fallback built.
+            QStringList before;
+            for (const MusicQueue::Entry& e : q.entries) before << e.path;
+            bool moved = false;
+            for (quint32 seed = 1; seed <= 8; ++seed)
+            {
+                QVector<MusicQueue::Entry> sh = q.entries;
+                MusicQueue::shuffle(sh, seed);
+                QStringList got;
+                for (const MusicQueue::Entry& e : sh) got << e.path;
+                if (got != before) moved = true;
+                QStringList a1 = before, a2 = got;
+                a1.sort(); a2.sort();
+                CHECK(a1 == a2);
+                for (const MusicQueue::Entry& e : sh) CHECK(q.identities.contains(e.path));
+            }
+            CHECK(moved);
+
+            // Two records skipped: the sentence counts them.
+            MusicLibrary::Index locOne;
+            locOne.artists.push_back(mkArtist(QStringLiteral("fixture band"), band,
+                { mkAlbum(lA, band, QStringLiteral("Album A"), 2018, 3, QStringLiteral("C:/Music/FB/A/0")) }));
+            MusicMerge::Merged m1;
+            const QVector<MusicFallback::ArtistAlbum> art1 = artistOf({ { QString(), &locOne }, { nav, &srv } }, m1);
+            const MusicFallback::ArtistPlan p1 = MusicFallback::planArtist(art1, nav, down({ nav }));
+            CHECK(p1.play.size() == 1 && p1.skipped.size() == 2);
+            CHECK(MusicFallback::artistSentence(p1, label) == QStringLiteral("Skipped 2 albums (Navidrome is unreachable)"));
+            // Offline: this disk still plays.
+            MusicId::Reachability offline; offline.offline = true;
+            CHECK(MusicFallback::planArtist(artist, nav, offline).play.size() == 2);
+            // Nothing reachable at all: every record skipped and nothing to queue — said, never silently empty.
+            QVector<MusicFallback::ArtistAlbum> serverOnly = artist;
+            for (MusicFallback::ArtistAlbum& aa : serverOnly) aa.copies.resize(1);   // drop the local copies
+            const MusicFallback::ArtistPlan gone = MusicFallback::planArtist(serverOnly, nav, down({ nav }));
+            CHECK(gone.play.isEmpty() && gone.skipped.size() == 3 && gone.changed());
+            CHECK(MusicFallback::artistQueue(gone, entriesFrom({ &loc, &srv })).entries.isEmpty());
+            CHECK(MusicFallback::artistSentence(gone, label) == QStringLiteral("Skipped 3 albums (Navidrome is unreachable)"));
+        }
+
+        // ALL REACHABLE -> UNCHANGED: nothing falls back, nothing is skipped, and changed() is false, so the
+        // caller builds today's queue by today's code. A second server being down is nothing to do with it.
+        {
+            const QVector<MusicId::Reachability> cases{ MusicId::Reachability{}, down({ nav2 }) };
+            for (const MusicId::Reachability& r : cases)
+            {
+                const MusicFallback::ArtistPlan p = MusicFallback::planArtist(artist, nav, r);
+                CHECK(!p.changed() && p.fallbacks == 0 && p.skipped.isEmpty() && p.downSources.isEmpty());
+                CHECK(p.play.size() == 3);
+                for (int i = 0; i < p.play.size() && i < artist.size(); ++i)
+                {
+                    CHECK(p.play.at(i).playKey == artist.at(i).key && p.play.at(i).albumKey == artist.at(i).key);
+                    CHECK(p.play.at(i).plan.identities.isEmpty());
+                }
+                CHECK(MusicFallback::artistSentence(p, label).isEmpty());
+            }
+        }
+
+        // ANOTHER SERVER HOLDS THE THIRD RECORD: it plays from there, in preference order, not skipped.
+        {
+            MusicMerge::Merged m3;
+            const QVector<MusicFallback::ArtistAlbum> art3 =
+                artistOf({ { QString(), &loc }, { nav, &srv }, { nav2, &srv2 } }, m3);
+            const MusicFallback::ArtistPlan p = MusicFallback::planArtist(art3, nav, down({ nav }));
+            CHECK(p.play.size() == 3 && p.skipped.isEmpty() && p.fallbacks == 3);
+            CHECK(p.play.size() == 3 && p.play.at(2).playKey == s2C && p.play.at(2).plan.via == MusicFallback::Via::Server);
+            CHECK(MusicFallback::artistSentence(p, label)
+                  == QStringLiteral("Playing 3 album(s) from another copy (Navidrome is unreachable)"));
+        }
+
+        // THE PASS: what is asked before the queue plays.
+        {
+            // Lists cached, server state unknown: ONE question to Navidrome (its first record's list) finds out
+            // whether it has stopped. This disk asks nothing.
+            MusicFallback::ArtistPass pass;
+            const QVector<MusicFallback::Ask> r1 = pass.next(artist, nav, MusicId::Reachability{});
+            CHECK(r1.size() == 1 && r1.first().sourceId == nav && r1.first().key == sA);
+            CHECK(!pass.idle());
+            pass.answered(sA, /*unreachable*/ true);
+            CHECK(pass.idle());
+            // Navidrome FAILED in this pass: it is not asked again, and the plan treats it as down.
+            CHECK(pass.next(artist, nav, MusicId::Reachability{}).isEmpty());
+            const MusicFallback::ArtistPlan p =
+                MusicFallback::planArtist(artist, nav, pass.reach(MusicId::Reachability{}));
+            CHECK(p.play.size() == 2 && p.skipped == QStringList{ QStringLiteral("Album C") });
+            // ...whereas a server that ANSWERED is asked nothing more: one question, then the queue.
+            MusicFallback::ArtistPass up;
+            const QVector<MusicFallback::Ask> u1 = up.next(artist, nav, MusicId::Reachability{});
+            CHECK(u1.size() == 1);
+            if (!u1.isEmpty()) up.answered(u1.first().key, false);
+            CHECK(up.idle() && up.next(artist, nav, MusicId::Reachability{}).isEmpty());
+            CHECK(!MusicFallback::planArtist(artist, nav, up.reach(MusicId::Reachability{})).changed());
+        }
+        {
+            // Nothing opened yet: every record's list is asked for AT ONCE (one round, in parallel).
+            MusicMerge::Merged mc;
+            const QVector<MusicFallback::ArtistAlbum> cold = artistOf({ { QString(), &loc }, { nav, &srvCold } }, mc);
+            MusicFallback::ArtistPass pass;
+            const QVector<MusicFallback::Ask> r1 = pass.next(cold, nav, MusicId::Reachability{});
+            CHECK(r1.size() == 3);
+            for (const MusicFallback::Ask& a : r1) CHECK(a.sourceId == nav);
+            if (r1.size() == 3)
+            {
+                pass.answered(r1.at(0).key, true);
+                CHECK(!pass.idle());
+                CHECK(pass.next(cold, nav, MusicId::Reachability{}).isEmpty());   // nothing is asked twice
+                pass.answered(r1.at(1).key, true);
+                pass.answered(r1.at(2).key, true);
+            }
+            CHECK(pass.idle() && pass.next(cold, nav, MusicId::Reachability{}).isEmpty());
+        }
+        {
+            // The preferred server fails, so the third record moves to the second server — whose list IS asked
+            // for, in a second round; the failed one is not asked again.
+            const MusicLibrary::Index srv2Cold = serverIndex(nav2, { QStringLiteral("Album C") }, false);
+            MusicMerge::Merged m3;
+            const QVector<MusicFallback::ArtistAlbum> art3 =
+                artistOf({ { QString(), &loc }, { nav, &srv }, { nav2, &srv2Cold } }, m3);
+            MusicFallback::ArtistPass pass;
+            const QVector<MusicFallback::Ask> r1 = pass.next(art3, nav, MusicId::Reachability{});
+            CHECK(r1.size() == 1 && r1.first().sourceId == nav);
+            if (!r1.isEmpty()) pass.answered(r1.first().key, true);
+            const QVector<MusicFallback::Ask> r2 = pass.next(art3, nav, MusicId::Reachability{});
+            CHECK(r2.size() == 1 && r2.first().key == s2C && r2.first().sourceId == nav2);
+            for (const MusicFallback::Ask& a : r2) CHECK(a.sourceId != nav);
+        }
+        {
+            // FAILED IN AN EARLIER PASS: asked again in this one — once, not once per record — so a server that
+            // has come back is found on the very next press and all three records stream from it.
+            MusicFallback::ArtistPass pass;
+            const QVector<MusicFallback::Ask> r1 = pass.next(artist, nav, down({ nav }));
+            CHECK(r1.size() == 1 && r1.first().sourceId == nav);
+            if (!r1.isEmpty()) pass.answered(r1.first().key, false);   // it answered: it is back
+            CHECK(pass.idle() && pass.next(artist, nav, MusicId::Reachability{}).isEmpty());
+            const MusicFallback::ArtistPlan back = MusicFallback::planArtist(artist, nav, pass.reach(down({ nav })));
+            CHECK(!back.changed() && back.play.size() == 3);
+            // ...and one that is STILL down: asked that once, then left alone for the rest of the pass.
+            MusicFallback::ArtistPass still;
+            const QVector<MusicFallback::Ask> s1 = still.next(artist, nav, down({ nav }));
+            CHECK(s1.size() == 1);
+            if (!s1.isEmpty()) still.answered(s1.first().key, true);
+            CHECK(still.next(artist, nav, down({ nav })).isEmpty());
+            CHECK(MusicFallback::planArtist(artist, nav, still.reach(down({ nav }))).play.size() == 2);
+            // Offline: nothing remote is picked, so no question at all — this disk plays.
+            MusicFallback::ArtistPass off;
+            MusicId::Reachability r; r.offline = true;
+            CHECK(off.next(artist, nav, r).isEmpty() && off.idle());
+            CHECK(MusicFallback::planArtist(artist, nav, off.reach(r)).play.size() == 2);
+        }
+        {
+            // THE ONE CAP: whatever is still out when it strikes counts as no answer; nothing more is asked;
+            // a reply that straggles in afterwards changes nothing.
+            CHECK(MusicFallback::kArtistPassCapMs == 6000);
+            MusicMerge::Merged mc;
+            const QVector<MusicFallback::ArtistAlbum> cold = artistOf({ { QString(), &loc }, { nav, &srvCold } }, mc);
+            MusicFallback::ArtistPass pass;
+            const QVector<MusicFallback::Ask> r1 = pass.next(cold, nav, MusicId::Reachability{});
+            CHECK(r1.size() == 3);
+            CHECK(pass.expire() == QStringList{ nav });   // named once, however many of its records were out
+            CHECK(pass.expired() && pass.idle());
+            CHECK(pass.next(cold, nav, MusicId::Reachability{}).isEmpty());
+            if (!r1.isEmpty()) pass.answered(r1.first().key, false);
+            CHECK(!pass.reach(MusicId::Reachability{}).reaches(nav));
+            const MusicFallback::ArtistPlan p =
+                MusicFallback::planArtist(cold, nav, pass.reach(MusicId::Reachability{}));
+            CHECK(p.play.size() == 2 && p.skipped == QStringList{ QStringLiteral("Album C") });
+            // A supplier the cap stopped the pass from ever asking keeps the standing it had before the press.
+            MusicFallback::ArtistPass unasked;
+            CHECK(!unasked.reach(down({ nav2 })).reaches(nav2) && unasked.reach(MusicId::Reachability{}).reaches(nav2));
         }
     }
 

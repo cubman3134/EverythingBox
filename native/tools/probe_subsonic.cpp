@@ -2716,6 +2716,48 @@ static void testHostWired194()
     CHECK(arm.contains(QStringLiteral("showToast(")) && !arm.contains(QStringLiteral("playMusic")));
 }
 
+// #465: an artist's "Play all" / "Shuffle all" on a merged artist. The pure rule is probe_musicsources §11; this
+// pins that the app actually runs it: HomeView plans with the album rule inside one capped pass, and the queue
+// opener plays that plan's records under the merged record's names — installed BEFORE the first track starts.
+static void testHostWired465()
+{
+    QFile hv(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/ui/HomeView.cpp"));
+    CHECK(hv.open(QIODevice::ReadOnly));
+    const QString h = QString::fromUtf8(hv.readAll()).remove(QLatin1Char('\r'));
+    QFile mw(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/ui/MainWindow.cpp"));
+    CHECK(mw.open(QIODevice::ReadOnly));
+    const QString m = QString::fromUtf8(mw.readAll()).remove(QLatin1Char('\r'));
+
+    // HomeView: a merged artist takes the pass, the pass is capped ONCE, and the finish plans with the album rule.
+    const int verb = h.indexOf(QStringLiteral("void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)"));
+    CHECK(verb >= 0);
+    const int todo = h.indexOf(QStringLiteral("QStringList todo;"), verb);
+    const QString merged = (verb >= 0 && todo > verb) ? h.mid(verb, todo - verb) : QString();
+    CHECK(merged.contains(QStringLiteral("stepMusicArtistPass(st);")));
+    CHECK(merged.count(QStringLiteral("QTimer::singleShot(")) == 1);
+    CHECK(merged.contains(QStringLiteral("QTimer::singleShot(MusicFallback::kArtistPassCapMs,")));
+    CHECK(!merged.contains(QStringLiteral("kMusicReachBudgetMs")));   // no per-album wait
+    const int fin = h.indexOf(QStringLiteral("void HomeView::finishMusicArtistPass("));
+    CHECK(fin >= 0);
+    const QString finish = fin >= 0 ? h.mid(fin, 2600) : QString();
+    CHECK(finish.contains(QStringLiteral("MusicFallback::planArtist(")));
+    CHECK(finish.contains(QStringLiteral("MusicFallback::artistSentence(")));
+    CHECK(finish.contains(QStringLiteral("if (!plan.changed()) { emit playMusicQueueRequested(st->artist, st->shuffle); return; }")));
+
+    // MainWindow: the opener takes the plan for THIS artist, shuffles whatever it built, and hands the names on.
+    const int door = m.indexOf(QStringLiteral("void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)"));
+    CHECK(door >= 0);
+    const int take    = m.indexOf(QStringLiteral("home_->takeMusicArtistQueue(artistKey, fallback)"), door);
+    const int shuffle = m.indexOf(QStringLiteral("if (shuffle) MusicQueue::shuffle(entries, MusicQueue::randomSeed());"), door);
+    const int start   = m.indexOf(QStringLiteral("startMusicEntries(entries, title, subtitle, /*titlesNameArtist*/ wholeLibrary, fallback.identities);"), door);
+    CHECK(take > door && shuffle > take && start > shuffle);
+    const int tail = m.indexOf(QStringLiteral("void MainWindow::startMusicEntries("));
+    CHECK(tail >= 0);
+    const int adopt = m.indexOf(QStringLiteral("adoptMusicPlayAliases(urlAliases);"), tail);
+    const int play  = m.indexOf(QStringLiteral("startLocalAudioQueue(queue, /*start*/ 0,"), tail);
+    CHECK(adopt > tail && play > adopt);
+}
+
 static void testCoverAnswers370()
 {
     CoverStub stub;
@@ -3360,6 +3402,7 @@ int main(int argc, char** argv)
     testQualityLine194();
     testPickerMarksUnreachable194();
     testHostWired194();
+    testHostWired465();
 
     if (g_fail) { std::fprintf(stderr, "%d check(s) failed\n", g_fail); return 1; }
     std::printf("SUBSONIC-OK\n");

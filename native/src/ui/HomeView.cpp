@@ -4302,6 +4302,17 @@ const MusicLibrary::Index& HomeView::musicIndexForArtist(const QString& artistKe
     return MusicSupply::indexFor(artistKey);   // a stale route: let the owning supplier answer, or not
 }
 
+// #465: one "Play all" / "Shuffle all" press on a merged artist (see the pass below the verb).
+struct HomeView::MusicArtistPassState
+{
+    MusicFallback::ArtistPass pass;
+    int     gen = 0;
+    QString artist;
+    bool    shuffle  = false;
+    bool    loading  = false;   // this pass put the sticky loading toast up
+    bool    finished = false;
+};
+
 // "Play all" / "Shuffle all" on an artist whose records may live on a server.
 //
 // The rows are offered on a count the server gave us (browse::musicArtistCatalog says why), but a COUNT is
@@ -4319,7 +4330,29 @@ void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)
 {
     const QString shown = musicMergeActive() ? mergedArtistPrimary(artistKey) : artistKey;
     const MusicLibrary::Artist* a = musicIndexForArtist(shown).artist(shown);
+    musicArtistQueueKey_.clear();                  // #465: a plan an earlier press left behind is not this one's
+    musicArtistQueue_ = MusicFallback::ArtistQueue{};
     if (!a) { emit playMusicQueueRequested(shown, shuffle); return; }   // stale: let the opener say so
+
+    // #465: a MERGED artist's records each have copies, and which copy a record plays is the ALBUM rule's
+    // answer (MusicFallback::plan) — so a server that is down costs the records only it holds, not the queue.
+    if (musicMergeActive() && mergedMusic_.active)
+    {
+        watchNetworkForMusic();
+        auto st = QSharedPointer<MusicArtistPassState>::create();
+        st->gen     = ++musicQueueFetchGen_;
+        st->artist  = shown;
+        st->shuffle = shuffle;
+        // THE ONE CAP over everything this press waits for, however many records and rounds it takes.
+        QTimer::singleShot(MusicFallback::kArtistPassCapMs, this, [this, st] {
+            if (st->finished || st->gen != musicQueueFetchGen_) return;
+            for (const QString& source : st->pass.expire())
+                MusicReach::noteUnreachable(source);   // no answer in time is no answer
+            finishMusicArtistPass(st);
+        });
+        stepMusicArtistPass(st);
+        return;
+    }
 
     QStringList todo;
     for (const MusicLibrary::Album& b : a->albums)
@@ -4347,6 +4380,83 @@ void HomeView::playMusicArtistQueue(const QString& artistKey, bool shuffle)
                 emit playMusicQueueRequested(shown, shuffle);
             });
     }
+}
+
+// ---- A MERGED ARTIST'S QUEUE, RECORD BY RECORD (issue #465) ------------------------------------------------
+//
+// One pass per press. It asks the suppliers the records' copies live on for the track lists the picks need —
+// all at once, a supplier that fails is not asked again, and the whole pass is capped (MusicFallback.h says
+// how) — then plans every record with the album rule and plays the result. While it waits, the user sees the
+// sticky "Loading N record(s)…" toast the verb has always shown while it fetches.
+
+QVector<MusicFallback::ArtistAlbum> HomeView::musicArtistAlbumsOf(const QString& artistKey)
+{
+    QVector<MusicFallback::ArtistAlbum> out;
+    rebuildMergedMusic();
+    const MusicLibrary::Artist* a = mergedMusic_.idx.artist(artistKey);
+    if (!a) return out;
+    for (const MusicLibrary::Album& b : a->albums)
+        out.push_back(MusicFallback::ArtistAlbum{ b.key, MusicLibrary::displayAlbum(b), musicCopiesOf(b.key) });
+    return out;
+}
+
+void HomeView::stepMusicArtistPass(const QSharedPointer<MusicArtistPassState>& st)
+{
+    if (st->finished || st->gen != musicQueueFetchGen_) return;
+    const QVector<MusicFallback::Ask> asks =
+        st->pass.next(musicArtistAlbumsOf(st->artist), Settings::musicPreferredSource(), MusicReach::current());
+    if (asks.isEmpty()) { if (st->pass.idle()) finishMusicArtistPass(st); return; }
+    if (!st->loading)
+    {
+        st->loading = true;
+        showToast(tr("Loading %n record(s)…", "", int(asks.size())), 0);   // sticky; the finish hides it
+    }
+    for (const MusicFallback::Ask& ask : asks)
+    {
+        musicFetchAlbumTracks(ask.key, [this, st, ask](bool, const QString&) {
+            if (st->finished || st->gen != musicQueueFetchGen_) return;   // capped, or superseded by a later press
+            mergedMusicValid_ = false;   // a fresh track list may have landed, and MusicReach may have moved
+            st->pass.answered(ask.key, !MusicReach::current().reaches(ask.sourceId));
+            if (st->pass.idle()) stepMusicArtistPass(st);   // every answer of this round is in: plan again
+        });
+    }
+}
+
+void HomeView::finishMusicArtistPass(const QSharedPointer<MusicArtistPassState>& st)
+{
+    if (st->finished || st->gen != musicQueueFetchGen_) return;
+    st->finished = true;
+    if (st->loading) hideToast();
+    mergedMusicValid_ = false;
+    const QVector<MusicFallback::ArtistAlbum> albums = musicArtistAlbumsOf(st->artist);
+    const MusicFallback::ArtistPlan plan = MusicFallback::planArtist(
+        albums, Settings::musicPreferredSource(), st->pass.reach(MusicReach::current()));
+    // NOTHING CHANGED: every record plays its preferred copy, so the queue is built exactly as it always was.
+    if (!plan.changed()) { emit playMusicQueueRequested(st->artist, st->shuffle); return; }
+
+    MusicFallback::ArtistQueue q = MusicFallback::artistQueue(plan, [](const QString& key) {
+        return MusicQueue::forAlbum(MusicSupply::indexFor(key), key);
+    });
+    const QString sentence = MusicFallback::artistSentence(plan, [this](const QString& id) {
+        return musicSourceLabel(id);
+    });
+    hvLog(QStringLiteral("music: artist fallback - records=%1 fallback=%2 skipped=%3 tracks=%4 tracks-renamed=%5")
+              .arg(albums.size()).arg(plan.fallbacks).arg(plan.skipped.size())
+              .arg(q.entries.size()).arg(q.identities.size()));
+    showToast(sentence);
+    if (q.entries.isEmpty()) return;   // every record was skipped: the sentence says why, and nothing starts
+    musicArtistQueueKey_ = st->artist;
+    musicArtistQueue_    = std::move(q);
+    emit playMusicQueueRequested(st->artist, st->shuffle);
+}
+
+bool HomeView::takeMusicArtistQueue(const QString& artistKey, MusicFallback::ArtistQueue& out)
+{
+    if (artistKey.isEmpty() || artistKey != musicArtistQueueKey_) return false;
+    musicArtistQueueKey_.clear();
+    out = std::move(musicArtistQueue_);
+    musicArtistQueue_ = MusicFallback::ArtistQueue{};
+    return true;
 }
 
 // "These are NOT the same album" - the important half of the escape hatch, because a wrong merge is the one
