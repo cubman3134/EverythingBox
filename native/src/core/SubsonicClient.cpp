@@ -8,6 +8,7 @@
 #include "SubsonicTransport.h"
 #include "Settings.h"          // #193: the streaming-quality cap, read at the moment a stream url is minted
 #include "SubsonicDownload.h"  // #193: a downloaded copy wins over a stream in MusicSupply::playUrl
+#include "MusicReach.h"        // #194: every reply says whether this server answered at all
 #include "DownloadsStore.h"
 #include <QFileInfo>
 
@@ -140,8 +141,11 @@ void SubsonicClient::request(const SubsonicServer& srv, const QString& method,
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
 
     QNetworkReply* reply = nam_->get(req);
-    connect(reply, &QNetworkReply::finished, this, [reply, then] {
+    connect(reply, &QNetworkReply::finished, this, [reply, then, serverId = srv.id] {
         reply->deleteLater();
+        // (#194) Whether the box answered at all, filed before anything else reads the reply: the offline
+        // fallback's only evidence about this server is what its own requests found (MusicReach.h).
+        MusicReach::noteAnswer(serverId, int(reply->error()));
         Result r;
         if (reply->error() != QNetworkReply::NoError)
         {
@@ -658,6 +662,7 @@ void SubsonicClient::prefetchAlbumCover(const QString& albumKey, std::function<v
     connect(reply, &QNetworkReply::finished, this, [this, reply, albumKey, tag, then] {
         reply->deleteLater();
         inflight_.remove(tag);
+        MusicReach::noteAnswer(Subsonic::serverOf(albumKey), int(reply->error()));   // #194: see request()
         const bool       transportOk = reply->error() == QNetworkReply::NoError;
         const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray body   = transportOk ? reply->readAll() : QByteArray();

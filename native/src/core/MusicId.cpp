@@ -637,3 +637,46 @@ int MusicId::pickAutoSource(const QVector<SourceRef>& all, const QString& prefer
     }
     return best;
 }
+
+MusicId::PlayPick MusicId::pickAutoSource(const QVector<SourceRef>& all, const QString& preference,
+                                          const Reachability& reach)
+{
+    PlayPick out;
+    out.preferred = pickAutoSource(all, preference);
+    if (out.preferred < 0) return out;
+
+    // A copy can be opened when its supplier answers (a local copy always does — Reachability::reaches), or
+    // when every track of it is a file on this disk whatever its server is doing.
+    const auto reachable = [&](const SourceRef& s) { return s.onDisk || reach.reaches(s.serverId); };
+
+    // THE PREFERRED COPY FIRST, and unconditionally when it can be opened: that is today's choice, and a
+    // supplier being down somewhere else is no reason to play anything different.
+    if (reachable(all.at(out.preferred))) { out.index = out.preferred; return out; }
+
+    const QString pref = preference.trimmed().isEmpty() ? QString::fromLatin1(kPreferLocal)
+                                                        : preference.trimmed();
+    // The fallback's order, lowest wins:
+    //   tier 0  a LOCAL copy — the user's own files, which no server outage can touch;
+    //   tier 1  a copy DOWNLOADED whole — the same promise, kept through the prefer-local rule;
+    //   tier 2  another supplier that is answering, in the user's preference order: the same prefRank the
+    //           identity pick uses, and then the order the caller supplied (the order servers were added).
+    int best = -1, bestRank = 0;
+    for (int i = 0; i < all.size(); ++i)
+    {
+        if (i == out.preferred) continue;
+        const SourceRef& s = all.at(i);
+        if (!reachable(s)) continue;
+        const bool local = s.serverId.isEmpty();
+        const int tier = local ? 0 : (s.onDisk ? 1 : 2);
+
+        int prefRank = 2;
+        if (pref == QLatin1String(kPreferLocal))       prefRank = local ? 0 : 1;
+        else if (pref == QLatin1String(kPreferServer)) prefRank = local ? 1 : 0;
+        else                                           prefRank = (s.serverId == pref) ? 0 : (local ? 1 : 2);
+
+        const int rank = tier * 1000 + prefRank * 100;
+        if (best < 0 || rank < bestRank) { best = i; bestRank = rank; }
+    }
+    out.index = best;   // -1: nothing can be reached, and `preferred` names the copy whose source is down
+    return out;
+}

@@ -5,6 +5,7 @@
 #include "Jellyfin.h"
 #include "JellyfinServerStore.h"
 #include "MetaCache.h"
+#include "MusicReach.h"   // #194: every reply says whether this server answered at all
 #include "Settings.h"
 
 #include <QCoreApplication>
@@ -149,9 +150,12 @@ void JellyfinMusicClient::request(const QString& serverId, const QString& pathAn
     connect(t, &QTimer::timeout, reply, [reply] { reply->abort(); });
     t->start(budgetMs > 0 ? budgetMs : 15000);
 
-    connect(reply, &QNetworkReply::finished, this, [reply, t, then] {
+    connect(reply, &QNetworkReply::finished, this, [reply, t, then, serverId] {
         t->stop();
         reply->deleteLater();
+        // (#194) Whether the box answered at all — a budget abort counts as not answering. The offline
+        // fallback's only evidence about this server is what its own requests found (MusicReach.h).
+        MusicReach::noteAnswer(serverId, int(reply->error()));
         if (reply->error() != QNetworkReply::NoError)
         {
             then({}, Result{ false, isAuthError(reply->error()), transportSentence(reply->error()) });
@@ -320,6 +324,7 @@ void JellyfinMusicClient::prefetchAlbumCover(const QString& albumKey, std::funct
     connect(reply, &QNetworkReply::finished, this, [this, reply, albumKey, tag, then] {
         reply->deleteLater();
         inflight_.remove(tag);
+        MusicReach::noteAnswer(Jellyfin::serverOf(albumKey), int(reply->error()));   // #194: see request()
         const bool       transportOk = reply->error() == QNetworkReply::NoError;
         const int        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray body   = transportOk ? reply->readAll() : QByteArray();

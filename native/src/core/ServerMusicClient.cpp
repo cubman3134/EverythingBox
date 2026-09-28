@@ -3,6 +3,7 @@
 #include "AppBrand.h"
 #include "CoverFetch.h"
 #include "MetaCache.h"
+#include "MusicReach.h"   // #194: every reply says whether this server answered at all
 
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -113,9 +114,13 @@ void ServerMusicClient::request(const Shelf& shelf, const QString& path, int bud
     connect(t, &QTimer::timeout, reply, [reply] { reply->abort(); });
     t->start(budgetMs > 0 ? budgetMs : 15000);
 
-    connect(reply, &QNetworkReply::finished, this, [reply, t, then] {
+    connect(reply, &QNetworkReply::finished, this, [reply, t, then, shelfId = shelf.id] {
         t->stop();
         reply->deleteLater();
+        // (#194) Whether the server answered at all — a budget abort counts as not answering. The offline
+        // fallback's only evidence about this shelf is what its own requests found (MusicReach.h). The cover
+        // fetch is NOT counted: a shelf's image url may name another host, whose silence says nothing here.
+        MusicReach::noteAnswer(shelfId, int(reply->error()));
         if (reply->error() != QNetworkReply::NoError)
         {
             then({}, Result{ false, transportSentence(reply->error()) });

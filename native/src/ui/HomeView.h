@@ -29,6 +29,7 @@
 #include "../browse/BookCatalogs.h"      // browse::BookEmptyNote - and the same again, for #134
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — what "add this row to the queue" means (#193)
 #include "../core/MusicMerge.h"       // MusicMerge::Merged — one library over every supplier (#194)
+#include "../core/MusicFallback.h"    // MusicFallback::Plan — which copy a Play opens when a server is down (#194)
 #include "../core/MusicSuppliers.h"   // MusicSuppliers::Suppliers — the one count the tab and merge share (#384)
 #include "../core/HomebrewClient.h"  // HomebrewMore — a server's outstanding page, held by the Homebrew folder
 #include "../comic/ChapterRun.h"   // ChapterRun — the chapters either side of an opened manga chapter
@@ -885,6 +886,23 @@ private:
     QString musicSourceLabel(const QString& sourceId) const;
     browse::MusicAlbumSources musicAlbumSourcesFor(const QString& albumKey) const;
     void playMusicAlbumFromSource(const QString& albumKey);   // a "Play from ..." row: fetch first if remote
+    // THE OFFLINE FALLBACK (issue #194) — the halves of divertMusicAlbumPlay below.
+    void startMusicPlayPlan(const QString& primaryKey, const QString& startPath, int gen);
+    void passMusicAlbumPlay(const QString& albumKey, const QString& startPath);   // the decision, back to the door
+    QVector<MusicFallback::Copy> musicCopiesOf(const QString& primaryKey) const;
+    QString musicFallbackReason(const MusicFallback::Plan& plan, const QVector<MusicFallback::Copy>& copies) const;
+public:
+    // THE OFFLINE FALLBACK'S GATE (issue #194), asked by MainWindow::openMusicAlbum — the one door every album
+    // play goes through — before it opens anything. FALSE: open it exactly as asked (everything that is not a
+    // merged album whose preferred copy is on a server). TRUE: this has taken the play over, and will send it
+    // back through playMusicAlbumRequested — the preferred copy if its server answers, else a copy that can
+    // be reached (local first), filed under the merged record's own track names.
+    bool divertMusicAlbumPlay(const QString& albumKey, const QString& startPath);
+    // The names a FALLBACK play's tracks are filed under (played track -> the merged record's track), for
+    // the album HomeView just asked MainWindow::openMusicAlbum to play — handed over once, then forgotten.
+    // Empty for every ordinary play.
+    QHash<QString, QString> takeMusicPlayAliases(const QString& albumKey);
+private:
     // "Play all" / "Shuffle all" on an artist (issue #194, increment 2). Same shape as the row above and for
     // the same reason: an artist whose records live on a server has no track lists until somebody asks for
     // them, and a queue built from those albums would be empty — the row would look like it did nothing.
@@ -1502,6 +1520,12 @@ private:
     // #194 increment 2: the supersede counter for the track-list fetches a "Play all"/"Shuffle all" press
     // fires. Its OWN counter, not musicFetchGen_ — see playMusicArtistQueue for why the two must not share.
     int                musicQueueFetchGen_ = 0;
+    // #194 offline fallback: the supersede counter for a Play press waiting on its reachability check, and
+    // the one fallback play's track names, held until MainWindow takes them.
+    int                     musicReachGen_ = 0;
+    QString                 musicPlayAliasKey_;
+    QHash<QString, QString> musicPlayAliases_;
+    QString                 musicGatePass_;   // the album the gate just decided: let it through once
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any

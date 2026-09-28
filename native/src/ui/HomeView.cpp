@@ -120,6 +120,10 @@
 #include "../core/MusicId.h"             // issue #194: cross-source identity + the manual override
 #include "../core/MusicMerge.h"          // ...and the merged view every music level renders
 #include "../core/MusicRemap.h"          // ...and the one-way move that keeps what was banked (#194 inc 2)
+#include "../core/MusicReach.h"          // ...which suppliers are answering, for the offline fallback (#194)
+#include <QFileInfo>
+#include <QNetworkInformation>             // the network being down at all (#194 offline fallback)
+#include <utility>                         // std::exchange — the gate's one-shot pass (#194)
 #include "../core/JellyfinMusicClient.h"  // #194 inc 3: a Jellyfin server's music as a supplier
 #include "../core/ServerMusic.h"          // #194 inc 3: the EverythingBox server's music shelf (ids, readers)
 #include "../core/ServerMusicClient.h"    // ...and its fetches
@@ -4003,6 +4007,8 @@ QString HomeView::musicSourceLabel(const QString& sourceId) const
     return tr("Music server");
 }
 
+namespace { void watchNetworkForMusic(); }   // #194: defined with the offline fallback, below
+
 browse::MusicAlbumSources HomeView::musicAlbumSourcesFor(const QString& albumKey) const
 {
     browse::MusicAlbumSources out;
@@ -4036,6 +4042,15 @@ browse::MusicAlbumSources HomeView::musicAlbumSourcesFor(const QString& albumKey
         s.detail = bits.join(QString::fromUtf8(" \xc2\xb7 "));
         out.instances.push_back(s);
     }
+
+    // (#194, offline fallback) Which copies can be reached right now, and what "Play album" will do about
+    // it. Read from what the suppliers' own requests found (MusicReach) - nothing is asked from here.
+    watchNetworkForMusic();
+    const QVector<MusicFallback::Copy> copies = musicCopiesOf(albumKey);
+    const MusicId::Reachability reach = MusicReach::current();
+    for (int i = 0; i < out.instances.size() && i < copies.size(); ++i)
+        out.instances[i].unreachable = !(copies.at(i).onDisk || reach.reaches(copies.at(i).sourceId));
+    out.reason = musicFallbackReason(MusicFallback::plan(copies, Settings::musicPreferredSource(), reach), copies);
     return out;
 }
 
@@ -4055,6 +4070,223 @@ void HomeView::playMusicAlbumFromSource(const QString& albumKey)
         return;
     }
     emit playMusicAlbumRequested(albumKey, QString());
+}
+
+// ---- THE OFFLINE FALLBACK (issue #194) -----------------------------------------------------------------
+//
+// A merged album is keyed on the copy the preference picked, and it STAYS keyed there when that copy's
+// server goes down — so nothing the user banked moves (MusicFallback.h). What changes is which copy's files a
+// Play press opens. The pick is MusicId::pickAutoSource's reachability overload; the input is MusicReach,
+// which each supplier's own requests fill in; and the album page says what is happening before the press.
+static void hvLog(const QString& msg);   // defined with the Home list's menus, below
+
+namespace {
+
+// How long a Play press waits for the preferred server to answer before it counts as not answering. A box
+// that refuses the connection answers in milliseconds; this only bounds one that swallows packets.
+constexpr int kMusicReachBudgetMs = 4000;
+
+// THE NETWORK BEING DOWN AT ALL — the one reachability input that is not a request. Qt's own platform
+// backend, loaded once, on first use of the music fallback; no backend (or "unknown") means "not offline",
+// so the requests alone decide. Event-driven: nothing here polls.
+void watchNetworkForMusic()
+{
+    static bool asked = false;
+    if (asked) return;
+    asked = true;
+    // The DEFAULT backend, the one the follow scheduler's metered check already loads: Qt holds one backend
+    // per process, and asking for a different one here could only fail or replace it.
+    if (!QNetworkInformation::loadDefaultBackend()) return;
+    QNetworkInformation* ni = QNetworkInformation::instance();
+    if (!ni || !ni->supports(QNetworkInformation::Feature::Reachability)) return;
+    MusicReach::setOffline(ni->reachability() == QNetworkInformation::Reachability::Disconnected);
+    QObject::connect(ni, &QNetworkInformation::reachabilityChanged, ni,
+                     [](QNetworkInformation::Reachability r) {
+        MusicReach::setOffline(r == QNetworkInformation::Reachability::Disconnected);
+    });
+}
+
+// Is every track of this copy a file on this disk? A local copy is, by definition. A Subsonic copy is when
+// each of its tracks has a finished download — the one prefer-local rule (PreferLocal.h), which is what
+// MusicSupply::playUrl will open for it. No other supplier downloads music tracks (#417's report says why).
+bool musicCopyOnDisk(const QString& key, const QString& sourceId)
+{
+    if (sourceId.isEmpty()) return true;
+    if (!Subsonic::isQualified(key)) return false;
+    const MusicLibrary::Album* b = MusicSupply::indexFor(key).album(key);
+    if (!b || b->tracks.isEmpty()) return false;
+    const QVector<DownloadedItem> downloads = DownloadsStore::list();
+    const auto exists = [](const QString& p) { return QFileInfo::exists(p); };
+    for (const MusicLibrary::IndexTrack& t : b->tracks)
+        if (SubsonicDownload::localCopy(t.path, downloads, exists).isEmpty()) return false;
+    return true;
+}
+
+} // namespace
+
+QVector<MusicFallback::Copy> HomeView::musicCopiesOf(const QString& primaryKey) const
+{
+    QVector<MusicFallback::Copy> out;
+    for (const QString& k : mergedMusic_.albumInstances(primaryKey))
+    {
+        MusicFallback::Copy c;
+        c.key      = k;
+        c.sourceId = mergedMusic_.sourceOf.value(k);
+        if (const MusicLibrary::Album* b = MusicSupply::indexFor(k).album(k))
+            for (const MusicLibrary::IndexTrack& t : b->tracks)
+                c.tracks.push_back(MusicRemap::TrackId{ t.track, t.title, QString(), t.path });
+        c.onDisk = musicCopyOnDisk(k, c.sourceId);
+        out.push_back(c);
+    }
+    return out;
+}
+
+QString HomeView::musicFallbackReason(const MusicFallback::Plan& plan,
+                                      const QVector<MusicFallback::Copy>& copies) const
+{
+    if (plan.pick.preferred < 0 || plan.pick.preferred >= copies.size()) return QString();
+    const QString down = musicSourceLabel(copies.at(plan.pick.preferred).sourceId);
+    switch (plan.via)
+    {
+        case MusicFallback::Via::Preferred:  return QString();
+        case MusicFallback::Via::Local:      return tr("Playing your local copy (%1 is unreachable)").arg(down);
+        case MusicFallback::Via::Downloaded: return tr("Playing your downloaded copy (%1 is unreachable)").arg(down);
+        case MusicFallback::Via::Server:
+            return tr("Playing from %1 (%2 is unreachable)")
+                .arg(musicSourceLabel(copies.at(plan.pick.index).sourceId), down);
+        case MusicFallback::Via::Nothing:
+            return tr("%1 is unreachable, and no other copy of this album can be reached").arg(down);
+    }
+    return QString();
+}
+
+QHash<QString, QString> HomeView::takeMusicPlayAliases(const QString& albumKey)
+{
+    if (albumKey.isEmpty() || albumKey != musicPlayAliasKey_) return {};
+    musicPlayAliasKey_.clear();
+    QHash<QString, QString> out;
+    out.swap(musicPlayAliases_);
+    return out;
+}
+
+// THE GATE, at the ONE door every album play goes through: MainWindow::openMusicAlbum asks it first, so the
+// album page's "Play album" and track rows, a Recents row, a favourite and a saved route are all covered by one
+// check rather than by a list of callers somebody has to keep complete. Answering FALSE means "open it exactly
+// as asked", and that is the answer for everything that is not the key a merged album is rendered under with
+// its preferred copy on a server — a single-source album, a copy chosen explicitly ("Play from ..."), a
+// preferred copy on this disk. Nothing about those plays changes.
+//
+// For the one case that is, the preferred supplier is asked the question the play needs anyway: this album's
+// track list, through its own client (musicFetchAlbumTracks), whose reply files the answer in MusicReach. That
+// is the "failed request" the fallback acts on and the "later one succeeds" it recovers on. It is asked on
+// every press rather than on a timer, so a server that comes back is noticed the next time anybody wants it
+// and never otherwise. A box ALREADY known to be down is not waited for: the press falls back at once, and
+// the same ask goes out anyway so the next press (and the album page) sees it if it has come back. Whatever
+// is decided comes back through playMusicAlbumRequested, marked so this gate lets it straight through.
+bool HomeView::divertMusicAlbumPlay(const QString& albumKey, const QString& startPath)
+{
+    const QString pass = std::exchange(musicGatePass_, QString());
+    if (!pass.isEmpty() && pass == albumKey) return false;   // this gate's own decision, coming back round
+    musicPlayAliasKey_.clear();
+    musicPlayAliases_.clear();
+    const int gen = ++musicReachGen_;   // an earlier press still waiting on its answer is superseded
+    if (albumKey.isEmpty() || !musicMergeActive()) return false;
+    rebuildMergedMusic();
+    // Only the key a merged row is RENDERED under takes the fallback. A sibling's key is an explicit choice of
+    // that copy (a "Play from ..." row, a saved route) and plays as asked.
+    if (mergedAlbumPrimary(albumKey) != albumKey || mergedMusic_.albumInstances(albumKey).size() < 2) return false;
+    watchNetworkForMusic();
+    const QVector<MusicFallback::Copy> copies = musicCopiesOf(albumKey);
+    const MusicFallback::Copy& pref = copies.first();
+    if (pref.sourceId.isEmpty() || pref.onDisk) return false;
+
+    const QString source    = pref.sourceId;
+    const bool    knownDown = !MusicReach::current().reaches(source);
+    const quint64 seen = MusicReach::generation();
+    auto decided = QSharedPointer<bool>::create(false);
+    auto decide  = [this, gen, decided, albumKey, startPath] {
+        if (*decided || gen != musicReachGen_) return;
+        *decided = true;
+        startMusicPlayPlan(albumKey, startPath, gen);
+    };
+    musicFetchAlbumTracks(albumKey, [this, decide, albumKey, seen](bool, const QString&) {
+        mergedMusicValid_ = false;   // a fresh track list may have landed, and MusicReach may have moved
+        decide();
+        // The page the user is standing on shows the copy's state; re-draw it ONLY if that just changed — an
+        // ordinary play must not re-render the page (and move the selection) under the user.
+        if (MusicReach::generation() != seen && !stack_.isEmpty()
+            && stack_.last().item.type == QStringLiteral("_musicalbum")
+            && mergedAlbumPrimary(browse::musicKeyOf(stack_.last().item.mime, browse::kMusicAlbumPrefix)) == albumKey)
+            loadTop();
+    });
+    if (knownDown) { decide(); return true; }
+    QTimer::singleShot(kMusicReachBudgetMs, this, [source, decide, decided] {
+        if (*decided) return;
+        MusicReach::noteUnreachable(source);   // no answer in time is no answer
+        decide();
+    });
+    return true;
+}
+
+// The gate's decision, sent back to the one door marked as already decided.
+void HomeView::passMusicAlbumPlay(const QString& albumKey, const QString& startPath)
+{
+    musicGatePass_ = albumKey;
+    emit playMusicAlbumRequested(albumKey, startPath);
+}
+
+void HomeView::startMusicPlayPlan(const QString& primaryKey, const QString& startPath, int gen)
+{
+    rebuildMergedMusic();
+    if (mergedMusic_.albumInstances(primaryKey).size() < 2)
+    { passMusicAlbumPlay(primaryKey, startPath); return; }   // the merge moved under us: play as asked
+    const QVector<MusicFallback::Copy> copies = musicCopiesOf(primaryKey);
+    const MusicFallback::Plan plan = MusicFallback::plan(copies, Settings::musicPreferredSource(),
+                                                         MusicReach::current());
+    if (!plan.fallback() && !plan.pick.none())
+    { passMusicAlbumPlay(primaryKey, startPath); return; }   // reachable: today's choice
+
+    const QString reason = musicFallbackReason(plan, copies);
+    if (plan.pick.none())
+    {
+        // TODAY'S FAILURE, SAID PLAINLY: nothing is started, and the sentence names the source that is down.
+        hvLog(QStringLiteral("music: fallback - no copy of %1 is reachable").arg(primaryKey.section(QChar(0x1F), -1)));
+        showToast(reason);
+        return;
+    }
+
+    const QString playKey = copies.at(plan.pick.index).key;
+    auto go = [this, primaryKey, playKey, startPath, reason, gen] {
+        if (gen != musicReachGen_) return;
+        // Re-planned now that the played copy's track list is certainly in hand: the names are matched
+        // track by track, and a list fetched a moment ago was not there to match against before.
+        rebuildMergedMusic();
+        const QVector<MusicFallback::Copy> cs = musicCopiesOf(primaryKey);
+        const MusicFallback::Plan p = MusicFallback::plan(cs, Settings::musicPreferredSource(),
+                                                          MusicReach::current());
+        const QString key = (p.fallback() && cs.at(p.pick.index).key == playKey) ? playKey : QString();
+        if (key.isEmpty()) { passMusicAlbumPlay(primaryKey, startPath); return; }
+        musicPlayAliasKey_ = key;
+        musicPlayAliases_  = p.identities;
+        hvLog(QStringLiteral("music: fallback - preferred copy unreachable, playing via=%1 tracks-renamed=%2")
+                  .arg(p.via == MusicFallback::Via::Local ? QStringLiteral("local")
+                       : p.via == MusicFallback::Via::Downloaded ? QStringLiteral("downloaded")
+                                                                 : QStringLiteral("server"))
+                  .arg(p.identities.size()));
+        showToast(reason);
+        passMusicAlbumPlay(key, MusicFallback::startFor(p, startPath));
+    };
+    if (musicNeedsAlbumFetch(playKey))
+    {
+        // A remote fallback nobody has opened has no track list yet — the playMusicAlbumFromSource rule.
+        musicFetchAlbumTracks(playKey, [this, go](bool ok, const QString& message) {
+            if (!ok) { showToast(message); return; }
+            mergedMusicValid_ = false;
+            go();
+        });
+        return;
+    }
+    go();
 }
 
 // The index a multi-album music queue is built from. See the header: merged while the merge is active, the
@@ -4625,7 +4857,11 @@ void HomeView::populateMusicAlbum(const QString& albumKey)
         musicFetchAlbumTracks(albumKeyResolved,
             [this, albumKeyResolved, title, gen](bool ok, const QString& message) {
                 if (gen != musicFetchGen_) return;
-                if (!ok) { showMusicServerError(title, message); return; }
+                // (#194, offline fallback) A MERGED album whose preferred copy did not answer is still a
+                // record the user owns elsewhere: draw its page — the picker then says which copy is down and
+                // "Play album" plays one that is not — rather than an error that hides the other copies.
+                if (!ok && !(musicMergeActive() && mergedMusic_.albumInstances(albumKeyResolved).size() > 1))
+                { showMusicServerError(title, message); return; }
                 mergedMusicValid_ = false;
                 renderMusicAlbum(albumKeyResolved);
             });
@@ -9141,6 +9377,9 @@ void HomeView::activateItem(int row)
     // server doors use, and the reason these verbs are reachable on the layout most people run.
     if (it.type == QString::fromLatin1(browse::kMusicAltSourceType))
         { playMusicAlbumFromSource(browse::musicKeyOf(it.mime, browse::kMusicAltSourcePrefix)); return; }
+    // (#194) A copy whose supplier is not answering cannot be chosen: say so, play nothing.
+    if (it.type == QString::fromLatin1(browse::kMusicUnreachableType))
+        { showToast(tr("That copy cannot be reached right now.")); return; }
     // Both overrides are DEFERRED A TURN, for the reason the "add a music server" row above already gives:
     // they rebuild this very level's model under the still-live delegate whose emission called us, and the
     // join one additionally spins NavMenu::pick, which is a nested event loop (issue #28).

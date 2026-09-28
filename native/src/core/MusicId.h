@@ -73,6 +73,7 @@
 //     bound removes the whole family. A single-token title is never levelled at all, which keeps the album
 //     literally named "I" away from the album literally named "1".
 #pragma once
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -246,6 +247,11 @@ namespace MusicId
     {
         QString serverId;         // "" == local
         bool    available = true; // a source that cannot answer right now must never be picked to play
+        // (#194, offline fallback) EVERY track of this copy is a file on this disk — a server copy the user
+        // downloaded whole, played through the one prefer-local rule (PreferLocal.h). Such a copy plays with
+        // its server switched off, so it is reachable whatever the reachability below says. A LOCAL copy
+        // does not need this: it is on disk by definition. Read only by the reachability-aware pick.
+        bool    onDisk = false;
     };
 
     // Which instance should play, as an index into `all`. Never -1: a merged row has to render under exactly
@@ -258,6 +264,53 @@ namespace MusicId
     // copy, which is what stops a merged row's identity flapping between two refreshes. -1 only for an empty
     // list.
     int pickAutoSource(const QVector<SourceRef>& all, const QString& preference);
+
+    // ---- Which copy plays WHEN A SUPPLIER IS DOWN (issue #194, offline fallback) ------------------------
+    //
+    // The pick above decides which copy a merged row IS — its key, and so the identity everything the user
+    // banks is filed under. It deliberately knows nothing about whether a server is answering right now: a
+    // row whose identity followed the network would move every resume position and listening second to
+    // the local copy when the box went to sleep and back again when it woke (MusicRemap moves records onto
+    // whichever copy is primary). So the row stays keyed on the preferred copy, and THIS answers the other
+    // question — which copy should the PLAY press actually open — given which suppliers are reachable.
+    //
+    // WHAT IS REACHABLE. What the suppliers already know, and nothing else: a supplier is unreachable after a
+    // request to it failed at the transport (refused, no route, timed out, a proxy's 5xx) until a later one
+    // succeeds, and every remote supplier is unreachable while the device has no network at all. Nothing
+    // here pings anything; see MusicReach.h for who fills this in.
+    struct Reachability
+    {
+        QSet<QString> unreachable;   // supplier ids whose last request failed
+        bool          offline = false;   // no network at all: no remote supplier can answer
+
+        // A LOCAL copy is always reachable — it is a file on this disk, and "no network" is exactly when it
+        // matters most. That is a rule, not an optimisation: without it the fallback has nowhere to go.
+        bool reaches(const QString& serverId) const
+        {
+            if (serverId.isEmpty()) return true;
+            if (offline) return false;
+            return !unreachable.contains(serverId);
+        }
+    };
+
+    struct PlayPick
+    {
+        int index = -1;       // the copy to open; -1 when no copy can be reached
+        int preferred = -1;   // the copy the row is keyed on — pickAutoSource(all, preference)
+        bool fallback() const { return index >= 0 && index != preferred; }
+        bool none() const     { return index < 0; }
+    };
+
+    // PURE. Total and deterministic, like the pick above.
+    //   * the preferred copy is reachable (its supplier answers, or it is local, or it is on disk)
+    //       -> the preferred copy: exactly today's choice, unchanged;
+    //   * it is not -> the best REACHABLE copy, in this order: a LOCAL copy, then a copy DOWNLOADED whole,
+    //       then the other suppliers in the user's preference order (pickAutoSource's own ranking, then the
+    //       order the caller supplied — the order the servers were added);
+    //   * nothing is reachable -> index -1, and `preferred` still names the copy whose source is down, so
+    //       the caller can say which one.
+    // -1/-1 only for an empty list.
+    PlayPick pickAutoSource(const QVector<SourceRef>& all, const QString& preference, const Reachability& reach);
 
 #ifdef EB_MUSICID_TEST_SEAM
     // Test-only ini redirect, declared and compiled ONLY for probe_musicid (the ProfilePasscode /

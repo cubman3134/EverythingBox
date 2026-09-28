@@ -417,6 +417,114 @@ int main(int argc, char** argv)
     }
 
     // =====================================================================================================
+    // 7b. pickAutoSource GIVEN REACHABILITY (#194, offline fallback)
+    // =====================================================================================================
+    // The row stays keyed on the preferred copy; this is only which copy a Play press opens. Every arm the
+    // issue names: preferred reachable -> unchanged; preferred down -> local first, then a downloaded copy,
+    // then the other servers in preference order; nothing reachable -> -1 naming the preferred copy.
+    {
+        auto ref = [](const char* id, bool onDisk = false) {
+            SourceRef r; r.serverId = QString::fromLatin1(id); r.onDisk = onDisk; return r;
+        };
+        auto down = [](std::initializer_list<const char*> ids, bool offline = false) {
+            Reachability r;
+            for (const char* id : ids) r.unreachable.insert(QString::fromLatin1(id));
+            r.offline = offline;
+            return r;
+        };
+        const QVector<SourceRef> three{ ref(""), ref("srv-a"), ref("srv-b") };
+
+        // THE PREFERRED COPY IS REACHABLE -> TODAY'S CHOICE, UNCHANGED, for every preference.
+        for (const char* pref : { "local", "server", "srv-a", "srv-b", "srv-gone", "" })
+        {
+            const PlayPick p = pickAutoSource(three, QString::fromLatin1(pref), Reachability{});
+            CHECK(p.index == pickAutoSource(three, QString::fromLatin1(pref)));
+            CHECK(p.preferred == p.index && !p.fallback() && !p.none());
+            // ...and a DIFFERENT supplier being down changes nothing either.
+            const PlayPick q = pickAutoSource(three, QString::fromLatin1(pref),
+                                              down({ p.index == 2 ? "srv-a" : "srv-b" }));
+            CHECK(q.index == p.index && !q.fallback());
+        }
+
+        // PREFERRED DOWN, A LOCAL COPY -> THE LOCAL COPY. Even when another server is up and is what the
+        // preference would otherwise fall to: "a music server" preferred, the first one down, local wins
+        // over the second one.
+        {
+            const PlayPick p = pickAutoSource(three, QStringLiteral("srv-a"), down({ "srv-a" }));
+            CHECK(p.preferred == 1 && p.index == 0 && p.fallback());
+            const PlayPick s = pickAutoSource(three, QStringLiteral("server"), down({ "srv-a" }));
+            CHECK(s.preferred == 1 && s.index == 0);
+            // The local copy's position in the list does not matter: it is chosen by what it IS.
+            const QVector<SourceRef> localLast{ ref("srv-a"), ref("srv-b"), ref("") };
+            const PlayPick l = pickAutoSource(localLast, QStringLiteral("srv-a"), down({ "srv-a" }));
+            CHECK(l.preferred == 0 && l.index == 2);
+        }
+
+        // PREFERRED DOWN, NO LOCAL COPY, A DOWNLOADED ONE -> THE DOWNLOAD, ahead of a server that is up and
+        // was added first.
+        {
+            const QVector<SourceRef> dl{ ref("srv-a"), ref("srv-b"), ref("srv-c", /*onDisk*/ true) };
+            const PlayPick p = pickAutoSource(dl, QStringLiteral("srv-a"), down({ "srv-a" }));
+            CHECK(p.preferred == 0 && p.index == 2);
+            // A download plays with its server switched off: srv-c being down too changes nothing.
+            const PlayPick q = pickAutoSource(dl, QStringLiteral("srv-a"), down({ "srv-a", "srv-c" }));
+            CHECK(q.index == 2);
+            // ...but a LOCAL copy still comes first.
+            const QVector<SourceRef> both{ ref("srv-a"), ref("srv-c", true), ref("") };
+            CHECK(pickAutoSource(both, QStringLiteral("srv-a"), down({ "srv-a" })).index == 2);
+            // THE PREFERRED COPY ITSELF DOWNLOADED WHOLE is reachable: no fallback at all.
+            const QVector<SourceRef> own{ ref("srv-a", true), ref("") };
+            const PlayPick o = pickAutoSource(own, QStringLiteral("srv-a"), down({ "srv-a" }, /*offline*/ true));
+            CHECK(o.index == 0 && !o.fallback());
+        }
+
+        // ONLY ANOTHER SERVER REACHABLE -> THAT SERVER, and among several the user's preference order:
+        // pickAutoSource's own ranking, then the order they were added.
+        {
+            const QVector<SourceRef> two{ ref("srv-a"), ref("srv-b") };
+            const PlayPick p = pickAutoSource(two, QStringLiteral("srv-a"), down({ "srv-a" }));
+            CHECK(p.preferred == 0 && p.index == 1 && p.fallback());
+            const QVector<SourceRef> four{ ref("srv-a"), ref("srv-b"), ref("srv-c"), ref("srv-d") };
+            CHECK(pickAutoSource(four, QStringLiteral("srv-c"), down({ "srv-c" })).index == 0);
+            CHECK(pickAutoSource(four, QStringLiteral("srv-c"), down({ "srv-c", "srv-a" })).index == 1);
+            CHECK(pickAutoSource(four, QStringLiteral("server"), down({ "srv-a", "srv-b" })).index == 2);
+        }
+
+        // NOTHING REACHABLE -> -1, and the preferred copy is still named, so the failure can say which
+        // source is down.
+        {
+            const QVector<SourceRef> two{ ref("srv-a"), ref("srv-b") };
+            const PlayPick p = pickAutoSource(two, QStringLiteral("srv-b"), down({ "srv-a", "srv-b" }));
+            CHECK(p.none() && !p.fallback() && p.index == -1 && p.preferred == 1);
+            const PlayPick q = pickAutoSource(two, QStringLiteral("srv-a"), down({}, /*offline*/ true));
+            CHECK(q.none() && q.preferred == 0);
+            const PlayPick e = pickAutoSource(QVector<SourceRef>(), QStringLiteral("local"), Reachability{});
+            CHECK(e.index == -1 && e.preferred == -1);
+        }
+
+        // NO NETWORK AT ALL: every remote supplier is down, and a LOCAL COPY IS ALWAYS REACHABLE — the rule
+        // the whole fallback stands on. Without it this case has nowhere to go.
+        {
+            const PlayPick p = pickAutoSource(three, QStringLiteral("srv-a"), down({}, /*offline*/ true));
+            CHECK(p.index == 0 && p.fallback());
+            const PlayPick l = pickAutoSource(three, QStringLiteral("local"), down({}, true));
+            CHECK(l.index == 0 && !l.fallback());
+            Reachability off; off.offline = true;
+            CHECK(off.reaches(QString()));
+            CHECK(!off.reaches(QStringLiteral("srv-a")));
+            Reachability r; r.unreachable.insert(QStringLiteral("srv-a"));
+            CHECK(r.reaches(QString()) && !r.reaches(QStringLiteral("srv-a")) && r.reaches(QStringLiteral("srv-b")));
+            // An offline device with a downloaded server copy plays the download.
+            const QVector<SourceRef> dl{ ref("srv-a"), ref("srv-b", true) };
+            CHECK(pickAutoSource(dl, QStringLiteral("srv-a"), down({}, true)).index == 1);
+        }
+
+        // Deterministic.
+        CHECK(pickAutoSource(three, QStringLiteral("server"), down({ "srv-a" })).index
+              == pickAutoSource(three, QStringLiteral("server"), down({ "srv-a" })).index);
+    }
+
+    // =====================================================================================================
     // 8. merge() — the single-source guarantee
     // =====================================================================================================
     // THE CLAIM "a user with only a local library sees exactly what they see today", made checkable. The one

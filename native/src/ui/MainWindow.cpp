@@ -6923,6 +6923,9 @@ void MainWindow::adoptMusicQueueIdentities(QHash<QString, QString> indexPaths)
 // which is the order stated once, in the index, and never restated here.
 void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPath)
 {
+    // #194: a merged album whose preferred server is not answering plays a copy that can be reached. HomeView
+    // owns the merge, so it decides — and when it takes the play over, it sends it back here, decided.
+    if (home_ && home_->divertMusicAlbumPlay(albumKey, startPath)) return;
     // WHICH SUPPLIER, decided structurally in one place: a local album key can never parse as a qualified
     // Subsonic id and vice versa (Subsonic.h). Everything below this line is supplier-agnostic.
     const MusicLibrary::Album* album = MusicSupply::indexFor(albumKey).album(albumKey);
@@ -6946,6 +6949,10 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     // untouched, a qualified Subsonic track id becomes a signed stream url. The index itself stores ids, so
     // nothing that persists a queue ever writes a token — see SubsonicClient.h.
     QHash<QString, QString> indexPaths;
+    // #194: a FALLBACK play (the merged album's preferred server is down) files each track under the merged
+    // record's own name. HomeView chose the copy and the names; empty for every ordinary play.
+    const QHash<QString, QString> aliases = home_ ? home_->takeMusicPlayAliases(albumKey) : QHash<QString, QString>();
+    QHash<QString, QString> urlAliases;
     for (const MusicLibrary::IndexTrack& t : album->tracks)
     {
         const QString url = MusicSupply::playUrl(t.path);
@@ -6953,6 +6960,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
         queue << url;
         titles << t.title;
         if (url != t.path) indexPaths.insert(url, t.path);
+        if (aliases.contains(t.path)) urlAliases.insert(url, aliases.value(t.path));
     }
     if (queue.isEmpty())
     {
@@ -6965,6 +6973,7 @@ void MainWindow::openMusicAlbum(const QString& albumKey, const QString& startPat
     int start = startUrl.isEmpty() ? 0 : queue.indexOf(startUrl);
     if (start < 0) start = 0;          // a row for a track the rescan dropped still plays the album
     adoptMusicQueueIdentities(indexPaths);
+    adoptMusicPlayAliases(urlAliases);   // #194: session + host only; nothing banked is moved
 
     // The album's own art for the now-playing page: the extracted embedded cover, else a sibling cover.*.
     const QString art = MusicSupply::albumArt(*album);

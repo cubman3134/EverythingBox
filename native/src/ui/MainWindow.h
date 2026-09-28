@@ -1685,6 +1685,10 @@ private:
     // #204: install that table on the host AND on the session, and migrate anything already banked under the
     // stream urls it names. The one entry point — see the definition for why the three are inseparable.
     void adoptMusicQueueIdentities(QHash<QString, QString> indexPaths);
+    // #194 offline fallback: a queue built from a copy that was PLAYED IN PLACE OF the merged record's
+    // preferred one files each track under the preferred copy's name (queue url -> that name). Session and
+    // host only — never the stream-key migration, so nothing banked is moved (MainWindowMusicFallback.cpp).
+    void adoptMusicPlayAliases(const QHash<QString, QString>& urlToIdentity);
     int themedAudioCurrent_ = 0;        // the playing row in the queue
     int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
     LrcLyrics::Lyrics trackLyrics_ = {}; // the WINNING source's lyrics for the current track (empty = none of the three had any); pushed to host.lyrics (#142)

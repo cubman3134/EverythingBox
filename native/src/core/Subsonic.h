@@ -322,7 +322,15 @@ namespace Subsonic
     {
         QString id, title, artist, album, albumId, coverArt, contentType, suffix;
         int track = 0, disc = 0, year = 0, durationSec = 0;
+        // (#194) The server's own `bitRate` for the file it holds, in kbps; 0 when it did not say. With
+        // `suffix`, the two facts the cross-source picker's quality line is built from.
+        int bitRateKbps = 0;
     };
+
+    // (#194) THE FORMAT A SONG'S `suffix` CLAIMS, as the picker's quality line spells formats: upper case,
+    // "FLAC", "MP3", "OPUS". Only a plain extension counts — letters and digits, one to eight of them — so
+    // an absent, empty or odd suffix ("", "mp3?x", "../a") claims nothing rather than something invented.
+    QString formatOfSuffix(const QString& suffix);
 
     // ONE PLAYLIST, as the three levels of #193 increment 6 need it. `songCount` is the server's own count
     // and is the only honest number between the playlists level and the moment the playlist is opened —
@@ -369,6 +377,11 @@ namespace Subsonic
     // Fill in ONE album's tracks (getAlbum), in disc-then-track order. A no-op when the album key is not in
     // the index. IndexTrack::path is the qualified TRACK id — NOT a stream url; see MusicSupply.h for why a
     // credential must never be what the index stores.
+    //
+    // (#194) Each track carries the format its `suffix` names and the server's `bitRate`, and the ALBUM
+    // carries them too — but only where every track agrees, the rule the Jellyfin supplier applies: a record
+    // holding one MP3 among the FLACs is not "a FLAC copy". A server that sends neither field leaves both
+    // empty, and the picker's line stays the track count alone.
     void fillAlbumTracks(MusicLibrary::Index& idx, const QString& serverId, const QString& albumKey,
                          const QVector<RemoteSong>& songs);
 
