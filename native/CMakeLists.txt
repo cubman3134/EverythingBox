@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.343 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.345 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1004,6 +1004,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)
         src/ui/AddonConfigurePanel.cpp src/ui/AddonConfigurePanel.h   # #80: the nav-kit waiting card that finishes it
+        src/ui/MainWindowDeepLink.cpp                      # everythingbox:// links, the MainWindow half (#80)
+        src/core/DeepLink.cpp src/core/DeepLink.h          # #80: the pure link rules, pinned by probe_deeplink
+        src/core/DeepLinkChannel.cpp src/core/DeepLinkChannel.h           # #80: argv / per-user socket / FileOpen
+        src/core/DeepLinkRegistration.cpp src/core/DeepLinkRegistration.h # #80: HKCU / .desktop, per user
         src/ui/MainWindowWatchTogether.cpp                 # "Watch together" MainWindow members, same rule (#86)
         src/ui/MainWindowSubtitleLogin.cpp                 # #81: OpenSubtitles' download-time sign-in, same rule
         src/ui/MainWindowTrackers.cpp                      # anime/manga tracker MainWindow members, same rule (#156)
@@ -1229,6 +1233,11 @@ if(EVERYTHINGBOX_BUILD_APP)
             TARGET_DIRECTORY everythingbox
             PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
         set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE_ICON_FILE "appicon")
+        # Issue #80: declare the everythingbox:// URL scheme (CFBundleURLTypes) so LaunchServices hands a
+        # clicked link to the app as a QFileOpenEvent (DeepLinkChannel). Qt's stock macOS template has no
+        # such key, so the bundle takes ours: Qt 6.8's template with CFBundleURLTypes added (see its header).
+        set_target_properties(everythingbox PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in")
     endif()
     # On Windows, build as a GUI-subsystem app so no console window opens alongside the main window.
     # qt_add_executable links Qt's EntryPoint, which supplies the WinMain that forwards to main(); all
@@ -4159,6 +4168,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_regbrowser PRIVATE src src/addons src/core src/emu third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_regbrowser PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_regbrowser PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Concurrent lzma7z)
+
+    # everythingbox:// deep links (issue #80, proposal 1): the parser's accept/refuse table (https only, no
+    # userinfo, /manifest.json only, the 2 KiB cap, the addon verb only, percent-decoding exactly once), the
+    # handoff frame and its re-validation on receipt -- pure, then over a real QLocalServer on a name of its own
+    # -- the per-user/per-session socket name, the one-card-at-a-time rule, and the Windows registration as a
+    # PURE list of (key, value) operations plus the Linux .desktop entry. Never touches the registry or ~/.local.
+    add_executable(probe_deeplink tools/probe_deeplink.cpp
+        src/core/DeepLink.cpp        src/core/DeepLink.h
+        src/core/DeepLinkChannel.cpp src/core/DeepLinkChannel.h)
+    target_include_directories(probe_deeplink PRIVATE src src/core)
+    target_link_libraries(probe_deeplink PRIVATE Qt6::Core Qt6::Gui Qt6::Network)
 
     # Seek previews (issue #85): the trickplay arithmetic -- which sprite-sheet grid, row and column a
     # given second of a film lives in (the last grid is SHORT, and a time past the end clamps rather than

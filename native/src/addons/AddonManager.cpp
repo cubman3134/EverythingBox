@@ -2974,6 +2974,73 @@ void AddonManager::addRemoteSource(const QString& url)
     });
 }
 
+// ---- issue #80: the deep-link confirmation's look at a manifest ------------------------------------------------
+
+AddonManager::RemotePreview AddonManager::describeRemoteManifest(const QString& manifestUrl, const QByteArray& json)
+{
+    RemotePreview p;
+    p.host = QUrl(manifestUrl).host();
+    // The very validation addRemoteSource applies, so a card never offers what Install would then refuse.
+    const auto built = buildRemoteAddon(normalizeBase(manifestUrl), json);
+    if (!built) { p.error = tr("That link doesn't lead to a valid add-on."); return p; }
+    const AddonManifest& m = built->manifest;
+    p.ok   = true;
+    p.id   = m.id;
+    p.name = m.name.isEmpty() ? m.id : m.name;
+    auto addType = [&p](const QString& t) { if (!t.isEmpty() && !p.catalogTypes.contains(t)) p.catalogTypes << t; };
+    if (built->stremio)
+    {
+        p.resources = built->stremioResources;
+        for (const StremioTranslate::Catalog& c : built->stremioManifest.catalogs) addType(c.type);
+    }
+    else
+    {
+        if (!m.catalogs.isEmpty()) p.resources << QStringLiteral("catalog");
+        for (const AddonResource& r : m.resources) if (!p.resources.contains(r.name)) p.resources << r.name;
+        for (const AddonCatalog& c : m.catalogs) addType(c.type);
+        p.permissions = m.permissions;
+    }
+    return p;
+}
+
+QNetworkReply* AddonManager::fetchRemotePreview(const QString& manifestUrl,
+                                                const std::function<void(const RemotePreview&)>& done)
+{
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    QNetworkRequest rq((QUrl(manifestUrl)));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(kPreviewTimeoutMs);
+    QNetworkReply* reply = nam_->get(rq);
+    // A manifest is a few KiB. Nobody chose to download this one — a link did — so a response that declares
+    // (or turns out to be) more than the cap is abandoned rather than read.
+    auto tooBig = std::make_shared<bool>(false);
+    auto capCheck = [reply, tooBig] {
+        if (*tooBig) return;
+        const QVariant len = reply->header(QNetworkRequest::ContentLengthHeader);
+        if ((len.isValid() && len.toLongLong() > kMaxPreviewBytes) || reply->bytesAvailable() > kMaxPreviewBytes)
+        {
+            *tooBig = true;
+            reply->abort();
+        }
+    };
+    connect(reply, &QNetworkReply::metaDataChanged, reply, capCheck);
+    connect(reply, &QNetworkReply::readyRead, reply, capCheck);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manifestUrl, done, tooBig] {
+        reply->deleteLater();
+        RemotePreview p;
+        p.host = QUrl(manifestUrl).host();
+        if (*tooBig)
+            p.error = tr("That add-on's manifest is far too large to be a real one.");
+        else if (reply->error() != QNetworkReply::NoError)
+            p.error = tr("Couldn't reach that add-on: %1").arg(NetErrorText::forReply(reply));   // #435: our words
+        else
+            p = describeRemoteManifest(manifestUrl, reply->readAll());
+        if (done) done(p);
+    });
+    return reply;
+}
+
 bool AddonManager::removeRemoteSource(const QString& url)
 {
     const QString base = normalizeBase(url);

@@ -847,6 +847,11 @@ void Settings::setFileDropEnabled(bool on)
 {
     store().setValue(QStringLiteral("remote/fileDrop"), on); store().sync();
 }
+bool Settings::deepLinksEnabled() { return store().value(QStringLiteral("device/deepLinks"), false).toBool(); }
+void Settings::setDeepLinksEnabled(bool on)
+{
+    store().setValue(QStringLiteral("device/deepLinks"), on); store().sync();
+}
 void Settings::setRemoteControlPort(int port)
 {
     if (port < 1) port = 1; else if (port > 65535) port = 65535;   // clamp to a valid TCP port
