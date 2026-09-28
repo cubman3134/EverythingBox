@@ -110,11 +110,14 @@ public:
     // options before seeding, and reportDosConf() reports that checked plan.
     bool dosConfPlan(const CorePlan& plan, DosConf::Plan* out, QString* confName) const;
 
-    // #191: the MIDI assets. For the user's chosen MS-DOS MIDI device, fills *options with the core option
-    // that selects it — but only when every file that device needs is in the system folder — and returns the
-    // message naming the missing file(s) and the folder when it is not. Never refuses a launch: a game with
-    // no soundfont plays through its default audio, and the message says so.
-    QString dosMidiSeed(const CorePlan& plan, const QString& title, QMap<QString, QString>* options) const;
+    // #191: the MIDI assets. For the MIDI device this launch resolves to — the game's own choice (keyed by
+    // `key`, the #51 per-game store), else the MS-DOS setting, else the recipe default — fills *options with
+    // the core option that selects it, but only when every file that device needs is in the system folder, and
+    // returns the message naming the missing file(s) and the folder when it is not. Logs the report line
+    // ("MIDI: MT-32 (this game)"). Never refuses a launch: a game with no soundfont plays through its default
+    // audio, and the message says so.
+    QString dosMidiSeed(const CorePlan& plan, const QString& title, const QString& key,
+                        QMap<QString, QString>* options) const;
 
     // Fill plan.corePath — immediately when installed, else via an async buildbot download (progress on the
     // Notifier toast) — then run onReady with the completed plan. On failure onReady never runs; the error

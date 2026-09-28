@@ -992,6 +992,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::tuneChannelCellRequested, this, &MainWindow::tuneChannelFromGuide);   // #179 inc 2
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::romhacksRequested, this, &MainWindow::showRomhacks);
+    wireGameMidiDoor();   // #191: "MIDI device…" on the game menu (MainWindowRetroComputers.cpp)
     connect(home_, &HomeView::configureAddonRequested, this, &MainWindow::openAddonConfigure);   // #80
     // #110: Download on a Jellyfin row. Deferred a turn for the reason every other verb that opens a
     // NavMenu is - this arrives inside a clicked()/QML delivery and the batch verb spins a nested loop,
@@ -12242,6 +12243,16 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
             kinds << QStringLiteral("emulation");
         }
 
+        // MIDI device (issue #191) — MS-DOS games on a core with a MIDI option (dosbox_pure): the recipe's devices,
+        // over the MS-DOS setting. Twin row on the Start-menu emulation panel; both go through editGameMidiDevice
+        // (MainWindowRetroComputers.cpp).
+        const QString midiCore = (curTarget.engine == EmuEngine::Libretro) ? curTarget.ref : QString();
+        if (systemOffersGameMidi(sys->id, midiCore))
+        {
+            rows << tr("MIDI device:  %1").arg(gameMidiLeverValue(ov, sys->id, midiCore));
+            kinds << QStringLiteral("midi");
+        }
+
         // Pre-launch / post-exit command hooks (issue #64). Desktop-only — a hook EXECUTES a local command, so
         // it neither runs nor appears on Android/iOS. They are device-local config (LaunchHooksStore, unsynced),
         // a separate store from the #51 overrides above, edited on the same nav-kit surface via an Osk row.
@@ -12331,6 +12342,10 @@ void MainWindow::editLaunchOptions(QString key, QString systemId)
         else if (kind == QStringLiteral("contentupd") || kind == QStringLiteral("contentdlc"))
         {
             editContentLever(key, kind == QStringLiteral("contentdlc"));   // issue #189 — one shared handler
+        }
+        else if (kind == QStringLiteral("midi"))
+        {
+            editGameMidiDevice(key, systemId, midiCore);                   // issue #191 — one shared handler
         }
         else if (kind.startsWith(QStringLiteral("gfx-")))
         {
@@ -29043,6 +29058,16 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
         PanelRow d; d.kind = PanelRow::Action; d.id = QStringLiteral("contentdlc");
         d.label = tr("Downloadable content:  %1").arg(contentLeverValue(cov, true)); rows << d;
     }
+    // MIDI device (issue #191) — a per-game lever, so ThisGame scope only, and only while the selected target is a
+    // libretro core whose recipe entry declares MIDI devices (an MS-DOS game on dosbox_pure). The twin of
+    // editLaunchOptions' row, through the same editGameMidiDevice.
+    const QString midiCore = (target.engine == EmuEngine::Libretro) ? target.ref : QString();
+    if (isGame && thisGame && systemOffersGameMidi(ctx.sys->id, midiCore))
+    {
+        PanelRow m; m.kind = PanelRow::Action; m.id = QStringLiteral("midi");
+        m.label = tr("MIDI device:  %1").arg(gameMidiLeverValue(LaunchOpts::get(ctx.gameKey), ctx.sys->id, midiCore));
+        rows << m;
+    }
     // (No "Controller mapping" row — that is v2.)
 
     auto onAct = [this, ctx, active, thisGame, returnTo, kThisGame, kSystemDefault](const QString& id, const QString& val) {
@@ -29135,6 +29160,26 @@ void MainWindow::presentEmulationPanelAt(const EmuMenuContext& ctx, emuscope::Sc
             const bool dlcRow = (id == QStringLiteral("contentdlc"));
             QTimer::singleShot(0, this, [this, ctx, active, returnTo, k, dlcRow]{
                 editContentLever(k, dlcRow);
+                presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the row shows the new value
+            });
+            return;
+        }
+        if (id == QStringLiteral("midi"))
+        {
+            // issue #191. Blocking NavMenu inside the pad timer: deferred, and the prior override recorded for
+            // Apply/Discard first — exactly the contentupd/contentdlc arm above.
+            // The core the row was built for, recomputed the way the row did (the Emulator pick may have moved it).
+            const EmulationTarget t = resolveEmulationTarget(
+                ctx.sys, thisGame ? LaunchOpts::get(ctx.gameKey) : LaunchOpts::Override{}, Settings::coreFor(ctx.sys->id),
+                Settings::emulatorFor(ctx.sys->id), Settings::backendFor(ctx.sys->id), kRetroParkBuildAvailable,
+                kStandaloneBuildAvailable);
+            const QString k = ctx.gameKey, sysId = ctx.sys->id;
+            const QString core = (t.engine == EmuEngine::Libretro) ? t.ref : QString();
+            const bool had = LaunchOpts::has(k);
+            const LaunchOpts::Override prior = LaunchOpts::get(k);
+            emuEditRecord([k, had, prior]{ if (had) LaunchOpts::set(k, prior); else LaunchOpts::reset(k); });
+            QTimer::singleShot(0, this, [this, ctx, active, returnTo, k, sysId, core]{
+                editGameMidiDevice(k, sysId, core);
                 presentEmulationPanelAt(ctx, active, returnTo);   // re-present so the row shows the new value
             });
             return;

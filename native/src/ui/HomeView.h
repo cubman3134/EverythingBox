@@ -400,6 +400,10 @@ public:
     // machine hosts a room. A source rather than a stored string because the room lives in MainWindow and the
     // label must be whatever it is at the moment the page is built.
     void setWatchTogetherLabelSource(std::function<QString()> source) { wtLabelSource_ = std::move(source); }
+    // #191: does this game (launch key, SystemCatalog id) have a per-game MIDI device to choose? Answered by
+    // MainWindow, which owns the emulation-target resolution; the game menu offers "MIDI device…" only on yes.
+    void setGameMidiOffered(std::function<bool(const QString& key, const QString& systemId)> f)
+    { gameMidiOffered_ = std::move(f); }
     void refreshWatchTogetherLabel();   // re-read the source into the classic button (a room opened or closed)
     // The classic detail page's Play for the item it is showing, IF it is still showing that item. The
     // watch-together menu runs its nested loop between the press and this call.
@@ -594,6 +598,10 @@ signals:
     // confirm and the install-and-launch, the same shape as romhacksRequested above. `portId` is the
     // NativePorts catalog id, resolved while the row index was still valid.
     void nativePortRequested(const MediaItem& item, const QString& portId);
+    // #191: "MIDI device…" on the game menu (showGameItemMenu) — the classic layout's door to the per-game MIDI
+    // lever, the same one the themed Launch options editor and Start panel open. `key` is the game's launch
+    // key (resumeKeyFor), the identity its #51 launch-override record is filed under.
+    void gameMidiRequested(const QString& key, const QString& systemId);
     // A channel row was activated: TUNE it (issue #179). MainWindow owns the tuner — it resolves what is on
     // now from the wall clock, joins the programme at its offset through PlaybackSession, and owns the
     // Up/Down surfing that follows — so this view only names the channel. Carries the CHANNEL ID, not the
@@ -1321,6 +1329,7 @@ private:
     QPushButton* sourceBtn_ = nullptr;
     QPushButton* wtBtn_ = nullptr;        // "Watch together…" (#86): playable video leaves only
     std::function<QString()> wtLabelSource_;
+    std::function<bool(const QString&, const QString&)> gameMidiOffered_;   // #191, see setGameMidiOffered
     QString watchTogetherLabel() const;   // wtLabelSource_'s answer, or "Watch together…" when none is set
     // ---- #239, the classic half of "this did not open" ---------------------------------------------------
     // The banner (top of the detail text column, above whatever the theme ordered) and the two verbs the

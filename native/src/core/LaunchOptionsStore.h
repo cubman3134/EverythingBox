@@ -73,6 +73,12 @@ namespace LaunchOpts
         // machine — which is also why it belongs in THIS store (per game, cloud-merged) rather than beside
         // the files.
         QString bootFile;
+        // #191: this game's MIDI device — a device id from the recipe's `midi` block ("mt32", "gm"). EMPTY is
+        // "Default (use MS-DOS setting)", i.e. no override: DosConf::resolveMidi then falls through to
+        // Settings::dosMidiDevice and the recipe default. Stored lowercased, the same spelling rule the MS-DOS
+        // setting uses, so the two layers compare on the same terms. Read on the LIBRETRO path only (the
+        // dosbox_pure option it selects); a standalone DOSBox takes its MIDI from its own conf.
+        QString midiDevice;
         qint64  updatedAt = 0;
 
         // No lever set. Ignores updatedAt, so a clear husk is empty (= "no override") while still being a real,

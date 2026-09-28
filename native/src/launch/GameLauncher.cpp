@@ -733,7 +733,7 @@ void GameLauncher::openResolved(const QString& rom, const QString& title, const 
                 QString confName;
                 const bool hasConf = dosConfPlan(ready, &confPlan, &confName);
                 QMap<QString, QString> midiSeed;
-                const QString midiMsg = dosMidiSeed(ready, recentTitle, &midiSeed);
+                const QString midiMsg = dosMidiSeed(ready, recentTitle, key, &midiSeed);
                 if (retro_)
                 {
                     retro_->setConfOptions(midiSeed);
@@ -871,40 +871,43 @@ void GameLauncher::reportDosConf(const QString& title, bool launched)
     if (launched) emit notifyUser(DosConf::report(title, confName, p), kFeedbackLong);
 }
 
-// #191. The MIDI assets. Whatever device the user chose for MS-DOS, the files it needs are THEIRS to supply —
-// MT-32 ROMs are copyrighted and a soundfont is somebody else's licensed content, so nothing here is ever
-// fetched or bundled. Present => seed the core option that selects it. Absent => return the message naming the
-// exact file(s) and the exact folder, and let the game boot anyway on its default audio. A missing soundfont
-// is not a reason to refuse a launch.
-QString GameLauncher::dosMidiSeed(const CorePlan& plan, const QString& title,
+// #191. The MIDI assets. Whichever device this launch resolves to — the game's own choice (the #51 per-game
+// store), else the MS-DOS setting, else the recipe's default (DosConf::resolveMidi) — the files it needs are
+// THEIRS to supply: MT-32 ROMs are copyrighted and a soundfont is somebody else's licensed content, so nothing
+// here is ever fetched or bundled. Present => seed the core option that selects it. Absent => return the message
+// naming the exact file(s) and the exact folder, and let the game boot anyway on its default audio. A missing
+// soundfont is not a reason to refuse a launch. The whole decision is DosConf::midiLaunch (pure, probed); this
+// only supplies the three inputs and writes the report line — "MIDI: MT-32 (this game)" — to the log.
+QString GameLauncher::dosMidiSeed(const CorePlan& plan, const QString& title, const QString& key,
                                   QMap<QString, QString>* options) const
 {
     if (options) options->clear();
-    const QString choice = Settings::dosMidiDevice();
-    if (choice.isEmpty()) return QString();             // "Default" — the core decides, as it always has
     if (plan.systemId.isEmpty() || plan.core.isEmpty()) return QString();
     const LaunchRecipe& recipe = LaunchRecipes::forSystem(plan.systemId);
     if (recipe.isNull()) return QString();
     const RecipeCore* rc = LaunchRecipes::coreFor(recipe, plan.core);
     if (!rc || rc->midi.isNull()) return QString();     // this core has no MIDI-asset option
-    const DosConf::MidiDevice* dev = DosConf::midiDevice(rc->midi, choice);
-    if (!dev) return QString();                         // a stored value this core does not offer
 
+    const QString gameChoice = key.isEmpty() ? QString() : LaunchOpts::get(key).midiDevice;
     const QString sysDir = CoreManager::systemDir();
     const auto exists = [&sysDir](const QString& n) {
         return QFileInfo::exists(sysDir + QStringLiteral("/") + n);
     };
-    const QStringList missing = DosConf::missingMidiFiles(*dev, exists);
-    if (missing.isEmpty())
+    const DosConf::MidiLaunch L = DosConf::midiLaunch(rc->midi, gameChoice, Settings::dosMidiDevice(), exists,
+                                                      QDir::toNativeSeparators(sysDir), title);
+    if (!L.choice.device) return QString();             // "Default" everywhere: the core decides, as it always has
+    if (L.missing.isEmpty())
     {
-        if (options) *options = DosConf::midiOptions(rc->midi, choice, exists);
-        glLog(QStringLiteral("game: MIDI device \"%1\" -> %2=%3")
-                  .arg(dev->label, rc->midi.option, dev->value));
+        if (options) *options = L.options;
+        glLog(QStringLiteral("game: %1 -> %2=%3").arg(L.report, rc->midi.option, L.choice.device->value));
         return QString();
     }
-    glLog(QStringLiteral("game: MIDI device \"%1\" unavailable — missing %2 in %3")
-              .arg(dev->label, missing.join(QStringLiteral(", ")), QDir::toNativeSeparators(sysDir)));
-    return DosConf::midiMessage(*dev, missing, QDir::toNativeSeparators(sysDir), title);
+    glLog(QStringLiteral("game: %1 unavailable — missing %2 in %3")
+              .arg(L.report, L.missing.join(QStringLiteral(", ")), QDir::toNativeSeparators(sysDir)));
+    // The sentence the user is shown, verbatim, the way firmwareBlocker's refusal is logged: a toast is gone in
+    // seconds (and a launch that then fails replaces it at once), the log is what a bug report carries.
+    glLog(QStringLiteral("game: MIDI message: %1").arg(L.message));
+    return L.message;
 }
 
 void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,

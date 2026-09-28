@@ -37,6 +37,7 @@
 #include "dosbox_pure_declared.h"   // #288: dosbox-pure's declared options, verified against its source
 
 #include <QCoreApplication>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
 #include <QString>
@@ -705,6 +706,197 @@ int main(int argc, char** argv)
         CHECK(allKeptReport.contains(QStringLiteral("Kept your own setting for cpu.cycles.")));
         // An unreadable plan is left as it is.
         CHECK(!DosConf::keepUserSettings(broken, userKeys).ok);
+    }
+
+    // ---- 9. #191, the per-game half: game override > MS-DOS setting > recipe default ---------------------------
+    // The device a launch uses, where it came from, and — the part a regression would hide — that the file
+    // check, the seeded option and the message all follow the RESOLVED device. Every expected string below is
+    // written out by hand; none is read back from the code under test.
+    {
+        const LaunchRecipe dos = LaunchRecipes::load(QStringLiteral("msdos"), QString());
+        const RecipeCore* pure = dos.isNull() ? nullptr : LaunchRecipes::coreFor(dos, QStringLiteral("dosbox_pure"));
+        CHECK(pure != nullptr);
+        if (!pure) { std::fprintf(stderr, "DOSCONF had %d failure(s)\n", failures + 1); return 1; }
+        const DosConf::MidiSpec& spec = pure->midi;
+        // The shipped recipe names no default of its own: with nothing chosen anywhere, the core decides.
+        CHECK(spec.defaultDevice.isEmpty());
+
+        using DosConf::MidiSource;
+        const QString none;
+        const QString mt32 = QStringLiteral("mt32"), gm = QStringLiteral("gm");
+
+        // (a) The order. The game's own choice beats the MS-DOS setting.
+        {
+            const DosConf::MidiChoice c = DosConf::resolveMidi(spec, mt32, gm);
+            CHECK(c.device && c.device->id == mt32);
+            CHECK(c.source == MidiSource::Game);
+        }
+        {
+            const DosConf::MidiChoice c = DosConf::resolveMidi(spec, gm, mt32);
+            CHECK(c.device && c.device->id == gm);
+            CHECK(c.source == MidiSource::Game);
+        }
+        // With no game choice, the MS-DOS setting decides.
+        {
+            const DosConf::MidiChoice c = DosConf::resolveMidi(spec, none, gm);
+            CHECK(c.device && c.device->id == gm);
+            CHECK(c.source == MidiSource::System);
+        }
+        // Neither: no device (the shipped recipe has no default), and nothing to report.
+        {
+            const DosConf::MidiChoice c = DosConf::resolveMidi(spec, none, none);
+            CHECK(c.device == nullptr);
+            CHECK(c.source == MidiSource::None);
+            CHECK(DosConf::midiReportLine(c).isEmpty());
+        }
+        // The game's choice is matched the way the MS-DOS setting is: trimmed, any case.
+        CHECK(DosConf::resolveMidi(spec, QStringLiteral(" MT32 "), gm).source == MidiSource::Game);
+        // A stored device the recipe does not declare is NOT an override: the MS-DOS setting still stands.
+        {
+            const DosConf::MidiChoice c = DosConf::resolveMidi(spec, QStringLiteral("sc55"), gm);
+            CHECK(c.device && c.device->id == gm);
+            CHECK(c.source == MidiSource::System);
+        }
+
+        // (b) The recipe default is the LAST layer. A hand-built spec (the same JSON shape a user recipe in
+        // <data>/systems/recipes would carry) that names one.
+        {
+            const QJsonObject o = QJsonDocument::fromJson(QByteArray(
+                "{\"option\":\"dosbox_pure_midi\",\"default\":\" GM \",\"devices\":["
+                "{\"id\":\"gm\",\"label\":\"General MIDI (SoundFont)\",\"short\":\"General MIDI\","
+                "\"value\":\"DOSBOX.SF2\",\"files\":[\"DOSBOX.SF2\"]},"
+                "{\"id\":\"mt32\",\"label\":\"Roland MT-32\",\"value\":\"MT32_CONTROL.ROM\","
+                "\"files\":[\"MT32_CONTROL.ROM\",\"MT32_PCM.ROM\"]}]}")).object();
+            const DosConf::MidiSpec withDef = DosConf::midiFromJson(o);
+            CHECK(withDef.defaultDevice == QLatin1String("gm"));   // trimmed and lowercased, like a stored id
+            const DosConf::MidiChoice r = DosConf::resolveMidi(withDef, none, none);
+            CHECK(r.device && r.device->id == gm);
+            CHECK(r.source == MidiSource::Recipe);
+            CHECK(DosConf::midiReportLine(r) == QLatin1String("MIDI: General MIDI (recipe default)"));
+            // The MS-DOS setting beats the recipe default, and the game beats both.
+            const DosConf::MidiChoice s = DosConf::resolveMidi(withDef, none, mt32);
+            CHECK(s.device && s.device->id == mt32);
+            CHECK(s.source == MidiSource::System);
+            const DosConf::MidiChoice g = DosConf::resolveMidi(withDef, mt32, none);
+            CHECK(g.device && g.device->id == mt32);
+            CHECK(g.source == MidiSource::Game);
+            // No "short": the report falls back to the full label.
+            CHECK(DosConf::midiReportLine(g) == QLatin1String("MIDI: Roland MT-32 (this game)"));
+        }
+
+        // (c) "Default (use MS-DOS setting)" is the EMPTY value, and the empty value is no override at all:
+        // for every MS-DOS setting, the game's Default resolves exactly as if the game had no record.
+        {
+            const QList<QPair<QString, QString>> choices = DosConf::gameMidiChoices(spec);
+            CHECK(choices.size() == 3);
+            if (choices.size() == 3)
+            {
+                CHECK(choices.at(0).first == QLatin1String("Default (use MS-DOS setting)"));
+                CHECK(choices.at(0).second.isEmpty());
+                CHECK(choices.at(1).first == QLatin1String("General MIDI (SoundFont)"));
+                CHECK(choices.at(1).second == gm);
+                CHECK(choices.at(2).first == QLatin1String("Roland MT-32"));
+                CHECK(choices.at(2).second == mt32);
+            }
+            for (const QString& sys : { none, gm, mt32 })
+            {
+                const DosConf::MidiChoice d = DosConf::resolveMidi(spec, none, sys);
+                CHECK(d.source == (sys.isEmpty() ? MidiSource::None : MidiSource::System));
+                CHECK((d.device ? d.device->id : QString()) == sys);
+            }
+        }
+
+        // (d) The file check follows the RESOLVED device. The folder holds only the soundfont; the MS-DOS
+        // setting is General MIDI; this game says MT-32. The MT-32 is what is checked, its two ROMs are what
+        // is named, nothing is seeded, and the soundfont that IS present does not leak in as a fallback.
+        const QString folder = QStringLiteral("/opt/EverythingBox/system");
+        const auto sf2Only = [](const QString& n) { return n == QLatin1String("DOSBOX.SF2"); };
+        const auto romsOnly = [](const QString& n) {
+            return n == QLatin1String("MT32_CONTROL.ROM") || n == QLatin1String("MT32_PCM.ROM");
+        };
+        const auto haveNothing = [](const QString&) { return false; };
+        {
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, mt32, gm, sf2Only, folder, QStringLiteral("Doom"));
+            CHECK(L.choice.device && L.choice.device->id == mt32);
+            CHECK(L.missing == (QStringList{ QStringLiteral("MT32_CONTROL.ROM"), QStringLiteral("MT32_PCM.ROM") }));
+            CHECK(L.options.isEmpty());
+            // Outside CHECK: an escape inside a stringified macro argument is what GCC has refused before.
+            const QString expected = QString::fromUtf8(
+                "Roland MT-32 needs files you have to supply: put MT32_CONTROL.ROM and MT32_PCM.ROM in the system "
+                "folder (/opt/EverythingBox/system). EverythingBox can't download them \xE2\x80\x94 these ROMs are "
+                "copyrighted. \xE2\x80\x9C" "Doom\xE2\x80\x9D will play through its default audio instead.");
+            CHECK(L.message == expected);
+            CHECK(L.report == QLatin1String("MIDI: MT-32 (this game)"));
+        }
+        // The mirror image: this game says General MIDI over an MT-32 setting, and only the ROMs are present.
+        {
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, gm, mt32, romsOnly, folder, QStringLiteral("Doom"));
+            CHECK(L.missing == QStringList{ QStringLiteral("DOSBOX.SF2") });
+            CHECK(L.options.isEmpty());
+            CHECK(L.message.contains(QStringLiteral("put DOSBOX.SF2 in the system folder (/opt/EverythingBox/system)")));
+            CHECK(!L.message.contains(QStringLiteral("MT32")));
+            CHECK(L.report == QLatin1String("MIDI: General MIDI (this game)"));
+        }
+        // The same device, missing the same files, says the same thing whichever layer chose it: the per-game
+        // MT-32 message IS the MS-DOS setting's message.
+        {
+            const DosConf::MidiLaunch byGame = DosConf::midiLaunch(spec, mt32, none, haveNothing, folder, QStringLiteral("Doom"));
+            const DosConf::MidiLaunch bySys  = DosConf::midiLaunch(spec, none, mt32, haveNothing, folder, QStringLiteral("Doom"));
+            CHECK(!byGame.message.isEmpty());
+            CHECK(byGame.message == bySys.message);
+            CHECK(byGame.report == QLatin1String("MIDI: MT-32 (this game)"));
+            CHECK(bySys.report  == QLatin1String("MIDI: MT-32 (MS-DOS setting)"));
+        }
+        // Files present: the resolved device's option is seeded and there is no message.
+        {
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, mt32, gm, romsOnly, folder, QStringLiteral("Doom"));
+            CHECK(L.missing.isEmpty());
+            CHECK(L.message.isEmpty());
+            CHECK(L.options.size() == 1);
+            CHECK(L.options.value(QStringLiteral("dosbox_pure_midi")) == QLatin1String("MT32_CONTROL.ROM"));
+        }
+        {
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, none, gm, sf2Only, folder, QString());
+            CHECK(L.options.value(QStringLiteral("dosbox_pure_midi")) == QLatin1String("DOSBOX.SF2"));
+            CHECK(L.report == QLatin1String("MIDI: General MIDI (MS-DOS setting)"));
+        }
+        // Nothing chosen anywhere: no device, no check, no seed, no message, no report (the pre-#191 launch).
+        {
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, none, none, haveNothing, folder, QStringLiteral("Doom"));
+            CHECK(L.choice.device == nullptr);
+            CHECK(L.missing.isEmpty() && L.options.isEmpty() && L.message.isEmpty() && L.report.isEmpty());
+        }
+
+        // (e) The composition GameLauncher::dosMidiSeed runs: the game's record from the #51 store, read by the
+        // launch key, fed in as the game layer. A store that dropped the field would land on the setting.
+        {
+            const QString key = QStringLiteral("romlib:C:/roms/dos/Monkey Island");
+            LaunchOpts::Override ov; ov.midiDevice = QStringLiteral("MT32");
+            LaunchOpts::set(key, ov);
+            const DosConf::MidiLaunch L = DosConf::midiLaunch(spec, LaunchOpts::get(key).midiDevice, gm, sf2Only,
+                                                              folder, QStringLiteral("Monkey Island"));
+            CHECK(L.report == QLatin1String("MIDI: MT-32 (this game)"));
+            CHECK(L.message.contains(QStringLiteral("MT32_CONTROL.ROM and MT32_PCM.ROM")));
+            LaunchOpts::reset(key);   // back to Default: the setting decides again
+            CHECK(DosConf::midiLaunch(spec, LaunchOpts::get(key).midiDevice, gm, sf2Only, folder, QString()).report
+                  == QLatin1String("MIDI: General MIDI (MS-DOS setting)"));
+        }
+
+        // (f) A non-DOS game has no MIDI entry. The chooser's list is the `midi` block of the recipe entry for the
+        // core the game resolves to (the entry the launch reads), so only an MS-DOS game on dosbox_pure gets one.
+        // C64 has a recipe without a `midi` block; SNES has no recipe at all; an MS-DOS game moved onto
+        // dosbox_core, or onto a standalone DOSBox (no libretro core: ""), would be offered a lever the launch
+        // ignores, so it is offered none.
+        CHECK(!LaunchRecipes::midiSpecFor(dos, QStringLiteral("dosbox_pure")).isNull());
+        CHECK(DosConf::gameMidiChoices(LaunchRecipes::midiSpecFor(dos, QStringLiteral("dosbox_pure"))).size() == 3);
+        CHECK(DosConf::gameMidiChoices(LaunchRecipes::midiSpecFor(dos, QStringLiteral("dosbox_core"))).isEmpty());
+        CHECK(DosConf::gameMidiChoices(LaunchRecipes::midiSpecFor(dos, QString())).isEmpty());
+        const LaunchRecipe c64 = LaunchRecipes::load(QStringLiteral("c64"), QString());
+        CHECK(!c64.isNull());
+        CHECK(LaunchRecipes::midiSpecFor(c64, QStringLiteral("vice_x64")).isNull());
+        CHECK(DosConf::gameMidiChoices(LaunchRecipes::midiSpecFor(c64, QStringLiteral("vice_x64"))).isEmpty());
+        const LaunchRecipe snes = LaunchRecipes::load(QStringLiteral("snes"), QString());
+        CHECK(DosConf::gameMidiChoices(LaunchRecipes::midiSpecFor(snes, QStringLiteral("snes9x"))).isEmpty());
     }
 
     if (failures == 0) std::printf("DOSCONF-OK\n");

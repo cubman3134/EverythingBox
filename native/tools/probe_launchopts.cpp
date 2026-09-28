@@ -391,6 +391,49 @@ int main(int argc, char** argv)
         CHECK(LaunchOpts::get(key).isEmpty());
     }
 
+    // ---- 10c. #191: this game's MIDI DEVICE round-trips the same way -------------------------------------------
+    //         The per-game MIDI device is a #51 lever like bootFile: a midiDevice-only override must be a real
+    //         record (not a husk ensureCache would drop), stored in ONE spelling (trimmed, lowercased, the MS-DOS
+    //         setting's rule), present in the ini blob under its own key so a cloud merge carries it, and
+    //         "Default (use MS-DOS setting)" (the empty value) must clear it rather than store a value.
+    {
+        const QString key = QStringLiteral("romlib:C:/roms/dos/Monkey Island");
+        Override ov; ov.midiDevice = QStringLiteral("  MT32 ");
+        LaunchOpts::set(key, ov);
+
+        const Override got = LaunchOpts::get(key);
+        CHECK(got.midiDevice == QStringLiteral("mt32"));
+        CHECK(!got.isEmpty());                       // a midiDevice-only override is a real record
+        CHECK(LaunchOpts::has(key));
+        CHECK(got.core.isEmpty() && got.emulatorId.isEmpty() && got.bootFile.isEmpty()); // no other lever moved
+
+        QSettings s3(iniPath, QSettings::IniFormat);
+        const QString leaf = QStringLiteral("launchopts/items/") + md5hex(key);
+        const QJsonObject blob = QJsonDocument::fromJson(s3.value(leaf).toString().toUtf8()).object();
+        CHECK(blob.value(QStringLiteral("midiDevice")).toString() == QStringLiteral("mt32"));
+
+        // The pure JSON pair on its own: the field survives fromJson(toJson()), and an unset one is ABSENT.
+        Override gm; gm.midiDevice = QStringLiteral("gm");
+        CHECK(LaunchOpts::fromJson(LaunchOpts::toJson(gm)).midiDevice == QStringLiteral("gm"));
+        CHECK(!LaunchOpts::toJson(Override{}).contains(QStringLiteral("midiDevice")));
+
+        // A second lever on the same record keeps the device; changing the device is a real change.
+        Override both = LaunchOpts::get(key); both.bootFile = QStringLiteral("MONKEY.EXE");
+        LaunchOpts::set(key, both);
+        CHECK(LaunchOpts::get(key).midiDevice == QStringLiteral("mt32"));
+        Override toGm = LaunchOpts::get(key); toGm.midiDevice = QStringLiteral("gm");
+        LaunchOpts::set(key, toGm);
+        CHECK(LaunchOpts::get(key).midiDevice == QStringLiteral("gm"));
+
+        // "Default (use MS-DOS setting)": the chooser writes the EMPTY value. With bootFile cleared too, the
+        // record is empty, so it reads as no override (a husk that still propagates the clear).
+        Override def = LaunchOpts::get(key); def.midiDevice.clear(); def.bootFile.clear();
+        LaunchOpts::set(key, def);
+        CHECK(LaunchOpts::get(key).midiDevice.isEmpty());
+        CHECK(LaunchOpts::get(key).isEmpty());
+        CHECK(!LaunchOpts::has(key));
+    }
+
     // ---- 11. Task 3 wiring: the EXACT composition GameLauncher::prepareCore threads into CorePlan::backend for a
     //          libretro system — `LaunchOpts::resolveBackend(Settings::backendFor(sysId), ov)`. prepareCore itself
     //          isn't headless-reachable (it constructs no GameLauncher without a RetroView + full app state), so this

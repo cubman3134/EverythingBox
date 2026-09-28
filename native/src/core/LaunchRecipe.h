@@ -295,6 +295,18 @@ namespace LaunchRecipes
         return nullptr;
     }
 
+    // Issue #191: the MIDI devices a GAME can be given, for the per-game options chooser: the `midi` block of
+    // the recipe entry for the core the game RESOLVES to (on msdos, dosbox_pure's), the same entry the launch
+    // reads. An empty spec for every other system, for a DOS game resolved onto a core with no MIDI option
+    // (dosbox_core) and for a standalone or RetroPark target (pass an empty core), which is how the chooser
+    // knows to offer no MIDI entry: a row with nothing behind it would be a lever that does nothing (#189's rule).
+    inline DosConf::MidiSpec midiSpecFor(const LaunchRecipe& r, const QString& coreName)
+    {
+        if (r.isNull() || coreName.isEmpty()) return DosConf::MidiSpec{};
+        const RecipeCore* c = coreFor(r, coreName);
+        return c ? c->midi : DosConf::MidiSpec{};
+    }
+
     // How this core wants content of this shape presented. A recipe that says NOTHING about a shape yields
     // Unknown, not AsIs, and the caller maps that onto its own pre-#190 behaviour (see the enum). Saying
     // nothing must never be the same as saying "asIs", because on an archive those are opposite actions.
