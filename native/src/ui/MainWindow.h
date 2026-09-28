@@ -458,8 +458,11 @@ private:
     // the second producer — "nothing was playing, so the queue becomes this" builds the identical thing, and
     // a hand-written second copy is how one of them ends up without the musicQueueAlbums_ map and shows the
     // wrong sleeve for the rest of the hour.
+    // `aliases` (#465): index path -> the merged record's own track, for the records of a fallback artist
+    // queue; empty for every other queue.
     void startMusicEntries(const QVector<MusicQueue::Entry>& entries, const QString& title,
-                           const QString& subtitle, bool titlesNameArtist);
+                           const QString& subtitle, bool titlesNameArtist,
+                           const QHash<QString, QString>& aliases = QHash<QString, QString>());
     // The now-playing art/subtitle for the track at `path`, when the running queue spans records. Single-album
     // queues never call it (their sleeve is right for every track); a cross-album queue that did not would
     // show the first record's cover for the whole hour. No-op when musicQueueAlbums_ is empty.

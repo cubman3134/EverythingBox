@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QHash>
 #include <QPointer>
+#include <QSharedPointer>
 #include <functional>
 #include "../addons/AddonModels.h"
 #include "../core/Tracker.h"   // tracker::Kind - TrackerLeaf names it by value (issue #156)
@@ -902,11 +903,21 @@ public:
     // the album HomeView just asked MainWindow::openMusicAlbum to play — handed over once, then forgotten.
     // Empty for every ordinary play.
     QHash<QString, QString> takeMusicPlayAliases(const QString& albumKey);
+    // #465: the queue an artist's "Play all" / "Shuffle all" decided on when a record's preferred copy could
+    // not be reached — each record's copy chosen by the album rule, plus the names its tracks are filed under.
+    // Handed to MainWindow::openMusicQueue once, for the artist it was built for, then forgotten. FALSE (and
+    // nothing touched) for every ordinary press: the queue is then built exactly as it always was.
+    bool takeMusicArtistQueue(const QString& artistKey, MusicFallback::ArtistQueue& out);
 private:
     // "Play all" / "Shuffle all" on an artist (issue #194, increment 2). Same shape as the row above and for
     // the same reason: an artist whose records live on a server has no track lists until somebody asks for
     // them, and a queue built from those albums would be empty — the row would look like it did nothing.
     void playMusicArtistQueue(const QString& artistKey, bool shuffle);
+    // #465: the same verb on a MERGED artist, record by record through the album fallback (MusicFallback.h).
+    struct MusicArtistPassState;
+    QVector<MusicFallback::ArtistAlbum> musicArtistAlbumsOf(const QString& artistKey);
+    void stepMusicArtistPass(const QSharedPointer<MusicArtistPassState>& st);
+    void finishMusicArtistPass(const QSharedPointer<MusicArtistPassState>& st);
     void unmergeAlbumInteractive(const QString& albumKey);    // "these are NOT the same album"
     void mergeAlbumInteractive(const QString& albumKey);      // "this IS the same album as..."
 
@@ -1520,6 +1531,9 @@ private:
     // #194 increment 2: the supersede counter for the track-list fetches a "Play all"/"Shuffle all" press
     // fires. Its OWN counter, not musicFetchGen_ — see playMusicArtistQueue for why the two must not share.
     int                musicQueueFetchGen_ = 0;
+    // #465: the artist queue a fallback press built, held until MainWindow::openMusicQueue takes it.
+    QString                    musicArtistQueueKey_;
+    MusicFallback::ArtistQueue musicArtistQueue_;
     // #194 offline fallback: the supersede counter for a Play press waiting on its reachability check, and
     // the one fallback play's track names, held until MainWindow takes them.
     int                     musicReachGen_ = 0;

@@ -7138,8 +7138,12 @@ void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
 
     // The queue build: a walk of memory the index already holds, on this thread, on purpose — see the note
     // at the top of MusicQueue.h for why handing it to a worker would cost strictly more than it saves.
-    QVector<MusicQueue::Entry> entries = wholeLibrary ? MusicQueue::forLibrary(idx)
-                                                      : MusicQueue::forArtist(idx, artistKey);
+    QVector<MusicQueue::Entry> entries;
+    // #465: a merged artist whose preferred server is down plays each record from the copy the album rule
+    // picked. HomeView decided (and named the records it skipped); empty for every ordinary press.
+    MusicFallback::ArtistQueue fallback;
+    if (!wholeLibrary && home_->takeMusicArtistQueue(artistKey, fallback)) entries = fallback.entries;
+    else entries = wholeLibrary ? MusicQueue::forLibrary(idx) : MusicQueue::forArtist(idx, artistKey);
     if (entries.isEmpty())
     {
         // The library was rescanned out from under the row (the folder moved, the drive went away). Say so;
@@ -7158,7 +7162,7 @@ void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
                                      : tr("%n track(s)", "", int(entries.size()));
     // Across a whole library the bare track title is not enough to know what is playing ("Intro" tells you
     // nothing); within one artist it is exactly right and the name would repeat on every row.
-    startMusicEntries(entries, title, subtitle, /*titlesNameArtist*/ wholeLibrary);
+    startMusicEntries(entries, title, subtitle, /*titlesNameArtist*/ wholeLibrary, fallback.identities);
 }
 
 // Turn a built MusicQueue into the running PlaybackSession queue. The tail of openMusicQueue, extracted when
@@ -7167,7 +7171,8 @@ void MainWindow::openMusicQueue(const QString& artistKey, bool shuffle)
 // musicQueueAlbums_, whose absence shows the first record's sleeve for the rest of the hour, on a page that
 // otherwise looks completely right.
 void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, const QString& title,
-                                   const QString& subtitle, bool titlesNameArtist)
+                                   const QString& subtitle, bool titlesNameArtist,
+                                   const QHash<QString, QString>& aliases)
 {
     if (entries.isEmpty()) return;
 
@@ -7182,6 +7187,7 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
     QHash<QString, QString> albums;
     albums.reserve(entries.size());
     QHash<QString, QString> indexPaths;
+    QHash<QString, QString> urlAliases;   // #465: as openMusicAlbum's, for a fallback artist queue
     for (const MusicQueue::Entry& e : entries)
     {
         // Same one place, same reason as openMusicAlbum: the queue holds what the player is handed, the
@@ -7192,9 +7198,11 @@ void MainWindow::startMusicEntries(const QVector<MusicQueue::Entry>& entries, co
         titles << ((titlesNameArtist && !e.artist.isEmpty()) ? tr("%1 — %2").arg(e.title, e.artist) : e.title);
         albums.insert(url, e.albumKey);
         if (url != e.path) indexPaths.insert(url, e.path);
+        if (aliases.contains(e.path)) urlAliases.insert(url, aliases.value(e.path));
     }
     if (queue.isEmpty()) return;
     adoptMusicQueueIdentities(indexPaths);
+    adoptMusicPlayAliases(urlAliases);   // session + host only; nothing banked is moved (MainWindowMusicFallback.cpp)
 
     // The sleeve for the queue as a whole is the FIRST track's record, which is the one about to play;
     // refreshMusicQueueArt moves it on at every boundary after that.
