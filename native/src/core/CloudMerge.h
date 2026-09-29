@@ -103,6 +103,7 @@
 #pragma once
 
 class QJsonObject;
+namespace synccat { enum class Category; }   // SyncCategories.h (issue #27)
 
 namespace CloudMerge
 {
@@ -111,4 +112,9 @@ namespace CloudMerge
 
     // Merge a remote document `root` into the local ini (recency + tombstones), then compact tombstones.
     void mergeAll(const QJsonObject& root);
+
+    // Issue #27: switch one sync category on or off on THIS device, in both documents (the settings half is
+    // CloudSync::setCategoryEnabled). Off relays the category instead of syncing it; on merges the relayed copy
+    // into the local stores by the ordinary rules. Neither starts a pull or a push. See CloudMerge.cpp.
+    void switchCategory(synccat::Category c, bool on);
 }

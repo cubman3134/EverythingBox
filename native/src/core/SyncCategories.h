@@ -14,10 +14,15 @@
 //   * Every synced key maps to exactly one category. A key no rule claims is Unmapped: at run time it syncs as
 //     "other settings" (behaviour unchanged), and probe_cloudmerge section 46 fails on it so a new settings
 //     group cannot ship without being named here.
-//   * OFF MEANS NOT PUSHED AND NOT APPLIED. IT NEVER MEANS DELETED. A disabled category's keys leave the
-//     settings bundle and the sync fingerprint; incoming values for it are ignored; its merge-document sections
-//     are neither serialised from this device nor merged into it. Nothing is tombstoned because it is absent,
-//     here or on a peer: absence is how every merge in this app already reads "I have nothing to say".
+//   * OFF MEANS NOT PUSHED AND NOT APPLIED. IT NEVER MEANS DELETED. This device's own values of a disabled
+//     category are not sent and a peer's are not applied: this device RELAYS the category instead (SyncCarry.h).
+//     What it uploads for it is the peer's copy as of the last pull — or its own, frozen at the moment of the
+//     switch, until a pull replaces them — so the shared copy never loses the category because one device
+//     opted out, and the local fingerprint and the pushed stamp keep describing the same bundle. Nothing is
+//     tombstoned because it is absent, here or on a peer: absence is how every merge in this app already reads
+//     "I have nothing to say".
+//   * BACK ON adopts the relayed values for that category only (never a whole peer bundle, and no pull): the
+//     device then holds what it was already uploading, so the switch is not a reason to push or to pull.
 //   * The switches are DEVICE-LOCAL. They live under cloud/sync/<id>, which the cloud/ carve-out keeps out of
 //     the bundle and the fingerprint, and which SettingsTxn keeps out of Discard's reach.
 //   * They default to ON, so nothing changes until someone turns one off.
@@ -116,14 +121,14 @@ inline bool isEnabled(const QSettings& s, Category c)
     return s.value(toggleKey(c), true).toBool();
 }
 
-// A category switched back ON after being off CATCHES UP before it is sent again: it takes a peer's values at
-// once, but this device sends nothing of it until a pull has landed (see CloudSync::setCategoryEnabled). The
-// marker is device-local for the switch's own reason.
-inline QString catchUpGroup() { return QStringLiteral("cloud/synccatchup"); }
-inline QString catchUpKey(Category c) { return catchUpGroup() + QLatin1Char('/') + QLatin1String(id(c)); }
-inline bool isCatchingUp(const QSettings& s, Category c) { return hasToggle(c) && s.value(catchUpKey(c), false).toBool(); }
-// Whether this device SENDS `c`: switched on and not catching up. (isEnabled alone answers whether it TAKES it.)
-inline bool isSent(const QSettings& s, Category c) { return isEnabled(s, c) && !isCatchingUp(s, c); }
+// Whether ANY switch is off. The defaults answer false, and every #27 path then skips the category table
+// entirely — which is what keeps a device that never touched the page byte-for-byte on the old behaviour.
+inline bool anySwitchedOff(const QSettings& s)
+{
+    for (Category c : kListed)
+        if (hasToggle(c) && !s.value(toggleKey(c), true).toBool()) return true;
+    return false;
+}
 
 // ---- the key table --------------------------------------------------------------------------------------------
 // Longest matching prefix wins, so an exact leaf (ebook/fontSize) can sit inside a group that means something
@@ -156,6 +161,7 @@ inline constexpr Rule kRules[] = {
     { "highlights/",        Category::Marks },       // book highlights
     { "metaoverrides/",     Category::Marks },       // title / artwork corrections
     { "trackerlink/",       Category::Marks },       // which AniList entry a row is
+    { "audiobookmatches/",  Category::Marks },       // which server book a local audiobook is (#27 review, finding 4)
     // -- play statistics
     { "stats/",             Category::Stats },
     { "playstats/",         Category::Stats },
@@ -174,7 +180,8 @@ inline constexpr Rule kRules[] = {
     { "registry/",          Category::Addons },      // registries the user added (legacy keys)
     // -- appearance & theme
     { "theme/",             Category::Appearance },
-    { "themes/",            Category::Appearance },  // the bundle's theme FILES (not a settings key)
+    { "themes/",            Category::Other },       // the bundle's theme FILES: installed themes always ride
+                                                     // (installing one never selects it; theme/ is the choice)
     { "themedHome/",        Category::Appearance },
     { "homerows/",          Category::Appearance },  // the home arrangement (merge document)
     { "bgm/",               Category::Appearance },  // menu background music
@@ -288,11 +295,6 @@ inline QString sectionPrefix(const QString& section)
         if (section == QLatin1String(s.name)) return QLatin1String(s.prefix);
     return QString();
 }
-
-// Where CloudMerge keeps a PEER's copy of a section this device has switched off, to pass it back up untouched
-// (see CloudMerge::serializeAll). Under cloud/, so it is device-local like the switches themselves.
-inline QString carryGroup() { return QStringLiteral("cloud/carry"); }
-inline QString carryKey(const QString& section) { return carryGroup() + QLatin1Char('/') + section; }
 
 inline Category ofSection(const QString& section)
 {

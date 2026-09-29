@@ -18,6 +18,7 @@
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
+#include "../core/CloudMerge.h"
 #include "../core/CloudSync.h"
 #include "../core/SyncCategories.h"
 #ifdef EB_HAVE_QML
@@ -76,28 +77,25 @@ QString syncCategoriesDeviceNote() { return MainWindow::tr("These choices apply 
 QString syncCategoriesOffNote(bool brief)
 {
     return brief ? MainWindow::tr("This device stops sending and taking it. Nothing is deleted.")
-                 : MainWindow::tr("Off means this device stops sending and taking that category. Nothing is "
+                 : MainWindow::tr("Off means this device stops sending and taking that category; turning it back "
+                                  "on takes your other devices' values for it. Nothing is "
                                   "deleted, here or on your other devices.");
 }
 
 } // namespace
 
-// Apply one switch from either layout. Turning a category back ON starts its catch-up (CloudSync): this device
-// takes the other devices' values before it sends its own. When signed in, both halves are started now rather
-// than left to chance — the merge document is pulled and merged at once (a union, newest wins), and the
-// conflict-aware settings attempt is armed as a user action, which waits for the settings visit to close and then
-// pulls before it pushes. Off needs nothing started: the next push simply leaves the category out.
+// Apply one switch from either layout, through the ONE core entry point (CloudMerge::switchCategory), which does
+// both documents. It starts no pull and no push (#27 review, finding 1): off relays the category, and on adopts
+// the relayed copy for that category alone, so what this device uploads is the same the moment after the switch as
+// the moment before. The one follow-up is the merge document's ordinary debounce, because turning a category back
+// on can add this device's own rows to the union — the same push any local edit to those stores arms.
 void MainWindow::setSyncCategoryFromUi(synccat::Category c, bool on)
 {
-    const bool was = CloudSync::categoryEnabled(c);
-    CloudSync::setCategoryEnabled(c, on);
-    if (was == on) return;
+    if (CloudSync::categoryEnabled(c) == on) return;
+    CloudMerge::switchCategory(c, on);
     mwLog(QStringLiteral("cloud sync: category %1 switched %2 on this device")
               .arg(QLatin1String(synccat::id(c)), on ? QStringLiteral("on") : QStringLiteral("off")));
-    if (!on || !cloud_ || !cloud_->isSignedIn()) return;
-    pullAndMergeProgress();
-    settingsPushManual_ = true;
-    armSettingsPushTimer();
+    if (on) scheduleProgressSync();   // no-op when signed out
 }
 
 void MainWindow::openCloudSyncCategories()

@@ -6932,38 +6932,161 @@ int main(int argc, char** argv)
 
     // ---- 46. What syncs, by category, and "off" never means deleted (issue #27, increments 1-2) -------------
     //
-    // (a) EVERY key the bundle or the merge document can carry names a category: each per-item store, each
-    //     merge-document section, every settings group literal in native/src, and every key a representative
-    //     fixture pushes through buildSettingsJson. A new group no rule claims is red here.
-    // (b) The switches are device-local, default ON, and never ride the bundle or the document.
-    // (c) A disabled category leaves the pushed bundle and the fingerprint (after the one move the switch itself
-    //     causes); (d) an incoming bundle's values for it are not applied; (e) accounts & sign-ins sync exactly
-    //     as before with every switch off; (f) CloudMerge neither serialises nor merges a disabled section, and
-    //     passes a peer's copy through untouched; (g) the asymmetric A/B: one device has a category off, the
-    //     other on, both sync both ways, NOBODY loses an entry and nothing is tombstoned; re-enabling unions.
+    // (0) With every switch ON — the default — the bundle, the fingerprint and the document are main's, byte for
+    //     byte, and a switch turned off and on again with no pull between leaves no trace.
+    // (a) EVERY key the bundle or the merge document can carry names a category: each per-item store, each merge
+    //     section, every settings-key literal in native/src, and every key a representative ini pushes through the
+    //     real bundle writer. A new group no rule claims is red here.
+    // (b) The switches are device-local, default ON, and neither they nor the relay ever ride a document.
+    // (c) OFF freezes the category: this device's later edits are not sent, the fingerprint does not move for
+    //     them, and the switch itself changes nothing that is uploaded. (d) A peer's values for it are not applied
+    //     but RELAYED. (e) Accounts & sign-ins sync exactly as before with every switch off. (f) CloudMerge neither
+    //     serialises nor merges a disabled section, relays the peer's copy, and seeds the relay with this device's
+    //     own at the switch. (g) The asymmetric A/B: one device off, the other on, both sync both ways, NOBODY loses
+    //     an entry, nothing is tombstoned, and turning it back on ends at the union.
+    // (h-j) The #27 review's push-funnel cases: the pull->push fixed point holds whichever side has a category off
+    //     (h); a re-enable is never a reason to pull over this session's edits (i); a re-enabled category never
+    //     sends its stale local copy (j).
     {
         using synccat::Category;
         const QVector<Category> switchable = { Category::Progress, Category::Collections, Category::Marks,
                                                Category::Stats, Category::Music, Category::Addons,
                                                Category::Appearance };
-        auto wipeIni = [&]() { QSettings raw(iniPath, QSettings::IniFormat); raw.clear(); raw.sync(); };
+        const QString carryFile = AppPaths::dataDir() + QStringLiteral("/sync-carry.json");
+        const QString themesDir = AppPaths::dataDir() + QStringLiteral("/themes");
+        auto wipeIni = [&]() {
+            { QSettings raw(iniPath, QSettings::IniFormat); raw.clear(); raw.sync(); }
+            QFile::remove(carryFile); };
         auto setRaw46 = [&](const QString& k, const QVariant& v) {
             QSettings raw(iniPath, QSettings::IniFormat); raw.setValue(k, v); raw.sync(); };
         auto rawValue = [&](const QString& k) { return QSettings(iniPath, QSettings::IniFormat).value(k); };
         auto rawKeys = [&]() { return QSettings(iniPath, QSettings::IniFormat).allKeys(); };
-        auto bundleKeys = [&]() {
-            return QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object().keys(); };
+        auto iniText = [&]() {
+            QMap<QString, QString> m; QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QString& k : raw.allKeys()) m.insert(k, raw.value(k).toString());
+            return m; };
+        auto bundleObj = [&]() { return QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object(); };
+        auto bundleKeys = [&]() { return bundleObj().keys(); };
+        auto sent = [&](const QString& k) { return bundleObj().value(k).toString(); };
         auto docOf = [&]() { QJsonObject root; CloudMerge::serializeAll(root); return root; };
-        auto allOn = [&]() { for (Category c : switchable) CloudSync::setCategoryEnabled(c, true); };
+        auto switchCat = [](Category c, bool on) { CloudMerge::switchCategory(c, on); };
+        auto allOn = [&]() { for (Category c : switchable) switchCat(c, true); };
+        auto offsetBlob = [](double off, qint64 ts) {
+            QJsonObject o; o.insert(QStringLiteral("offset"), off); o.insert(QStringLiteral("updatedAt"), double(ts));
+            return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
+        const qint64 T46 = QDateTime::currentSecsSinceEpoch();
+        auto zipNames46 = [](const QByteArray& zip) {
+            QStringList out;
+            mz_zip_archive z; std::memset(&z, 0, sizeof(z));
+            if (!mz_zip_reader_init_mem(&z, zip.constData(), size_t(zip.size()), 0)) return out;
+            for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i)
+            {
+                mz_zip_archive_file_stat st;
+                if (mz_zip_reader_file_stat(&z, i, &st)) out << QString::fromUtf8(st.m_filename);
+            }
+            mz_zip_reader_end(&z);
+            return out; };
+
+        // A device is its whole sync state: the ini AND the relay file beside it. A "push" is what pushLocal does
+        // (the uploaded settings + document, stamped with this device's fingerprint, which becomes its baseline); a
+        // "pull" is what applyRemote + the progress merge do (apply, merge, adopt the remote's stamp).
+        struct Dev { QMap<QString, QVariant> ini; QByteArray carry; bool hasCarry = false; };
+        struct Cloud { QByteArray settings; QJsonObject doc; QString stamp; };
+        auto save = [&]() {
+            Dev d; QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QString& k : raw.allKeys()) d.ini.insert(k, raw.value(k));
+            QFile f(carryFile);
+            if (f.open(QIODevice::ReadOnly)) { d.carry = f.readAll(); d.hasCarry = true; }
+            return d; };
+        auto load = [&](const Dev& d) {
+            { QSettings raw(iniPath, QSettings::IniFormat); raw.clear();
+              for (auto it = d.ini.begin(); it != d.ini.end(); ++it) raw.setValue(it.key(), it.value());
+              raw.sync(); }
+            QFile::remove(carryFile);
+            if (d.hasCarry) { QFile f(carryFile); if (f.open(QIODevice::WriteOnly)) f.write(d.carry); }
+            ItemMarks::invalidate(); };
+        auto push = [&](Cloud& cl) {
+            cl.settings = CloudSync::buildSettingsJson();
+            cl.doc = docOf();
+            const QByteArray fp = CloudSync::stateFingerprint();
+            cl.stamp = QString::fromUtf8(fp);
+            setRaw46(QStringLiteral("cloud/syncedHash"), fp); };
+        auto pull = [&](const Cloud& cl) {
+            CloudSync::applySettingsJson(cl.settings);
+            CloudMerge::mergeAll(cl.doc);
+            CloudSync::adoptSyncedBaseline(QStringLiteral("2026-01-01T00:00:00Z"), cl.stamp); };
+
+        // 46.0 Every switch ON: main's bytes. mainFingerprint/mainSettingsJson are main's stateHash and
+        //      buildSettingsJson, restated verbatim; themes/ is empty, so main's file half adds nothing.
+        wipeIni();
+        QDir(themesDir).removeRecursively();
+        {
+            setRaw46(QStringLiteral("device/id"), QStringLiteral("dev-0"));
+            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("m"));
+            setRaw46(QStringLiteral("playback/crossfadeSeconds"), 3);
+            setRaw46(QStringLiteral("theme/default"), QStringLiteral("t"));
+            setRaw46(QStringLiteral("subs/font"), QStringLiteral("f"));
+            setRaw46(QStringLiteral("trakt/access"), QStringLiteral("fixture-value"));
+            setRaw46(QStringLiteral("comic/abc/page"), 7);
+            setRaw46(QStringLiteral("roms/folder"), QStringLiteral("C:/roms"));
+            setRaw46(QStringLiteral("roms/autoApplyPatches"), true);
+            setRaw46(QStringLiteral("addon.remote.urls"), QStringLiteral("https://x.invalid/manifest.json"));
+            setRaw46(QStringLiteral("addoncfg/x/key"), QStringLiteral("k"));
+            setRaw46(QStringLiteral("lyricoffset/items/aaaa"), offsetBlob(0.5, T46 - 100));
+            useProfile(QStringLiteral("p46"));
+            FavoriteItem f; f.addonId = QStringLiteral("a46"); f.itemId = QStringLiteral("fav0"); f.title = f.itemId;
+            FavoritesStore::add(f);
+        }
+        auto mainKeys = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QStringList keys;
+            for (const QString& k : raw.allKeys())
+                if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k)
+                    && !AddonRoster::isLegacyRegistryKey(k))
+                    keys << k;
+            keys.sort();
+            return keys; };
+        auto mainFingerprint = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            QCryptographicHash h(QCryptographicHash::Sha256);
+            for (const QString& k : mainKeys())
+            { h.addData(k.toUtf8()); h.addData("="); h.addData(raw.value(k).toString().toUtf8()); h.addData("\n"); }
+            return h.result().toHex(); };
+        auto mainSettingsJson = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat); QJsonObject so;
+            for (const QString& k : mainKeys()) so.insert(k, raw.value(k).toString());
+            return QJsonDocument(so).toJson(QJsonDocument::Compact); };
+        {
+            const QByteArray fp0 = CloudSync::stateFingerprint();
+            const QByteArray sj0 = CloudSync::buildSettingsJson();
+            const QJsonObject doc0 = docOf();
+            const QMap<QString, QString> ini0 = iniText();
+            CHECK(fp0 == mainFingerprint());
+            CHECK(sj0 == mainSettingsJson());
+            CHECK(doc0.size() == 25);
+            CHECK(!QFile::exists(carryFile));
+            // Every switch off, then on, with no pull between: nothing that is uploaded ever moves, and nothing is
+            // left behind — not a key, not a relay file.
+            for (Category c : switchable) switchCat(c, false);
+            CHECK(CloudSync::stateFingerprint() == fp0);
+            CHECK(CloudSync::buildSettingsJson() == sj0);
+            CHECK(docOf() == doc0);
+            for (Category c : switchable) switchCat(c, true);
+            CHECK(CloudSync::stateFingerprint() == fp0);
+            CHECK(CloudSync::buildSettingsJson() == sj0);
+            CHECK(docOf() == doc0);
+            if (iniText() != ini0) std::fprintf(stderr, "  46.0: the ini changed across an off/on round trip\n");
+            CHECK(iniText() == ini0);
+            CHECK(!QFile::exists(carryFile));
+        }
 
         // 46a. The mapping is total.
-        // Every per-item store prefix — walked from THE table, not restated — names a category. None is
-        // device-local (the store would not be in that table) and none is Accounts.
+        // Every per-item store prefix — walked from THE table, not restated — names a category, and its deleted/
+        // tombstone form names the same one. None is device-local (the store would not be in that table) and none
+        // is Accounts.
         for (int i = 0; i < peritem::kPrefixCount; ++i)
         {
             const QString p = QLatin1String(peritem::kPrefixes[i]);
-            // deleted/ is the tombstone store every other one shares: a tombstone is its own store's category.
-            if (p == QLatin1String("deleted/")) continue;
+            if (p == QLatin1String("deleted/")) continue;   // the tombstone store itself: checked through the others
             CHECK(CloudSync::categoryFor(QStringLiteral("deleted/") + p + QStringLiteral("probe46"))
                   == CloudSync::categoryFor(p + QStringLiteral("probe46")));
             const Category c = CloudSync::categoryFor(p + QStringLiteral("probe46"));
@@ -6985,61 +7108,105 @@ int main(int argc, char** argv)
                 CHECK(synccat::ofSection(it.key()) != Category::Unmapped);
             }
         }
-        // Every settings GROUP a source literal names. The scan reads native/src as it is when the probe runs, so
-        // a group added anywhere in the tree is red here until SyncCategories.h places it. Literals that are not
-        // settings keys at all (MIME types, file paths, package layouts) are listed below with what they are.
+        // Every settings-key LITERAL in native/src, however it is spelled: QStringLiteral, QLatin1String, a
+        // `const QLatin1String kGroup("x/y")`, a constexpr char array, a plain "x/y" (the #27 review's finding 4
+        // was a key the old QStringLiteral-only pattern could not see). The tree is read as it is when the probe
+        // runs, so a group added anywhere is red here until SyncCategories.h places it. Not scanned: #include lines,
+        // text after //, and literals with a space in them (no settings key has one; sentences and MIME parameters
+        // do). The exemptions are the literals that are not settings keys at all — a full literal is exempt
+        // wherever it appears, a bare "group/" prefix only in the file it is known in (a new key built from that
+        // prefix somewhere else is NOT excused) — and each exemption must still occur.
         {
-            static const QSet<QString> kNotSettings = {
-                QStringLiteral("addons"), QStringLiteral("saves"), QStringLiteral("states"),        // bundle folders
-                QStringLiteral("application"), QStringLiteral("image"), QStringLiteral("text"),     // MIME types
-                QStringLiteral("android"), QStringLiteral("apple"), QStringLiteral("linux"),        // buildbot paths
-                QStringLiteral("windows"),
-                QStringLiteral("app"), QStringLiteral("snap.discord"),                               // Discord IPC paths
-                QStringLiteral("ares"), QStringLiteral("ares.app"), QStringLiteral("melonDS.app"),  // emulator layouts
-                QStringLiteral("rpcs3.app"), QStringLiteral("xemu.app"), QStringLiteral("publish"),
-                QStringLiteral("dolphin"), QStringLiteral("inis"), QStringLiteral("controllerProfiles"),
-                QStringLiteral("bezel"), QStringLiteral("dev_hdd0"), QStringLiteral("titles"),       // content paths
-                QStringLiteral("unknown"),                                                           // a path segment
-                QStringLiteral("deleted"),   // tombstones: the category of the store they delete from (walked above)
+            static const QSet<QString> kNotKeys = {   // full literals: MIME types, file paths, package layouts
+                QStringLiteral("android/content/Context"), QStringLiteral("android/content/Intent"),
+                QStringLiteral("android/latest/arm64-v8a/"), QStringLiteral("android/net/Uri"),
+                QStringLiteral("app/com.discordapp.Discord/"), QStringLiteral("apple/osx/arm64/latest/"),
+                QStringLiteral("apple/osx/x86_64/latest/"), QStringLiteral("linux/x86_64/latest/"),
+                QStringLiteral("windows/x86_64/latest/"),
+                QStringLiteral("application/json"), QStringLiteral("application/octet-stream"),
+                QStringLiteral("application/vnd.api+json"), QStringLiteral("application/vnd.github+json"),
+                QStringLiteral("application/vnd.google-apps.folder"), QStringLiteral("application/x-dtbncx+xml"),
+                QStringLiteral("application/x-eb-bundle"), QStringLiteral("application/x-www-form-urlencoded"),
+                QStringLiteral("application/zip"), QStringLiteral("image/bmp"), QStringLiteral("image/gif"),
+                QStringLiteral("image/jpeg"), QStringLiteral("image/png"), QStringLiteral("image/webp"),
+                QStringLiteral("text/plain"),
+                QStringLiteral("ares.app/Contents/MacOS/ares"), QStringLiteral("ares/ares.exe"),
+                QStringLiteral("melonDS.app/Contents/MacOS/melonDS"), QStringLiteral("rpcs3.app/Contents/MacOS/rpcs3"),
+                QStringLiteral("xemu.app/Contents/MacOS/xemu"), QStringLiteral("publish/Ryujinx.exe"),
+                QStringLiteral("dolphin/Dolphin.exe"), QStringLiteral("dolphin/GC"), QStringLiteral("dolphin/Wii"),
+                QStringLiteral("bezel/Mega_Bezel/Presets/MBZ__3__STD.slangp"),
+                QStringLiteral("controllerProfiles/controller%1.xml"), QStringLiteral("inis/PCSX2.ini"),
+                QStringLiteral("dev_hdd0/game/"), QStringLiteral("metadata/by-key/"),
             };
-            const QRegularExpression rx(QStringLiteral(
-                "(?:QStringLiteral|QLatin1String|QString::fromLatin1|QStringView|u)\\(\"([a-z][A-Za-z0-9_.]*)/"));
-            QSet<QString> groups;
-            int files = 0;
-            QDirIterator it(QStringLiteral(EB_CLOUDMERGE_NATIVE_DIR) + QStringLiteral("/src"),
-                            { QStringLiteral("*.cpp"), QStringLiteral("*.h") }, QDir::Files,
-                            QDirIterator::Subdirectories);
+            static const QSet<QString> kNotKeyPrefixes = {   // bare "group/" prefixes, pinned to their file
+                QStringLiteral("addons/|src/core/CloudSync.cpp"),         // the bundle's (refused) add-on folder
+                QStringLiteral("saves/|src/core/CloudSync.cpp"), QStringLiteral("saves/|src/core/SaveSync.cpp"),
+                QStringLiteral("states/|src/core/CloudSync.cpp"), QStringLiteral("states/|src/core/SaveSync.cpp"),
+                QStringLiteral("ebbundle/|src/core/LibraryBundle.cpp"),   // a hash domain tag
+                QStringLiteral("image/|src/core/CatalogMatch.cpp"), QStringLiteral("image/|src/media/AudioTags.cpp"),
+                QStringLiteral("text/|src/core/CatalogMatch.cpp"),        // MIME families
+                QStringLiteral("snap.discord/|src/core/DiscordPresence.cpp"),
+                QStringLiteral("titles/|src/core/RecompFeed.cpp"),        // a feed archive's member folder
+                QStringLiteral("unknown/|src/core/ScrobbleQueue.cpp"),    // a segment inside scrobblestate/
+                QStringLiteral("deleted/|src/core/CloudMerge.cpp"), QStringLiteral("deleted/|src/core/PerItemStores.h"),
+                QStringLiteral("deleted/|src/core/SyncCategories.h"), QStringLiteral("deleted/|src/core/Tombstones.cpp"),
+                                                                          // tombstones: their store's category (walked above)
+            };
+            const QString nativeDir = QStringLiteral(EB_CLOUDMERGE_NATIVE_DIR);
+            const QRegularExpression rx(QStringLiteral("\"([a-z][A-Za-z0-9_.]*/[^\"]*)"));
+            QSet<QString> seenFull, seenPrefix;
+            int files = 0, literals = 0, unmapped = 0;
+            QDirIterator it(nativeDir + QStringLiteral("/src"), { QStringLiteral("*.cpp"), QStringLiteral("*.h") },
+                            QDir::Files, QDirIterator::Subdirectories);
             while (it.hasNext())
             {
-                QFile f(it.next());
+                const QString path = it.next();
+                const QString rel = QDir(nativeDir).relativeFilePath(path);
+                QFile f(path);
                 if (!f.open(QIODevice::ReadOnly)) continue;
                 ++files;
-                const QString text = QString::fromUtf8(f.readAll());
-                for (auto m = rx.globalMatch(text); m.hasNext();) groups.insert(m.next().captured(1));
+                for (QString line : QString::fromUtf8(f.readAll()).split(QLatin1Char('\n')))
+                {
+                    if (line.trimmed().startsWith(QLatin1String("#include"))) continue;
+                    const int cmt = line.indexOf(QLatin1String("//"));
+                    if (cmt >= 0) line.truncate(cmt);
+                    for (auto m = rx.globalMatch(line); m.hasNext();)
+                    {
+                        const QString lit = m.next().captured(1);
+                        if (lit.contains(QLatin1Char(' '))) continue;
+                        ++literals;
+                        const bool bare = lit.endsWith(QLatin1Char('/')) && lit.count(QLatin1Char('/')) == 1;
+                        if (kNotKeys.contains(lit)) { seenFull.insert(lit); continue; }
+                        if (bare && kNotKeyPrefixes.contains(lit + QLatin1Char('|') + rel))
+                        { seenPrefix.insert(lit + QLatin1Char('|') + rel); continue; }
+                        const QString key = lit.endsWith(QLatin1Char('/')) ? lit + QStringLiteral("probe46") : lit;
+                        if (CloudSync::categoryFor(key) == Category::Unmapped)
+                        {
+                            std::fprintf(stderr, "  46a: \"%s\" (%s) names no sync category\n", qPrintable(lit), qPrintable(rel));
+                            ++unmapped;
+                        }
+                    }
+                }
             }
             CHECK(files >= 300);          // the corpus is the tree, not an empty directory
-            CHECK(groups.size() >= 100);
-            int unmapped = 0;
-            for (const QString& g : groups)
-            {
-                if (kNotSettings.contains(g)) continue;
-                if (CloudSync::categoryFor(g + QStringLiteral("/probe46")) == Category::Unmapped)
-                { std::fprintf(stderr, "  46a: settings group \"%s/\" names no sync category\n", qPrintable(g)); ++unmapped; }
-            }
+            CHECK(literals >= 500);
             CHECK(unmapped == 0);
-            // The exemptions are not stale: each still occurs, or it would excuse a future real group silently.
-            for (const QString& e : kNotSettings)
-                if (!groups.contains(e)) std::fprintf(stderr, "  46a: stale exemption \"%s\"\n", qPrintable(e));
-            for (const QString& e : kNotSettings) CHECK(groups.contains(e));
+            for (const QString& e : kNotKeys)
+                if (!seenFull.contains(e)) std::fprintf(stderr, "  46a: stale exemption \"%s\"\n", qPrintable(e));
+            for (const QString& e : kNotKeyPrefixes)
+                if (!seenPrefix.contains(e)) std::fprintf(stderr, "  46a: stale exemption \"%s\"\n", qPrintable(e));
+            CHECK(seenFull.size() == kNotKeys.size());
+            CHECK(seenPrefix.size() == kNotKeyPrefixes.size());
         }
         // A representative ini, one real key per family, pushed through the REAL bundle writer: every key it
-        // emits names a category. EB_PROBE_PLANT_UNMAPPED plants one no rule claims — the demonstration that
-        // this assertion is live (it must go red).
+        // emits names a category. EB_PROBE_PLANT_UNMAPPED plants one no rule claims — the demonstration that this
+        // assertion is live (it must go red).
         wipeIni();
         {
             const QStringList fixture = {
                 QStringLiteral("comic/abc/page"), QStringLiteral("pdf/abc/page"), QStringLiteral("ebook/abc/pos"),
                 QStringLiteral("ebook/fontSize"), QStringLiteral("audiobook/abc/pos"),
+                QStringLiteral("audiobookmatches/items/abc"),
                 QStringLiteral("music/folder"), QStringLiteral("music/albumalias"), QStringLiteral("playback/gaplessAudio"),
                 QStringLiteral("playback/replayGainPreamp"), QStringLiteral("playback/autoplayNext"),
                 QStringLiteral("addon.remote.manifest.x"), QStringLiteral("addon.torrentio.seeded"),
@@ -7055,6 +7222,7 @@ int main(int argc, char** argv)
                 QStringLiteral("parental/pinHash"), QStringLiteral("following/interval"), QStringLiteral("video/hdr"),
                 QStringLiteral("gestures/videoSeek"), QStringLiteral("reader/font"), QStringLiteral("cache/imageCapMB"),
                 QStringLiteral("hashverify/stamps/x"), QStringLiteral("recomps/feedCheckedAt"),
+                QStringLiteral("epgcache/src/date"),
             };
             for (const QString& k : fixture) setRaw46(k, QStringLiteral("v"));
             if (qEnvironmentVariableIsSet("EB_PROBE_PLANT_UNMAPPED")) setRaw46(QStringLiteral("zzplanted27/key"), 1);
@@ -7082,9 +7250,12 @@ int main(int argc, char** argv)
             CHECK(CloudSync::categoryFor(QStringLiteral("subs/osUser")) == Category::DeviceLocal);
             CHECK(CloudSync::categoryFor(QStringLiteral("playback/replayGainPreamp")) == Category::Music);
             CHECK(CloudSync::categoryFor(QStringLiteral("playback/autoplayNext")) == Category::Other);
+            CHECK(CloudSync::categoryFor(QStringLiteral("audiobookmatches/items/abc")) == Category::Marks);
+            CHECK(CloudSync::categoryFor(QStringLiteral("themes/x/theme.json")) == Category::Other);
         }
 
-        // 46b. The switches: device-local, default ON, only on the seven switchable categories, and never carried.
+        // 46b. The switches: device-local, default ON, only on the seven switchable categories, never carried —
+        //      and the RELAY, with something actually in it, is never a key and never a document entry of its own.
         wipeIni();
         for (Category c : switchable)
         {
@@ -7096,118 +7267,96 @@ int main(int argc, char** argv)
         for (Category c : { Category::Accounts, Category::Other, Category::DeviceLocal })
         {
             CHECK(!synccat::hasToggle(c));
-            CloudSync::setCategoryEnabled(c, false);                        // a no-op: there is no switch
+            switchCat(c, false);                                            // a no-op: there is no switch
             CHECK(CloudSync::categoryEnabled(c));
             CHECK(!rawValue(synccat::toggleKey(c)).isValid());
         }
         setRaw46(QStringLiteral("theme/default"), QStringLiteral("t"));
-        for (Category c : switchable) CloudSync::setCategoryEnabled(c, false);
+        setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("m"));
+        setRaw46(QStringLiteral("lyricoffset/items/aaaa"), offsetBlob(0.5, T46 - 100));
+        for (Category c : switchable) switchCat(c, false);
         for (Category c : switchable) CHECK(!CloudSync::categoryEnabled(c));
         {
+            QJsonObject peerSec; peerSec.insert(QStringLiteral("bbbb"), QJsonDocument::fromJson(offsetBlob(1.0, T46).toUtf8()).object());
+            QJsonObject peerDoc; peerDoc.insert(QStringLiteral("lyricoffset"), peerSec);
+            CloudMerge::mergeAll(peerDoc);
+            QJsonObject peer; peer.insert(QStringLiteral("music/albumalias"), QStringLiteral("peer"));
+            CloudSync::applySettingsJson(QJsonDocument(peer).toJson(QJsonDocument::Compact));
+            CHECK(QFile::exists(carryFile));                                // the relay really holds something
             const QByteArray sj = CloudSync::buildSettingsJson();
             const QByteArray dj = QJsonDocument(docOf()).toJson(QJsonDocument::Compact);
-            CHECK(!sj.contains("cloud/sync") && !sj.contains("cloud\\/sync"));
-            CHECK(!dj.contains("cloud/sync") && !dj.contains("cloud\\/sync"));
-            CHECK(!sj.contains("cloud/carry") && !sj.contains("cloud\\/carry"));   // the relay buffer is not sent as a setting
-            CHECK(CloudSync::isDeviceLocalKey(synccat::carryKey(QStringLiteral("lyricoffset"))));
+            for (const QString& k : rawKeys()) CHECK(!k.contains(QLatin1String("carry")));
+            for (const QString& k : bundleKeys()) CHECK(!k.startsWith(QLatin1String("cloud/")));
+            CHECK(!sj.contains("cloud/sync") && !sj.contains("cloud\\/sync") && !sj.contains("carry"));
+            CHECK(!dj.contains("cloud/sync") && !dj.contains("cloud\\/sync") && !dj.contains("carry"));
+            for (const QString& n : zipNames46(CloudSync::buildStateBundle()))
+                CHECK(n == QLatin1String("meta.json") || n == QLatin1String("settings.json") || n.startsWith(QLatin1String("themes/")));
+            CHECK(sent(QStringLiteral("music/albumalias")) == QStringLiteral("peer"));   // relayed as a VALUE...
+            CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject() == peerSec);   // ...and as a section
         }
         allOn();
         for (Category c : switchable) CHECK(!rawValue(synccat::toggleKey(c)).isValid());   // ON leaves no key behind
+        CHECK(!QFile::exists(carryFile));                                   // ...and no relay
 
-        // 46c. Off: out of the pushed bundle, and the fingerprint stops seeing it (after the switch's one move).
+        // 46c. OFF freezes: the switch itself changes nothing that is uploaded; later local edits are not sent and
+        //      do not move the fingerprint; an enabled edit still does; ON again adopts the frozen (relayed) values,
+        //      and touches neither the baseline nor anything outside the category.
         wipeIni();
         setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("a1"));
         setRaw46(QStringLiteral("playback/crossfadeSeconds"), 3);
         setRaw46(QStringLiteral("theme/default"), QStringLiteral("t1"));
         setRaw46(QStringLiteral("subs/font"), QStringLiteral("f1"));
+        setRaw46(QStringLiteral("cloud/syncedHash"), QByteArray("baseline"));
         {
             const QByteArray fp0 = CloudSync::stateFingerprint();
-            CHECK(bundleKeys().contains(QStringLiteral("music/albumalias")));
-            CloudSync::setCategoryEnabled(Category::Music, false);
-            const QByteArray fp1 = CloudSync::stateFingerprint();
-            CHECK(fp1 != fp0);                                               // the one upload a switch costs
-            const QStringList keys = bundleKeys();
-            CHECK(!keys.contains(QStringLiteral("music/albumalias")));
-            CHECK(!keys.contains(QStringLiteral("playback/crossfadeSeconds")));
-            CHECK(keys.contains(QStringLiteral("theme/default")) && keys.contains(QStringLiteral("subs/font")));
+            switchCat(Category::Music, false);
+            CHECK(CloudSync::stateFingerprint() == fp0);                     // switching costs no upload
+            CHECK(sent(QStringLiteral("music/albumalias")) == QStringLiteral("a1"));
             setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("a2"));
             setRaw46(QStringLiteral("playback/crossfadeSeconds"), 7);
-            CHECK(CloudSync::stateFingerprint() == fp1);                     // a disabled edit is not "local changed"
+            CHECK(CloudSync::stateFingerprint() == fp0);                     // a disabled edit is not "local changed"
+            CHECK(sent(QStringLiteral("music/albumalias")) == QStringLiteral("a1"));   // ...and is not sent
+            CHECK(sent(QStringLiteral("playback/crossfadeSeconds")) == QStringLiteral("3"));
             setRaw46(QStringLiteral("theme/default"), QStringLiteral("t2"));
-            CHECK(CloudSync::stateFingerprint() != fp1);                     // an enabled one still is
-            // Back ON: the category CATCHES UP. It takes a peer's values at once, sends nothing of its own (this
-            // device's copy is the stale side) and stays out of the fingerprint, and the synced baseline is
-            // forgotten so the next automatic push pulls first.
-            setRaw46(QStringLiteral("cloud/syncedHash"), QStringLiteral("abc"));
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CHECK(CloudSync::categoryEnabled(Category::Music) && CloudSync::categoryCatchingUp(Category::Music));
-            CHECK(!rawValue(QStringLiteral("cloud/syncedHash")).isValid());
-            CHECK(!bundleKeys().contains(QStringLiteral("music/albumalias")));
-            const QByteArray fpUp = CloudSync::stateFingerprint();
-            {
-                QJsonObject peer; peer.insert(QStringLiteral("music/albumalias"), QStringLiteral("peerA"));
-                CloudSync::applySettingsJson(QJsonDocument(peer).toJson(QJsonDocument::Compact));
-            }
-            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("peerA"));   // taken
-            CHECK(CloudSync::stateFingerprint() == fpUp);                                            // not counted yet
-            CHECK(CloudSync::isDeviceLocalKey(synccat::catchUpKey(Category::Music)));
-            // A pull landing (applyRemote's adoptSyncedBaseline) ends the catch-up: the category is sent again.
-            CloudSync::adoptSyncedBaseline(QStringLiteral("2026-01-01T00:00:00Z"), QStringLiteral("remotehash"));
-            CHECK(!CloudSync::categoryCatchingUp(Category::Music));
-            CHECK(bundleKeys().contains(QStringLiteral("music/albumalias")));
-            CHECK(CloudSync::stateFingerprint() != fpUp);
-            // ...and only a real off->on edge does any of this: re-asserting ON leaves the baseline alone.
-            setRaw46(QStringLiteral("cloud/syncedHash"), QStringLiteral("abc"));
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CHECK(rawValue(QStringLiteral("cloud/syncedHash")).toString() == QStringLiteral("abc"));
-            CHECK(!CloudSync::categoryCatchingUp(Category::Music));
-            // Switching OFF again drops a catch-up marker rather than leaving it to surprise a later re-enable.
-            CloudSync::setCategoryEnabled(Category::Music, false);
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CloudSync::setCategoryEnabled(Category::Music, false);
-            CHECK(!rawValue(synccat::catchUpKey(Category::Music)).isValid());
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CloudSync::adoptSyncedBaseline(QStringLiteral("2026-01-01T00:00:00Z"), QStringLiteral("remotehash"));
+            const QByteArray fp1 = CloudSync::stateFingerprint();
+            CHECK(fp1 != fp0);                                               // an enabled one still is
+            switchCat(Category::Music, true);
+            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("a1"));   // adopted
+            CHECK(rawValue(QStringLiteral("theme/default")).toString() == QStringLiteral("t2"));     // untouched
+            CHECK(CloudSync::stateFingerprint() == fp1);                     // the upload did not move
+            CHECK(rawValue(QStringLiteral("cloud/syncedHash")).toByteArray() == QByteArray("baseline"));
         }
-        // Appearance off takes the theme FILES out of the zip and the fingerprint too.
+        // Installed theme FILES are not a switch: they ride with appearance off, and a peer's still land.
         {
-            const QString themesDir = AppPaths::dataDir() + QStringLiteral("/themes");
             QDir(themesDir).removeRecursively();
             QDir().mkpath(themesDir + QStringLiteral("/p46"));
             { QFile f(themesDir + QStringLiteral("/p46/a.txt")); CHECK(f.open(QIODevice::WriteOnly)); f.write("one"); }
-            CloudSync::setCategoryEnabled(Category::Appearance, false);
-            const QByteArray fpA = CloudSync::stateFingerprint();
-            { QFile f(themesDir + QStringLiteral("/p46/a.txt")); CHECK(f.open(QIODevice::WriteOnly)); f.write("two"); }
-            CHECK(CloudSync::stateFingerprint() == fpA);
+            switchCat(Category::Appearance, false);
+            CHECK(zipNames46(CloudSync::buildStateBundle()).contains(QStringLiteral("themes/p46/a.txt")));
             mz_zip_archive z; std::memset(&z, 0, sizeof(z));
-            const QByteArray zip = CloudSync::buildStateBundle();
-            bool anyTheme = false, settings = false;
-            if (mz_zip_reader_init_mem(&z, zip.constData(), size_t(zip.size()), 0))
-            {
-                for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&z); ++i)
-                {
-                    mz_zip_archive_file_stat st;
-                    if (!mz_zip_reader_file_stat(&z, i, &st)) continue;
-                    const QString n = QString::fromUtf8(st.m_filename);
-                    if (n.startsWith(QLatin1String("themes/"))) anyTheme = true;
-                    if (n == QLatin1String("settings.json")) settings = true;
-                }
-                mz_zip_reader_end(&z);
-            }
-            CHECK(settings && !anyTheme);
-            CloudSync::setCategoryEnabled(Category::Appearance, true);
-            CHECK(CloudSync::stateFingerprint() == fpA);     // catching up: still not sent, still not counted
-            CloudSync::adoptSyncedBaseline(QStringLiteral("2026-01-01T00:00:00Z"), QStringLiteral("remotehash"));
-            CHECK(CloudSync::stateFingerprint() != fpA);
+            mz_zip_writer_init_heap(&z, 0, 0);
+            const QByteArray s = "{\"subs/font\":\"f1\"}", t = "peer theme";
+            mz_zip_writer_add_mem(&z, "settings.json", s.constData(), size_t(s.size()), MZ_DEFAULT_COMPRESSION);
+            mz_zip_writer_add_mem(&z, "themes/p46/peer.txt", t.constData(), size_t(t.size()), MZ_DEFAULT_COMPRESSION);
+            void* buf = nullptr; size_t sz = 0;
+            mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
+            const QByteArray zip(static_cast<const char*>(buf), int(sz));
+            mz_zip_writer_end(&z);
+            if (buf) mz_free(buf);
+            CHECK(CloudSync::applyStateBundle(zip));
+            CHECK(QFileInfo::exists(themesDir + QStringLiteral("/p46/peer.txt")));
+            switchCat(Category::Appearance, true);
             QDir(themesDir).removeRecursively();
         }
 
-        // 46d. Incoming values for a disabled category are not applied; the rest of the bundle still is.
+        // 46d. Incoming values for a disabled category are not applied — they are RELAYED into the next upload;
+        //      the rest of the bundle still applies.
         wipeIni();
         setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("mine"));
         setRaw46(QStringLiteral("addoncfg/x/key"), QStringLiteral("mine"));
-        CloudSync::setCategoryEnabled(Category::Music, false);
-        CloudSync::setCategoryEnabled(Category::Addons, false);
+        setRaw46(QStringLiteral("subs/font"), QStringLiteral("mine"));      // a key the peer's bundle does not carry
+        switchCat(Category::Music, false);
+        switchCat(Category::Addons, false);
         {
             QJsonObject peer;
             peer.insert(QStringLiteral("music/albumalias"), QStringLiteral("peer"));
@@ -7221,27 +7370,18 @@ int main(int argc, char** argv)
             CHECK(rawValue(QStringLiteral("addoncfg/x/key")).toString() == QStringLiteral("mine"));
             CHECK(AddonRoster::records().isEmpty());                         // an old peer's roster is not adopted
             CHECK(rawValue(QStringLiteral("theme/default")).toString() == QStringLiteral("peerTheme"));
-        }
-        CloudSync::setCategoryEnabled(Category::Appearance, false);
-        {
-            const QString themesDir = AppPaths::dataDir() + QStringLiteral("/themes");
-            QDir(themesDir).removeRecursively();
-            mz_zip_archive z; std::memset(&z, 0, sizeof(z));
-            mz_zip_writer_init_heap(&z, 0, 0);
-            const QByteArray s = "{}", t = "peer theme";
-            mz_zip_writer_add_mem(&z, "settings.json", s.constData(), size_t(s.size()), MZ_DEFAULT_COMPRESSION);
-            mz_zip_writer_add_mem(&z, "themes/p46/peer.txt", t.constData(), size_t(t.size()), MZ_DEFAULT_COMPRESSION);
-            void* buf = nullptr; size_t sz = 0;
-            mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
-            const QByteArray zip(static_cast<const char*>(buf), int(sz));
-            mz_zip_writer_end(&z);
-            if (buf) mz_free(buf);
-            CHECK(CloudSync::applyStateBundle(zip));
-            CHECK(!QFileInfo::exists(themesDir + QStringLiteral("/p46/peer.txt")));
-            CloudSync::setCategoryEnabled(Category::Appearance, true);
-            CHECK(CloudSync::applyStateBundle(zip));
-            CHECK(QFileInfo::exists(themesDir + QStringLiteral("/p46/peer.txt")));
-            QDir(themesDir).removeRecursively();
+            CHECK(rawValue(QStringLiteral("subs/font")).toString() == QStringLiteral("mine"));   // absent is not deleted
+            CHECK(sent(QStringLiteral("music/albumalias")) == QStringLiteral("peer"));   // relayed, not applied
+            CHECK(sent(QStringLiteral("music/newKey")) == QStringLiteral("peer"));
+            CHECK(sent(QStringLiteral("addoncfg/x/key")) == QStringLiteral("peer"));
+            CHECK(!bundleObj().contains(QStringLiteral("addon.remote.urls")));            // the roster's, never relayed
+            // Turning MUSIC back on adopts music's relayed values and nothing else: add-ons stays off, and its
+            // relayed value is still relayed, never written (review finding 1: no whole peer bundle on a toggle).
+            switchCat(Category::Music, true);
+            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("peer"));
+            CHECK(rawValue(QStringLiteral("music/newKey")).toString() == QStringLiteral("peer"));
+            CHECK(rawValue(QStringLiteral("addoncfg/x/key")).toString() == QStringLiteral("mine"));
+            CHECK(sent(QStringLiteral("addoncfg/x/key")) == QStringLiteral("peer"));
         }
         allOn();
 
@@ -7254,7 +7394,7 @@ int main(int argc, char** argv)
                                           QStringLiteral("subs/osApiKey") };
         for (const QString& k : accountKeys) setRaw46(k, QStringLiteral("fixture-value"));
         setRaw46(QStringLiteral("ra/token"), QStringLiteral("fixture-value"));
-        for (Category c : switchable) CloudSync::setCategoryEnabled(c, false);
+        for (Category c : switchable) switchCat(c, false);
         {
             const QStringList keys = bundleKeys();
             for (const QString& k : accountKeys) CHECK(keys.contains(k));
@@ -7268,18 +7408,23 @@ int main(int argc, char** argv)
         }
         allOn();
 
-        // 46f. CloudMerge: a disabled section is neither serialised nor merged, and a peer's copy passes through.
+        // 46f. CloudMerge: a disabled section is neither serialised as ours nor merged; the relay is seeded with
+        //      this device's own copy at the switch — entries AND tombstones — so the first upload after it does not
+        //      drop them (review finding 5); a peer's copy replaces it and passes through verbatim; ON merges it.
         wipeIni();
-        const qint64 T46 = QDateTime::currentSecsSinceEpoch();
-        auto offsetBlob = [](double off, qint64 ts) {
-            QJsonObject o; o.insert(QStringLiteral("offset"), off); o.insert(QStringLiteral("updatedAt"), double(ts));
-            return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
         setRaw46(QStringLiteral("lyricoffset/items/aaaa"), offsetBlob(0.5, T46 - 100));
+        useProfile(QStringLiteral("p46"));
         {
+            FavoriteItem f; f.addonId = QStringLiteral("a46"); f.title = QStringLiteral("x");
+            f.itemId = QStringLiteral("keep"); FavoritesStore::add(f);
+            f.itemId = QStringLiteral("gone"); FavoritesStore::add(f);
+            FavoritesStore::remove(QStringLiteral("gone"));                 // a tombstone
+            const QJsonObject favs0 = docOf().value(QStringLiteral("favorites")).toObject();
+            CHECK(QJsonDocument(favs0).toJson().contains("gone"));          // ...which rides the document
+            switchCat(Category::Collections, false);
+            switchCat(Category::Music, false);
+            CHECK(docOf().value(QStringLiteral("favorites")).toObject() == favs0);   // seeded: nothing dropped
             CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("aaaa")));
-            CloudSync::setCategoryEnabled(Category::Music, false);
-            CHECK(!docOf().contains(QStringLiteral("lyricoffset")));        // nothing of ours, and nothing to carry
-            CHECK(docOf().contains(QStringLiteral("favorites")));           // the others still ride
             QJsonObject peerSec;
             QJsonObject newer; newer.insert(QStringLiteral("offset"), 2.0); newer.insert(QStringLiteral("updatedAt"), double(T46));
             QJsonObject other; other.insert(QStringLiteral("offset"), 1.0); other.insert(QStringLiteral("updatedAt"), double(T46));
@@ -7289,104 +7434,182 @@ int main(int argc, char** argv)
             CloudMerge::mergeAll(peerDoc);
             CHECK(rawValue(QStringLiteral("lyricoffset/items/aaaa")).toString() == offsetBlob(0.5, T46 - 100));
             CHECK(!rawValue(QStringLiteral("lyricoffset/items/bbbb")).isValid());
-            const QJsonObject out = docOf();
-            CHECK(out.value(QStringLiteral("lyricoffset")).toObject() == peerSec);   // passed through verbatim
-            CHECK(rawValue(synccat::carryKey(QStringLiteral("lyricoffset"))).isValid());   // relayed from disk, so a
-            CHECK(!rawValue(synccat::carryKey(QStringLiteral("favorites"))).isValid());    // restart keeps it; only OFF sections
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CHECK(!rawValue(synccat::carryKey(QStringLiteral("lyricoffset"))).isValid());  // back ON: the relay copy is dropped
-            CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject().value(QStringLiteral("aaaa")).toObject()
-                  .value(QStringLiteral("offset")).toDouble() == 0.5);                // ours again, not the carry
+            CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject() == peerSec);   // passed through verbatim
+            CHECK(docOf().value(QStringLiteral("favorites")).toObject() == favs0);       // absent: the copy stays
+            switchCat(Category::Music, true);                               // ON merges the relayed copy: union
+            CHECK(QJsonDocument::fromJson(rawValue(QStringLiteral("lyricoffset/items/aaaa")).toString().toUtf8())
+                  .object().value(QStringLiteral("offset")).toDouble() == 2.0);
+            CHECK(rawValue(QStringLiteral("lyricoffset/items/bbbb")).isValid());
+            switchCat(Category::Collections, true);
+            CHECK(!QFile::exists(carryFile));
         }
 
-        // 46g. The asymmetric A/B. Two devices, one ini each, swapped in and out of the one file this process has.
-        //      A has the category OFF, B has it ON. Sync both ways, twice; nobody loses anything; B's entries are
-        //      never tombstoned; then A turns it back on and both end at the union.
+        // 46g. The asymmetric A/B. A has music and favourites OFF, B has them ON. Their settings start in sync; each
+        //      then edits music, and each has its own lyric row and favourite. Two full rounds each way: nobody
+        //      loses anything, nothing is tombstoned, A's switch never reverts B, and A takes nothing. Then A turns
+        //      both back on and both devices end at the union.
         {
-            using Snap = QMap<QString, QVariant>;
-            auto snap = [&]() { Snap m; QSettings raw(iniPath, QSettings::IniFormat);
-                                for (const QString& k : raw.allKeys()) m.insert(k, raw.value(k)); return m; };
-            auto load = [&](const Snap& m) { QSettings raw(iniPath, QSettings::IniFormat); raw.clear();
-                                for (auto it = m.begin(); it != m.end(); ++it) raw.setValue(it.key(), it.value());
-                                raw.sync(); ItemMarks::invalidate(); };
             auto withPrefix = [&](const QString& p) { QStringList out;
-                                for (const QString& k : rawKeys()) if (k.startsWith(p)) out << k; out.sort(); return out; };
+                for (const QString& k : rawKeys()) if (k.startsWith(p)) out << k; out.sort(); return out; };
             auto favIds = [&]() { QStringList ids; for (const FavoriteItem& f : FavoritesStore::list()) ids << f.itemId;
-                                ids.sort(); return ids; };
+                ids.sort(); return ids; };
             auto fav = [&](const QString& id) { FavoriteItem f; f.addonId = QStringLiteral("a46"); f.itemId = id;
-                                f.title = id; FavoritesStore::add(f); };
-            struct Wire { QJsonObject doc; QByteArray settings; };
-            auto send = [&]() { return Wire{ docOf(), CloudSync::buildSettingsJson() }; };
-            auto receive = [&](const Wire& w) { CloudSync::applySettingsJson(w.settings); CloudMerge::mergeAll(w.doc); };
-
-            // Device A: music and favourites OFF.
+                f.title = id; FavoritesStore::add(f); };
             wipeIni();
             setRaw46(QStringLiteral("device/id"), QStringLiteral("dev-A"));
             useProfile(QStringLiteral("p46"));
+            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("shared"));
             setRaw46(QStringLiteral("lyricoffset/items/a111"), offsetBlob(0.25, T46 - 50));
-            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("fromA"));
             fav(QStringLiteral("favA"));
-            CloudSync::setCategoryEnabled(Category::Music, false);
-            CloudSync::setCategoryEnabled(Category::Collections, false);
-            Snap A = snap();
-            // Device B: everything ON.
+            switchCat(Category::Music, false);
+            switchCat(Category::Collections, false);
+            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("A-local"));   // made while off: never sent
+            Dev A = save();
             wipeIni();
             setRaw46(QStringLiteral("device/id"), QStringLiteral("dev-B"));
             useProfile(QStringLiteral("p46"));
+            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("B-new"));
             setRaw46(QStringLiteral("lyricoffset/items/b222"), offsetBlob(-0.5, T46 - 40));
-            setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("fromB"));
             fav(QStringLiteral("favB"));
-            Snap B = snap();
-            const QStringList bLyric0 = withPrefix(QStringLiteral("lyricoffset/"));
-
+            Dev B = save();
+            Cloud cl;
             for (int round = 0; round < 2; ++round)
             {
-                load(A); const Wire fromA = send(); A = snap();
-                CHECK(!QJsonDocument(fromA.doc).toJson().contains("favA"));
-                CHECK(!QJsonDocument::fromJson(fromA.settings).object().contains(QStringLiteral("music/albumalias")));
-                load(B); receive(fromA); const Wire fromB = send(); B = snap();
-                // B lost nothing, and nothing of B's was tombstoned by A's silence.
-                CHECK(withPrefix(QStringLiteral("lyricoffset/")) == bLyric0);
-                CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("fromB"));
+                load(B); push(cl); B = save();
+                load(A); pull(cl);
+                // A took nothing of what it has off, and lost nothing.
+                CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("A-local"));
+                CHECK(withPrefix(QStringLiteral("lyricoffset/")) == QStringList{ QStringLiteral("lyricoffset/items/a111") });
+                CHECK(favIds() == QStringList{ QStringLiteral("favA") });
+                CHECK(withPrefix(QStringLiteral("deleted/")).isEmpty());
+                push(cl); A = save();
+                // What A sends is B's copy, relayed — never A's own edit and never A's stale starting value.
+                CHECK(QJsonDocument::fromJson(cl.settings).object().value(QStringLiteral("music/albumalias")).toString()
+                      == QStringLiteral("B-new"));
+                CHECK(cl.doc.value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("b222")));
+                CHECK(!cl.doc.value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("a111")));
+                CHECK(!QJsonDocument(cl.doc).toJson().contains("favA"));
+                load(B); pull(cl);
+                // B lost nothing, was not reverted, and nothing of B's was tombstoned by A's switch.
+                CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("B-new"));
+                CHECK(withPrefix(QStringLiteral("lyricoffset/")) == QStringList{ QStringLiteral("lyricoffset/items/b222") });
                 CHECK(favIds() == QStringList{ QStringLiteral("favB") });
                 CHECK(Tombstones::all(QStringLiteral("favorites/p46")).isEmpty());
                 CHECK(withPrefix(QStringLiteral("deleted/")).isEmpty());
-                load(A); receive(fromB); A = snap();
-                // A lost nothing, and took nothing of the categories it has off.
-                CHECK(withPrefix(QStringLiteral("lyricoffset/")) == QStringList{ QStringLiteral("lyricoffset/items/a111") });
-                CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("fromA"));
-                CHECK(favIds() == QStringList{ QStringLiteral("favA") });
-                CHECK(withPrefix(QStringLiteral("deleted/")).isEmpty());
-                // What A sends next carries B's music section untouched (the pass-through), never A's own.
-                const QJsonObject again = docOf();
-                CHECK(again.value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("b222")));
-                CHECK(!again.value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("a111")));
+                B = save();
             }
-
-            // A turns both back on, takes the cloud first (what the re-enable path does), then both sync again:
-            // both devices end at the union, and still nothing is tombstoned.
             load(A);
-            CloudSync::setCategoryEnabled(Category::Music, true);
-            CloudSync::setCategoryEnabled(Category::Collections, true);
-            A = snap();
-            load(B); const Wire fromB2 = send(); B = snap();
-            load(A); receive(fromB2);
-            // Until the pull that brought fromB2 is adopted, A sends none of its (stale) music settings...
-            CHECK(!QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object().contains(QStringLiteral("music/albumalias")));
-            CloudSync::adoptSyncedBaseline(QStringLiteral("2026-01-01T00:00:00Z"), QStringLiteral("remotehash"));
-            // ...and after it, what it sends is what it took.
-            CHECK(QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object().value(QStringLiteral("music/albumalias"))
-                  .toString() == QStringLiteral("fromB"));
-            const Wire fromA2 = send(); A = snap();
+            switchCat(Category::Music, true);
+            switchCat(Category::Collections, true);
+            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("B-new"));   // adopted
             CHECK(withPrefix(QStringLiteral("lyricoffset/")) == (QStringList{ QStringLiteral("lyricoffset/items/a111"),
                                                                            QStringLiteral("lyricoffset/items/b222") }));
             CHECK(favIds() == (QStringList{ QStringLiteral("favA"), QStringLiteral("favB") }));
-            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("fromB"));   // peer wins, as ever
-            load(B); receive(fromA2); B = snap();
+            push(cl); A = save();
+            load(B); pull(cl);
             CHECK(withPrefix(QStringLiteral("lyricoffset/")) == (QStringList{ QStringLiteral("lyricoffset/items/a111"),
                                                                            QStringLiteral("lyricoffset/items/b222") }));
             CHECK(favIds() == (QStringList{ QStringLiteral("favA"), QStringLiteral("favB") }));
+            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("B-new"));
             CHECK(withPrefix(QStringLiteral("deleted/")).isEmpty());
+        }
+
+        auto musicSent = [&]() { return sent(QStringLiteral("music/albumalias")); };
+        auto fresh = [&](const QString& id, const QString& music) {
+            wipeIni();
+            setRaw46(QStringLiteral("device/id"), id);
+            setRaw46(QStringLiteral("theme/default"), QStringLiteral("t"));
+            setRaw46(QStringLiteral("subs/font"), QStringLiteral("f"));
+            setRaw46(QStringLiteral("music/albumalias"), music);
+            return save(); };
+
+        // 46h. THE FIXED POINT (review finding 2). Straight after a pull, localChangedSinceSync() is false — the
+        //      local fingerprint and the pushed stamp describe the same bundle — whichever side has the category off.
+        struct Case { const char* name; bool aOff; bool bOff; };
+        for (const Case& cs : { Case{ "A off, B on", true, false }, Case{ "A on, B off", false, true },
+                                Case{ "both off", true, true } })
+        {
+            Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            if (cs.aOff) { switchCat(Category::Music, false); A = save(); }
+            Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("b"));
+            if (cs.bOff) { switchCat(Category::Music, false); B = save(); }
+            Cloud cl;
+            for (int round = 0; round < 2; ++round)
+            {
+                load(B); push(cl); B = save();
+                load(A); pull(cl);
+                if (CloudSync::localChangedSinceSync())
+                    std::fprintf(stderr, "  46h (%s, round %d): A reads local-changed right after pulling B\n", cs.name, round);
+                CHECK(!CloudSync::localChangedSinceSync());
+                push(cl); A = save();
+                load(B); pull(cl);
+                if (CloudSync::localChangedSinceSync())
+                    std::fprintf(stderr, "  46h (%s, round %d): B reads local-changed right after pulling A\n", cs.name, round);
+                CHECK(!CloudSync::localChangedSinceSync());
+                B = save();
+            }
+        }
+        // ...and after a re-enable: A off, B on, a pull; A turns music back on — which itself leaves nothing owed —
+        // and every pull after it is still a fixed point, on both sides.
+        {
+            Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            switchCat(Category::Music, false); A = save();
+            Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("b"));
+            Cloud cl;
+            load(B); push(cl); B = save();
+            load(A); pull(cl);
+            switchCat(Category::Music, true);
+            CHECK(!CloudSync::localChangedSinceSync());
+            A = save();
+            load(B); push(cl); B = save();
+            load(A); pull(cl);
+            if (CloudSync::localChangedSinceSync()) std::fprintf(stderr, "  46h (re-enable): A local-changed after a pull\n");
+            CHECK(!CloudSync::localChangedSinceSync());
+            push(cl); A = save();
+            load(B); pull(cl);
+            if (CloudSync::localChangedSinceSync()) std::fprintf(stderr, "  46h (re-enable): B local-changed after a pull\n");
+            CHECK(!CloudSync::localChangedSinceSync());
+        }
+
+        // 46i. RE-ENABLING IS NOT A REASON TO PULL (review finding 1). One device, in sync with its own last upload,
+        //      edits a bundle key (a comic page) and turns a category off and on. The next automatic attempt must
+        //      PUSH — never PullThenPush, which would apply its own old bundle over this session's edits.
+        {
+            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            setRaw46(QStringLiteral("comic/abc/page"), 1);
+            Cloud cl;
+            push(cl);
+            setRaw46(QStringLiteral("comic/abc/page"), 2);          // this session's unpushed edit
+            switchCat(Category::Music, false);
+            switchCat(Category::Music, true);
+            const bool localChanged = CloudSync::localChangedSinceSync();
+            const bool remoteChanged = cl.stamp.toUtf8() != rawValue(QStringLiteral("cloud/syncedHash")).toByteArray();
+            if (remoteChanged) std::fprintf(stderr, "  46i: the toggle made the device's own upload read as a peer's\n");
+            CHECK(localChanged && !remoteChanged);
+            CHECK(PendingPush::resolve(true, true, localChanged, remoteChanged) == PendingPush::Plan::Push);
+            CHECK(rawValue(QStringLiteral("comic/abc/page")).toInt() == 2);
+        }
+
+        // 46j. A RE-ENABLED CATEGORY NEVER SENDS ITS STALE LOCAL COPY (review finding 3). A has music off; B changes
+        //      it and pushes; A pulls, then A's own exit push becomes the remote; A turns music back on and pulls that
+        //      remote — its OWN bundle. What A then sends for music is B's value, not A's month-old one.
+        {
+            Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("old"));
+            switchCat(Category::Music, false); A = save();
+            Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("new"));
+            Cloud cl;
+            load(B); push(cl); B = save();
+            load(A); pull(cl); push(cl);                            // A's exit push: the remote is now A's own
+            switchCat(Category::Music, true);
+            // Turned on and QUIT at once (review finding 6): the blind exit push that follows sends B's value too —
+            // not A's stale one, and not a gap.
+            if (musicSent() != QStringLiteral("new"))
+                std::fprintf(stderr, "  46j: straight after re-enabling, A sends music \"%s\"\n", qPrintable(musicSent()));
+            CHECK(musicSent() == QStringLiteral("new"));
+            pull(cl);                                               // ...and a pull that lands it
+            if (musicSent() != QStringLiteral("new"))
+                std::fprintf(stderr, "  46j: A sends music \"%s\" after re-enabling\n", qPrintable(musicSent()));
+            CHECK(musicSent() == QStringLiteral("new"));
         }
         wipeIni();
     }

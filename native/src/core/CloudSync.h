@@ -51,19 +51,20 @@ public:
     // SyncCategories.h gives it (Unmapped when no rule claims it; such a key still syncs, as "other settings").
     static synccat::Category categoryFor(const QString& key);
     // #27: this device's switch for a category (device-local, under cloud/sync/<id>; absent = on). Only the seven
-    // switchable categories can be off; the rest always read true. Turning a category back ON makes it CATCH UP:
-    // while it was off this device neither sent nor took it, so its local values are the stale side. It takes a
-    // peer's values at once but sends nothing of the category until a pull lands (adoptSyncedBaseline) or a
-    // reachable remote proves there is nothing to take, and the synced baseline is forgotten so the next
-    // automatic push pulls first (PendingPush's PullThenPush: peer wins, then the union goes up).
+    // switchable categories can be off; the rest always read true.
     static bool categoryEnabled(synccat::Category c);
-    static bool categoryCatchingUp(synccat::Category c);
+    // The SETTINGS half of a switch. Call CloudMerge::switchCategory, which does this AND the merge document's
+    // half; this one alone is for the probes and for a build that links CloudSync without CloudMerge.
+    //   off: this device's current values of the category are frozen into the relay (SyncCarry.h), so what it
+    //        uploads does not change at the moment of the switch; from then on its own edits are not sent and a
+    //        peer's values are relayed, never applied.
+    //   on:  the relayed values — the other devices' latest, as of the last pull — are adopted for THIS
+    //        category's keys only, and the relay entry is dropped. No pull, no baseline change: what this device
+    //        uploads is the same bundle it uploaded a moment before, so the switch is not a reason to push or pull.
     static void setCategoryEnabled(synccat::Category c, bool on);
-    // Whether a peer's value for `key` is written here (not device-local; category on) — the bundle reader asks.
+    // Whether a peer's value for `key` is written here: not device-local, and its category (Other when
+    // unmapped) is switched on.
     static bool keyTakenHere(const QString& key);
-    // Whether `key` leaves this device (the above, and its category is not catching up) — the bundle writer and
-    // the fingerprint ask, so an unsent key can never read as an unsynced change.
-    static bool keySentFromHere(const QString& key);
     // The bundle's settings.json content (device-local excluded) — the exact bytes buildBundle embeds. Exposed
     // so the headless probe exercises the real carve-out without the zip/network.
     static QByteArray buildSettingsJson();

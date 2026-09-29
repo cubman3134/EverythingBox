@@ -14,6 +14,8 @@
 #include "AddonRoster.h"     // issue #77: the roster's live keys leave the bundle; an old peer's snapshot is adopted
 #include "AddonConfigKeys.h" // issue #77: an add-on's PASSWORD fields are device-local
 #include "PerItemStores.h"   // #332: THE per-item-store prefix table, shared with SettingsTxn::inScope
+#include "SyncCarry.h"       // #27: the relay buffer a switched-off category is carried through
+#include <QMap>
 #include <QSet>
 #include <QSettings>
 #include <QCryptographicHash>
@@ -445,59 +447,95 @@ bool CloudSync::categoryEnabled(synccat::Category c)
     return synccat::isEnabled(store(), c);
 }
 
-bool CloudSync::categoryCatchingUp(synccat::Category c)
-{
-    return synccat::isCatchingUp(store(), c);
-}
-
-void CloudSync::setCategoryEnabled(synccat::Category c, bool on)
-{
-    if (!synccat::hasToggle(c)) return;   // accounts, other settings and device-local have no switch
-    const bool was = categoryEnabled(c);
-    // Written only when OFF: ON is the default, so a device that never touched the page carries no key at all.
-    if (on) store().remove(synccat::toggleKey(c));
-    else    store().setValue(synccat::toggleKey(c), false);
-    if (!on) store().remove(synccat::catchUpKey(c));
-    // Back ON after being off: this device's copy of the category is the STALE side — while it was off, this
-    // device took none of the other devices' changes. So it TAKES before it SENDS:
-    //   * catching up: its keys are applied from a peer's bundle at once, but left out of what this device sends
-    //     (and of the fingerprint) until a pull has landed (adoptSyncedBaseline) or proved there is nothing to
-    //     take. Without it, the next push — the exit push is a blind one — would hand every other device this
-    //     device's out-of-date values, and a peer's apply is "peer wins per key". That would be a revert.
-    //   * the synced baseline is forgotten, so the next automatic push finds remoteChanged AND localChanged and
-    //     takes PendingPush's PullThenPush arm: the peer's values land first, then the union goes up.
-    // Nothing is deleted either way, and the gap is not read as deletions: the pull is an ordinary apply.
-    if (on && !was)
-    {
-        store().setValue(synccat::catchUpKey(c), true);
-        store().remove(QStringLiteral("cloud/syncedHash"));
-    }
-    // ...and drop any peer copies CloudMerge was relaying for this category while it was off: from here on this
-    // device merges and sends the category itself, and a relay copy left behind would be stale if it were ever
-    // switched off again before the next pull refreshed it.
-    if (on)
-        for (const synccat::Section& s : synccat::kSections)
-            if (synccat::ofKey(QLatin1String(s.prefix)) == c) store().remove(synccat::carryKey(QLatin1String(s.name)));
-    store().sync();
-}
-
 bool CloudSync::keyTakenHere(const QString& key)
 {
     if (isDeviceLocalKey(key)) return false;
     return synccat::isEnabled(store(), synccat::effective(synccat::ofKey(key)));
 }
 
-bool CloudSync::keySentFromHere(const QString& key)
+// A key the settings bundle carries at all, whatever the switches say: not a per-item store (the merge document
+// owns those), not device-local, and not one of the roster's live or legacy keys (#77: the document's roster
+// section is their authority). The per-item test goes FIRST: resume/ and marks/ rows are most of a big ini, and
+// that table is two dozen prefixes where the carve-out is a long walk.
+static bool isBundleSettingKey(const QString& k)
 {
-    if (isDeviceLocalKey(key)) return false;
-    return synccat::isSent(store(), synccat::effective(synccat::ofKey(key)));
+    return !CloudSync::isPerItemStoreKey(k) && !CloudSync::isDeviceLocalKey(k) && !AddonRoster::isLiveKey(k)
+        && !AddonRoster::isLegacyRegistryKey(k);
 }
 
-// A pull has landed, or a reachable remote proved there was nothing to take: every re-enabled category has
-// caught up and rides this device's pushes again.
-static void clearCatchUp()
+// Whether `k`'s category is switched off here. Only asked once some switch is off, so a device on the defaults
+// never walks the category table at all.
+static bool offHere(const QString& k)
 {
-    store().remove(synccat::catchUpGroup());
+    return !synccat::isEnabled(store(), synccat::effective(synccat::ofKey(k)));
+}
+
+// THE SETTINGS THIS DEVICE UPLOADS — the one answer buildSettingsJson and the fingerprint both read, so the
+// stamp a push carries and the hash this device compares against it can never describe two different bundles
+// (#27 review, finding 2). It is this device's own value for every key of a category that is ON, plus, for a
+// category switched OFF, the value the relay holds: the other devices' latest as of the last pull (or this
+// device's own, frozen at the switch, until a pull has replaced them). A device that has just pulled therefore
+// uploads exactly the bundle it pulled, whichever side has which category off, and the pull->push round keeps
+// its fixed point. With every switch on — the default — this is byte-for-byte the set main always uploaded.
+static QMap<QString, QString> uploadSettings()
+{
+    QMap<QString, QString> out;
+    const bool anyOff = synccat::anySwitchedOff(store());
+    for (const QString& k : store().allKeys())
+    {
+        if (!isBundleSettingKey(k)) continue;
+        if (anyOff && offHere(k)) continue;
+        out.insert(k, store().value(k).toString());
+    }
+    if (anyOff)
+    {
+        const QJsonObject carry = synccat::loadCarry(synccat::carrySettingsPart());
+        for (auto it = carry.begin(); it != carry.end(); ++it)
+            if (isBundleSettingKey(it.key()) && offHere(it.key())) out.insert(it.key(), it.value().toString());
+    }
+    return out;
+}
+
+void CloudSync::setCategoryEnabled(synccat::Category c, bool on)
+{
+    if (!synccat::hasToggle(c)) return;   // accounts, other settings and device-local have no switch
+    if (categoryEnabled(c) == on) return;
+    QJsonObject carry = synccat::loadCarry(synccat::carrySettingsPart());
+    if (!on)
+    {
+        // Freeze: the relay starts as this device's own values, so the upload is unchanged by the switch (no
+        // upload is owed for it, and the cloud copy does not lose the category while nobody has pulled yet).
+        for (const QString& k : store().allKeys())
+            if (isBundleSettingKey(k) && synccat::effective(synccat::ofKey(k)) == c)
+                carry.insert(k, store().value(k).toString());
+        synccat::saveCarry(synccat::carrySettingsPart(), carry);
+        store().setValue(synccat::toggleKey(c), false);   // written only when OFF: ON is the absent default
+        store().sync();
+        return;
+    }
+    // Adopt: THIS category's relayed values, and nothing else — never a whole peer bundle (review, finding 1).
+    // They are the other devices' values as of the last pull, so this device now holds what it was already
+    // uploading, and the upload does not change. Its own edits made while the category was off are replaced:
+    // they were never sent, and "the peer wins per key" is the rule every pull already applies. A key only this
+    // device has stays, and goes up with the next push, which is the union.
+    store().remove(synccat::toggleKey(c));
+    QJsonObject rest;
+    bool committed = false;
+    for (auto it = carry.begin(); it != carry.end(); ++it)
+    {
+        const QString& k = it.key();
+        if (synccat::effective(synccat::ofKey(k)) != c || !isBundleSettingKey(k)) { rest.insert(k, it.value()); continue; }
+        const QString v = it.value().toString();
+        if (store().value(k).toString() == v) continue;   // unchanged: no write (so an off->on with no pull between
+                                                          // is a no-op on the ini, byte for byte)
+        // Written into the open settings visit, a later Discard would restore this device's stale values under a
+        // switch that stays on (cloud/ is out of the transaction), and they would then be SENT. Close it first —
+        // the same trade a remote apply makes (applySettingsJson).
+        if (!committed && SettingsTxn::active()) { SettingsTxn::commit(); committed = true; }
+        store().setValue(k, v);
+    }
+    synccat::saveCarry(synccat::carrySettingsPart(), rest);
+    store().sync();
 }
 
 QByteArray CloudSync::buildSettingsJson()
@@ -515,13 +553,11 @@ QByteArray CloudSync::buildSettingsJson()
     // user added (registry/addonsExtras, registry/themesExtras) are out for the same reason: they are roster
     // records now, and the old keys only exist on a device that has not yet adopted them.
     //
-    // And a category this device has switched OFF (#27) is out too. Off means "this device neither sends nor
-    // takes it" — not "delete it": the peer's copy is untouched, because applySettingsJson only ever adds.
+    // #27: exactly uploadSettings() — this device's values for the categories it has on, and the relayed values
+    // for the ones it has off (see there). With every switch on it is the same set, and the same bytes, as ever.
     QJsonObject so;
-    for (const QString& k : store().allKeys())
-        if (keySentFromHere(k) && !isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k)
-            && !AddonRoster::isLegacyRegistryKey(k))
-            so.insert(k, store().value(k).toString());
+    const QMap<QString, QString> up = uploadSettings();
+    for (auto it = up.cbegin(); it != up.cend(); ++it) so.insert(it.key(), it.value());
     return QJsonDocument(so).toJson(QJsonDocument::Compact);
 }
 
@@ -538,16 +574,22 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
     QHash<QString, bool> legacyFlags;
     bool legacyRoster = false;
     QVector<QPair<AddonRoster::RegistryList, QStringList>> legacyRegistries;   // #77: an older peer's added registries
+    // #27: a category switched off here takes nothing from the peer. Its incoming values are RELAYED instead —
+    // kept aside, never written to the ini — so this device's next upload carries the peer's view of it, not a
+    // gap and not this device's own stale copy (see uploadSettings).
+    const bool anyOff = synccat::anySwitchedOff(store());
+    QJsonObject relay;
     for (auto it = so.begin(); it != so.end(); ++it)
     {
         const QString& k = it.key();
         // Inbound carve-out: never overwrite a device-local key, and never write a per-item store key (the
         // merge document owns those — writing them here would clobber this device's live/merged state).
         if (isDeviceLocalKey(k) || isPerItemStoreKey(k)) continue;
-        // #27: a category this device has switched off takes nothing from a peer. The local value stays exactly
-        // as it is; the incoming one is simply not written (the roster's live and legacy keys below are the
-        // add-on category too, so an old peer's roster snapshot is not adopted either).
-        if (!keyTakenHere(k)) continue;
+        if (anyOff && offHere(k))
+        {
+            if (!AddonRoster::isLiveKey(k) && !AddonRoster::isLegacyRegistryKey(k)) relay.insert(k, it.value().toString());
+            continue;   // (an older peer's roster snapshot is the add-on category too: not adopted either)
+        }
         // The roster's live keys are never written raw either (#77). Only a peer on a build before #77 still
         // sends them; its snapshot is kept aside and ADOPTED after the loop — so its manifest caches, which
         // do still ride the bundle, are already in place to key the entries by manifest id.
@@ -570,6 +612,10 @@ void CloudSync::applySettingsJson(const QByteArray& settingsJson)
         store().setValue(k, it.value().toString());
     }
     store().sync();
+    // The relay is REPLACED, not merged: it is a copy of the peer's bundle, and the fixed point needs this
+    // device's next upload to equal what it just pulled. It is never local data, so replacing it deletes nothing.
+    // (An empty document is not a bundle — never let one wipe the relay.)
+    if (anyOff && !so.isEmpty()) synccat::saveCarry(synccat::carrySettingsPart(), relay);
     // As ADDS, at ts 0, never over a local tombstone, never as a removal: the snapshot carries no dates, so the
     // union is the most it can honestly say. What it cannot say — that the old peer REMOVED something — waits
     // for that peer to upgrade and send a dated tombstone through the merge document.
@@ -594,9 +640,7 @@ static QByteArray buildBundle()
 
     const QString app = AppPaths::dataDir();
     // No addons/ (issue #77): add-on code never rides sync. See isAddonCodePath above.
-    // The theme FILES are appearance & theme (#27): switched off, they stay on this device.
-    if (synccat::isSent(store(), synccat::Category::Appearance))
-        zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
+    zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
     // saves/ and states/ are NOT in the bundle: they sync per-file via SaveSync. They used to be here, which
     // meant (a) two devices silently overwrote each other's saves wholesale, and (b) every save write flipped
     // the fingerprint below and re-uploaded addons, themes and settings along with it.
@@ -648,8 +692,6 @@ static bool applyBundle(const QByteArray& data, int* refusedAddonFiles)
         }
         else if (name.startsWith(QStringLiteral("themes/")))
         {
-            // Appearance & theme switched off (#27): a peer's theme files are not written over this device's.
-            if (!CloudSync::categoryEnabled(synccat::Category::Appearance)) continue;
             // Restrict to the app dir (defend against path traversal in archive names).
             const QString dest = QDir::cleanPath(app + QStringLiteral("/") + name);
             if (!dest.startsWith(QDir::cleanPath(app) + QStringLiteral("/"))) continue;
@@ -671,22 +713,18 @@ static bool applyBundle(const QByteArray& data, int* refusedAddonFiles)
 static QByteArray stateHash()
 {
     QCryptographicHash h(QCryptographicHash::Sha256);
-    QStringList keys;
     // Same carve-out as buildBundle: a device-local key isn't synced, so it must not enter the fingerprint —
     // otherwise a purely-local edit reads as an unsynced change and cross-device baselines never converge.
     // The per-item stores are ALSO excluded (mdsync T5): they're owned by the merge document, and if they
     // entered this fingerprint every mark/favorite/playlist/stats tick would read as "local changed" and
     // re-upload the heavy bundle. Keeping them out means per-item churn is served solely by the merge doc's
     // own push cadence; the bundle only re-uploads when a genuinely bundle-synced setting or file changes.
-    // A switched-off category (#27) is out for buildBundle's reason: it is not sent, so editing it is not an
-    // unsynced change. The switch itself moves this fingerprint ONCE (its keys leave), which is one upload.
-    for (const QString& k : store().allKeys())
-        if (CloudSync::keySentFromHere(k) && !CloudSync::isPerItemStoreKey(k) && !AddonRoster::isLiveKey(k)
-            && !AddonRoster::isLegacyRegistryKey(k))
-            keys << k;   // #77: the roster's live keys are the merge document's, so they are out here too
-    keys.sort();
-    for (const QString& k : keys)
-    { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
+    // #77: the roster's live keys are the merge document's, so they are out here too. #27: the fingerprint hashes
+    // EXACTLY the settings buildSettingsJson uploads (uploadSettings), in the same sorted key order and the same
+    // k=v lines as always, so the stamp a push carries and this hash can never describe different bundles.
+    const QMap<QString, QString> up = uploadSettings();
+    for (auto it = up.cbegin(); it != up.cend(); ++it)
+    { h.addData(it.key().toUtf8()); h.addData("="); h.addData(it.value().toUtf8()); h.addData("\n"); }
 
     const QString app = AppPaths::dataDir();
     // saves/ and states/ are NOT here either (save-sync T3), and this is the edit that pays for the track: a
@@ -696,7 +734,6 @@ static QByteArray stateHash()
     // unsynced change, and must not re-upload the bundle.
     for (const QString& sub : { QStringLiteral("themes") })
     {
-        if (!synccat::isSent(store(), synccat::Category::Appearance)) continue;   // #27: not sent, not counted
         const QString dir = app + QStringLiteral("/") + sub;
         QStringList files;
         QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
@@ -740,9 +777,6 @@ void CloudSync::adoptSyncedBaseline(const QString& modifiedIso, const QString& r
     store().setValue(QStringLiteral("cloud/appliedModified"), modifiedIso);
     // Baseline = the remote we just took, so a re-check sees neither side changed (no false conflict). A
     // legacy bundle carries no stamp, and then the state we have just applied is itself the baseline.
-    // #27: a pull has landed, so a re-enabled category has taken the peers' values and may be sent again. Cleared
-    // BEFORE a legacy baseline is computed below, so that baseline already counts the caught-up keys.
-    clearCatchUp();
     store().setValue(QStringLiteral("cloud/syncedHash"),
                      remoteHash.isEmpty() ? stateHash() : remoteHash.toUtf8());
     store().sync();
@@ -760,8 +794,6 @@ void CloudSync::checkStatus(std::function<void(const Status&)> cb)
                  [this, cb, st, synced](bool listOk, const QString& id, const QString& modIso, const QString& remoteHash) mutable {
             st.listReached = listOk;   // false => the file-query failed; "no bundle" is UNPROVEN, don't seed fresh
             st.hasRemote = !id.isEmpty();
-            // #27: a PROVEN empty remote has nothing for a re-enabled category to take, so it has caught up.
-            if (listOk && !st.hasRemote) { clearCatchUp(); st.localChanged = localChangedSinceSync(); }
             st.fileId = id;
             st.modifiedIso = modIso;
             st.remoteHash = remoteHash;
