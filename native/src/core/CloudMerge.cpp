@@ -2000,27 +2000,38 @@ bool CloudMerge::switchCategory(synccat::Category c, bool on)
     auto ofCat = [c](const QString& name) { return synccat::ofSection(name) == c; };
     if (!on)
     {
+        // The relay and its snapshot are seeded together, once, here: "frozenSections" is this device's own copy
+        // at the switch, and nothing else ever writes it. A change of account resets the relay to it
+        // (CloudSync::forgetRelay), so a row added while the category is off is never uploaded (#476).
         QJsonObject own;
         serializeAll(own);   // still ON here, so these are this device's own sections
-        QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart());
+        QJsonObject all = synccat::loadCarryAll();
+        const QJsonObject before = all;
+        QJsonObject relay = all.value(synccat::carrySectionsPart()).toObject();
+        QJsonObject frozen = all.value(synccat::carryFrozenSectionsPart()).toObject();
         for (auto it = own.begin(); it != own.end(); ++it)
-            if (ofCat(it.key())) relay.insert(it.key(), it.value());
-        if (!synccat::saveCarry(synccat::carrySectionsPart(), relay)) return false;
+            if (ofCat(it.key())) { relay.insert(it.key(), it.value()); frozen.insert(it.key(), it.value()); }
+        all.insert(synccat::carrySectionsPart(), relay);
+        all.insert(synccat::carryFrozenSectionsPart(), frozen);
+        if (!synccat::saveCarryAll(all)) return false;
         if (!CloudSync::setCategoryEnabled(c, false))
         {
-            // The settings half could not freeze: undo the sections just relayed, and stay on.
-            for (auto it = own.begin(); it != own.end(); ++it)
-                if (ofCat(it.key())) relay.remove(it.key());
-            synccat::saveCarry(synccat::carrySectionsPart(), relay);
+            // The settings half could not freeze: undo the sections just relayed and frozen, and stay on.
+            synccat::saveCarryAll(before);
             return false;
         }
         return true;
     }
     CloudSync::setCategoryEnabled(c, true);
-    QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart()), take, rest;
+    QJsonObject all = synccat::loadCarryAll();
+    QJsonObject relay = all.value(synccat::carrySectionsPart()).toObject(), take, rest;
     for (auto it = relay.begin(); it != relay.end(); ++it)
         (ofCat(it.key()) ? take : rest).insert(it.key(), it.value());
-    synccat::saveCarry(synccat::carrySectionsPart(), rest);
+    QJsonObject frozen = all.value(synccat::carryFrozenSectionsPart()).toObject();
+    for (const QString& name : frozen.keys()) if (ofCat(name)) frozen.remove(name);
+    all.insert(synccat::carrySectionsPart(), rest);
+    all.insert(synccat::carryFrozenSectionsPart(), frozen);
+    synccat::saveCarryAll(all);
     if (!take.isEmpty()) mergeDocument(take);
     return true;
 }

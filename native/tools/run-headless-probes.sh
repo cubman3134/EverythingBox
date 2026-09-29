@@ -1481,7 +1481,15 @@ else
   '; }
   mp_body="$(mp_fn mergeProgress)"
   mp_tail="$(mp_fn afterProgressMerge)"
-  mp_hook="$(sed -E 's://.*$::' "$MWCPP" | grep -c 'setAfterMergeHook(.*afterProgressMerge()')"
+  # #476: the registration counts only INSIDE the MainWindow constructor's body. Anywhere else in the file it
+  # passed too, even in a function nothing calls, and then the hook never runs. The constructor is read from
+  # MW_OWN_SOURCES, so it may move to any file #186 splits out of MainWindow.cpp.
+  mp_ctor="$(sed -E 's://.*$::' "${MW_OWN_SOURCES[@]}" 2>/dev/null | awk '
+    /^MainWindow::MainWindow[(]/ { inbody = 1 }
+    inbody       { print }
+    inbody && /^}/ { exit }
+  ')"
+  mp_hook="$(printf '%s\n' "$mp_ctor" | grep -c 'setAfterMergeHook(.*afterProgressMerge()')"
   if [ -z "$(printf '%s' "$mp_body" | tr -d '[:space:]')" ] || [ -z "$(printf '%s' "$mp_tail" | tr -d '[:space:]')" ]; then
     echo "FAIL: post-merge addon-ref repair (MainWindow::mergeProgress or ::afterProgressMerge not found — the gate stopped matching)"
     fail=1
@@ -1495,7 +1503,11 @@ else
     echo "FAIL: post-merge addon-ref repair (mergeProgress no longer merges through CloudMerge::mergeDocument, so the tail does not run)"
     fail=1
   elif [ "$mp_hook" -lt 1 ]; then
-    echo "FAIL: post-merge addon-ref repair (no CloudMerge::setAfterMergeHook registers afterProgressMerge)"
+    if [ -z "$(printf '%s' "$mp_ctor" | tr -d '[:space:]')" ]; then
+      echo "FAIL: post-merge addon-ref repair (MainWindow::MainWindow not found in MW_OWN_SOURCES $(mw_own_missing)— the gate stopped matching)"
+    else
+      echo "FAIL: post-merge addon-ref repair (the MainWindow constructor does not register afterProgressMerge through CloudMerge::setAfterMergeHook)"
+    fi
     fail=1
   else
     echo "PASS: post-merge addon-ref repair"
