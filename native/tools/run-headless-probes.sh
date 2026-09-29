@@ -32,6 +32,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 
+# MainWindow's own code (#470): MainWindow.cpp plus every file #186 has moved out of it. A NEGATIVE source
+# check about MainWindow (absent, count == 0, "never", "no longer") reads EVERY file here, so moving a function
+# out of MainWindow.cpp cannot move it out of the scan; a POSITIVE check keeps reading the file its text lives in.
+# Every #186 increment appends its new file HERE and nowhere else. probe_jfdownload and probe_subsonic read this
+# list out of this file (native/tools/MainWindowOwnSources.h), so keep it one "$HERE/../src/ui/<file>" per
+# line, with no comment inside the parentheses. Deliberately NOT listed: the feature siblings
+# (MainWindowJellyfin.cpp and the rest), which were never part of MainWindow.cpp and no gate claimed to cover.
+MW_OWN_SOURCES=(
+  "$HERE/../src/ui/MainWindow.cpp"
+  "$HERE/../src/ui/MainWindowSettingsGeneral.cpp"
+  "$HERE/../src/ui/MainWindowPanels.cpp"
+)
+# The listed files that do not exist, each followed by a space; empty when all do. sed over a missing file only
+# warns and carries on with a corpus short of that file, so a gate reading the list reports these instead.
+mw_own_missing() { local f; for f in "${MW_OWN_SOURCES[@]}"; do [ -f "$f" ] || printf '%s ' "$f"; done; }
+
 # ---- The verdict, derived from the per-probe lines (issue #180) ---- VERDICT BLOCK BEGIN -------------------
 # Three times this suite printed SOME HEADLESS PROBES FAILED while naming NO probe, and once a failing run was
 # recorded as a pass because it was piped through `tail` (a pipeline reports TAIL's status, not the suite's).
@@ -1051,6 +1067,11 @@ if [ ! -f "$MWCPP" ] || [ ! -f "$TD_MWP" ] || [ ! -f "$HVCPP" ]; then
   echo "FAIL: themed handler deferral (MainWindow.cpp, MainWindowPanels.cpp or HomeView.cpp not found under $HERE/../src/ui)"; fail=1
 else
   mw_src="$(sed -E 's://.*$::' "$MWCPP" "$TD_MWP")"
+  # Check 5's per-handler scan is NEGATIVE (no handler may skip the deferral), so it reads all of MainWindow's
+  # own code (#470). Everything else here reads mw_src, the files its text lives in.
+  td_own_src="$(sed -E 's://.*$::' "${MW_OWN_SOURCES[@]}" 2>/dev/null)"
+  td_miss="$(mw_own_missing)"
+  [ -z "$td_miss" ] || td_note "MW_OWN_SOURCES lists ${td_miss}which does not exist: the handler scan cannot see it."
   hv_src="$(sed -E 's://.*$::' "$HVCPP")"
   # One file-scope function body, from its definition line to the column-0 `}` that closes it.
   td_body() { printf '%s\n' "$2" | awk -v sig="$1" '
@@ -1132,7 +1153,7 @@ else
       td_note "found $td_count 'auto $td_cb = [' handler(s), expected at least 3 — renamed or removed? This gate is now asserting less than it looks."
     fi
     # Each handler must reach deferPastQmlEmission within its own body (to the closing `    };`).
-    td_bad="$(printf '%s\n' "$mw_src" | awk -v cb="auto $td_cb = [" '
+    td_bad="$(printf '%s\n' "$td_own_src" | awk -v cb="auto $td_cb = [" '
       index($0, cb) { on = 1; seen = 0; start = NR }
       on && /deferPastQmlEmission/ { seen = 1 }
       on && /^    \};/ { if (!seen) print start; on = 0 }
@@ -3589,8 +3610,7 @@ tp_fail=0
 tp_note() { echo "  $1"; tp_fail=1; }
 # The host files that reach the themed scene. Every setProperty RECEIVER in these is classified below.
 TP_HOSTS=(
-  "$HERE/../src/ui/MainWindow.cpp"
-  "$HERE/../src/ui/MainWindowPanels.cpp"
+  "${MW_OWN_SOURCES[@]}"   # MainWindow's own code (#470): MainWindow.cpp and every file #186 moved out of it
   "$HERE/../src/ui/MainWindowTimelineMarks.cpp"
   "$HERE/../src/ui/MainWindowWatchTogether.cpp"
   "$HERE/../src/theme2/ThemeEngine.cpp"
@@ -3910,12 +3930,16 @@ else
   # `grep -c -F` against a FILE, never `printf | grep -q` (SIGPIPE under pipefail fails ON a match).
   lz_tmp="$(mktemp)"
   sed -E 's://.*$::' "$LZ_MW" > "$lz_tmp"
+  # The direct-write check is NEGATIVE, so it reads all of MainWindow's own code (#470).
+  lz_own="$(mktemp)"; sed -E 's://.*$::' "${MW_OWN_SOURCES[@]}" > "$lz_own" 2>/dev/null
+  lz_miss="$(mw_own_missing)"
+  [ -z "$lz_miss" ] || lz_note "MW_OWN_SOURCES lists ${lz_miss}which does not exist: the direct-write scan cannot see it."
   [ "$(wc -l < "$lz_tmp")" -gt 100 ] || lz_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
   [ "$(grep -c -F 'ThemeEngine::recountAudioLyricZone(' "$lz_tmp")" -ge 1 ] \
     || lz_note "MainWindow never calls ThemeEngine::recountAudioLyricZone: a track change no longer recounts the lyric zone through the page gate."
-  [ "$(grep -c -F 'setZoneCount(QStringLiteral("lyrics")' "$lz_tmp")" -eq 0 ] \
+  [ "$(grep -c -F 'setZoneCount(QStringLiteral("lyrics")' "$lz_own")" -eq 0 ] \
     || lz_note "MainWindow writes the lyrics zone count directly: only ThemeEngine::recountAudioLyricZone may, or the list is counted up under the home after Back (#357)."
-  rm -f "$lz_tmp"
+  rm -f "$lz_tmp" "$lz_own"
 fi
 if [ "$lz_fail" -eq 0 ]; then echo "PASS: lyric zone recount asks the page (#357)"; else echo "FAIL: lyric zone recount asks the page (#357)"; fail=1; fi
 echo
@@ -4158,8 +4182,13 @@ else
   # or a write that leaks onto the branch where the queue ENDS and leaves a finished book looking unfinished.
   [ "$(grep -c -F 'ResumeStore::lastMarkedIndex(store(), queue)' "$rb_mwt")" -eq 2 ] \
     || rb_note "the two book openers do not both run the shared resume scan (ResumeStore::lastMarkedIndex): a local and a remote book would answer 'where does this resume' differently, which is the drift that put two copies of the same loop in this file in the first place."
-  [ "$(grep -c -F 'toDouble() > 1.0' "$rb_mwt")" -eq 0 ] \
+  # NEGATIVE, so it reads all of MainWindow's own code (#470), not only rb_mwt.
+  rb_own="$(mktemp)"; sed -E 's://.*$::' "${MW_OWN_SOURCES[@]}" > "$rb_own" 2>/dev/null
+  rb_miss="$(mw_own_missing)"
+  [ -z "$rb_miss" ] || rb_note "MW_OWN_SOURCES lists ${rb_miss}which does not exist: the hand-written-scan check cannot see it."
+  [ "$(grep -c -F 'toDouble() > 1.0' "$rb_own")" -eq 0 ] \
     || rb_note "MainWindow still carries a hand-written book-resume scan asking for a position past one second: a part that was REACHED and never played sits at zero, so that scan cannot see it and the book re-opens at part one (#220)."
+  rm -f "$rb_own"
   RB_PS="$HERE/../src/media/PlaybackSession.cpp"
   if [ ! -f "$RB_PS" ]; then
     rb_note "native/src/media/PlaybackSession.cpp not found -- the boundary write half of #220 was not checked."
