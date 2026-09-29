@@ -7688,14 +7688,18 @@ int main(int argc, char** argv)
         // 46l (second review, finding 3; #476). SIGNING OUT, OR SWITCHING BACKEND, DROPS THE ACCOUNT'S RELAY AND KEEPS
         //      THIS DEVICE'S OWN. What a pull relayed belongs to the account being left, and must never be uploaded into
         //      the next one. The switch-off snapshot ("frozen") and this device's own sections belong to the DEVICE:
-        //      for a category still off, the settings relay goes back to the snapshot and the relayed sections are
-        //      re-seeded from this device's own serialisation, the same step switch-off performs. So:
+        //      for a category still off, the settings relay goes back to the snapshot and the relayed sections go
+        //      back to this device's own copy of them at the switch. So:
         //        (1) nothing of account X's peer values is left, only this device's snapshot and sections;
         //        (2) the first push after it still carries the category, from the snapshot and this device's
         //            sections (#476: forgetting the whole file reopened the switch-off hole for one round);
         //        (3) a re-enable after signing back in still keeps the off-period edits (#476: with no snapshot,
         //            the relayed 50 won over the 200 read while off);
         //        (4) with every category on, nothing differs from before #476: the file goes, and nothing else moves.
+        //        (5) off means NOT PUSHED across it too: the section relay resets to this device's SNAPSHOT of its
+        //            sections at the switch ("frozenSections"), never to the current stores, so a favourite added
+        //            while off is not in the first push; it syncs once the category is back on;
+        //        (6) a relay written before that snapshot existed relays nothing for the section after it.
         //      Both origins: the backend's signedOut (every origin of a sign-out), and CloudSync::forgetRelay itself,
         //      which is what MainWindow::switchSyncBackend calls (a source check: MainWindow is not linked here).
         {
@@ -7757,6 +7761,7 @@ int main(int argc, char** argv)
                 if (sections.value(QStringLiteral("lyricoffset")).toObject() != ownSec)
                     std::fprintf(stderr, "  46l (%s): the relayed sections are not this device's own\n", o.name);
                 CHECK(sections.value(QStringLiteral("lyricoffset")).toObject() == ownSec);
+                CHECK(carry.value(QStringLiteral("frozenSections")).toObject() == sections);   // relay == its snapshot
                 // (2) The first push: the category is still there, and it is this device's.
                 if (musicSent() != QStringLiteral("mine"))
                     std::fprintf(stderr, "  46l (%s): the first push sends music \"%s\"\n", o.name, qPrintable(musicSent()));
@@ -7793,6 +7798,77 @@ int main(int argc, char** argv)
                     std::fprintf(stderr, "  46l (%s): re-enabling after signing back in rewound the page to %d\n", o.name,
                                  rawValue(QStringLiteral("comic/abc/page")).toInt());
                 CHECK(rawValue(QStringLiteral("comic/abc/page")).toInt() == 200);
+                allOn();
+            }
+            // The favourite helpers for (5) and (6). The carry's snapshot part is named by its file key, the contract.
+            const QString frozenSectionsPart = QStringLiteral("frozenSections");
+            auto fav476 = [&](const QString& id) { FavoriteItem f; f.addonId = QStringLiteral("a46"); f.itemId = id;
+                f.title = id; FavoritesStore::add(f); };
+            auto favIds476 = [&]() { QStringList ids; for (const FavoriteItem& f : FavoritesStore::list()) ids << f.itemId;
+                ids.sort(); return ids; };
+            auto favJson = [&]() { return QJsonDocument(docOf().value(QStringLiteral("favorites")).toObject()).toJson(); };
+            // Device A: favourites OFF with "fav0"; "offPeriod476" is added while off. Account X's peer B has
+            // "peerFav", and A's pull relays it. Returns A's switch-off snapshot of the favourites section.
+            auto offWithPeer = [&]() {
+                fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+                useProfile(QStringLiteral("p46"));
+                fav476(QStringLiteral("fav0"));
+                const QJsonObject favs0 = docOf().value(QStringLiteral("favorites")).toObject();
+                switchCat(Category::Collections, false);
+                fav476(QStringLiteral("offPeriod476"));             // added while off: never sent while off
+                Dev A = save();
+                fresh(QStringLiteral("dev-B"), QStringLiteral("a"));
+                useProfile(QStringLiteral("p46"));
+                fav476(QStringLiteral("peerFav"));
+                Dev B = save();
+                Cloud cl;
+                load(B); push(cl);
+                load(A); pull(cl);
+                CHECK(favJson().contains("peerFav"));                // the relay holds X's...
+                CHECK(!favJson().contains("offPeriod476"));          // ...and never A's off-period row
+                return favs0; };
+            for (const Origin& o : origins)
+            {
+                // (5) OFF MEANS NOT PUSHED, across a change of account too. The first push after it carries the
+                //     favourites section EXACTLY as it was at the switch: not the row added while off, not X's.
+                const QJsonObject favs0 = offWithPeer();
+                o.run();
+                const QJsonObject favsUp = docOf().value(QStringLiteral("favorites")).toObject();
+                if (favJson().contains("offPeriod476"))
+                    std::fprintf(stderr, "  46l (%s): the first push after it uploads a favourite added while off\n", o.name);
+                CHECK(!favJson().contains("offPeriod476"));
+                CHECK(!favJson().contains("peerFav"));
+                if (favsUp != favs0)
+                    std::fprintf(stderr, "  46l (%s): the pushed favourites are not the switch-off snapshot\n", o.name);
+                CHECK(favsUp == favs0);
+                CHECK(synccat::loadCarryAll().value(frozenSectionsPart).toObject().value(QStringLiteral("favorites"))
+                      .toObject() == favs0);                        // the snapshot is kept for the next change
+                CHECK(favIds476() == (QStringList{ QStringLiteral("fav0"), QStringLiteral("offPeriod476") }));   // kept here
+                // Back on: the off-period row is merged with the relay (union) and syncs from now on.
+                switchCat(Category::Collections, true);
+                CHECK(favIds476() == (QStringList{ QStringLiteral("fav0"), QStringLiteral("offPeriod476") }));
+                CHECK(favJson().contains("offPeriod476"));
+                allOn();
+            }
+            for (const Origin& o : origins)
+            {
+                // (6) MIGRATION: a relay written before the section snapshot existed (8a421111..792e04cb) has none.
+                //     Such a section relays NOTHING after the reset: the upload leaves it out (as every sign-out did
+                //     before #476) rather than send this device's current rows or keep account X's.
+                offWithPeer();
+                {
+                    QJsonObject old = synccat::loadCarryAll();
+                    old.remove(frozenSectionsPart);                  // the older file's shape
+                    CHECK(synccat::saveCarryAll(old));
+                }
+                o.run();
+                const QByteArray bytes = carryBytes();
+                CHECK(!bytes.contains("peerFav") && !bytes.contains("offPeriod476"));
+                if (docOf().contains(QStringLiteral("favorites")))
+                    std::fprintf(stderr, "  46l (%s, no snapshot): the first push still uploads a favourites section\n", o.name);
+                CHECK(!docOf().contains(QStringLiteral("favorites")));
+                CHECK(favIds476() == (QStringList{ QStringLiteral("fav0"), QStringLiteral("offPeriod476") }));
+                CHECK(!CloudSync::categoryEnabled(Category::Collections));
                 allOn();
             }
             for (const Origin& o : origins)

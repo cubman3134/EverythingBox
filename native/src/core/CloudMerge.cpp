@@ -1833,12 +1833,7 @@ void updateRelay(const QJsonObject& root)
 
 } // namespace
 
-// The document's sections, in one of two modes.
-//   upload (ownOfSwitchedOff = false; serializeAll): what this device sends.
-//   ownOfSwitchedOff (#476): ONLY the sections of the categories switched off here, serialised from this device's
-//     own stores, as if they were on. It is what the relay is re-seeded with when the account changes
-//     (synccat::ownSwitchedOffSections, installed below).
-static void serializeSections(QJsonObject& root, bool ownOfSwitchedOff)
+void CloudMerge::serializeAll(QJsonObject& root)
 {
     QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, highlights, vocabulary, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels, roster;
     // #27: a section whose category this device has switched OFF is neither serialised from here nor sent as ours.
@@ -1846,15 +1841,11 @@ static void serializeSections(QJsonObject& root, bool ownOfSwitchedOff)
     // device's own, frozen at the moment of the switch. This upload replaces the shared document, so leaving the
     // section out instead would strip every other device's entries and tombstones from it. With every switch on
     // (the default) `on` is always true and nothing below differs from what this function always did.
-    // In the ownOfSwitchedOff mode the test is inverted: exactly the switched-off sections, from this device's
-    // stores, and no relay at all. With every switch on that is nothing.
     const bool anyOff = synccat::anySwitchedOff(store());
-    const QJsonObject relay = (anyOff && !ownOfSwitchedOff) ? synccat::loadCarry(synccat::carrySectionsPart())
-                                                            : QJsonObject();
-    auto isOn = [anyOff](const QString& section) { return !anyOff || sectionOn(section); };
-    auto on = [&isOn, ownOfSwitchedOff](const char* section) { return isOn(QLatin1String(section)) != ownOfSwitchedOff; };
-    auto put = [&root, &relay, &isOn, ownOfSwitchedOff](const QString& name, const QJsonValue& ours) {
-        if (isOn(name) != ownOfSwitchedOff) root.insert(name, ours);
+    const QJsonObject relay = anyOff ? synccat::loadCarry(synccat::carrySectionsPart()) : QJsonObject();
+    auto on = [anyOff](const char* section) { return !anyOff || sectionOn(QLatin1String(section)); };
+    auto put = [&root, &relay, anyOff](const QString& name, const QJsonValue& ours) {
+        if (!anyOff || sectionOn(name)) root.insert(name, ours);
         else if (relay.contains(name)) root.insert(name, relay.value(name));
     };
     if (on("resume")) serializeResumeRecent(resume, recent);
@@ -1913,20 +1904,6 @@ static void serializeSections(QJsonObject& root, bool ownOfSwitchedOff)
     put(QStringLiteral("stats"), stats);
     put(QStringLiteral("playstats"), playstats);
 }
-
-void CloudMerge::serializeAll(QJsonObject& root) { serializeSections(root, false); }
-
-// #476: this device's own sections of the categories it has switched off, for CloudSync::forgetRelay. Installed at
-// static initialisation, so every build that links the merge document re-seeds the relay on a sign-out or a backend
-// switch without anyone having to register it; a build without CloudMerge has no document, and nothing to re-seed.
-static QJsonObject ownSwitchedOffSectionsNow()
-{
-    QJsonObject own;
-    serializeSections(own, true);
-    return own;
-}
-[[maybe_unused]] static const bool kOwnSwitchedOffSectionsInstalled =
-    (synccat::ownSwitchedOffSections() = &ownSwitchedOffSectionsNow, true);
 
 void CloudMerge::mergeAll(const QJsonObject& root)
 {
@@ -2023,27 +2000,38 @@ bool CloudMerge::switchCategory(synccat::Category c, bool on)
     auto ofCat = [c](const QString& name) { return synccat::ofSection(name) == c; };
     if (!on)
     {
+        // The relay and its snapshot are seeded together, once, here: "frozenSections" is this device's own copy
+        // at the switch, and nothing else ever writes it. A change of account resets the relay to it
+        // (CloudSync::forgetRelay), so a row added while the category is off is never uploaded (#476).
         QJsonObject own;
         serializeAll(own);   // still ON here, so these are this device's own sections
-        QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart());
+        QJsonObject all = synccat::loadCarryAll();
+        const QJsonObject before = all;
+        QJsonObject relay = all.value(synccat::carrySectionsPart()).toObject();
+        QJsonObject frozen = all.value(synccat::carryFrozenSectionsPart()).toObject();
         for (auto it = own.begin(); it != own.end(); ++it)
-            if (ofCat(it.key())) relay.insert(it.key(), it.value());
-        if (!synccat::saveCarry(synccat::carrySectionsPart(), relay)) return false;
+            if (ofCat(it.key())) { relay.insert(it.key(), it.value()); frozen.insert(it.key(), it.value()); }
+        all.insert(synccat::carrySectionsPart(), relay);
+        all.insert(synccat::carryFrozenSectionsPart(), frozen);
+        if (!synccat::saveCarryAll(all)) return false;
         if (!CloudSync::setCategoryEnabled(c, false))
         {
-            // The settings half could not freeze: undo the sections just relayed, and stay on.
-            for (auto it = own.begin(); it != own.end(); ++it)
-                if (ofCat(it.key())) relay.remove(it.key());
-            synccat::saveCarry(synccat::carrySectionsPart(), relay);
+            // The settings half could not freeze: undo the sections just relayed and frozen, and stay on.
+            synccat::saveCarryAll(before);
             return false;
         }
         return true;
     }
     CloudSync::setCategoryEnabled(c, true);
-    QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart()), take, rest;
+    QJsonObject all = synccat::loadCarryAll();
+    QJsonObject relay = all.value(synccat::carrySectionsPart()).toObject(), take, rest;
     for (auto it = relay.begin(); it != relay.end(); ++it)
         (ofCat(it.key()) ? take : rest).insert(it.key(), it.value());
-    synccat::saveCarry(synccat::carrySectionsPart(), rest);
+    QJsonObject frozen = all.value(synccat::carryFrozenSectionsPart()).toObject();
+    for (const QString& name : frozen.keys()) if (ofCat(name)) frozen.remove(name);
+    all.insert(synccat::carrySectionsPart(), rest);
+    all.insert(synccat::carryFrozenSectionsPart(), frozen);
+    synccat::saveCarryAll(all);
     if (!take.isEmpty()) mergeDocument(take);
     return true;
 }

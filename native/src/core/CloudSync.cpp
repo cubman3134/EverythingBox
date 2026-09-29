@@ -574,29 +574,47 @@ bool CloudSync::setCategoryEnabled(synccat::Category c, bool on)
 // What belongs to this DEVICE is kept (#476). Forgetting the whole file used to drop the switch-off snapshot too,
 // which cost twice over for a category still off: the first upload afterwards carried none of the category's keys
 // or sections (the switch-off hole, reopened for a round), and the next re-enable, with no snapshot to compare
-// against, adopted every relayed value over the edits made while off. So for each category still off, the relay
-// goes back to exactly what the switch-off gave it:
-//   settings  -> the snapshot ("frozen"), which only this device ever writes;
-//   frozen    -> kept;
-//   sections  -> this device's own serialisation of them, now (synccat::ownSwitchedOffSections, the same step
-//                CloudMerge::switchCategory performs at a switch-off).
-// Nothing that came from a pull survives it: every part is rebuilt from this device's own data, and the old file
-// is replaced as a whole. A category that is on has nothing in the carry, so with every switch on the file simply
+// against, adopted every relayed value over the edits made while off. So for each category still off, BOTH relays
+// go back to exactly what the switch-off gave them — the snapshots, which only this device ever writes:
+//   settings        -> "frozen";
+//   sections        -> "frozenSections" (written once, by CloudMerge::switchCategory at the switch);
+//   both snapshots  -> kept.
+// Never the current stores: "off" means this device does not send what it does while off, and a row added after
+// the switch is exactly that. It goes up once the category is back on, through the ordinary merge.
+//
+// A carry written before frozenSections existed (8a421111..792e04cb) has no snapshot for its sections. Such a
+// section relays NOTHING after the reset — the upload leaves it out, which is how every sign-out behaved before
+// #476 — rather than guess at a copy that could carry off-period rows or the old account's. It is logged.
+//
+// Nothing that came from a pull survives: every part is rebuilt from the two snapshots and the old file is
+// replaced as a whole. A category that is on has nothing in the carry, so with every switch on the file simply
 // goes, as it always did. If the rewrite fails, the file is removed instead: the one-round hole is the lesser harm.
+// QtCore and SyncCategories.h only, so a build that links CloudSync without CloudMerge runs it unchanged.
 void CloudSync::forgetRelay()
 {
-    QJsonObject frozen;
+    QJsonObject frozen, frozenSections, sections;
     if (synccat::anySwitchedOff(store()))
     {
-        const QJsonObject was = synccat::loadCarry(synccat::carryFrozenPart());
+        const QJsonObject all = synccat::loadCarryAll();
+        const QJsonObject was = all.value(synccat::carryFrozenPart()).toObject();
         for (auto it = was.begin(); it != was.end(); ++it)
             if (isBundleSettingKey(it.key()) && offHere(it.key())) frozen.insert(it.key(), it.value());
+        const QJsonObject wasSections = all.value(synccat::carryFrozenSectionsPart()).toObject();
+        for (auto it = wasSections.begin(); it != wasSections.end(); ++it)
+            if (!synccat::isEnabled(store(), synccat::ofSection(it.key()))) frozenSections.insert(it.key(), it.value());
+        sections = frozenSections;
+        int unfrozen = 0;
+        for (const QString& name : all.value(synccat::carrySectionsPart()).toObject().keys())
+            if (!synccat::isEnabled(store(), synccat::ofSection(name)) && !frozenSections.contains(name)) ++unfrozen;
+        if (unfrozen)
+            appendSyncLog(QStringLiteral("cloud sync: %1 switched-off section(s) have no switch-off snapshot (an older "
+                                         "relay) - they relay nothing until a pull or a re-enable").arg(unfrozen));
     }
     QJsonObject own;
     own.insert(synccat::carrySettingsPart(), frozen);
     own.insert(synccat::carryFrozenPart(), frozen);
-    if (const synccat::OwnSectionsFn sections = synccat::ownSwitchedOffSections())
-        own.insert(synccat::carrySectionsPart(), sections());
+    own.insert(synccat::carrySectionsPart(), sections);
+    own.insert(synccat::carryFrozenSectionsPart(), frozenSections);
     if (synccat::saveCarryAll(own)) return;
     appendSyncLog(QStringLiteral("cloud sync: could not reset the category relay to this device's own copy - removing it"));
     if (QFile::exists(synccat::carryPath()) && !QFile::remove(synccat::carryPath()))
