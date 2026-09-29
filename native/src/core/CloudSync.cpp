@@ -68,7 +68,8 @@ void CloudSync::wireBackend()
     connect(backend_, &SyncBackend::signedIn, this, &CloudSync::signedIn);
     connect(backend_, &SyncBackend::signInFailed, this, &CloudSync::signInFailed);
     connect(backend_, &SyncBackend::signedOut, this, &CloudSync::signedOut);
-    // #27: the category relay is this account's — a sign-out, from wherever it comes, forgets it.
+    // #27: the category relay is this account's — a sign-out, from wherever it comes, forgets it (and keeps what is
+    // this device's own: #476, see forgetRelay).
     connect(backend_, &SyncBackend::signedOut, this, [] { forgetRelay(); });
 }
 
@@ -566,12 +567,38 @@ bool CloudSync::setCategoryEnabled(synccat::Category c, bool on)
     return true;
 }
 
-// The relay belongs to one account: its relayed values are that account's, and uploading them into another would
-// hand account Y whatever account X's devices last had. Forgotten on sign-out (wired in wireBackend, so every
-// origin of a sign-out counts) and on a backend switch (MainWindow::switchSyncBackend). A category still switched
-// off then relays nothing until the new account's first pull fills it.
+// The relay's VALUES belong to one account: they are that account's, and uploading them into another would hand
+// account Y whatever account X's devices last had. So they are forgotten on sign-out (wired in wireBackend, so
+// every origin of a sign-out counts) and on a backend switch (MainWindow::switchSyncBackend).
+//
+// What belongs to this DEVICE is kept (#476). Forgetting the whole file used to drop the switch-off snapshot too,
+// which cost twice over for a category still off: the first upload afterwards carried none of the category's keys
+// or sections (the switch-off hole, reopened for a round), and the next re-enable, with no snapshot to compare
+// against, adopted every relayed value over the edits made while off. So for each category still off, the relay
+// goes back to exactly what the switch-off gave it:
+//   settings  -> the snapshot ("frozen"), which only this device ever writes;
+//   frozen    -> kept;
+//   sections  -> this device's own serialisation of them, now (synccat::ownSwitchedOffSections, the same step
+//                CloudMerge::switchCategory performs at a switch-off).
+// Nothing that came from a pull survives it: every part is rebuilt from this device's own data, and the old file
+// is replaced as a whole. A category that is on has nothing in the carry, so with every switch on the file simply
+// goes, as it always did. If the rewrite fails, the file is removed instead: the one-round hole is the lesser harm.
 void CloudSync::forgetRelay()
 {
+    QJsonObject frozen;
+    if (synccat::anySwitchedOff(store()))
+    {
+        const QJsonObject was = synccat::loadCarry(synccat::carryFrozenPart());
+        for (auto it = was.begin(); it != was.end(); ++it)
+            if (isBundleSettingKey(it.key()) && offHere(it.key())) frozen.insert(it.key(), it.value());
+    }
+    QJsonObject own;
+    own.insert(synccat::carrySettingsPart(), frozen);
+    own.insert(synccat::carryFrozenPart(), frozen);
+    if (const synccat::OwnSectionsFn sections = synccat::ownSwitchedOffSections())
+        own.insert(synccat::carrySectionsPart(), sections());
+    if (synccat::saveCarryAll(own)) return;
+    appendSyncLog(QStringLiteral("cloud sync: could not reset the category relay to this device's own copy - removing it"));
     if (QFile::exists(synccat::carryPath()) && !QFile::remove(synccat::carryPath()))
         appendSyncLog(QStringLiteral("cloud sync: could not remove the category relay file"));
 }

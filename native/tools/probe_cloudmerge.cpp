@@ -76,6 +76,7 @@
 #include "PerItemStores.h"    // issue #332: THE per-item-store prefix table, walked by section 42
 #include "AddonRoster.h"      // issue #77: the add-on roster section 43 drives (only its migrations gate is called)
 #include "AddonConfigKeys.h"  // issue #77 inc 3: the password-field key spelling section 44h asserts through
+#include "SyncCarry.h"        // #476: section 46l reads the relay file's three parts
 #include "miniz.h"            // issue #77 inc 2: section 44 reads and writes real bundle zips
 #include <cstring>
 #include "FilterPresetStore.h"  // issue #184: the saved-filter preset store §33 asserts through (the accessor)
@@ -7684,8 +7685,19 @@ int main(int argc, char** argv)
             CHECK(rawValue(QStringLiteral("pdf/abc/page")).toInt() == 11);      // absent from the peer: kept
         }
 
-        // 46l (second review, finding 3). THE RELAY DOES NOT OUTLIVE THE ACCOUNT. Signing out forgets it, so account
-        //      X's relayed values are never uploaded into account Y — and so does a backend switch.
+        // 46l (second review, finding 3; #476). SIGNING OUT, OR SWITCHING BACKEND, DROPS THE ACCOUNT'S RELAY AND KEEPS
+        //      THIS DEVICE'S OWN. What a pull relayed belongs to the account being left, and must never be uploaded into
+        //      the next one. The switch-off snapshot ("frozen") and this device's own sections belong to the DEVICE:
+        //      for a category still off, the settings relay goes back to the snapshot and the relayed sections are
+        //      re-seeded from this device's own serialisation, the same step switch-off performs. So:
+        //        (1) nothing of account X's peer values is left, only this device's snapshot and sections;
+        //        (2) the first push after it still carries the category, from the snapshot and this device's
+        //            sections (#476: forgetting the whole file reopened the switch-off hole for one round);
+        //        (3) a re-enable after signing back in still keeps the off-period edits (#476: with no snapshot,
+        //            the relayed 50 won over the 200 read while off);
+        //        (4) with every category on, nothing differs from before #476: the file goes, and nothing else moves.
+        //      Both origins: the backend's signedOut (every origin of a sign-out), and CloudSync::forgetRelay itself,
+        //      which is what MainWindow::switchSyncBackend calls (a source check: MainWindow is not linked here).
         {
             class Backend27 : public SyncBackend
             {
@@ -7705,16 +7717,111 @@ int main(int argc, char** argv)
                 void findFolderNamed(const QString&, std::function<void(bool, const QString&)> cb) override { cb(false, QString()); }
                 void renameFile(const QString&, const QString&, std::function<void(bool)> cb) override { cb(false); }
             };
-            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
-            switchCat(Category::Music, false);
-            CHECK(QFile::exists(carryFile));
+            struct Origin { const char* name; void (*run)(); };
+            const Origin origins[] = {
+                { "sign-out", [] { CloudSync cs(new Backend27); cs.signOut(); } },
+                { "backend switch", [] { CloudSync::forgetRelay(); } },
+            };
+            auto carryBytes = [&]() { QFile f(carryFile); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+            for (const Origin& o : origins)
             {
-                CloudSync cs(new Backend27);
-                cs.signOut();
+                // (1) + (2). A has music off with its own value and lyric row; account X's peer relays its own.
+                Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("mine"));
+                setRaw46(QStringLiteral("lyricoffset/items/aaaa"), offsetBlob(0.5, T46 - 100));
+                const QJsonObject ownSec = docOf().value(QStringLiteral("lyricoffset")).toObject();
+                CHECK(ownSec.contains(QStringLiteral("aaaa")));
+                switchCat(Category::Music, false);
+                A = save();
+                Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("peerX"));
+                setRaw46(QStringLiteral("lyricoffset/items/bbbb"), offsetBlob(1.0, T46));
+                B = save();
+                Cloud cl;
+                load(B); push(cl); B = save();
+                load(A); pull(cl);
+                CHECK(musicSent() == QStringLiteral("peerX"));                          // the relay holds X's...
+                CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject().contains(QStringLiteral("bbbb")));
+                setRaw46(QStringLiteral("music/albumalias"), QStringLiteral("later"));   // an edit while off: not sent
+                o.run();
+                const QByteArray bytes = carryBytes();
+                if (bytes.contains("peerX") || bytes.contains("bbbb"))
+                    std::fprintf(stderr, "  46l (%s): account X's relayed values survived it\n", o.name);
+                CHECK(!bytes.contains("peerX") && !bytes.contains("bbbb"));
+                const QJsonObject carry = synccat::loadCarryAll();
+                const QJsonObject frozen = carry.value(synccat::carryFrozenPart()).toObject();
+                if (frozen.value(QStringLiteral("music/albumalias")).toString() != QStringLiteral("mine"))
+                    std::fprintf(stderr, "  46l (%s): this device's switch-off snapshot was lost\n", o.name);
+                CHECK(frozen.value(QStringLiteral("music/albumalias")).toString() == QStringLiteral("mine"));
+                CHECK(carry.value(synccat::carrySettingsPart()).toObject() == frozen);    // the relay IS the snapshot
+                const QJsonObject sections = carry.value(synccat::carrySectionsPart()).toObject();
+                CHECK(sections.keys() == QStringList{ QStringLiteral("lyricoffset") });   // music's only section
+                if (sections.value(QStringLiteral("lyricoffset")).toObject() != ownSec)
+                    std::fprintf(stderr, "  46l (%s): the relayed sections are not this device's own\n", o.name);
+                CHECK(sections.value(QStringLiteral("lyricoffset")).toObject() == ownSec);
+                // (2) The first push: the category is still there, and it is this device's.
+                if (musicSent() != QStringLiteral("mine"))
+                    std::fprintf(stderr, "  46l (%s): the first push sends music \"%s\"\n", o.name, qPrintable(musicSent()));
+                CHECK(musicSent() == QStringLiteral("mine"));
+                if (docOf().value(QStringLiteral("lyricoffset")).toObject() != ownSec)
+                    std::fprintf(stderr, "  46l (%s): the first document push does not carry this device's lyric offsets\n", o.name);
+                CHECK(docOf().value(QStringLiteral("lyricoffset")).toObject() == ownSec);
+                // Local state is untouched: nothing adopted, nothing deleted, still off.
+                CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("later"));
+                CHECK(!rawValue(QStringLiteral("lyricoffset/items/bbbb")).isValid());
+                CHECK(rawValue(QStringLiteral("lyricoffset/items/aaaa")).isValid());
+                CHECK(!CloudSync::categoryEnabled(Category::Music));
+                allOn();
             }
-            if (QFile::exists(carryFile)) std::fprintf(stderr, "  46l: the relay survived a sign-out\n");
-            CHECK(!QFile::exists(carryFile));
-            // The backend switch goes through the same forgetting (a source check: MainWindow is not linked here).
+            for (const Origin& o : origins)
+            {
+                // (3) Progress off at page 50, read on to 200; a peer relays 50; sign out, sign back in, the next pull
+                //     relays 50 again; turn Progress back on: 200.
+                Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+                setRaw46(QStringLiteral("comic/abc/page"), 50);
+                switchCat(Category::Progress, false);
+                setRaw46(QStringLiteral("comic/abc/page"), 200);
+                A = save();
+                Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("a"));
+                setRaw46(QStringLiteral("comic/abc/page"), 50);
+                B = save();
+                Cloud cl;
+                load(B); push(cl); B = save();
+                load(A); pull(cl);
+                o.run();                                            // signed out...
+                pull(cl);                                           // ...signed back in: the peer's 50 again
+                switchCat(Category::Progress, true);
+                if (rawValue(QStringLiteral("comic/abc/page")).toInt() != 200)
+                    std::fprintf(stderr, "  46l (%s): re-enabling after signing back in rewound the page to %d\n", o.name,
+                                 rawValue(QStringLiteral("comic/abc/page")).toInt());
+                CHECK(rawValue(QStringLiteral("comic/abc/page")).toInt() == 200);
+                allOn();
+            }
+            for (const Origin& o : origins)
+            {
+                // (4) Every category on: the file goes (a stale one, left by a failed tidy, included), no file is made
+                //     where there was none, and the ini, the bundle, the document and the fingerprint do not move.
+                fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+                setRaw46(QStringLiteral("lyricoffset/items/aaaa"), offsetBlob(0.5, T46 - 100));
+                const QByteArray bundle0 = CloudSync::buildSettingsJson();
+                const QJsonObject doc0 = docOf();
+                const QByteArray fp0 = CloudSync::stateFingerprint();
+                const auto ini0 = iniText();                       // after them: serialising writes the roster's shadow
+                o.run();
+                CHECK(!QFile::exists(carryFile));
+                {
+                    QJsonObject stale;
+                    stale.insert(synccat::carrySettingsPart(), QJsonObject{ { QStringLiteral("music/albumalias"), QStringLiteral("peerX") } });
+                    stale.insert(synccat::carryFrozenPart(), QJsonObject{ { QStringLiteral("music/albumalias"), QStringLiteral("a") } });
+                    CHECK(synccat::saveCarryAll(stale));
+                }
+                o.run();
+                if (QFile::exists(carryFile)) std::fprintf(stderr, "  46l (%s, all on): the relay file survived\n", o.name);
+                CHECK(!QFile::exists(carryFile));
+                CHECK(iniText() == ini0);
+                CHECK(CloudSync::buildSettingsJson() == bundle0);
+                CHECK(docOf() == doc0);
+                CHECK(CloudSync::stateFingerprint() == fp0);
+            }
+            // The backend switch goes through the same function (a source check: MainWindow is not linked here).
             QFile mw(QStringLiteral(EB_CLOUDMERGE_NATIVE_DIR) + QStringLiteral("/src/ui/MainWindow.cpp"));
             CHECK(mw.open(QIODevice::ReadOnly));
             const QString mwText = QString::fromUtf8(mw.readAll());

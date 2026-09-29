@@ -1833,7 +1833,12 @@ void updateRelay(const QJsonObject& root)
 
 } // namespace
 
-void CloudMerge::serializeAll(QJsonObject& root)
+// The document's sections, in one of two modes.
+//   upload (ownOfSwitchedOff = false; serializeAll): what this device sends.
+//   ownOfSwitchedOff (#476): ONLY the sections of the categories switched off here, serialised from this device's
+//     own stores, as if they were on. It is what the relay is re-seeded with when the account changes
+//     (synccat::ownSwitchedOffSections, installed below).
+static void serializeSections(QJsonObject& root, bool ownOfSwitchedOff)
 {
     QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, highlights, vocabulary, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels, roster;
     // #27: a section whose category this device has switched OFF is neither serialised from here nor sent as ours.
@@ -1841,11 +1846,15 @@ void CloudMerge::serializeAll(QJsonObject& root)
     // device's own, frozen at the moment of the switch. This upload replaces the shared document, so leaving the
     // section out instead would strip every other device's entries and tombstones from it. With every switch on
     // (the default) `on` is always true and nothing below differs from what this function always did.
+    // In the ownOfSwitchedOff mode the test is inverted: exactly the switched-off sections, from this device's
+    // stores, and no relay at all. With every switch on that is nothing.
     const bool anyOff = synccat::anySwitchedOff(store());
-    const QJsonObject relay = anyOff ? synccat::loadCarry(synccat::carrySectionsPart()) : QJsonObject();
-    auto on = [anyOff](const char* section) { return !anyOff || sectionOn(QLatin1String(section)); };
-    auto put = [&root, &relay, anyOff](const QString& name, const QJsonValue& ours) {
-        if (!anyOff || sectionOn(name)) root.insert(name, ours);
+    const QJsonObject relay = (anyOff && !ownOfSwitchedOff) ? synccat::loadCarry(synccat::carrySectionsPart())
+                                                            : QJsonObject();
+    auto isOn = [anyOff](const QString& section) { return !anyOff || sectionOn(section); };
+    auto on = [&isOn, ownOfSwitchedOff](const char* section) { return isOn(QLatin1String(section)) != ownOfSwitchedOff; };
+    auto put = [&root, &relay, &isOn, ownOfSwitchedOff](const QString& name, const QJsonValue& ours) {
+        if (isOn(name) != ownOfSwitchedOff) root.insert(name, ours);
         else if (relay.contains(name)) root.insert(name, relay.value(name));
     };
     if (on("resume")) serializeResumeRecent(resume, recent);
@@ -1904,6 +1913,20 @@ void CloudMerge::serializeAll(QJsonObject& root)
     put(QStringLiteral("stats"), stats);
     put(QStringLiteral("playstats"), playstats);
 }
+
+void CloudMerge::serializeAll(QJsonObject& root) { serializeSections(root, false); }
+
+// #476: this device's own sections of the categories it has switched off, for CloudSync::forgetRelay. Installed at
+// static initialisation, so every build that links the merge document re-seeds the relay on a sign-out or a backend
+// switch without anyone having to register it; a build without CloudMerge has no document, and nothing to re-seed.
+static QJsonObject ownSwitchedOffSectionsNow()
+{
+    QJsonObject own;
+    serializeSections(own, true);
+    return own;
+}
+[[maybe_unused]] static const bool kOwnSwitchedOffSectionsInstalled =
+    (synccat::ownSwitchedOffSections() = &ownSwitchedOffSectionsNow, true);
 
 void CloudMerge::mergeAll(const QJsonObject& root)
 {

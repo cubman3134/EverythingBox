@@ -34,8 +34,10 @@
 // ITS OWN FILE, not the ini: a relayed section can be a whole peer's statistics, and in the ini it would be
 // rewritten by every store().sync() of every store in the app. Here it is written only when it changes. It is
 // device-local by construction: not in the ini, so neither the bundle nor the fingerprint nor a Discard can see
-// it, and the bundle zips only settings.json and themes/. It belongs to ONE account: signing out and switching
-// backend forget it (CloudSync::forgetRelay), so account X's relayed values are never uploaded into account Y.
+// it, and the bundle zips only settings.json and themes/. Its RELAYED values belong to ONE account: signing out and
+// switching backend forget them (CloudSync::forgetRelay), so account X's relayed values are never uploaded into
+// account Y. What belongs to this DEVICE stays (#476): the snapshot is kept, the settings relay goes back to it,
+// and the sections go back to this device's own, exactly as at the switch.
 namespace synccat
 {
 inline QString carryPath() { return AppPaths::dataDir() + QStringLiteral("/sync-carry.json"); }
@@ -87,6 +89,17 @@ inline bool saveCarryAll(QJsonObject all)
     if (!f.open(QIODevice::WriteOnly)) return false;
     f.write(QJsonDocument(all).toJson(QJsonDocument::Compact));
     return f.commit();
+}
+
+// This device's OWN merge-document sections for every category switched off here, serialised from its stores now:
+// the same thing CloudMerge::switchCategory seeds the relay with at a switch-off. CloudSync::forgetRelay re-seeds
+// the relay from it when the account changes (#476). CloudMerge.cpp installs it; a build that links CloudSync
+// without CloudMerge has no merge document to upload, and leaves it null.
+using OwnSectionsFn = QJsonObject (*)();
+inline OwnSectionsFn& ownSwitchedOffSections()
+{
+    static OwnSectionsFn fn = nullptr;
+    return fn;
 }
 
 // Replace one part. See saveCarryAll for the return value.

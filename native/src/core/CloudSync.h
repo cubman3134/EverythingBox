@@ -64,7 +64,9 @@ public:
     //   Returns false when the switch did NOT flip: no switch for this category, or (off) the relay could not be
     //   written — off with nothing relayed would drop the category from the next upload.
     static bool setCategoryEnabled(synccat::Category c, bool on);
-    // Forget the relay (SyncCarry.h): it belongs to one account. Called on sign-out and on a backend switch.
+    // Forget the relay (SyncCarry.h): its relayed values belong to one account. Called on sign-out and on a backend
+    // switch. This device's own part stays (#476): for each category still off, the settings relay goes back to the
+    // switch-off snapshot, the snapshot is kept, and the sections are re-seeded from this device's own stores.
     static void forgetRelay();
     // Whether a peer's value for `key` is written here: not device-local, and its category (Other when
     // unmapped) is switched on.
