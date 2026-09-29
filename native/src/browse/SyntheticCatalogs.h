@@ -14,6 +14,7 @@
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
+#include "../core/UbisoftLibrary.h"
 #include "../core/LocalLibrary.h"
 #include "../core/PhotoLibrary.h" // photosCatalog: the scanned PhotoEntry list (#102)
 #include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
@@ -33,6 +34,12 @@ namespace browse
 {
     // Map a Recent/Downloaded entry's kind to a media type (for the placeholder icon) and a human label.
     QString iconTypeForKind(const QString& kind);
+
+    // True for every Recent kind that belongs with GAMES: an emulated "game", a "pcgame", and each store
+    // launcher's own kind (steamgame / epicgame / goggame / battlenetgame / ubisoftgame). The ONE list: the
+    // games catalogue's Recent (recentsCatalog) and the classic home's Continue shelf grouping both read it,
+    // so a store kind can never land in the one and be a stray raw-kind group in the other.
+    bool isGameRecentKind(const QString& kind);
 
     // marker = "<kind>" or "<kind>|<system>": the optional system scopes a games console (its SystemCatalog id,
     // or "pc"); empty system = all of that kind (the catalogue-root Recent). PC games count as "game".
@@ -197,7 +204,8 @@ namespace browse
     // the only place that id is built. The two used to compute it separately and could disagree, which
     // silently strands the user's favourites, marks and play time under a key nothing reads; probe_browse
     // now pins them equal. mime = "pcgame", the ONE routing kind replacing steamgame /
-    // epicgame / goggame / battlenetgame; url EMPTY, because which copy runs is decided at activation.
+    // epicgame / goggame / battlenetgame / ubisoftgame; url EMPTY, because which copy runs is decided at
+    // activation.
     //
     // `downloaded` is the already-built source list for locally downloaded copies (PcGameStore). Its `label`
     // doubles as that copy's TITLE — it is the only human-readable field on a PcGameSource — and is kept
@@ -205,7 +213,7 @@ namespace browse
     // every other nameless one.
     //
     // DISPLAY TITLE: a launcher's own name beats a file-provider release name (which carries scene tokens),
-    // by the fixed precedence steam > epic > gog > battlenet > downloaded. That precedence keys on the
+    // by the fixed precedence steam > epic > gog > battlenet > ubisoft > downloaded. That precedence keys on the
     // source's KIND first and only then on its `launcher`, so a Downloaded source loses whatever `launcher`
     // it happens to carry — the rule is in the code, not in an assumption that the field is empty. Two
     // titles at the same rank are
@@ -230,7 +238,7 @@ namespace browse
     //
     // `query` filters on the NORMALISED title (any of the game's contributing titles, not just the displayed
     // one); a query that normalises to nothing ("!!!") falls back to a plain case-insensitive match rather
-    // than matching everything. `launcherFilter` ("steam" | "epic" | "gog" | "battlenet") keeps only games
+    // than matching everything. `launcherFilter` ("steam" | "epic" | "gog" | "battlenet" | "ubisoft") keeps only games
     // that HAVE such a source — it narrows which games appear, not which sources they carry, so "what I own
     // on Steam" survives without a separate folder and still launches by whichever copy is ready. It matches
     // a LAUNCHER source only: a downloaded copy that records which launcher it came from does not make the
@@ -262,13 +270,19 @@ namespace browse
     //     about being an entitlement: not ready, nothing to activate. It still MERGES — a game owned on Epic
     //     and installed on Steam is one entry with a Steam source and an Epic one, which is the property the
     //     backend work has to preserve.
+    //
+    // `ubisoft` is the Ubisoft Connect installed library (issue #60, UbisoftLibrary). Each game is a
+    // LauncherInstalled source launching by uplay://launch/<id>/0 — the Epic shape — and merges with the same
+    // game's other copies by title like every store. It rides last for the same reason the two owned lists do:
+    // every existing call site keeps compiling.
     MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                 const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
                                 const QVector<pcgame::PcGameSource>& downloaded,
                                 const QString& query, const QString& launcherFilter,
                                 const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
                                 const QList<SteamGame>& steamOwned = {},
-                                const QList<EpicGame>& epicOwned = {});
+                                const QList<EpicGame>& epicOwned = {},
+                                const QList<UbisoftGame>& ubisoft = {});
 
     // The launcherFilter SENTINEL for the "Owned, not installed" group (issue #62). It is deliberately NOT a
     // launcher name (those are steam/epic/gog/battlenet), so pcGamesCatalog tells it apart from an ordinary
@@ -289,7 +303,7 @@ namespace browse
     QString pcLauncherLabel(const QString& launcher);
 
     // Which launchers this library actually has games in, in the folder's fixed display order
-    // (steam, epic, gog, battlenet). Offering a launcher with nothing behind it is a menu row that can only
+    // (steam, epic, gog, battlenet, ubisoft). Offering a launcher with nothing behind it is a menu row that can only
     // ever empty the folder, and offering ALL FOUR always would do exactly that on the common machine with
     // one store installed. Owned-but-not-installed Steam entries count: they are Steam library entries, and
     // "what I own on Steam" is the phrase this feature exists to answer.
@@ -298,7 +312,8 @@ namespace browse
     QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                    const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
                                    const QList<SteamGame>& steamOwned = {},
-                                   const QList<EpicGame>& epicOwned = {});
+                                   const QList<EpicGame>& epicOwned = {},
+                                   const QList<UbisoftGame>& ubisoft = {});
 
     // The filter menu: .first is the launcherFilter value to pass to pcGamesCatalog (EMPTY = every
     // launcher), .second is the row a person reads, with the current choice ticked.

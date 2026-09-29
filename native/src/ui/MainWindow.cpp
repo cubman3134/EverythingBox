@@ -14021,6 +14021,10 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
             relaunchBattleNetGame(resumeKey, title, thumb, path);
             return;
         }
+        // Ubisoft Connect (#60): re-launch by uplay:// (fire-and-forget); launchUbisoftGame re-records the Recent.
+        case RecentStore::Relaunch::UbisoftGame:
+            launchUbisoftGame(resumeKey, path, title, thumb);
+            return;
         // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path this
         // Recent entry recorded (e.g. its one-time installer) is stale or gone.
         case RecentStore::Relaunch::PcGame:

@@ -27,6 +27,7 @@
 #include "../comic/ComicView.h"
 #include "../core/AppPaths.h"
 #include "../core/BattleNetLibrary.h"
+#include "../core/UbisoftLibrary.h"
 #include "../core/BingeStore.h"
 #include "../core/BoundedFetch.h"
 #include "../core/CastManager.h"
@@ -984,6 +985,26 @@ void MainWindow::showRomhacks(const MediaItem& item, const QString& systemId)
     dm_->enqueue(patchJob);
 }
 
+void MainWindow::launchUbisoftGame(const QString& key, const QString& uri, const QString& title,
+                                   const QString& thumb)
+{
+    const QString id = UbisoftLibrary::idFrom(key, uri);
+    const QString url = UbisoftLibrary::launchUri(id);   // rebuilt from the id: a recorded URI is never replayed raw
+    if (url.isEmpty())
+    {
+        statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(title), kFeedbackLong);
+        return;
+    }
+    const QString recentKey = QStringLiteral("ubi:") + id;
+    // handOffStoreLaunch is the one openUrl for a store URI. Under EB_UITEST_STORE_URI_SINK it logs the URI as
+    // held back instead of opening it, which is how a UI-test drive proves this dispatch without a Ubisoft
+    // client. (No play-time watch: LaunchWatch knows steam:// and the Epic URI only, so this stays a plain
+    // fire-and-forget handoff.)
+    handOffStoreLaunch(url, recentKey);
+    RecentStore::add({ url, title, QStringLiteral("ubisoftgame"), thumb, recentKey });
+    statusBar()->showMessage(tr("Launching “%1” via Ubisoft Connect…").arg(title), 5000);
+}
+
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
     // A "Choose source…" fan-out still out from the PREVIOUS item is now stale: its reply must not clear the
@@ -1028,6 +1049,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         }
         // Code-less: launchPcExe records the "battlenetgame" Recent ITSELF — do NOT re-record here.
         launchPcExe(item.url, item.id, item.title, item.thumbnailUrl, QStringLiteral("battlenetgame"));
+        return;
+    }
+    // A Ubisoft Connect game (#60). Above the url.isEmpty() bail for the same reason as Battle.net: a playlist
+    // row carries no url, only its "ubi:<id>" id, and the URI is built from that.
+    if (item.mime == QStringLiteral("ubisoftgame")
+        || item.url.startsWith(QStringLiteral("uplay://"), Qt::CaseInsensitive))
+    {
+        launchUbisoftGame(item.id, item.url, item.title, item.thumbnailUrl);
         return;
     }
     if (item.url.isEmpty())
