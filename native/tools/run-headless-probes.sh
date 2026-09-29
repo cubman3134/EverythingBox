@@ -43,6 +43,7 @@ MW_OWN_SOURCES=(
   "$HERE/../src/ui/MainWindow.cpp"
   "$HERE/../src/ui/MainWindowSettingsGeneral.cpp"
   "$HERE/../src/ui/MainWindowPanels.cpp"
+  "$HERE/../src/ui/MainWindowLaunch.cpp"
 )
 # The listed files that do not exist, each followed by a space; empty when all do. sed over a missing file only
 # warns and carries on with a corpus short of that file, so a gate reading the list reports these instead.
@@ -3853,15 +3854,16 @@ fi
 # and a return) rather than falling through.
 echo "=== audio leaf refuses a non-audio payload ==="
 AP_MW="$HERE/../src/ui/MainWindow.cpp"
+AP_ML="$HERE/../src/ui/MainWindowLaunch.cpp"   # #186: openLibraryItem() moved here
 ap_fail=0
 ap_note() { echo "  $1"; ap_fail=1; }
-if [ ! -f "$AP_MW" ]; then
-  echo "FAIL: audio leaf refuses a non-audio payload (MainWindow.cpp not found)"; fail=1
+if [ ! -f "$AP_MW" ] || [ ! -f "$AP_ML" ]; then
+  echo "FAIL: audio leaf refuses a non-audio payload (MainWindow.cpp or MainWindowLaunch.cpp not found)"; fail=1
 else
   # Comments stripped, and matched with `grep -c -F` against a FILE: this source is far too big for
   # `printf … | grep -q`, which SIGPIPEs the printf under `set -o pipefail` and reports failure ON A MATCH.
   ap_tmp="$(mktemp)"
-  sed -E 's://.*$::' "$AP_MW" > "$ap_tmp"
+  sed -E 's://.*$::' "$AP_MW" "$AP_ML" > "$ap_tmp"
   [ "$(wc -l < "$ap_tmp")" -gt 100 ] || ap_note "the stripped MainWindow.cpp corpus is empty — this gate scanned nothing."
 
   ap_n="$(grep -c -F 'CatalogMatch::payloadShape(url, item.mime)' "$ap_tmp")"
@@ -3963,16 +3965,17 @@ echo "=== a multi-file audiobook plays as one book ==="
 rb_fail=0
 rb_note() { echo "  $1"; rb_fail=1; }
 RB_MW="$HERE/../src/ui/MainWindow.cpp"
+RB_ML="$HERE/../src/ui/MainWindowLaunch.cpp"   # #186: openLibraryItem() moved here
 RB_AM="$HERE/../src/addons/AddonManager.cpp"
 RB_HV="$HERE/../src/ui/HomeView.cpp"
 RB_NP="$HERE/../src/theme2/qml/elements/NowPlayingAudio.qml"
-if [ ! -f "$RB_MW" ] || [ ! -f "$RB_AM" ] || [ ! -f "$RB_HV" ]; then
+if [ ! -f "$RB_MW" ] || [ ! -f "$RB_ML" ] || [ ! -f "$RB_AM" ] || [ ! -f "$RB_HV" ]; then
   echo "FAIL: a multi-file audiobook plays as one book (a source file this gate reads was not found)"; fail=1
 else
   # Comments stripped, and matched with `grep -c -F` against a FILE rather than a pipe: these sources are
   # far too big for `printf ... | grep -q`, which SIGPIPEs the printf under `set -o pipefail` and reports
   # failure ON A MATCH (the trap the gate above records at length).
-  rb_mwt="$(mktemp)"; sed -E 's://.*$::' "$RB_MW" > "$rb_mwt"
+  rb_mwt="$(mktemp)"; sed -E 's://.*$::' "$RB_MW" "$RB_ML" > "$rb_mwt"
   rb_amt="$(mktemp)"; sed -E 's://.*$::' "$RB_AM" > "$rb_amt"
   rb_hvt="$(mktemp)"; sed -E 's://.*$::' "$RB_HV" > "$rb_hvt"
   [ "$(wc -l < "$rb_mwt")" -gt 100 ] || rb_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
@@ -4313,8 +4316,10 @@ echo "=== a re-minted Recents row asks the addon that can answer (#224) ==="
 rm_fail=0
 rm_note() { echo "  $1"; rm_fail=1; }
 RM_MW="$HERE/../src/ui/MainWindow.cpp"
+RM_ML="$HERE/../src/ui/MainWindowLaunch.cpp"   # #186: remintAndOpen() moved here
+RM_MI="$HERE/../src/ui/MainWindowInternal.h"   # #186: applyRemintRecipe() moved here, shared
 RM_HV="$HERE/../src/ui/HomeView.cpp"
-if [ ! -f "$RM_MW" ] || [ ! -f "$RM_HV" ]; then
+if [ ! -f "$RM_MW" ] || [ ! -f "$RM_ML" ] || [ ! -f "$RM_MI" ] || [ ! -f "$RM_HV" ]; then
   echo "FAIL: a re-minted Recents row asks the addon that can answer (a source file this gate reads was not found)"; fail=1
 else
   # THE REPORTED FAILURE. An audiobook opened from Continue Watching answered "Couldn't get a fresh link"
@@ -4328,7 +4333,7 @@ else
   # anything WRITES IT DOWN: MainWindow is not linked into any probe, and a fix that resolves the identity
   # and drops it on the floor looks identical from the AddonManager side. Same reason the audiobook gate
   # above exists — the defect was never a rule that answered wrongly, it was a question nobody put.
-  rm_mwt="$(mktemp)"; sed -E 's://.*$::' "$RM_MW" > "$rm_mwt"
+  rm_mwt="$(mktemp)"; sed -E 's://.*$::' "$RM_MW" "$RM_ML" "$RM_MI" > "$rm_mwt"
   rm_hvt="$(mktemp)"; sed -E 's://.*$::' "$RM_HV" > "$rm_hvt"
   [ "$(wc -l < "$rm_mwt")" -gt 100 ] || rm_note "the stripped MainWindow.cpp corpus is empty -- this gate scanned nothing."
   [ "$(wc -l < "$rm_hvt")" -gt 100 ] || rm_note "the stripped HomeView.cpp corpus is empty -- this gate scanned nothing."
