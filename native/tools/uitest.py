@@ -32,6 +32,9 @@ unix socket (typically /tmp/EverythingBox-uitest).
 Reads block on a 5s client-side timeout by default (EB_UITEST_TIMEOUT overrides it, seconds; <= 0 disables):
 a connect that succeeds but never gets a reply exits 3 with "connected but no reply ... the GUI thread is
 blocked", distinguishing a wedged app from a missing channel (a failed connect) or a clean protocol error.
+Before it says "blocked" it asks `state` on a SECOND connection: a command whose handler opened a prompt (a
+nested event loop: NavConfirm, NavMenu, the OSK) holds its reply until the prompt closes while the app answers
+everything else, and that is reported as what it is, naming the overlay. It is still exit 3 (#471).
 
 Everything this client prints is UTF-8 (see use_utf8_streams): the app's labels are full of non-ASCII
 (the detail view's "▶ Play", the settings rows' cloud/plus/pencil/star glyphs, emoji profile avatars,
@@ -108,13 +111,69 @@ def use_utf8_streams() -> None:
                 pass
 
 
+# The command in flight, for the timeout report. Set by _send; read only by _timeout_exit.
+_IN_FLIGHT = ""
+
+
+def _second_opinion(timeout: float = 2.0):
+    """Ask `state` on a NEW connection, bounded. Returns the parsed JSON, or None if that went unanswered too.
+
+    Issue #471: a command whose handler opens a prompt (NavConfirm::ask, NavMenu::pick and Osk::getText are all
+    nested event loops) does not reply until the prompt closes, and the app answers every other connection in
+    the meantime. From the first connection alone that looks exactly like a wedged GUI thread, and it was
+    reported as one ("blocked for 30 s") about an app that had shown its Save prompt within 90 ms.
+    Runs in a daemon thread for the same reason _readline_timeout does: a pipe read has no timeout of its own."""
+    box = {}
+
+    def worker():
+        try:
+            if os.name == "nt":
+                with open(rf"\\.\pipe\{NAME}", "r+b", buffering=0) as f:
+                    f.write(b"state\n")
+                    box["line"] = f.readline()
+            else:
+                import socket
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(f"/tmp/{NAME}")
+                    s.sendall(b"state\n")
+                    buf = b""
+                    while not buf.endswith(b"\n"):
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    box["line"] = buf
+        except Exception:
+            pass
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    line = (box.get("line") or b"").decode("utf-8", "replace").strip()
+    if t.is_alive() or not line.startswith("ok "):
+        return None
+    try:
+        return json.loads(line[3:])
+    except ValueError:
+        return None
+
+
 def _timeout_exit() -> None:
     # Distinct from a clean failure: the channel WAS reachable, we just never got a line back.
     # os._exit, not SystemExit: on Windows the abandoned reader thread is still blocked inside a
     # kernel read on the pipe handle, and unwinding out of the `with open(...)` would call close()
     # on that same handle, which itself blocks until the read returns — i.e. until the wedged app
     # finally answers or dies. That is the exact hang we are trying to escape, so flush and exit now.
-    sys.stderr.write(f"connected but no reply within {READ_TIMEOUT:g}s — the GUI thread is blocked\n")
+    # Before calling it blocked, ask on a second connection (#471). A `state` or `status` that timed out is
+    # its own second opinion: asking again would only wait again.
+    st = _second_opinion() if _IN_FLIGHT.split(" ", 1)[0] not in ("state", "status") else None
+    if st is not None:
+        sys.stderr.write(
+            f"connected but no reply to '{_IN_FLIGHT}' within {READ_TIMEOUT:g}s, but the GUI is NOT blocked: a "
+            f"second connection's `state` answered (overlay: {st.get('overlay') or 'none'}). The command is "
+            f"still running inside a nested event loop, usually a prompt it opened; it replies when that closes.\n")
+    else:
+        sys.stderr.write(f"connected but no reply within {READ_TIMEOUT:g}s — the GUI thread is blocked\n")
     sys.stderr.flush()
     try:
         sys.stdout.flush()
@@ -146,6 +205,8 @@ def _readline_timeout(readline, timeout: float) -> bytes:
 
 
 def _send(cmd: str) -> str:
+    global _IN_FLIGHT
+    _IN_FLIGHT = cmd
     if os.name == "nt":
         with open(rf"\\.\pipe\{NAME}", "r+b", buffering=0) as f:
             f.write((cmd + "\n").encode("utf-8"))

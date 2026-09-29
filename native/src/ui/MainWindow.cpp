@@ -18911,7 +18911,7 @@ void MainWindow::presentSettingsHub()
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         // Split Screen LEAVES the settings area (it is not a settings panel), so it is an exit — gate it,
         // exactly like the themed hub's "split" row above.
-        add(tr("Split Screen"),       [this] { leaveSettingsArea([this](SettingsReturn) { enterSplitScreen(); }); }); // F8
+        add(tr("Split Screen"),       [this] { leaveSettingsAreaLater([this](SettingsReturn) { enterSplitScreen(); }); }); // F8
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
 #if !defined(Q_OS_ANDROID)
         add(tr("Stand Alone Emulators Settings"), [this] { openEmulatorManager(); }); // standalone emulators (Dolphin…) - desktop only
@@ -18925,7 +18925,8 @@ void MainWindow::presentSettingsHub()
         // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
         // The settings TRANSACTION closes here too — this is the classic hub's only exit. Nothing to restore
         // on "Keep editing": showPanel's Back just invokes panelOnBack_, so the panel is still standing.
-        leaveSettingsArea([this](SettingsReturn where) { returnFromSettings(where); });
+        // A turn late, so the Save prompt does not run inside the Back press (#471, MainWindowSettingsExit.cpp).
+        leaveSettingsAreaLater([this](SettingsReturn where) { returnFromSettings(where); });
     });
 }
 
@@ -19012,8 +19013,8 @@ void MainWindow::openStats()
     }, [this] {
         // THE OUTLIER among the classic panels: every other one's Back returns to the hub (openSettingsHub),
         // but classic Stats leaves the settings area DIRECTLY, bypassing the hub's onBack. So it needs the
-        // gate itself, or a visit that ends here would strand the transaction open.
-        leaveSettingsArea([this](SettingsReturn where) { returnFromSettings(where); });
+        // gate itself, or a visit that ends here would strand the transaction open. A turn late, like the hub's (#471).
+        leaveSettingsAreaLater([this](SettingsReturn where) { returnFromSettings(where); });
     });
 }
 

@@ -275,6 +275,10 @@ private slots:
     // setCurrentWidget() on a widget already removed from the stack. Classify FIRST, act on the classification.
     // (SettingsReturn itself is declared at the top of the class — moc rejects a type inside `private slots:`.)
     bool leaveSettingsArea(std::function<void(SettingsReturn)> proceed);
+    // The same gate, one event-loop turn later (issue #471), for a classic door that needs nothing back from it.
+    // The Save prompt is a nested loop, and running it inside the key press made that press last as long as the
+    // prompt stood. Defined in MainWindowSettingsExit.cpp, which says why and what it guards against.
+    void leaveSettingsAreaLater(std::function<void(SettingsReturn)> proceed);
     // The destination the classification names: the home screen (rebuilt, so an Appearance change applies), or
     // the remembered page — which is re-checked for liveness, so a return page destroyed after the classification
     // was taken degrades to the home screen instead of a dangling setCurrentWidget().
@@ -2801,6 +2805,7 @@ private:
     // slot sees "no dialog" — which is the truth — however the destruction was reached.
     QPointer<QWidget> panelDialog_;
     std::function<void()> panelOnBack_;
+    bool settingsExitQueued_ = false;   // a leaveSettingsAreaLater gate is queued or its prompt is up (#471)
     double duration_ = 0.0;
     double lastPos_ = 0.0;   // last reported playback position, for the segment marks menu
     // Which playback epoch (nextEpGen_) these two were last reported FOR. mpv reports neither until well after an
