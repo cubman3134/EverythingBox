@@ -32,18 +32,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 
-# MainWindow's own code (#470): MainWindow.cpp plus every file #186 has moved out of it. A NEGATIVE source
-# check about MainWindow (absent, count == 0, "never", "no longer") reads EVERY file here, so moving a function
-# out of MainWindow.cpp cannot move it out of the scan; a POSITIVE check keeps reading the file its text lives in.
-# Every #186 increment appends its new file HERE and nowhere else. probe_jfdownload and probe_subsonic read this
-# list out of this file (native/tools/MainWindowOwnSources.h), so keep it one "$HERE/../src/ui/<file>" per
-# line, with no comment inside the parentheses. Deliberately NOT listed: the feature siblings
-# (MainWindowJellyfin.cpp and the rest), which were never part of MainWindow.cpp and no gate claimed to cover.
+# MainWindow's own code (#470): MainWindow.cpp plus every file #186 has moved its code into. That includes
+# the internal header MainWindowInternal.h, which holds the file-scope helpers the MainWindow TUs share and
+# which #186 has moved real logic into, not only the new .cpp files. A NEGATIVE source check about MainWindow
+# (absent, count == 0, "never", "no longer") reads EVERY file here, so moving a function out of MainWindow.cpp
+# cannot move it out of the scan; a POSITIVE check keeps reading the file its text lives in. Every #186
+# increment appends HERE, and nowhere else, any new file it moves MainWindow code into. probe_jfdownload and
+# probe_subsonic read this list out of this file (native/tools/MainWindowOwnSources.h), so keep it one
+# "$HERE/../src/ui/<file>" per line, with no comment inside the parentheses. Deliberately NOT listed: the
+# feature siblings (MainWindowJellyfin.cpp and the rest), which were never part of MainWindow.cpp and no gate
+# claimed to cover.
 MW_OWN_SOURCES=(
   "$HERE/../src/ui/MainWindow.cpp"
   "$HERE/../src/ui/MainWindowSettingsGeneral.cpp"
   "$HERE/../src/ui/MainWindowPanels.cpp"
   "$HERE/../src/ui/MainWindowLaunch.cpp"
+  "$HERE/../src/ui/MainWindowInternal.h"
 )
 # The listed files that do not exist, each followed by a space; empty when all do. sed over a missing file only
 # warns and carries on with a corpus short of that file, so a gate reading the list reports these instead.

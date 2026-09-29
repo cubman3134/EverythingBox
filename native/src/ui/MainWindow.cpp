@@ -5,7 +5,7 @@
 #include "Notifier.h"
 #include "BlackFrameWatchdog.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J08/J10/J11)
-#include "MainWindowInternal.h" // #186: store(), panelRow() - file-scope helpers shared with the other MainWindow TUs
+#include "MainWindowInternal.h" // #186: store(), panelRow(), mwLog(), logSafeUrl(), applyRemintRecipe() (+ remintableId()), romLibraryFolderFor(), romhackPatchCacheDir(), describeTarget() - file-scope helpers shared with the other MainWindow TUs
 #include "../media/StreamResolver.h"
 #include "../media/PlaybackSession.h"
 #include "../launch/GameLauncher.h"
@@ -8686,7 +8686,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
 // and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
 // reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
 // and the playRequested choke point — rather than by this function touching the player itself.
-// (applyRemintRecipe is forward-declared above openStreamUrl — playStream is a write site too.)
+// (applyRemintRecipe is declared in MainWindowInternal.h, shared with MainWindowLaunch.cpp — playStream is a write site too.)
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl, const StreamHeaders::Headers& headers,
                                  const MediaItem* recipe)
