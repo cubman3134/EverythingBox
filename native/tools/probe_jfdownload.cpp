@@ -35,6 +35,7 @@
 #include "Jellyfin.h"
 #include "JellyfinDownload.h"
 #include "JellyfinServerStore.h"
+#include "MainWindowOwnSources.h"   // #470: MainWindow's own code, for the negative source check in 10(g)
 #include "OfflineProgress.h"
 #include "UrlAtRest.h"        // #437: a resumable link as it may sit in queue.json
 
@@ -1618,7 +1619,11 @@ static void sectionWaitForMinter()
                                   && mw.contains(QStringLiteral(".arg(waitingFor)"));
         CHECK(waitingSentence);
         CHECK(mw.count(QStringLiteral("downloadStatusText(j, downloadWaitingFor(j))")) == 4);
-        CHECK(!mw.contains(QStringLiteral("downloadStatusText(j)")));
+        // NEGATIVE, so it reads all of MainWindow's own code (#470): MainWindow.cpp and every file #186 moved
+        // out of it, as run-headless-probes.sh's MW_OWN_SOURCES lists them. An empty corpus is a failure.
+        const QString own = mwown::ownCode(QStringLiteral(EB_JFDOWNLOAD_NATIVE_DIR));
+        CHECK(!own.isEmpty());
+        CHECK(!own.contains(QStringLiteral("downloadStatusText(j)")));
         const QString jf = QString::fromUtf8(readSource(QStringLiteral("src/ui/MainWindowJellyfinDownload.cpp")));
         CHECK(jf.contains(QStringLiteral("if (!dm_ || !dm_->waitingForSource(j)) return QString();")));
     }

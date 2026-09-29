@@ -27,6 +27,7 @@
 #include "Jellyfin.h"
 #include "JellyfinMusicClient.h"
 #include "JellyfinServerStore.h"
+#include "MainWindowOwnSources.h"   // #470: MainWindow's own code, for the negative source checks in 417
 #include "MetaCache.h"
 #include "MusicCatalogs.h"
 #include "MusicFixtures.h"
@@ -3328,9 +3329,13 @@ static void testHostDoorsWired417()
     CHECK(src.contains(QStringLiteral(
         "crossfadeTrackFacts(MusicSupply::openQueueEntry(inPath, session_->identityFor(inPath)))")));
     CHECK(src.contains(QStringLiteral("session_->refeedPreloaded(j.key);")));
-    // ...and no door left handing over the frozen entry.
-    CHECK(!src.contains(QStringLiteral("player_->play(p, trackHeaders")));
-    CHECK(!src.contains(QStringLiteral("player_->appendFile(p, trackHeaders")));
+    // ...and no door left handing over the frozen entry. NEGATIVE, so it reads all of MainWindow's own code
+    // (#470): MainWindow.cpp and every file #186 moved out of it, as run-headless-probes.sh's MW_OWN_SOURCES
+    // lists them. An empty corpus is a failure, never a pass.
+    const QString own = mwown::ownCode(QStringLiteral(EB_SUBSONIC_SRC_DIR) + QStringLiteral("/.."));
+    CHECK(!own.isEmpty());
+    CHECK(!own.contains(QStringLiteral("player_->play(p, trackHeaders")));
+    CHECK(!own.contains(QStringLiteral("player_->appendFile(p, trackHeaders")));
 }
 
 static void test417()
