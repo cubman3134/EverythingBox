@@ -1808,6 +1808,7 @@ private:
     void pullAndMergeProgress();          // download remote progress + merge into local, then refresh the home view
     QByteArray serializeProgress() const; // current resume positions + per-profile recent lists -> JSON
     void mergeProgress(const QByteArray& json); // merge remote JSON into local by recency (never deletes local)
+    void afterProgressMerge();                  // #27: the ONE post-merge tail (roster, add-on refs, home refresh)
 
     // ---- push settings on Save, with a durable retry when offline (#34) ---------------------------------
     // The POLICY (when to attempt, when to wait, when to stop, what to do about a peer's push) lives in

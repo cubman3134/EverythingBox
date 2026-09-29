@@ -1461,24 +1461,41 @@ echo
 #
 # That second half is a WIRING fact inside MainWindow, which no headless probe links (it is the whole Qt
 # Widgets app). The probe demonstrates the behaviour by calling merge-then-reconcile itself; this gate pins
-# that mergeProgress is where the product actually does it. Deleting the call is otherwise a silent revert:
+# that the product actually does it after every merge. Deleting the call is otherwise a silent revert:
 # every probe stays green, and the symptom only appears on a synced install with a renamed add-on.
+#
+# Since #27 the repair lives in afterProgressMerge, the ONE post-merge tail: mergeProgress merges through
+# CloudMerge::mergeDocument, which runs the hook the constructor registers, and a sync category switched back on
+# merges through the same function. So the gate pins all three links: the tail re-runs the repair (and applies
+# the merged roster), mergeProgress goes through mergeDocument, and the hook names the tail.
 echo "=== post-merge addon-ref repair ==="
 MWCPP="$HERE/../src/ui/MainWindow.cpp"
 if [ ! -f "$MWCPP" ]; then
   echo "FAIL: post-merge addon-ref repair (MainWindow.cpp not found at $MWCPP)"; fail=1
 else
-  # The body of mergeProgress, comments stripped, from its signature to the closing brace at column 0.
-  mp_body="$(sed -E 's://.*$::' "$MWCPP" | awk '
-    /^void MainWindow::mergeProgress\(/ { inbody = 1 }
-    inbody                              { print }
-    inbody && /^}/                      { exit }
-  ')"
-  if [ -z "$(printf '%s' "$mp_body" | tr -d '[:space:]')" ]; then
-    echo "FAIL: post-merge addon-ref repair (MainWindow::mergeProgress not found — the gate stopped matching)"
+  # A function's body, comments stripped, from its signature to the closing brace at column 0.
+  mp_fn() { sed -E 's://.*$::' "$MWCPP" | awk -v SIG="^void MainWindow::$1[(]" '
+    $0 ~ SIG     { inbody = 1 }
+    inbody       { print }
+    inbody && /^}/ { exit }
+  '; }
+  mp_body="$(mp_fn mergeProgress)"
+  mp_tail="$(mp_fn afterProgressMerge)"
+  mp_hook="$(sed -E 's://.*$::' "$MWCPP" | grep -c 'setAfterMergeHook(.*afterProgressMerge()')"
+  if [ -z "$(printf '%s' "$mp_body" | tr -d '[:space:]')" ] || [ -z "$(printf '%s' "$mp_tail" | tr -d '[:space:]')" ]; then
+    echo "FAIL: post-merge addon-ref repair (MainWindow::mergeProgress or ::afterProgressMerge not found — the gate stopped matching)"
     fail=1
-  elif ! printf '%s' "$mp_body" | grep -q 'reconcileAddonRefs'; then
-    echo "FAIL: post-merge addon-ref repair (mergeProgress no longer re-runs BrandMigration::reconcileAddonRefs)"
+  elif ! printf '%s' "$mp_tail" | grep -q 'reconcileAddonRefs'; then
+    echo "FAIL: post-merge addon-ref repair (afterProgressMerge no longer re-runs BrandMigration::reconcileAddonRefs)"
+    fail=1
+  elif ! printf '%s' "$mp_tail" | grep -q 'applyMergedRoster'; then
+    echo "FAIL: post-merge addon-ref repair (afterProgressMerge no longer applies the merged add-on roster)"
+    fail=1
+  elif ! printf '%s' "$mp_body" | grep -q 'CloudMerge::mergeDocument'; then
+    echo "FAIL: post-merge addon-ref repair (mergeProgress no longer merges through CloudMerge::mergeDocument, so the tail does not run)"
+    fail=1
+  elif [ "$mp_hook" -lt 1 ]; then
+    echo "FAIL: post-merge addon-ref repair (no CloudMerge::setAfterMergeHook registers afterProgressMerge)"
     fail=1
   else
     echo "PASS: post-merge addon-ref repair"

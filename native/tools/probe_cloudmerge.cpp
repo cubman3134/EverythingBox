@@ -7188,6 +7188,29 @@ int main(int argc, char** argv)
                     }
                 }
             }
+            // ...and the groups a store opens by NAME, with no slash in the literal — beginGroup(QStringLiteral("stats"))
+            // (second review, finding 6). Every one must name a category too; "deleted" is the tombstone store.
+            {
+                const QRegularExpression grx(QStringLiteral(
+                    "beginGroup\\((?:QStringLiteral\\(|QLatin1String\\()?\"([a-z][A-Za-z0-9_.]*)\""));
+                int groupsSeen = 0;
+                QDirIterator git(nativeDir + QStringLiteral("/src"), { QStringLiteral("*.cpp"), QStringLiteral("*.h") },
+                                 QDir::Files, QDirIterator::Subdirectories);
+                while (git.hasNext())
+                {
+                    QFile f(git.next());
+                    if (!f.open(QIODevice::ReadOnly)) continue;
+                    for (auto m = grx.globalMatch(QString::fromUtf8(f.readAll())); m.hasNext();)
+                    {
+                        const QString g = m.next().captured(1);
+                        ++groupsSeen;
+                        if (g == QLatin1String("deleted")) continue;
+                        if (CloudSync::categoryFor(g + QStringLiteral("/probe46")) == Category::Unmapped)
+                        { std::fprintf(stderr, "  46a: beginGroup(\"%s\") names no sync category\n", qPrintable(g)); ++unmapped; }
+                    }
+                }
+                CHECK(groupsSeen >= 5);
+            }
             CHECK(files >= 300);          // the corpus is the tree, not an empty directory
             CHECK(literals >= 500);
             CHECK(unmapped == 0);
@@ -7321,9 +7344,12 @@ int main(int argc, char** argv)
             const QByteArray fp1 = CloudSync::stateFingerprint();
             CHECK(fp1 != fp0);                                               // an enabled one still is
             switchCat(Category::Music, true);
-            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("a1"));   // adopted
+            // Nobody else changed it (the relay still equals the snapshot), so the edit made while off is KEPT and
+            // now goes up as an ordinary local change (second review, finding 1).
+            CHECK(rawValue(QStringLiteral("music/albumalias")).toString() == QStringLiteral("a2"));
             CHECK(rawValue(QStringLiteral("theme/default")).toString() == QStringLiteral("t2"));     // untouched
-            CHECK(CloudSync::stateFingerprint() == fp1);                     // the upload did not move
+            CHECK(sent(QStringLiteral("music/albumalias")) == QStringLiteral("a2"));
+            CHECK(CloudSync::stateFingerprint() != fp1);
             CHECK(rawValue(QStringLiteral("cloud/syncedHash")).toByteArray() == QByteArray("baseline"));
         }
         // Installed theme FILES are not a switch: they ride with appearance off, and a peer's still land.
@@ -7610,6 +7636,137 @@ int main(int argc, char** argv)
             if (musicSent() != QStringLiteral("new"))
                 std::fprintf(stderr, "  46j: A sends music \"%s\" after re-enabling\n", qPrintable(musicSent()));
             CHECK(musicSent() == QStringLiteral("new"));
+        }
+
+        // 46k (second review, finding 1). RE-ENABLING KEEPS THIS DEVICE'S OFF-PERIOD EDITS unless a peer genuinely
+        //      changed the key. The relay starts as this device's own switch-off snapshot and, on a one-device
+        //      account, every pull hands that snapshot straight back — so "adopt the relay" rewound a comic read
+        //      from page 50 to 200 back to page 50.
+        {
+            // One device. Off at page 50, read on to 200 (its own upload relayed back by a pull meanwhile), on.
+            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            setRaw46(QStringLiteral("comic/abc/page"), 50);
+            Cloud cl;
+            push(cl);
+            switchCat(Category::Progress, false);
+            setRaw46(QStringLiteral("comic/abc/page"), 200);
+            push(cl); pull(cl);                                     // the account's only bundle is its own
+            switchCat(Category::Progress, true);
+            if (rawValue(QStringLiteral("comic/abc/page")).toInt() != 200)
+                std::fprintf(stderr, "  46k: re-enabling rewound the page to %d\n", rawValue(QStringLiteral("comic/abc/page")).toInt());
+            CHECK(rawValue(QStringLiteral("comic/abc/page")).toInt() == 200);
+            // The kept edit is simply a local change: the next attempt pushes it, it does not pull over it.
+            const bool localChanged = CloudSync::localChangedSinceSync();
+            const bool remoteChanged = cl.stamp.toUtf8() != rawValue(QStringLiteral("cloud/syncedHash")).toByteArray();
+            CHECK(localChanged && !remoteChanged);
+            CHECK(PendingPush::resolve(true, true, localChanged, remoteChanged) == PendingPush::Plan::Push);
+            CHECK(sent(QStringLiteral("comic/abc/page")) == QStringLiteral("200"));
+        }
+        {
+            // Two devices, and the peer REALLY changed the key while A had it off: then the peer's value is adopted.
+            // A key the peer's bundle no longer carries (in A's snapshot, absent from the relay) is not a deletion:
+            // A keeps its own value.
+            Dev A = fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            setRaw46(QStringLiteral("comic/abc/page"), 50);
+            setRaw46(QStringLiteral("pdf/abc/page"), 9);
+            switchCat(Category::Progress, false);
+            setRaw46(QStringLiteral("comic/abc/page"), 200);       // A reads on, locally
+            setRaw46(QStringLiteral("pdf/abc/page"), 11);
+            A = save();
+            Dev B = fresh(QStringLiteral("dev-B"), QStringLiteral("a"));
+            setRaw46(QStringLiteral("comic/abc/page"), 120);       // B moved the page (and has no pdf key at all)
+            B = save();
+            Cloud cl;
+            load(B); push(cl); B = save();
+            load(A); pull(cl);
+            switchCat(Category::Progress, true);
+            CHECK(rawValue(QStringLiteral("comic/abc/page")).toInt() == 120);   // the peer's genuine change wins
+            CHECK(rawValue(QStringLiteral("pdf/abc/page")).toInt() == 11);      // absent from the peer: kept
+        }
+
+        // 46l (second review, finding 3). THE RELAY DOES NOT OUTLIVE THE ACCOUNT. Signing out forgets it, so account
+        //      X's relayed values are never uploaded into account Y — and so does a backend switch.
+        {
+            class Backend27 : public SyncBackend
+            {
+            public:
+                bool isSignedIn() const override { return true; }
+                QString accountEmail() const override { return QString(); }
+                PendingPush::Auth lastAuth() const override { return PendingPush::Auth::Ok; }
+                void signIn() override {}
+                void signOut() override { emit signedOut(); }
+                void ensureFolder(std::function<void(const QString&)> cb) override { cb(QString()); }
+                void findFile(const QString&, const QString&,
+                              std::function<void(bool, const QString&, const QString&, const QString&)> cb) override
+                { cb(false, QString(), QString(), QString()); }
+                void uploadFile(const QString&, const QString&, const QString&, const QString&, const QByteArray&,
+                                const QString&, std::function<void(const QString&)> cb) override { cb(QString()); }
+                void downloadFile(const QString&, std::function<void(bool, const QByteArray&)> cb) override { cb(false, QByteArray()); }
+                void findFolderNamed(const QString&, std::function<void(bool, const QString&)> cb) override { cb(false, QString()); }
+                void renameFile(const QString&, const QString&, std::function<void(bool)> cb) override { cb(false); }
+            };
+            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            switchCat(Category::Music, false);
+            CHECK(QFile::exists(carryFile));
+            {
+                CloudSync cs(new Backend27);
+                cs.signOut();
+            }
+            if (QFile::exists(carryFile)) std::fprintf(stderr, "  46l: the relay survived a sign-out\n");
+            CHECK(!QFile::exists(carryFile));
+            // The backend switch goes through the same forgetting (a source check: MainWindow is not linked here).
+            QFile mw(QStringLiteral(EB_CLOUDMERGE_NATIVE_DIR) + QStringLiteral("/src/ui/MainWindow.cpp"));
+            CHECK(mw.open(QIODevice::ReadOnly));
+            const QString mwText = QString::fromUtf8(mw.readAll());
+            const int at = mwText.indexOf(QStringLiteral("void MainWindow::switchSyncBackend("));
+            const int end = mwText.indexOf(QStringLiteral("\nvoid MainWindow::"), at + 1);
+            CHECK(at >= 0 && end > at);
+            if (!mwText.mid(at, end - at).contains(QStringLiteral("forgetRelay()")))
+                std::fprintf(stderr, "  46l: switchSyncBackend does not forget the relay\n");
+            CHECK(mwText.mid(at, end - at).contains(QStringLiteral("forgetRelay()")));
+            allOn();
+        }
+
+        // 46m (second review, finding 5). A SWITCH THAT CANNOT FREEZE DOES NOT FLIP. With the relay file unwritable
+        //      (here: a directory where it should be), switching off must leave the category ON — otherwise it would be
+        //      off with nothing relayed, and the next upload would drop it from the shared copy.
+        {
+            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            QDir().mkpath(carryFile);
+            switchCat(Category::Music, false);
+            if (!CloudSync::categoryEnabled(Category::Music)) std::fprintf(stderr, "  46m: the switch flipped with no relay\n");
+            CHECK(CloudSync::categoryEnabled(Category::Music));
+            CHECK(!rawValue(synccat::toggleKey(Category::Music)).isValid());
+            QDir(carryFile).removeRecursively();
+            allOn();
+        }
+
+        // 46n (second review, finding 2). A CATEGORY TURNED BACK ON RUNS THE APP'S POST-MERGE TAIL — the roster
+        //      applied to the loaded add-ons, add-on ids repaired, the home refreshed — exactly as a progress pull
+        //      does, because both merge through CloudMerge::mergeDocument (the seam: the hook the app registers).
+        //      The pure fold, mergeAll, never runs it; switching OFF merges nothing, so it does not run either.
+        {
+            int tailRuns = 0;
+            CloudMerge::setAfterMergeHook([&tailRuns] { ++tailRuns; });
+            fresh(QStringLiteral("dev-A"), QStringLiteral("a"));
+            switchCat(Category::Addons, false);
+            CHECK(tailRuns == 0);
+            {
+                QJsonObject rec; rec["key"] = QStringLiteral("probe.46n"); rec["url"] = QStringLiteral("https://x.invalid/m.json");
+                rec["enabled"] = true; rec["ts"] = double(T46);
+                QJsonObject scope; scope.insert(QStringLiteral("items"), QJsonArray{ rec }); scope.insert(QStringLiteral("tombs"), QJsonArray{});
+                QJsonObject roster; roster.insert(QStringLiteral("all"), scope);
+                QJsonObject peerDoc; peerDoc.insert(QStringLiteral("roster"), roster);
+                CloudMerge::mergeAll(peerDoc);                      // a pull while off: relayed, and the fold alone
+            }
+            CHECK(tailRuns == 0);
+            switchCat(Category::Addons, true);
+            if (tailRuns != 1) std::fprintf(stderr, "  46n: re-enabling ran the post-merge tail %d time(s)\n", tailRuns);
+            CHECK(tailRuns == 1);
+            CloudMerge::mergeDocument(QJsonObject());                // ...and the progress pull's path runs it too
+            CHECK(tailRuns == 2);
+            CloudMerge::setAfterMergeHook({});
+            allOn();
         }
         wipeIni();
     }

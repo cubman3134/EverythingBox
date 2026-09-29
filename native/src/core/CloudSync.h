@@ -58,10 +58,14 @@ public:
     //   off: this device's current values of the category are frozen into the relay (SyncCarry.h), so what it
     //        uploads does not change at the moment of the switch; from then on its own edits are not sent and a
     //        peer's values are relayed, never applied.
-    //   on:  the relayed values — the other devices' latest, as of the last pull — are adopted for THIS
-    //        category's keys only, and the relay entry is dropped. No pull, no baseline change: what this device
-    //        uploads is the same bundle it uploaded a moment before, so the switch is not a reason to push or pull.
-    static void setCategoryEnabled(synccat::Category c, bool on);
+    //   on:  for THIS category's keys only, a relayed value is adopted where a peer genuinely changed it (it
+    //        differs from this device's snapshot at the switch); every other key keeps the value this device holds
+    //        now. No pull, no baseline change: the switch is never a reason to pull over this device.
+    //   Returns false when the switch did NOT flip: no switch for this category, or (off) the relay could not be
+    //   written — off with nothing relayed would drop the category from the next upload.
+    static bool setCategoryEnabled(synccat::Category c, bool on);
+    // Forget the relay (SyncCarry.h): it belongs to one account. Called on sign-out and on a backend switch.
+    static void forgetRelay();
     // Whether a peer's value for `key` is written here: not device-local, and its category (Other when
     // unmapped) is switched on.
     static bool keyTakenHere(const QString& key);

@@ -21,6 +21,7 @@
 #include "SyncCarry.h"          // issue #27: ...it is RELAYED: the peer's copy goes back up untouched
 #include "CloudSync.h"          // issue #27: switchCategory drives the settings half of a switch too
 #include <QFile>
+#include <functional>
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -1959,20 +1960,43 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
 }
 
+// ---- the app's merge entry point, and the one post-merge tail -----------------------------------------------------
+// mergeAll is the pure fold the probes drive. A merge the APP performs also has to reach the running app — the
+// add-on roster applied to the loaded add-ons, stored add-on ids repaired, the home refreshed — and that tail lives
+// in the UI (MainWindow::afterProgressMerge). It is registered here once, and mergeDocument is the ONE function
+// that runs a merge and then that tail, so the progress pull and a category switched back on cannot drift apart
+// (#27 second review, finding 2: re-enabling Add-ons merged the roster and never applied it until a restart).
+static std::function<void()>& afterMergeHook()
+{
+    static std::function<void()> hook;
+    return hook;
+}
+
+void CloudMerge::setAfterMergeHook(std::function<void()> hook) { afterMergeHook() = std::move(hook); }
+
+void CloudMerge::mergeDocument(const QJsonObject& root)
+{
+    mergeAll(root);
+    if (afterMergeHook()) afterMergeHook()();
+}
+
 // ---- #27: one category switch, both documents -------------------------------------------------------------------
 // THE entry point the UI calls. The settings half is CloudSync::setCategoryEnabled; this adds the merge document's.
 //   off: this device's own sections of the category become the relay BEFORE the switch flips, so the first
 //        upload after it still carries them — entries and tombstones — instead of dropping them from the shared
-//        document (review, finding 5).
+//        document (review, finding 5). If the relay cannot be written the switch does not flip (second review,
+//        finding 5) and this returns false.
 //   on:  the relayed sections — the other devices' copy as of the last merge, or this device's own if none has
 //        happened since — are MERGED into the local stores by the ordinary rules (union, newest wins,
-//        tombstones honoured), then dropped from the relay. No pull and no push is started: a toggle is never a
-//        reason to apply a whole peer document or bundle over this device (review, finding 1).
+//        tombstones honoured), through mergeDocument so the app's post-merge tail runs, then dropped from the
+//        relay. No pull and no push is started: a toggle is never a reason to apply a whole peer document or
+//        bundle over this device (review, finding 1).
 // Known limit of "on": a peer's deletion older than Tombstones::compact(30) is gone from its tombstones, so an
 // entry this device still holds from before the switch is not suppressed, and goes back up with the union.
-void CloudMerge::switchCategory(synccat::Category c, bool on)
+bool CloudMerge::switchCategory(synccat::Category c, bool on)
 {
-    if (!synccat::hasToggle(c) || CloudSync::categoryEnabled(c) == on) return;
+    if (!synccat::hasToggle(c)) return false;
+    if (CloudSync::categoryEnabled(c) == on) return true;
     auto ofCat = [c](const QString& name) { return synccat::ofSection(name) == c; };
     if (!on)
     {
@@ -1981,14 +2005,22 @@ void CloudMerge::switchCategory(synccat::Category c, bool on)
         QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart());
         for (auto it = own.begin(); it != own.end(); ++it)
             if (ofCat(it.key())) relay.insert(it.key(), it.value());
-        synccat::saveCarry(synccat::carrySectionsPart(), relay);
-        CloudSync::setCategoryEnabled(c, false);
-        return;
+        if (!synccat::saveCarry(synccat::carrySectionsPart(), relay)) return false;
+        if (!CloudSync::setCategoryEnabled(c, false))
+        {
+            // The settings half could not freeze: undo the sections just relayed, and stay on.
+            for (auto it = own.begin(); it != own.end(); ++it)
+                if (ofCat(it.key())) relay.remove(it.key());
+            synccat::saveCarry(synccat::carrySectionsPart(), relay);
+            return false;
+        }
+        return true;
     }
     CloudSync::setCategoryEnabled(c, true);
     QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart()), take, rest;
     for (auto it = relay.begin(); it != relay.end(); ++it)
         (ofCat(it.key()) ? take : rest).insert(it.key(), it.value());
     synccat::saveCarry(synccat::carrySectionsPart(), rest);
-    if (!take.isEmpty()) mergeAll(take);
+    if (!take.isEmpty()) mergeDocument(take);
+    return true;
 }

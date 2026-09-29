@@ -15,7 +15,9 @@
 
 #include <QCheckBox>
 #include <QLabel>
+#include <QPointer>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "../core/CloudMerge.h"
@@ -82,17 +84,35 @@ QString syncCategoriesOffNote(bool brief)
                                   "deleted, here or on your other devices.");
 }
 
+// The sentence a switch that could not flip leaves for the page's next presentation (shown once, then cleared).
+QString g_syncSwitchError;
+
 } // namespace
 
 // Apply one switch from either layout, through the ONE core entry point (CloudMerge::switchCategory), which does
-// both documents. It starts no pull and no push (#27 review, finding 1): off relays the category, and on adopts
-// the relayed copy for that category alone, so what this device uploads is the same the moment after the switch as
-// the moment before. The one follow-up is the merge document's ordinary debounce, because turning a category back
-// on can add this device's own rows to the union — the same push any local edit to those stores arms.
+// both documents. It starts no pull and no push (#27 review, finding 1): off relays the category, and on takes,
+// for that category alone, the values a peer genuinely changed while it was off — this device's own edits made
+// meanwhile are kept (second review, finding 1) — and merges the relayed rows through CloudMerge::mergeDocument,
+// so the app's post-merge tail runs (second review, finding 2). The one follow-up is the merge document's
+// ordinary debounce, because turning a category back on can add this device's own rows to the union — the same
+// push any local edit to those stores arms.
+//
+// A switch that cannot flip (off, with the relay unwritable — #27 second review, finding 5) leaves the category
+// ON, and the page says so in one plain sentence. The page is re-presented a turn later, so the switch reads ON
+// again, and never inside the toggle's own delivery (the #28 / #211 family).
 void MainWindow::setSyncCategoryFromUi(synccat::Category c, bool on)
 {
     if (CloudSync::categoryEnabled(c) == on) return;
-    CloudMerge::switchCategory(c, on);
+    if (!CloudMerge::switchCategory(c, on))
+    {
+        g_syncSwitchError = tr("Couldn't turn %1 off: this device couldn't save the copy it keeps for your other "
+                               "devices, so it stays on.").arg(synccat::displayName(c));
+        mwLog(QStringLiteral("cloud sync: category %1 could not be switched off (relay not written) - left on")
+                  .arg(QLatin1String(synccat::id(c))));
+        QPointer<MainWindow> self(this);
+        QTimer::singleShot(0, this, [self] { if (self) self->openCloudSyncCategories(); });
+        return;
+    }
     mwLog(QStringLiteral("cloud sync: category %1 switched %2 on this device")
               .arg(QLatin1String(synccat::id(c)), on ? QStringLiteral("on") : QStringLiteral("off")));
     if (on) scheduleProgressSync();   // no-op when signed out
@@ -103,6 +123,8 @@ void MainWindow::openCloudSyncCategories()
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
     const bool signedIn = cloud_->isSignedIn();
     const QVector<SyncCategoryRow> cats = syncCategoryRowsFor();
+    const QString switchError = g_syncSwitchError;
+    g_syncSwitchError.clear();
 #ifdef EB_HAVE_QML
     // Themed: a nested level on the Cloud Sync panel (Back pops to it). Switches are Toggle rows; the rest are
     // Info rows whose value says what happens to them.
@@ -116,6 +138,9 @@ void MainWindow::openCloudSyncCategories()
           r.value = syncCategoriesDeviceNote(); rows << r; }
         { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("sync.offnote"); r.label = tr("Off");
           r.value = syncCategoriesOffNote(/*brief=*/true); rows << r; }
+        if (!switchError.isEmpty())
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("sync.error"); r.label = tr("Not changed");
+          r.value = switchError; rows << r; }
         if (!signedIn)
         { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("sync.signedout"); r.label = tr("Status");
           r.value = tr("Not signed in — nothing syncs yet. These choices apply once you are."); rows << r; }
@@ -142,13 +167,19 @@ void MainWindow::openCloudSyncCategories()
         return;
     }
 #endif
-    showPanel(tr("What syncs"), [this, cats, signedIn](QVBoxLayout* v) {
+    showPanel(tr("What syncs"), [this, cats, signedIn, switchError](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("<b>What Cloud Sync carries</b><br>%1").arg(syncCategoriesDeviceNote().toHtmlEscaped()));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
         v->addWidget(intro);
         auto* off = new QLabel(syncCategoriesOffNote(/*brief=*/false));
         off->setWordWrap(true); off->setStyleSheet(QStringLiteral("font-size:13px;color:#888;"));
         v->addWidget(off);
+        if (!switchError.isEmpty())
+        {
+            auto* err = new QLabel(switchError);
+            err->setWordWrap(true); err->setStyleSheet(QStringLiteral("font-size:14px;color:#f08c00;"));
+            v->addWidget(err);
+        }
         if (!signedIn)
         {
             auto* so = new QLabel(tr("Not signed in — nothing syncs yet. These choices apply once you are."));

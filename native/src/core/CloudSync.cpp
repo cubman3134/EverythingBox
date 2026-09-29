@@ -68,6 +68,8 @@ void CloudSync::wireBackend()
     connect(backend_, &SyncBackend::signedIn, this, &CloudSync::signedIn);
     connect(backend_, &SyncBackend::signInFailed, this, &CloudSync::signInFailed);
     connect(backend_, &SyncBackend::signedOut, this, &CloudSync::signedOut);
+    // #27: the category relay is this account's — a sign-out, from wherever it comes, forgets it.
+    connect(backend_, &SyncBackend::signedOut, this, [] { forgetRelay(); });
 }
 
 // ---- static + auth forwarders to the Drive backend --------------------------------------------------
@@ -496,46 +498,82 @@ static QMap<QString, QString> uploadSettings()
     return out;
 }
 
-void CloudSync::setCategoryEnabled(synccat::Category c, bool on)
+bool CloudSync::setCategoryEnabled(synccat::Category c, bool on)
 {
-    if (!synccat::hasToggle(c)) return;   // accounts, other settings and device-local have no switch
-    if (categoryEnabled(c) == on) return;
-    QJsonObject carry = synccat::loadCarry(synccat::carrySettingsPart());
+    if (!synccat::hasToggle(c)) return false;   // accounts, other settings and device-local have no switch
+    if (categoryEnabled(c) == on) return true;
+    QJsonObject all = synccat::loadCarryAll();
+    QJsonObject relay = all.value(synccat::carrySettingsPart()).toObject();
+    QJsonObject frozen = all.value(synccat::carryFrozenPart()).toObject();
+    auto ofCat = [c](const QString& k) { return isBundleSettingKey(k) && synccat::effective(synccat::ofKey(k)) == c; };
     if (!on)
     {
         // Freeze: the relay starts as this device's own values, so the upload is unchanged by the switch (no
-        // upload is owed for it, and the cloud copy does not lose the category while nobody has pulled yet).
+        // upload is owed for it, and the cloud copy does not lose the category while nobody has pulled yet). The
+        // same values are kept as the SNAPSHOT a re-enable compares against.
+        for (const QString& k : frozen.keys()) if (ofCat(k)) frozen.remove(k);
+        for (const QString& k : relay.keys())  if (ofCat(k)) relay.remove(k);
         for (const QString& k : store().allKeys())
-            if (isBundleSettingKey(k) && synccat::effective(synccat::ofKey(k)) == c)
-                carry.insert(k, store().value(k).toString());
-        synccat::saveCarry(synccat::carrySettingsPart(), carry);
+            if (ofCat(k)) { const QString v = store().value(k).toString(); relay.insert(k, v); frozen.insert(k, v); }
+        all.insert(synccat::carrySettingsPart(), relay);
+        all.insert(synccat::carryFrozenPart(), frozen);
+        // No relay, no switch (the second review, finding 5): off with nothing relayed would drop the category
+        // from the next upload. The caller tells the user; the category simply stays on.
+        if (!synccat::saveCarryAll(all))
+        {
+            appendSyncLog(QStringLiteral("cloud sync: could not write the category relay - category %1 left on")
+                              .arg(QLatin1String(synccat::id(c))));
+            return false;
+        }
         store().setValue(synccat::toggleKey(c), false);   // written only when OFF: ON is the absent default
         store().sync();
-        return;
+        return true;
     }
-    // Adopt: THIS category's relayed values, and nothing else — never a whole peer bundle (review, finding 1).
-    // They are the other devices' values as of the last pull, so this device now holds what it was already
-    // uploading, and the upload does not change. Its own edits made while the category was off are replaced:
-    // they were never sent, and "the peer wins per key" is the rule every pull already applies. A key only this
-    // device has stays, and goes up with the next push, which is the union.
+    // Back on: THIS category only — never a whole peer bundle (first review, finding 1) — and only where a peer
+    // genuinely changed a key while the category was off: relay != this device's snapshot (second review,
+    // finding 1). Everything else keeps the value this device holds NOW, including edits made while off (a comic
+    // read on from page 50 to 200 stays at 200); such an edit simply reads as a local change and goes up with the
+    // next push. Per key:
+    //   in the relay, and different from the snapshot (or not in it)  -> a peer's change: adopted;
+    //   in the relay, equal to the snapshot                            -> nobody else touched it: kept;
+    //   in the snapshot only (the peer's bundle no longer carries it)  -> absence is not deletion: kept;
+    //   in neither                                                     -> a key only this device has: kept.
     store().remove(synccat::toggleKey(c));
-    QJsonObject rest;
     bool committed = false;
-    for (auto it = carry.begin(); it != carry.end(); ++it)
+    for (auto it = relay.begin(); it != relay.end(); ++it)
     {
         const QString& k = it.key();
-        if (synccat::effective(synccat::ofKey(k)) != c || !isBundleSettingKey(k)) { rest.insert(k, it.value()); continue; }
+        if (!ofCat(k)) continue;
         const QString v = it.value().toString();
-        if (store().value(k).toString() == v) continue;   // unchanged: no write (so an off->on with no pull between
-                                                          // is a no-op on the ini, byte for byte)
+        if (frozen.contains(k) && frozen.value(k).toString() == v) continue;   // the peer did not change it
+        if (store().value(k).toString() == v) continue;                       // already there: no write
         // Written into the open settings visit, a later Discard would restore this device's stale values under a
         // switch that stays on (cloud/ is out of the transaction), and they would then be SENT. Close it first —
         // the same trade a remote apply makes (applySettingsJson).
         if (!committed && SettingsTxn::active()) { SettingsTxn::commit(); committed = true; }
         store().setValue(k, v);
     }
-    synccat::saveCarry(synccat::carrySettingsPart(), rest);
+    for (const QString& k : frozen.keys()) if (ofCat(k)) frozen.remove(k);
+    for (const QString& k : relay.keys())  if (ofCat(k)) relay.remove(k);
+    all.insert(synccat::carrySettingsPart(), relay);
+    all.insert(synccat::carryFrozenPart(), frozen);
+    // A failed write here leaves stale entries for a category that is now ON: uploadSettings reads the relay only
+    // for categories that are off, and the next freeze of this one replaces them, so it is logged and ignored.
+    if (!synccat::saveCarryAll(all))
+        appendSyncLog(QStringLiteral("cloud sync: could not tidy the category relay after switching %1 back on")
+                          .arg(QLatin1String(synccat::id(c))));
     store().sync();
+    return true;
+}
+
+// The relay belongs to one account: its relayed values are that account's, and uploading them into another would
+// hand account Y whatever account X's devices last had. Forgotten on sign-out (wired in wireBackend, so every
+// origin of a sign-out counts) and on a backend switch (MainWindow::switchSyncBackend). A category still switched
+// off then relays nothing until the new account's first pull fills it.
+void CloudSync::forgetRelay()
+{
+    if (QFile::exists(synccat::carryPath()) && !QFile::remove(synccat::carryPath()))
+        appendSyncLog(QStringLiteral("cloud sync: could not remove the category relay file"));
 }
 
 QByteArray CloudSync::buildSettingsJson()
