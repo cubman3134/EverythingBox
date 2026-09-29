@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.351 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.352 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1000,6 +1000,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowMusicFallback.cpp                 # the offline fallback's MainWindow member (#194)
         src/ui/MainWindowLaunchWatch.cpp                   # store-launch play time: the MainWindow half (#61)
         src/ui/MainWindowCast.cpp                          # casting a local file: the MainWindow half (#72)
+        src/ui/MainWindowSettingsExit.cpp                  # the settings exit gate, a turn late for classic doors (#471)
         src/ui/MainWindowFileDrop.cpp                      # LAN file drop MainWindow members (#115)
         src/ui/MainWindowFollowNotify.cpp                  # followed-series notifications: tray delivery + the hold (#155)
         src/ui/MainWindowAddonConfigure.cpp                # "Configure on website…" MainWindow members, same rule (#80)

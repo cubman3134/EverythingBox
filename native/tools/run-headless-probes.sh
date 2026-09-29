@@ -1285,6 +1285,61 @@ else
 fi
 echo
 
+# Classic settings-exit deferral (issue #471). Classic Settings > Appearance, change the theme, then Back twice: the
+# second Back is the settings area's exit, and a changed setting makes that exit ask "Save changes?" through
+# NavConfirm::ask, which is a nested event loop. The classic hub ran that loop INSIDE the Back press's own dispatch
+# (sendNavKey -> panelBack_->click() -> clicked -> panelOnBack_ -> leaveSettingsArea -> NavConfirm::ask), so the
+# press did not return until the prompt was answered. A uitest `key back` then held its reply for as long as the
+# prompt stood, and uitest.py reported that as "the GUI thread is blocked" (30 s and more). The GUI was never
+# blocked: the prompt was up in about 90 ms and answered every other query. The themed hub never did this, because
+# ThemedPanelHost defers its root Back a turn (#165). MainWindow links into no probe, so the classic half is held
+# as source shape:
+#   1. leaveSettingsAreaLater queues (Qt::QueuedConnection) and only then reaches leaveSettingsArea;
+#   2. the classic hub's builder and classic Stats' builder reach the exit gate only through it. The themed
+#      branches above each showPanel line are not scanned: their calls already run a turn late (#165).
+echo "=== classic settings exit off the Back dispatch (#471) ==="
+SX_CPP="$HERE/../src/ui/MainWindowSettingsExit.cpp"
+sx_fail=0
+sx_note() { echo "  $1"; sx_fail=1; }
+sx_body() { printf '%s\n' "$2" | awk -v sig="$1" '
+  !on && index($0, sig) { on = 1 }
+  on                    { print }
+  on && /^\}/           { exit }
+'; }
+# From the classic builder's showPanel(...) line to the end of the function: the classic half of the body.
+sx_from() { printf '%s\n' "$1" | awk -v sig="$2" '!on && index($0, sig) { on = 1 } on { print }'; }
+sx_count() { printf '%s\n' "$2" | grep -cE "$1" || true; }
+if [ -f "$SX_CPP" ]; then
+  sx_later="$(sx_body 'void MainWindow::leaveSettingsAreaLater(' "$(sed -E 's://.*$::' "$SX_CPP")")"
+  [ -n "$sx_later" ] || sx_note "leaveSettingsAreaLater not found in MainWindowSettingsExit.cpp: renamed? This gate is now asserting nothing about it."
+  [ -z "$sx_later" ] || [ "$(sx_count 'Qt::QueuedConnection' "$sx_later")" != "0" ] \
+    || sx_note "leaveSettingsAreaLater does not queue: every classic door that calls it runs the Save prompt inside the key press again."
+  [ -z "$sx_later" ] || [ "$(sx_count '(^|[^A-Za-z_])leaveSettingsArea\(' "$sx_later")" != "0" ] \
+    || sx_note "leaveSettingsAreaLater never reaches leaveSettingsArea: the classic exits no longer close the settings transaction."
+else
+  sx_note "MainWindowSettingsExit.cpp not found under $HERE/../src/ui: there is no deferring exit for the classic doors to use."
+fi
+# NEGATIVE (no direct call), so it reads all of MainWindow's own code (#470).
+sx_own="$(sed -E 's://.*$::' "${MW_OWN_SOURCES[@]}" 2>/dev/null)"
+sx_miss="$(mw_own_missing)"
+[ -z "$sx_miss" ] || sx_note "MW_OWN_SOURCES lists ${sx_miss}which does not exist: the Back scan cannot see it."
+for sx_fn in 'presentSettingsHub()|showPanel(tr("Settings")' 'openStats()|showPanel(tr("Stats")'; do
+  sx_sig="void MainWindow::${sx_fn%%|*}"
+  sx_part="$(sx_from "$(sx_body "$sx_sig" "$sx_own")" "${sx_fn#*|}")"
+  if [ -z "$sx_part" ]; then
+    sx_note "${sx_sig}: its classic builder (${sx_fn#*|}) was not found. Moved or renamed? This gate is now asserting nothing about it."
+    continue
+  fi
+  sx_direct="$(printf '%s\n' "$sx_part" | grep -nE '(^|[^A-Za-z_])leaveSettingsArea\(' || true)"
+  [ -z "$sx_direct" ] || sx_note "${sx_sig}: the classic surface calls leaveSettingsArea on the key press's own stack; use leaveSettingsAreaLater: $(printf '%s' "$sx_direct" | tr '\n' ' ')"
+  [ "$(sx_count 'leaveSettingsAreaLater\(' "$sx_part")" != "0" ] \
+    || sx_note "${sx_sig}: the classic surface has no leaveSettingsAreaLater call, so its exit no longer goes through the settings gate."
+done
+if [ "$sx_fail" -eq 0 ]; then echo "PASS: classic settings exit off the Back dispatch (#471)"; else
+  echo "FAIL: classic settings exit off the Back dispatch (#471): a classic door runs the Save prompt's nested loop inside its own key press"; fail=1
+fi
+echo
+
 # Panel-dialog lifetime gate (issue #122). Same standing as the gate above, and for the same reason: MainWindow
 # links into no probe, so this rule cannot be asserted as behaviour anywhere. It is held as source shape.
 #
