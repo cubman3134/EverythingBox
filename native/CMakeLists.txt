@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.352 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.353 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1023,6 +1023,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/MainWindowAbsTimeline.cpp                   # issue #197: a server book's whole-book bar may seek across parts, same rule
         src/ui/MainWindowAbsDownload.cpp                   # issue #197: a server book downloaded for offline listening, same rule
         src/ui/MainWindowBookStep.cpp                      # issue #432: the classic seek bar's arrow step on a multi-part book, same rule
+        src/ui/MainWindowSyncCategories.cpp                # issue #27: Cloud Sync ▸ What syncs, the MainWindow half, same rule
         # #83: playing a Jellyfin item and reporting progress to the server that owns it. A FEATURE TU
         # for the reason the row above it already is one - MainWindow.cpp is the file every concurrent
         # branch collides in.
@@ -2519,7 +2520,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
     target_include_directories(probe_cloudmerge PRIVATE src src/core src/ebook src/media src/theme2 third_party)
-    target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    # Issue #27: section 46 reads native/src to find every settings group a source literal names, so a new group
+    # cannot ship without a sync category.
+    target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+        EB_CLOUDMERGE_NATIVE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 
     # First-run onboarding router (onboarding/drive-restore T1): the pure eb::onboardingRoute table plus

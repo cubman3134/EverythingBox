@@ -40,6 +40,7 @@ class DeepLinkChannel;                 // issue #80: everythingbox:// links reac
 #include "../core/MusicQueue.h"      // MusicQueue::Entry — startMusicEntries takes the built queue by value
 #include "../core/Scrobble.h"        // Scrobble::Track is a value member (issue #192)
 #include "../core/Tracker.h"         // tracker::Kind / tracker::Update - the #156 seam's value types
+#include "../core/SyncCategories.h"  // synccat::Category - the #27 What-syncs switch parameter (QtCore-only)
 #include "../browse/LeafRoute.h"     // browse::QueueTarget — the browse row the #193 reach verbs act on
 #include "../comic/ChapterRun.h"     // ChapterRun — comicRun_ is a value member (chapter auto-advance)
 #include "../video/PlayerGestures.h" // issue #162: the touch gesture recogniser is a value member
@@ -288,6 +289,8 @@ private slots:
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openStats();           // per-profile consumption stats (Watched/Listened/Read/Played + top titles)
     void openCloudSync();     // Google Drive sign-in + sync panel
+    void openCloudSyncCategories();   // #27: Cloud Sync > What syncs, both layouts (MainWindowSyncCategories.cpp)
+    void setSyncCategoryFromUi(synccat::Category c, bool on);   // #27: one switch, from either layout
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
     // Cloud Sync backend (Increment C): switch between Google Drive and a self-hosted server as a MIGRATION —

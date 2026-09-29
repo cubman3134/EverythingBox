@@ -19505,6 +19505,7 @@ void MainWindow::openCloudSync()
         cloudRetryRowShown_ = in && !pending.isEmpty();
         if (in)              action(QStringLiteral("cloud.signout"), tr("Sign out"));
         if (!serverBackend)  action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+        action(QStringLiteral("cloud.whatsyncs"), tr("What syncs"));   // #27: the categories, and this device's switches
 
         auto setStatus = [this](const QString& s) {
             PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.status"); r.label = MainWindow::tr("Status");
@@ -19516,6 +19517,7 @@ void MainWindow::openCloudSync()
             else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(PushTrigger::UserAction); }
             else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
             else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
+            else if (id == QStringLiteral("cloud.whatsyncs")) openCloudSyncCategories();   // #27: a nested level
             else if (id == QStringLiteral("cloud.backend")) {
                 // The Choice delivers the newly-picked label; map it and switch only on a real change.
                 const QString want = (val == tr("My server")) ? QStringLiteral("server") : QStringLiteral("drive");
@@ -19612,8 +19614,10 @@ void MainWindow::openCloudSync()
         auto* retry = panelRow(tr("Retry sync"));
         auto* signOut = panelRow(tr("Sign out"));
         auto* setup = panelRow(tr("Set up sign-in…"));
+        auto* whatSyncs = panelRow(tr("What syncs"));   // #27: the categories, and this device's switches
         v->addWidget(signIn); v->addWidget(serverConnect); v->addWidget(syncNow);
-        v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
+        v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup); v->addWidget(whatSyncs);
+        connect(whatSyncs, &QPushButton::clicked, this, [this] { openCloudSyncCategories(); });
         // Held for the same reason as cloudPendingLabel_: a park arising minutes after the panel was built has
         // to move the ACTION the line names, not only the line. refresh() below owns it on a rebuild; this
         // pointer is how a push completing later reaches it without one.

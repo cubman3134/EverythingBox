@@ -7,6 +7,7 @@
 #pragma once
 #include "PendingPush.h"   // #34: the Auth classification the token refresh reports
 #include "SyncBackend.h"   // Increment B: the transport seam CloudSync composes (Drive is one backend)
+#include "SyncCategories.h" // #27: the categories a user sees and may switch off
 #include <QObject>
 #include <QString>
 #include <QByteArray>
@@ -46,6 +47,23 @@ public:
     // clobber this device's live accumulator namespace and then propagate. The rule is symmetrical: anything
     // with a CloudMerge section belongs here, or the bundle silently becomes a second, RAW writer of it.
     static bool isPerItemStoreKey(const QString& key);
+    // #27: which category `key` syncs under — DeviceLocal for the carve-out above, otherwise the one the table in
+    // SyncCategories.h gives it (Unmapped when no rule claims it; such a key still syncs, as "other settings").
+    static synccat::Category categoryFor(const QString& key);
+    // #27: this device's switch for a category (device-local, under cloud/sync/<id>; absent = on). Only the seven
+    // switchable categories can be off; the rest always read true. Turning a category back ON makes it CATCH UP:
+    // while it was off this device neither sent nor took it, so its local values are the stale side. It takes a
+    // peer's values at once but sends nothing of the category until a pull lands (adoptSyncedBaseline) or a
+    // reachable remote proves there is nothing to take, and the synced baseline is forgotten so the next
+    // automatic push pulls first (PendingPush's PullThenPush: peer wins, then the union goes up).
+    static bool categoryEnabled(synccat::Category c);
+    static bool categoryCatchingUp(synccat::Category c);
+    static void setCategoryEnabled(synccat::Category c, bool on);
+    // Whether a peer's value for `key` is written here (not device-local; category on) — the bundle reader asks.
+    static bool keyTakenHere(const QString& key);
+    // Whether `key` leaves this device (the above, and its category is not catching up) — the bundle writer and
+    // the fingerprint ask, so an unsent key can never read as an unsynced change.
+    static bool keySentFromHere(const QString& key);
     // The bundle's settings.json content (device-local excluded) — the exact bytes buildBundle embeds. Exposed
     // so the headless probe exercises the real carve-out without the zip/network.
     static QByteArray buildSettingsJson();
