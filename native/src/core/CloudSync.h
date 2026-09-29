@@ -7,6 +7,7 @@
 #pragma once
 #include "PendingPush.h"   // #34: the Auth classification the token refresh reports
 #include "SyncBackend.h"   // Increment B: the transport seam CloudSync composes (Drive is one backend)
+#include "SyncCategories.h" // #27: the categories a user sees and may switch off
 #include <QObject>
 #include <QString>
 #include <QByteArray>
@@ -46,6 +47,28 @@ public:
     // clobber this device's live accumulator namespace and then propagate. The rule is symmetrical: anything
     // with a CloudMerge section belongs here, or the bundle silently becomes a second, RAW writer of it.
     static bool isPerItemStoreKey(const QString& key);
+    // #27: which category `key` syncs under — DeviceLocal for the carve-out above, otherwise the one the table in
+    // SyncCategories.h gives it (Unmapped when no rule claims it; such a key still syncs, as "other settings").
+    static synccat::Category categoryFor(const QString& key);
+    // #27: this device's switch for a category (device-local, under cloud/sync/<id>; absent = on). Only the seven
+    // switchable categories can be off; the rest always read true.
+    static bool categoryEnabled(synccat::Category c);
+    // The SETTINGS half of a switch. Call CloudMerge::switchCategory, which does this AND the merge document's
+    // half; this one alone is for the probes and for a build that links CloudSync without CloudMerge.
+    //   off: this device's current values of the category are frozen into the relay (SyncCarry.h), so what it
+    //        uploads does not change at the moment of the switch; from then on its own edits are not sent and a
+    //        peer's values are relayed, never applied.
+    //   on:  for THIS category's keys only, a relayed value is adopted where a peer genuinely changed it (it
+    //        differs from this device's snapshot at the switch); every other key keeps the value this device holds
+    //        now. No pull, no baseline change: the switch is never a reason to pull over this device.
+    //   Returns false when the switch did NOT flip: no switch for this category, or (off) the relay could not be
+    //   written — off with nothing relayed would drop the category from the next upload.
+    static bool setCategoryEnabled(synccat::Category c, bool on);
+    // Forget the relay (SyncCarry.h): it belongs to one account. Called on sign-out and on a backend switch.
+    static void forgetRelay();
+    // Whether a peer's value for `key` is written here: not device-local, and its category (Other when
+    // unmapped) is switched on.
+    static bool keyTakenHere(const QString& key);
     // The bundle's settings.json content (device-local excluded) — the exact bytes buildBundle embeds. Exposed
     // so the headless probe exercises the real carve-out without the zip/network.
     static QByteArray buildSettingsJson();

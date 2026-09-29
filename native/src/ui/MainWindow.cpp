@@ -2620,6 +2620,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
     // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
     QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
+    // #27: every app-side merge (CloudMerge::mergeDocument) ends in afterProgressMerge — see there.
+    CloudMerge::setAfterMergeHook([self = QPointer<MainWindow>(this)] { if (self) self->afterProgressMerge(); });
 
     // …and reconcile the per-file saves/states alongside it (save-sync T5). This is the STEADY-STATE pull
     // chain's hook: main.cpp's cloudPullAtStartup() applies the state bundle SYNCHRONOUSLY before this window
@@ -19405,6 +19407,8 @@ void MainWindow::switchSyncBackend(const QString& newBackend)
     { QSettings s(iniPath, QSettings::IniFormat);
       s.setValue(QStringLiteral("cloud/backend"), newBackend);
       s.sync(); }
+    // #27: the sync-category relay belongs to the account being left; never upload it into the next one.
+    CloudSync::forgetRelay();
     // Rebuild: the ctor calls makeConfiguredBackend, which now reads cloud/backend. The old cloud_ dies here,
     // dropping its panelPageConns_/window-scoped connections; openCloudSync re-arms the panel pool on re-present.
     cloud_ = std::make_unique<CloudSync>(this);
@@ -19505,6 +19509,7 @@ void MainWindow::openCloudSync()
         cloudRetryRowShown_ = in && !pending.isEmpty();
         if (in)              action(QStringLiteral("cloud.signout"), tr("Sign out"));
         if (!serverBackend)  action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+        action(QStringLiteral("cloud.whatsyncs"), tr("What syncs"));   // #27: the categories, and this device's switches
 
         auto setStatus = [this](const QString& s) {
             PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.status"); r.label = MainWindow::tr("Status");
@@ -19516,6 +19521,7 @@ void MainWindow::openCloudSync()
             else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(PushTrigger::UserAction); }
             else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
             else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
+            else if (id == QStringLiteral("cloud.whatsyncs")) openCloudSyncCategories();   // #27: a nested level
             else if (id == QStringLiteral("cloud.backend")) {
                 // The Choice delivers the newly-picked label; map it and switch only on a real change.
                 const QString want = (val == tr("My server")) ? QStringLiteral("server") : QStringLiteral("drive");
@@ -19612,8 +19618,10 @@ void MainWindow::openCloudSync()
         auto* retry = panelRow(tr("Retry sync"));
         auto* signOut = panelRow(tr("Sign out"));
         auto* setup = panelRow(tr("Set up sign-in…"));
+        auto* whatSyncs = panelRow(tr("What syncs"));   // #27: the categories, and this device's switches
         v->addWidget(signIn); v->addWidget(serverConnect); v->addWidget(syncNow);
-        v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
+        v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup); v->addWidget(whatSyncs);
+        connect(whatSyncs, &QPushButton::clicked, this, [this] { openCloudSyncCategories(); });
         // Held for the same reason as cloudPendingLabel_: a park arising minutes after the panel was built has
         // to move the ACTION the line names, not only the line. refresh() below owns it on a rebuild; this
         // pointer is how a push completing later reaches it without one.
@@ -20356,9 +20364,17 @@ QByteArray MainWindow::serializeProgress() const
 
 void MainWindow::mergeProgress(const QByteArray& json)
 {
-    CloudMerge::mergeAll(QJsonDocument::fromJson(json).object());
+    // Through CloudMerge::mergeDocument, which runs afterProgressMerge below: the ONE post-merge tail, shared
+    // with a sync category switched back on (#27 second review, finding 2).
+    CloudMerge::mergeDocument(QJsonDocument::fromJson(json).object());
+}
 
-    // ...and re-run the stored-add-on-id repair over what the merge just landed (#58 review).
+// Everything a merge into the local stores owes the running app. Registered as CloudMerge's after-merge hook in
+// the constructor, so every app-side merge runs it exactly once: the progress pull, and a category turned back on.
+void MainWindow::afterProgressMerge()
+{
+    // The roster the merge may have changed is applied to the loaded add-ons, and the stored-add-on-id repair is
+    // re-run over what the merge just landed (#58 review).
     //
     // The tie-break no longer decides an equal-timestamp meeting on an add-on id's SPELLING (CloudMerge's
     // tieKey), so a repaired blob is no longer reverted by the merge that follows it. This covers the other
@@ -20367,11 +20383,23 @@ void MainWindow::mergeProgress(const QByteArray& json)
     // will not run again, so without this the favourite would read "source addon isn't available" for the
     // rest of the session and only come right on the next launch. Idempotent and near-free (it writes only
     // when something actually moved), which is what makes running it on every merge affordable.
-    if (!addons_) return;
-    addons_->applyMergedRoster();   // #77: the merge may have added, removed or re-flagged add-ons
-    const int repointed = BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), addons_->installedIds());
-    if (repointed)
-        mwLog(QStringLiteral("addon refs: re-pointed %1 stored reference(s) after a cloud merge").arg(repointed));
+    if (addons_)
+    {
+        addons_->applyMergedRoster();   // #77: the merge may have added, removed or re-flagged add-ons
+        const int repointed = BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), addons_->installedIds());
+        if (repointed)
+            mwLog(QStringLiteral("addon refs: re-pointed %1 stored reference(s) after a cloud merge").arg(repointed));
+    }
+    // If the home is on screen, rebuild it so freshly-merged resume progress + recent entries show at once.
+    // GATED (issue #30 fix round 2): this is an OUT-OF-BAND renderer — it calls showHomeScreen() directly
+    // rather than navigating through openHome(), so it does not pass the landing gate. While the landing
+    // pad is up (delete-A-repoints-to-locked-B) the STALE themed home is still the current widget, so a
+    // pull completing in that window would rebuild B's home behind the pad, ungated. activeProfileEntered()
+    // answers the gate's question without prompting — a network reply must not raise a passcode pad — and
+    // skipping the rebuild costs nothing: whoever navigates home next goes through openHome().
+    QWidget* cur = stack_->currentWidget();
+    if ((cur == home_ || cur == themedHome_) && home_ && activeProfileEntered())
+    { home_->refresh(); showHomeScreen(); }
 }
 
 void MainWindow::pushProgressNow()
@@ -20399,16 +20427,6 @@ void MainWindow::pullAndMergeProgress()
     cloud_->pullProgress([this](bool ok, const QByteArray& json) {
         if (!ok || json.isEmpty()) return;
         mergeProgress(json);
-        // If the home is on screen, rebuild it so freshly-merged resume progress + recent entries show at once.
-        // GATED (issue #30 fix round 2): this is an OUT-OF-BAND renderer — it calls showHomeScreen() directly
-        // rather than navigating through openHome(), so it does not pass the landing gate. While the landing
-        // pad is up (delete-A-repoints-to-locked-B) the STALE themed home is still the current widget, so a
-        // pull completing in that window would rebuild B's home behind the pad, ungated. activeProfileEntered()
-        // answers the gate's question without prompting — a network reply must not raise a passcode pad — and
-        // skipping the rebuild costs nothing: whoever navigates home next goes through openHome().
-        QWidget* cur = stack_->currentWidget();
-        if ((cur == home_ || cur == themedHome_) && home_ && activeProfileEntered())
-        { home_->refresh(); showHomeScreen(); }
     });
 }
 

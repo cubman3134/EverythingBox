@@ -102,7 +102,10 @@
 // then Tombstones::compact(30) bounds the deleted/* footprint.
 #pragma once
 
+#include <functional>
+
 class QJsonObject;
+namespace synccat { enum class Category; }   // SyncCategories.h (issue #27)
 
 namespace CloudMerge
 {
@@ -111,4 +114,16 @@ namespace CloudMerge
 
     // Merge a remote document `root` into the local ini (recency + tombstones), then compact tombstones.
     void mergeAll(const QJsonObject& root);
+
+    // Issue #27: switch one sync category on or off on THIS device, in both documents (the settings half is
+    // CloudSync::setCategoryEnabled). Off relays the category instead of syncing it; on merges the relayed copy
+    // into the local stores by the ordinary rules. Neither starts a pull or a push. See CloudMerge.cpp.
+    // Returns false when the switch did not flip (no switch for c, or the relay could not be written).
+    bool switchCategory(synccat::Category c, bool on);
+
+    // The app's merge: mergeAll, then the post-merge tail the app registered (the add-on roster applied, stored
+    // add-on ids repaired, the home refreshed). Every merge the app performs goes through this, so no path can
+    // merge without that tail. The hook is set once by the UI; with none set this is exactly mergeAll.
+    void mergeDocument(const QJsonObject& root);
+    void setAfterMergeHook(std::function<void()> hook);
 }

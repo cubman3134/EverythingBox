@@ -17,6 +17,11 @@
 #include "LiveTvIdentity.h"     // issue #203: ...and the Live TV half of the same question
 #include "AddonRoster.h"        // issue #77: the add-on roster's stamped shadow, merged as the `roster` section
 #include "SettingsTxn.h"        // issue #77: a roster merge closes an open settings transaction first
+#include "SyncCategories.h"     // issue #27: a switched-off category is neither serialised nor merged
+#include "SyncCarry.h"          // issue #27: ...it is RELAYED: the peer's copy goes back up untouched
+#include "CloudSync.h"          // issue #27: switchCategory drives the settings half of a switch too
+#include <QFile>
+#include <functional>
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -1804,95 +1809,141 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
     }
 }
 
+// ---- #27: this device's category switches, applied per section ----------------------------------------------
+// A section is ON unless its category (SyncCategories.h: the section's store prefix, then that prefix's
+// category) is switchable and switched off here. A section this build does not know is Unmapped, which has no
+// switch, so it reads ON — it is not ours to decide about, and mergeAll never reads one anyway.
+bool sectionOn(const QString& section)
+{
+    return synccat::isEnabled(store(), synccat::ofSection(section));
+}
+
+// The relay (SyncCarry.h, "sections"), refreshed from a document being merged: every section switched off here
+// takes the peer's copy; a section the document lacks keeps the copy it had (absence says nothing); a section
+// that is back ON loses its copy, which switchCategory has already merged.
+void updateRelay(const QJsonObject& root)
+{
+    QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart());
+    for (const QString& name : relay.keys())
+        if (sectionOn(name)) relay.remove(name);
+    for (auto it = root.begin(); it != root.end(); ++it)
+        if (!synccat::sectionPrefix(it.key()).isEmpty() && !sectionOn(it.key())) relay.insert(it.key(), it.value());
+    synccat::saveCarry(synccat::carrySectionsPart(), relay);
+}
+
 } // namespace
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
     QJsonObject resume, recent, recentTombs, marks, favorites, follows, bookmarks, highlights, vocabulary, audiobookmarks, playlists, presets, stats, playstats, metaoverrides, launchopts, pad2key, speed, lyricoffset, trackerlink, missed, homerows, channels, roster;
-    serializeResumeRecent(resume, recent);
-    serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
-    serializeMarks(marks);
-    serializeFavorites(favorites);
-    serializeFollows(follows);          // issue #155: the followed-series marks, favourites' shape
-    serializeBookmarks(bookmarks);                               // issue #136: per-book reading bookmarks
-    serializeHighlights(highlights);                             // issue #136: per-book highlights
-    serializeVocabulary(vocabulary);                             // issue #137: the looked-up word list
-    serializeAudioBookmarks(audiobookmarks);                     // issue #140: per-item audio bookmarks
-    serializePlaylists(playlists);
-    serializePresets(presets);                                   // issue #184: saved filter presets
-    serializeChannels(channels);                                 // issue #179: personal TV channels
-    serializeHomeRows(homerows);                                 // issue #161: the profile's home arrangement
-    serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
-    serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
-    serializePad2Key(pad2key);                                   // per-game pad-to-keyboard records (issue #105)
-    serializeSpeed(speed);                                       // per-item playback-speed memory (issue #140)
-    serializeLyricOffset(lyricoffset);                           // per-item lyric offset memory (issue #142)
-    serializeTrackerLink(trackerlink);                           // per-item tracker links (issue #156)
-    serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
-    serializeRoster(roster);                                     // issue #77: the add-on roster
-    serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
-    serializeNamespaced(QStringLiteral("playstats"), playstats);
-    root.insert(QStringLiteral("resume"), resume);
-    root.insert(QStringLiteral("recent"), recent);
+    // #27: a section whose category this device has switched OFF is neither serialised from here nor sent as ours.
+    // What goes up for it is the RELAYED copy (SyncCarry.h): the peer's, as the last merge delivered it, or this
+    // device's own, frozen at the moment of the switch. This upload replaces the shared document, so leaving the
+    // section out instead would strip every other device's entries and tombstones from it. With every switch on
+    // (the default) `on` is always true and nothing below differs from what this function always did.
+    const bool anyOff = synccat::anySwitchedOff(store());
+    const QJsonObject relay = anyOff ? synccat::loadCarry(synccat::carrySectionsPart()) : QJsonObject();
+    auto on = [anyOff](const char* section) { return !anyOff || sectionOn(QLatin1String(section)); };
+    auto put = [&root, &relay, anyOff](const QString& name, const QJsonValue& ours) {
+        if (!anyOff || sectionOn(name)) root.insert(name, ours);
+        else if (relay.contains(name)) root.insert(name, relay.value(name));
+    };
+    if (on("resume")) serializeResumeRecent(resume, recent);
+    if (on("recentTombs")) serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
+    if (on("marks")) serializeMarks(marks);
+    if (on("favorites")) serializeFavorites(favorites);
+    if (on("follow")) serializeFollows(follows);          // issue #155: the followed-series marks, favourites' shape
+    if (on("bookmarks")) serializeBookmarks(bookmarks);                               // issue #136: per-book reading bookmarks
+    if (on("highlights")) serializeHighlights(highlights);                             // issue #136: per-book highlights
+    if (on("vocabulary")) serializeVocabulary(vocabulary);                             // issue #137: the looked-up word list
+    if (on("audiobookmarks")) serializeAudioBookmarks(audiobookmarks);                     // issue #140: per-item audio bookmarks
+    if (on("playlists")) serializePlaylists(playlists);
+    if (on("presets")) serializePresets(presets);                                   // issue #184: saved filter presets
+    if (on("channels")) serializeChannels(channels);                                 // issue #179: personal TV channels
+    if (on("homerows")) serializeHomeRows(homerows);                                 // issue #161: the profile's home arrangement
+    if (on("metaoverrides")) serializeMetaOverrides(metaoverrides);                       // per-item metadata corrections (issue #24)
+    if (on("launchopts")) serializeLaunchOpts(launchopts);                             // per-game launch overrides (issue #51)
+    if (on("pad2key")) serializePad2Key(pad2key);                                   // per-game pad-to-keyboard records (issue #105)
+    if (on("speed")) serializeSpeed(speed);                                       // per-item playback-speed memory (issue #140)
+    if (on("lyricoffset")) serializeLyricOffset(lyricoffset);                           // per-item lyric offset memory (issue #142)
+    if (on("trackerlink")) serializeTrackerLink(trackerlink);                           // per-item tracker links (issue #156)
+    if (on("missed")) serializeMissed(missed);                                     // "you missed" dismissals (issue #25)
+    if (on("roster")) serializeRoster(roster);                                     // issue #77: the add-on roster
+    if (on("stats")) serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
+    if (on("playstats")) serializeNamespaced(QStringLiteral("playstats"), playstats);
+    put(QStringLiteral("resume"), resume);
+    put(QStringLiteral("recent"), recent);
     // The two deletion namespaces #150 added, carried as SEPARATE root keys rather than by re-shaping "resume"
     // / "recent" into {items,tombs}. That is what makes the mixed-version fleet work in the direction that
     // cannot be fixed later: an already-shipped build reads root["resume"] as a flat hash->object map and
     // root["recent"]'s per-profile value as the list JSON STRING, so re-shaping either would have made every
     // old device read an empty document and stop merging progress at all. Unknown root keys are ignored by
     // every build (mergeAll reads by name), so these ride along invisibly until the peer is upgraded.
-    root.insert(QStringLiteral("resumeTombs"), tombsToArray(ResumeStore::tombStore()));
-    root.insert(QStringLiteral("recentTombs"), recentTombs);
-    root.insert(QStringLiteral("marks"), marks);
-    root.insert(QStringLiteral("favorites"), favorites);
-    root.insert(QStringLiteral("follow"), follows);
-    root.insert(QStringLiteral("bookmarks"), bookmarks);         // issue #136 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("highlights"), highlights);       // issue #136 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("vocabulary"), vocabulary);       // issue #137 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("audiobookmarks"), audiobookmarks); // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("playlists"), playlists);
-    root.insert(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("channels"), channels);           // issue #179 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("homerows"), homerows);           // issue #161 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("metaoverrides"), metaoverrides);
-    root.insert(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("pad2key"), pad2key);             // issue #105 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("speed"), speed);                 // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("lyricoffset"), lyricoffset);     // issue #142 — a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("trackerlink"), trackerlink);     // issue #156 - a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("missed"), missed);
-    root.insert(QStringLiteral("roster"), roster);               // issue #77 - a new root key; old builds ignore it (mergeAll reads by name)
-    root.insert(QStringLiteral("stats"), stats);
-    root.insert(QStringLiteral("playstats"), playstats);
+    put(QStringLiteral("resumeTombs"), on("resumeTombs") ? QJsonValue(tombsToArray(ResumeStore::tombStore()))
+                                                         : QJsonValue());
+    put(QStringLiteral("recentTombs"), recentTombs);
+    put(QStringLiteral("marks"), marks);
+    put(QStringLiteral("favorites"), favorites);
+    put(QStringLiteral("follow"), follows);
+    put(QStringLiteral("bookmarks"), bookmarks);         // issue #136 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("highlights"), highlights);       // issue #136 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("vocabulary"), vocabulary);       // issue #137 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("audiobookmarks"), audiobookmarks); // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("playlists"), playlists);
+    put(QStringLiteral("presets"), presets);             // issue #184 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("channels"), channels);           // issue #179 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("homerows"), homerows);           // issue #161 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("metaoverrides"), metaoverrides);
+    put(QStringLiteral("launchopts"), launchopts);       // issue #51 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("pad2key"), pad2key);             // issue #105 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("speed"), speed);                 // issue #140 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("lyricoffset"), lyricoffset);     // issue #142 — a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("trackerlink"), trackerlink);     // issue #156 - a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("missed"), missed);
+    put(QStringLiteral("roster"), roster);               // issue #77 - a new root key; old builds ignore it (mergeAll reads by name)
+    put(QStringLiteral("stats"), stats);
+    put(QStringLiteral("playstats"), playstats);
 }
 
 void CloudMerge::mergeAll(const QJsonObject& root)
 {
-    mergeResume(root.value(QStringLiteral("resume")).toObject(),
-                root.value(QStringLiteral("resumeTombs")).toArray());
-    mergeRecent(root.value(QStringLiteral("recent")).toObject(),
-                root.value(QStringLiteral("recentTombs")).toObject());
-    mergeMarks(root.value(QStringLiteral("marks")).toObject());
-    mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
-    mergeFollows(root.value(QStringLiteral("follow")).toObject());
-    mergeBookmarks(root.value(QStringLiteral("bookmarks")).toObject());  // issue #136: per-book reading bookmarks
-    mergeHighlights(root.value(QStringLiteral("highlights")).toObject());  // issue #136: per-book highlights
-    mergeVocabulary(root.value(QStringLiteral("vocabulary")).toObject());  // issue #137: the looked-up word list
-    mergeAudioBookmarks(root.value(QStringLiteral("audiobookmarks")).toObject()); // issue #140: per-item audio bookmarks
-    mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
-    mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
-    mergeChannels(root.value(QStringLiteral("channels")).toObject());   // issue #179: personal TV channels
-    mergeHomeRows(root.value(QStringLiteral("homerows")).toObject());    // issue #161: the home arrangement
-    mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
-    mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
-    mergePad2Key(root.value(QStringLiteral("pad2key")).toObject());         // issue #105: per-game pad2key records
-    mergeSpeed(root.value(QStringLiteral("speed")).toObject());             // issue #140: per-item speed memory
-    mergeLyricOffset(root.value(QStringLiteral("lyricoffset")).toObject()); // issue #142: per-item lyric offset
-    mergeTrackerLink(root.value(QStringLiteral("trackerlink")).toObject()); // issue #156: per-item tracker links
-    mergeMissed(root.value(QStringLiteral("missed")).toObject());
-    mergeRoster(root.value(QStringLiteral("roster")).toObject());           // issue #77: the add-on roster
+    // #27: a section this device has switched off is NOT merged — off means it takes nothing of the category, and
+    // nothing local is touched, so nothing is tombstoned. The peer's copy of it is kept as the relay instead
+    // (updateRelay), and goes back up untouched with this device's next upload.
+    const bool anyOff = synccat::anySwitchedOff(store());
+    if (anyOff || QFile::exists(synccat::carryPath())) updateRelay(root);
+    auto on = [anyOff](const char* section) { return !anyOff || sectionOn(QLatin1String(section)); };
+
+    if (on("resume"))
+        mergeResume(root.value(QStringLiteral("resume")).toObject(),
+                    root.value(QStringLiteral("resumeTombs")).toArray());
+    if (on("recent"))
+        mergeRecent(root.value(QStringLiteral("recent")).toObject(),
+                    root.value(QStringLiteral("recentTombs")).toObject());
+    if (on("marks"))          mergeMarks(root.value(QStringLiteral("marks")).toObject());
+    if (on("favorites"))      mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
+    if (on("follow"))         mergeFollows(root.value(QStringLiteral("follow")).toObject());
+    if (on("bookmarks"))      mergeBookmarks(root.value(QStringLiteral("bookmarks")).toObject());  // issue #136: per-book reading bookmarks
+    if (on("highlights"))     mergeHighlights(root.value(QStringLiteral("highlights")).toObject());  // issue #136: per-book highlights
+    if (on("vocabulary"))     mergeVocabulary(root.value(QStringLiteral("vocabulary")).toObject());  // issue #137: the looked-up word list
+    if (on("audiobookmarks")) mergeAudioBookmarks(root.value(QStringLiteral("audiobookmarks")).toObject()); // issue #140: per-item audio bookmarks
+    if (on("playlists"))      mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
+    if (on("presets"))        mergePresets(root.value(QStringLiteral("presets")).toObject());      // issue #184: saved filter presets
+    if (on("channels"))       mergeChannels(root.value(QStringLiteral("channels")).toObject());   // issue #179: personal TV channels
+    if (on("homerows"))       mergeHomeRows(root.value(QStringLiteral("homerows")).toObject());    // issue #161: the home arrangement
+    if (on("metaoverrides"))  mergeMetaOverrides(root.value(QStringLiteral("metaoverrides")).toObject());
+    if (on("launchopts"))     mergeLaunchOpts(root.value(QStringLiteral("launchopts")).toObject());   // issue #51
+    if (on("pad2key"))        mergePad2Key(root.value(QStringLiteral("pad2key")).toObject());         // issue #105: per-game pad2key records
+    if (on("speed"))          mergeSpeed(root.value(QStringLiteral("speed")).toObject());             // issue #140: per-item speed memory
+    if (on("lyricoffset"))    mergeLyricOffset(root.value(QStringLiteral("lyricoffset")).toObject()); // issue #142: per-item lyric offset
+    if (on("trackerlink"))    mergeTrackerLink(root.value(QStringLiteral("trackerlink")).toObject()); // issue #156: per-item tracker links
+    if (on("missed"))         mergeMissed(root.value(QStringLiteral("missed")).toObject());
+    if (on("roster"))         mergeRoster(root.value(QStringLiteral("roster")).toObject());           // issue #77: the add-on roster
     const QString localDevice = Settings::deviceId();
-    mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
-    mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
+    if (on("stats"))
+        mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
+    if (on("playstats"))
+        mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
     store().sync();
     ItemMarks::invalidate();      // the merge wrote marks/* under the ini directly; drop the stale static cache
     // Ditto for metaoverrides/* (issue #24): its lazy cache would otherwise go on showing the old scrape.
@@ -1907,4 +1958,69 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     MissedDismiss::invalidate();    // ditto for the per-show dismissal cache the "You missed" rule reads
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
+}
+
+// ---- the app's merge entry point, and the one post-merge tail -----------------------------------------------------
+// mergeAll is the pure fold the probes drive. A merge the APP performs also has to reach the running app — the
+// add-on roster applied to the loaded add-ons, stored add-on ids repaired, the home refreshed — and that tail lives
+// in the UI (MainWindow::afterProgressMerge). It is registered here once, and mergeDocument is the ONE function
+// that runs a merge and then that tail, so the progress pull and a category switched back on cannot drift apart
+// (#27 second review, finding 2: re-enabling Add-ons merged the roster and never applied it until a restart).
+static std::function<void()>& afterMergeHook()
+{
+    static std::function<void()> hook;
+    return hook;
+}
+
+void CloudMerge::setAfterMergeHook(std::function<void()> hook) { afterMergeHook() = std::move(hook); }
+
+void CloudMerge::mergeDocument(const QJsonObject& root)
+{
+    mergeAll(root);
+    if (afterMergeHook()) afterMergeHook()();
+}
+
+// ---- #27: one category switch, both documents -------------------------------------------------------------------
+// THE entry point the UI calls. The settings half is CloudSync::setCategoryEnabled; this adds the merge document's.
+//   off: this device's own sections of the category become the relay BEFORE the switch flips, so the first
+//        upload after it still carries them — entries and tombstones — instead of dropping them from the shared
+//        document (review, finding 5). If the relay cannot be written the switch does not flip (second review,
+//        finding 5) and this returns false.
+//   on:  the relayed sections — the other devices' copy as of the last merge, or this device's own if none has
+//        happened since — are MERGED into the local stores by the ordinary rules (union, newest wins,
+//        tombstones honoured), through mergeDocument so the app's post-merge tail runs, then dropped from the
+//        relay. No pull and no push is started: a toggle is never a reason to apply a whole peer document or
+//        bundle over this device (review, finding 1).
+// Known limit of "on": a peer's deletion older than Tombstones::compact(30) is gone from its tombstones, so an
+// entry this device still holds from before the switch is not suppressed, and goes back up with the union.
+bool CloudMerge::switchCategory(synccat::Category c, bool on)
+{
+    if (!synccat::hasToggle(c)) return false;
+    if (CloudSync::categoryEnabled(c) == on) return true;
+    auto ofCat = [c](const QString& name) { return synccat::ofSection(name) == c; };
+    if (!on)
+    {
+        QJsonObject own;
+        serializeAll(own);   // still ON here, so these are this device's own sections
+        QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart());
+        for (auto it = own.begin(); it != own.end(); ++it)
+            if (ofCat(it.key())) relay.insert(it.key(), it.value());
+        if (!synccat::saveCarry(synccat::carrySectionsPart(), relay)) return false;
+        if (!CloudSync::setCategoryEnabled(c, false))
+        {
+            // The settings half could not freeze: undo the sections just relayed, and stay on.
+            for (auto it = own.begin(); it != own.end(); ++it)
+                if (ofCat(it.key())) relay.remove(it.key());
+            synccat::saveCarry(synccat::carrySectionsPart(), relay);
+            return false;
+        }
+        return true;
+    }
+    CloudSync::setCategoryEnabled(c, true);
+    QJsonObject relay = synccat::loadCarry(synccat::carrySectionsPart()), take, rest;
+    for (auto it = relay.begin(); it != relay.end(); ++it)
+        (ofCat(it.key()) ? take : rest).insert(it.key(), it.value());
+    synccat::saveCarry(synccat::carrySectionsPart(), rest);
+    if (!take.isEmpty()) mergeDocument(take);
+    return true;
 }
