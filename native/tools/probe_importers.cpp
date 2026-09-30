@@ -28,6 +28,11 @@
 //   * UbisoftLibrary (#60) - the pure registry-snapshot parser (installed / dir missing / DisplayName fallback /
 //     duplicate ids / odd ids), the uplay://launch/<id>/0 URL, the fixture JSON and its EB_UITEST-only seam, the
 //     Windows-only live reader, and Ubisoft as a SOURCE in the merged PC Games folder plus its Recents kind.
+//   * EaLibrary (#60 increment 2) - the installerdata.xml parse (DiPManifest and the legacy <game> form, UTF-8
+//     and UTF-16), the pure snapshot parser (installed / dir missing / name fallbacks / no launchable id / the
+//     EA Uninstall recognition / duplicate ids / odd ids), the origin2:// launch URI and idFrom, gatherSnapshot
+//     over real temp folders, the fixture JSON and its EB_UITEST-only seam, the Windows-only live reader, and
+//     EA as a SOURCE in the merged PC Games folder plus its Recents kind.
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, but the #224 block
@@ -39,6 +44,7 @@
 #include "GogLibrary.h"
 #include "BattleNetLibrary.h"
 #include "UbisoftLibrary.h"
+#include "EaLibrary.h"
 #include "RecentStore.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -1211,6 +1217,395 @@ int main(int argc, char** argv)
         PlaylistEntry e; e.itemId = QStringLiteral("ubi:3539"); e.title = QStringLiteral("ACO"); p.items << e;
         const MediaCatalog pl = browse::playlistItemsCatalog(p);
         CHECK(pl.items.size() == 1 && pl.items[0].mime == QStringLiteral("ubisoftgame") && pl.items[0].url.isEmpty());
+    }
+
+    // ---- EA app (issue #60, increment 2): installerdata.xml + the Uninstall entry, as plain records ----------
+    // Every rule is pinned with no EA app installed. Install dirs are REAL temp folders because "installed"
+    // means the folder exists; the one that must not exist is a path under the temp root never created.
+    {
+        using R = EaInstallRecord;
+        QTemporaryDir root;
+        CHECK(root.isValid());
+        const QString base = root.path();
+        const QString bf1     = base + QStringLiteral("/EA Games/Battlefield 1");
+        const QString sims    = base + QStringLiteral("/EA Games/The Sims 4");
+        const QString noTitle = base + QStringLiteral("/EA Games/Mass Effect Legendary Edition");
+        const QString legacy  = base + QStringLiteral("/Origin Games/Dragon Age Inquisition");
+        const QString eaApp   = base + QStringLiteral("/Electronic Arts/EA Desktop");
+        CHECK(QDir().mkpath(bf1) && QDir().mkpath(sims) && QDir().mkpath(noTitle) && QDir().mkpath(legacy)
+              && QDir().mkpath(eaApp));
+        const QString gone = base + QStringLiteral("/EA Games/Uninstalled Long Ago");   // never created
+
+        // installerdata.xml in its current (DiPManifest) form: the ids in order, then (locale, title) pairs.
+        // Text is escaped as a real manifest's would be, so an odd id reaches the parser as that id.
+        auto esc = [](QString t) {
+            return t.replace(QLatin1Char('&'), QStringLiteral("&amp;")).replace(QLatin1Char('<'), QStringLiteral("&lt;")); };
+        auto dip = [esc](const QStringList& ids, const QList<QPair<QString, QString>>& titles) {
+            QString x = QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DiPManifest version=\"4.0\">\n"
+                                       "  <contentIDs>");
+            for (const QString& id : ids) x += QStringLiteral("<contentID>") + esc(id) + QStringLiteral("</contentID>");
+            x += QStringLiteral("</contentIDs>\n  <gameTitles>");
+            for (const auto& t : titles)
+                x += QStringLiteral("<gameTitle locale=\"") + t.first + QStringLiteral("\">") + esc(t.second)
+                     + QStringLiteral("</gameTitle>");
+            x += QStringLiteral("</gameTitles>\n  <runtime><launcher><filePath>bf1.exe</filePath></launcher>"
+                                "</runtime>\n</DiPManifest>\n");
+            return x.toUtf8();
+        };
+        const QByteArray bf1Xml = dip({ QStringLiteral("1026023"), QStringLiteral("1035052") },
+                                      { { QStringLiteral("de_DE"), QStringLiteral("Battlefield 1 (DE)") },
+                                        { QStringLiteral("en_US"), QStringLiteral("Battlefield 1") } });
+        const QByteArray simsXml = dip({ QStringLiteral("DR:225064100") },
+                                       { { QStringLiteral("fr_FR"), QStringLiteral("Les Sims 4") } });
+        const QByteArray noTitleXml = dip({ QStringLiteral("1027133") }, {});
+        const QByteArray legacyXml = QByteArrayLiteral(
+            "<?xml version=\"1.0\"?><game manifestVersion=\"3.0\"><metadata>"
+            "<localeInfo locale=\"en_US\"><title>Dragon Age: Inquisition</title></localeInfo></metadata>"
+            "<contentIDs><contentID>1000184</contentID></contentIDs></game>");
+        // The real uninstall string the EA installer writes (a real EA registry export's shape).
+        const QString eaUn = QStringLiteral("\"C:/Program Files/Common Files/EAInstaller/Battlefield 1/Cleanup.exe\""
+                                            " uninstall_game -autologging");
+
+        auto folder = [](const QString& dir, const QByteArray& xml) {
+            R r; r.source = R::LibraryFolder; r.keyName = QFileInfo(dir).fileName(); r.installDir = dir;
+            r.installerData = xml; return r; };
+        auto unin = [](const QString& key, const QString& name, const QString& loc, const QString& un,
+                       const QByteArray& xml) {
+            R r; r.source = R::Uninstall; r.keyName = key; r.displayName = name; r.installDir = loc;
+            r.uninstallString = un; r.installerData = xml; return r; };
+
+        // The manifest parse itself: every contentID in order, the en_US title over an earlier locale's.
+        {
+            const EaLibrary::InstallerData d = EaLibrary::parseInstallerData(bf1Xml);
+            CHECK(d.ok);
+            CHECK(d.ids == QStringList({ QStringLiteral("1026023"), QStringLiteral("1035052") }));
+            CHECK(d.title == QStringLiteral("Battlefield 1"));
+            // No en_US title: the first non-empty one.
+            CHECK(EaLibrary::parseInstallerData(simsXml).title == QStringLiteral("Les Sims 4"));
+            // The legacy Origin <game> form.
+            const EaLibrary::InstallerData l = EaLibrary::parseInstallerData(legacyXml);
+            CHECK(l.ok && l.ids == QStringList({ QStringLiteral("1000184") })
+                  && l.title == QStringLiteral("Dragon Age: Inquisition"));
+            // UTF-16LE with a BOM (Steam ROM Manager's parser meets both encodings in the wild).
+            QByteArray u16("\xFF\xFE", 2);
+            const QString asText = QString::fromUtf8(bf1Xml).replace(QStringLiteral("utf-8"), QStringLiteral("utf-16"));
+            u16 += QByteArray(reinterpret_cast<const char*>(asText.utf16()), int(asText.size() * 2));
+            const EaLibrary::InstallerData w = EaLibrary::parseInstallerData(u16);
+            CHECK(w.ok && w.ids.value(0) == QStringLiteral("1026023") && w.title == QStringLiteral("Battlefield 1"));
+            // Not XML at all, and an empty file.
+            CHECK(!EaLibrary::parseInstallerData(QByteArrayLiteral("<DiPManifest><contentIDs>")).ok);
+            CHECK(!EaLibrary::parseInstallerData(QByteArray()).ok);
+        }
+
+        // INSTALLED, found through a library folder: the id is the FIRST contentID, the name the en_US title.
+        {
+            QVector<R> snap; snap << folder(bf1 + QStringLiteral("/"), bf1Xml);
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1);
+            CHECK(g.size() == 1 && g[0].id == QStringLiteral("1026023"));
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Battlefield 1"));
+            CHECK(g.size() == 1 && g[0].installDir == bf1);
+            CHECK(g.size() == 1 && g[0].available);
+        }
+        // INSTALLED, found through its Uninstall entry: InstallLocation with backslashes and a trailing one.
+        {
+            QString winStyle = sims;
+            winStyle.replace(QLatin1Char('/'), QLatin1Char('\\'));
+            winStyle += QLatin1Char('\\');
+            QVector<R> snap;
+            snap << unin(QStringLiteral("{9F2A7A2C-5D7F-4E0E-9E8E-8E5B1B7C0D11}"), QStringLiteral("The Sims™ 4"),
+                         winStyle, eaUn, simsXml);
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1 && g[0].id == QStringLiteral("DR:225064100") && g[0].installDir == sims);
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Les Sims 4"));   // the manifest title first
+            // The legacy Origin manifest form installs too.
+            QVector<R> old; old << folder(legacy, legacyXml);
+            const QVector<EaGame> o = EaLibrary::parseSnapshot(old);
+            CHECK(o.size() == 1 && o[0].id == QStringLiteral("1000184")
+                  && o[0].name == QStringLiteral("Dragon Age: Inquisition"));
+        }
+        // Install dir MISSING: a manifest that names a folder no longer on disk is not installed — and neither
+        // is a record with no dir at all.
+        {
+            QVector<R> snap;
+            snap << folder(gone, bf1Xml)
+                 << unin(QStringLiteral("{GONE}"), QStringLiteral("Gone"), gone, eaUn, bf1Xml)
+                 << unin(QStringLiteral("{NODIR}"), QStringLiteral("No Dir"), QString(), eaUn, bf1Xml)
+                 << folder(QStringLiteral("   "), bf1Xml);
+            CHECK(EaLibrary::parseSnapshot(snap).isEmpty());
+        }
+        // DISPLAY NAME missing: no manifest title falls back to the Uninstall DisplayName, then to the folder.
+        {
+            QVector<R> snap; snap << folder(noTitle, noTitleXml);
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Mass Effect Legendary Edition"));
+            // Whitespace titles and a whitespace DisplayName are no name either.
+            QVector<R> ws;
+            ws << unin(QStringLiteral("{ME}"), QStringLiteral("   "), noTitle, eaUn,
+                       dip({ QStringLiteral("1027133") }, { { QStringLiteral("en_US"), QStringLiteral("  ") } }));
+            const QVector<EaGame> g2 = EaLibrary::parseSnapshot(ws);
+            CHECK(g2.size() == 1 && g2[0].name == QStringLiteral("Mass Effect Legendary Edition"));
+            QVector<R> dn; dn << unin(QStringLiteral("{ME}"), QStringLiteral("Mass Effect™ Legendary Edition"),
+                                      noTitle, eaUn, noTitleXml);
+            const QVector<EaGame> g3 = EaLibrary::parseSnapshot(dn);
+            CHECK(g3.size() == 1 && g3[0].name == QStringLiteral("Mass Effect™ Legendary Edition"));
+        }
+        // NO launchable id: no manifest, an unparseable one, or one with no contentID — nothing to launch it by.
+        {
+            QVector<R> snap;
+            snap << folder(bf1, QByteArray())
+                 << folder(sims, QByteArrayLiteral("not xml <<<"))
+                 << folder(noTitle, dip({}, { { QStringLiteral("en_US"), QStringLiteral("No Ids") } }));
+            CHECK(EaLibrary::parseSnapshot(snap).isEmpty());
+        }
+        // Only an EA game's Uninstall entry counts: its UninstallString runs the EA installer's cleanup. A Steam
+        // entry, or the EA app's OWN entry, is not one — even pointing at a folder that holds a manifest.
+        {
+            CHECK(EaLibrary::isEaUninstallString(eaUn));
+            CHECK(EaLibrary::isEaUninstallString(
+                QStringLiteral("\"D:/Games/Apex/__Installer/Cleanup.exe\" UNINSTALL_GAME -autologging")));
+            CHECK(!EaLibrary::isEaUninstallString(QStringLiteral("\"C:/Program Files (x86)/Steam/steam.exe\" "
+                                                                 "steam://uninstall/1238810")));
+            CHECK(!EaLibrary::isEaUninstallString(QStringLiteral("MsiExec.exe /X{0DD7F3F6-0C4F-4A7B-8D5A-2A6D3B1C1E01}")));
+            CHECK(!EaLibrary::isEaUninstallString(QString()));
+            QVector<R> snap;
+            snap << unin(QStringLiteral("Steam App 1238810"), QStringLiteral("Battlefield V"), bf1,
+                         QStringLiteral("\"C:/Program Files (x86)/Steam/steam.exe\" steam://uninstall/1238810"), bf1Xml)
+                 << unin(QStringLiteral("{EA-APP}"), QStringLiteral("EA app"), eaApp,
+                         QStringLiteral("MsiExec.exe /X{0DD7F3F6-0C4F-4A7B-8D5A-2A6D3B1C1E01}"), QByteArray())
+                 << unin(QStringLiteral("{EA-APP-2}"), QStringLiteral("EA app"), eaApp, eaUn, QByteArray());
+            CHECK(EaLibrary::parseSnapshot(snap).isEmpty());
+        }
+        // DUPLICATE ids: the Uninstall entry and the library folder (and both registry views) describe one game —
+        // ONE entry. A duplicate whose first sighting is a stale dir takes the dir that exists.
+        {
+            QVector<R> snap;
+            snap << unin(QStringLiteral("{BF1}"), QStringLiteral("Battlefield™ 1"), gone, eaUn, bf1Xml)
+                 << unin(QStringLiteral("{BF1}"), QStringLiteral("Battlefield™ 1"), bf1, eaUn, bf1Xml)
+                 << folder(bf1, bf1Xml)
+                 << folder(sims, dip({ QStringLiteral(" 1026023 ") }, {}));   // same id, other folder
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1);
+            CHECK(g.size() == 1 && g[0].installDir == bf1 && g[0].name == QStringLiteral("Battlefield 1"));
+        }
+        // ODD ids: the id is pasted into a URI and a record key, so anything but a plain token is refused —
+        // never "cleaned". The first VALID contentID is the id; a manifest with none is dropped.
+        {
+            const QStringList bad = { QString(), QStringLiteral("   "), QStringLiteral("12 34"), QStringLiteral("1/2"),
+                                      QStringLiteral("a?b=1"), QStringLiteral("x&y=2"), QStringLiteral("1,2"),
+                                      QStringLiteral("%41"), QStringLiteral("-5"), QStringLiteral(".5"),
+                                      QStringLiteral("a#b"), QString::fromUtf8("\xEF\xBC\x91\xEF\xBC\x92"),
+                                      QString(65, QLatin1Char('7')) };   // full-width "１２"; 65 chars
+            for (const QString& b : bad) CHECK(!EaLibrary::isValidId(b));
+            for (const char* ok : { "1026023", "0", "DR:225064100", "Origin.OFR.50.0001452", "OFB-EAST:52017" })
+                CHECK(EaLibrary::isValidId(QString::fromLatin1(ok)));
+            CHECK(EaLibrary::isValidId(QString(64, QLatin1Char('7'))));
+            QVector<R> allBad; allBad << folder(bf1, dip(bad.mid(2, 6), { { QStringLiteral("en_US"), QStringLiteral("X") } }));
+            CHECK(EaLibrary::parseSnapshot(allBad).isEmpty());
+            QVector<R> mixed;
+            mixed << folder(bf1, dip({ QStringLiteral("a?b=1"), QStringLiteral("1026023") },
+                                     { { QStringLiteral("en_US"), QStringLiteral("Battlefield 1") } }));
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(mixed);
+            CHECK(g.size() == 1 && g[0].id == QStringLiteral("1026023"));
+        }
+        // Deterministic order: by name, case-insensitively, whatever order the records came in.
+        {
+            QVector<R> snap;
+            snap << folder(sims, simsXml) << folder(bf1, bf1Xml) << folder(legacy, legacyXml);
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 3 && g[0].name == QStringLiteral("Battlefield 1")
+                  && g[1].name == QStringLiteral("Dragon Age: Inquisition") && g[2].name == QStringLiteral("Les Sims 4"));
+        }
+
+        // The LAUNCH URI: origin2://game/launch?offerIds=<id>&autoDownload=1, nothing for an id refused.
+        CHECK(EaLibrary::launchUri(QStringLiteral("1026023"))
+              == QStringLiteral("origin2://game/launch?offerIds=1026023&autoDownload=1"));
+        CHECK(EaLibrary::launchUri(QStringLiteral("DR:225064100"))
+              == QStringLiteral("origin2://game/launch?offerIds=DR:225064100&autoDownload=1"));
+        CHECK(EaLibrary::launchUri(QStringLiteral("a&b=1")).isEmpty());
+        CHECK(EaLibrary::launchUri(QStringLiteral("1,2")).isEmpty());
+        CHECK(EaLibrary::launchUri(QString()).isEmpty());
+        // ...and the id a launch / Recent names, read back from its key or its recorded URI.
+        CHECK(EaLibrary::idFrom(QStringLiteral("ea:1026023"), QString()) == QStringLiteral("1026023"));
+        CHECK(EaLibrary::idFrom(QString(), QStringLiteral("origin2://game/launch?offerIds=1026023&autoDownload=1"))
+              == QStringLiteral("1026023"));
+        CHECK(EaLibrary::idFrom(QString(), QStringLiteral("origin2://game/launch?offerIds=1026023,1035052"))
+              == QStringLiteral("1026023"));
+        CHECK(EaLibrary::idFrom(QString(), QStringLiteral("origin2://game/launch?offerIds=DR%3A225064100"))
+              == QStringLiteral("DR:225064100"));
+        CHECK(EaLibrary::idFrom(QStringLiteral("ea:1026023"), QStringLiteral("origin2://game/launch?offerIds=1"))
+              == QStringLiteral("1026023"));                                               // the key wins
+        CHECK(EaLibrary::idFrom(QStringLiteral("ea:a b"), QString()).isEmpty());
+        CHECK(EaLibrary::idFrom(QString(), QStringLiteral("origin2://library/open")).isEmpty());
+        CHECK(EaLibrary::idFrom(QString(), QStringLiteral("origin2://game/download?offerId=1026023")).isEmpty());
+        CHECK(EaLibrary::idFrom(QStringLiteral("ubi:3539"), QString()).isEmpty());
+
+        // gatherSnapshot: every folder directly under a library root becomes a record, and each record's
+        // __Installer/installerdata.xml is read from disk. A missing root contributes nothing.
+        {
+            auto writeXml = [](const QString& dir, const QByteArray& xml) {
+                QDir().mkpath(dir + QStringLiteral("/__Installer"));
+                QFile f(dir + QStringLiteral("/__Installer/installerdata.xml"));
+                return f.open(QIODevice::WriteOnly) && f.write(xml) == xml.size();
+            };
+            CHECK(writeXml(bf1, bf1Xml) && writeXml(legacy, legacyXml));
+            QFile stray(base + QStringLiteral("/EA Games/readme.txt"));   // a FILE under the root: not a game
+            CHECK(stray.open(QIODevice::WriteOnly)); stray.close();
+            QVector<R> un;
+            un << unin(QStringLiteral("{DAI}"), QStringLiteral("Dragon Age™: Inquisition"), legacy, eaUn, QByteArray());
+            const QVector<R> snap = EaLibrary::gatherSnapshot(
+                un, { base + QStringLiteral("/EA Games"), base + QStringLiteral("/No Such Root") });
+            int folders = 0; bool bf1Read = false, simsEmpty = false, legacyRead = false;
+            for (const R& r : snap)
+            {
+                if (r.source == R::LibraryFolder) ++folders;
+                if (r.installDir == bf1 && r.installerData == bf1Xml) bf1Read = true;
+                if (r.installDir == sims && r.installerData.isEmpty()) simsEmpty = true;
+                if (r.source == R::Uninstall && r.installerData == legacyXml) legacyRead = true;
+            }
+            CHECK(snap.size() == 4);          // the uninstall record + three folders (the file is skipped)
+            CHECK(folders == 3);
+            CHECK(bf1Read && simsEmpty && legacyRead);
+            const QVector<EaGame> g = EaLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 2 && g[0].name == QStringLiteral("Battlefield 1")
+                  && g[1].name == QStringLiteral("Dragon Age: Inquisition"));
+
+            // The fixture JSON form (what the EB_UITEST seam reads) round-trips, and goes through the same gather.
+            QJsonObject u1; u1.insert(QStringLiteral("key"), QStringLiteral("{DAI}"));
+            u1.insert(QStringLiteral("DisplayName"), QString::fromUtf8("Dragon Age\xE2\x84\xA2: Inquisition"));
+            u1.insert(QStringLiteral("InstallLocation"), legacy);
+            u1.insert(QStringLiteral("UninstallString"), eaUn);
+            QJsonObject top;
+            top.insert(QStringLiteral("uninstall"), QJsonArray{ u1 });
+            top.insert(QStringLiteral("libraryRoots"), QJsonArray{ base + QStringLiteral("/EA Games") });
+            const QByteArray json = QJsonDocument(top).toJson();
+            const QVector<R> ju = EaLibrary::uninstallFromJson(json);
+            CHECK(ju.size() == 1 && ju[0].source == R::Uninstall && ju[0].installDir == legacy
+                  && ju[0].uninstallString == eaUn && ju[0].keyName == QStringLiteral("{DAI}"));
+            CHECK(EaLibrary::libraryRootsFromJson(json) == QStringList({ base + QStringLiteral("/EA Games") }));
+            CHECK(EaLibrary::uninstallFromJson(QByteArrayLiteral("not json")).isEmpty());
+            CHECK(EaLibrary::libraryRootsFromJson(QByteArrayLiteral("[1,2]")).isEmpty());
+
+            // The seam is honoured ONLY on the test channel: the fixture path alone changes nothing.
+            QFile fx(base + QStringLiteral("/ea-fixture.json"));
+            CHECK(fx.open(QIODevice::WriteOnly) && fx.write(json) == json.size());
+            fx.close();
+            const QByteArray hadUitest = qgetenv("EB_UITEST");
+            const bool uitestWasSet = qEnvironmentVariableIsSet("EB_UITEST");
+            qunsetenv("EB_UITEST");
+            qputenv("EB_UITEST_EA_FIXTURE", fx.fileName().toUtf8());
+            bool fixtureLeaked = false;
+            for (const EaGame& x : EaLibrary::installedGames())
+                if (x.installDir == bf1 || x.installDir == legacy) fixtureLeaked = true;
+            CHECK(!fixtureLeaked);
+            qputenv("EB_UITEST", "1");
+            const QVector<EaGame> seam = EaLibrary::installedGames();
+            CHECK(seam.size() == 2 && seam[0].id == QStringLiteral("1026023") && seam[1].id == QStringLiteral("1000184"));
+            CHECK(EaLibrary::isAvailable());
+            qunsetenv("EB_UITEST_EA_FIXTURE");
+            if (uitestWasSet) qputenv("EB_UITEST", hadUitest); else qunsetenv("EB_UITEST");
+        }
+    }
+
+    // ---- EA: the live reader is Windows-only ----------------------------------------------------------------
+    // Off Windows there is no EA app: the reader is compiled (CI is GCC on Linux) and returns nothing.
+    {
+#ifdef Q_OS_WIN
+        CHECK(EaLibrary::hasLiveReader());
+#else
+        CHECK(!EaLibrary::hasLiveReader());
+        CHECK(EaLibrary::readLiveSnapshot().isEmpty());
+        CHECK(EaLibrary::installedGames().isEmpty());
+        CHECK(!EaLibrary::isAvailable());
+#endif
+    }
+
+    // ---- EA in the ONE PC Games folder: a source, merged with the same game's other copies ------------------
+    {
+        QList<SteamGame> steam;
+        { SteamGame g; g.appid = QStringLiteral("1238840"); g.name = QStringLiteral("Battlefield 1"); steam << g; }
+        QList<EaGame> ea;
+        { EaGame g; g.id = QStringLiteral("1026023"); g.name = QString::fromUtf8("Battlefield\xE2\x84\xA2 1");
+          g.installDir = QStringLiteral("C:/Program Files/EA Games/Battlefield 1"); ea << g; }
+        { EaGame g; g.id = QStringLiteral("DR:225064100"); g.name = QStringLiteral("The Sims 4");
+          g.installDir = QStringLiteral("C:/Program Files/EA Games/The Sims 4"); ea << g; }
+        { EaGame g; g.id = QStringLiteral("1000184"); g.name = QStringLiteral("Dragon Age: Inquisition");
+          g.available = false; ea << g; }                              // shown from the #62 last-good cache
+        const auto noPoster = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog c = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), noPoster,
+                                                      {}, {}, {}, ea);
+        CHECK(c.items.size() == 3);   // Battlefield 1 merged into one, plus The Sims 4 and Dragon Age
+
+        // THE MERGE: installed on Steam AND through the EA app is ONE entry with two sources.
+        const MediaItem* bf = find(c, pcgame::itemId(QStringLiteral("Battlefield 1")));
+        CHECK(bf != nullptr);
+        CHECK(bf && bf->mime == QStringLiteral("pcgame") && bf->pcSources.size() == 2);
+        const pcgame::PcGameSource* eaSrc = nullptr;
+        const pcgame::PcGameSource* steamSrc = nullptr;
+        if (bf)
+            for (const pcgame::PcGameSource& s : bf->pcSources)
+            {
+                if (s.launcher == QStringLiteral("ea"))    eaSrc = &s;
+                if (s.launcher == QStringLiteral("steam")) steamSrc = &s;
+            }
+        CHECK(eaSrc && steamSrc);
+        CHECK(eaSrc && eaSrc->kind == pcgame::PcGameSource::LauncherInstalled);
+        CHECK(eaSrc && eaSrc->launchId == QStringLiteral("1026023"));
+        CHECK(eaSrc && eaSrc->launchUrl == QStringLiteral("origin2://game/launch?offerIds=1026023&autoDownload=1"));
+        CHECK(eaSrc && eaSrc->launchUrl == EaLibrary::launchUri(QStringLiteral("1026023")));   // inline == canonical
+        CHECK(eaSrc && eaSrc->label == QStringLiteral("EA app"));
+        CHECK(eaSrc && eaSrc->ready);
+        CHECK(eaSrc && eaSrc->exePath.isEmpty());           // a URI launch, never an exe
+        // Steam's spelling outranks the EA manifest's ™ one for the tile title; EA's own name rides its source.
+        CHECK(bf && bf->title == QStringLiteral("Battlefield 1"));
+        const QString bfTm = QString::fromUtf8("Battlefield\xE2\x84\xA2 1");
+        CHECK(eaSrc && eaSrc->sourceName == bfTm);
+        // Two ready copies: Play must ASK (the source picker), never guess.
+        CHECK(bf && pcgame::pickAutoSource(bf->pcSources) == -1);
+        CHECK(browse::pcLauncherLabel(QStringLiteral("ea")) == QStringLiteral("EA app"));
+
+        // An EA-only game: one source, auto-picked; its id with a colon survives into the URI untouched.
+        const MediaItem* s4 = find(c, pcgame::itemId(QStringLiteral("The Sims 4")));
+        CHECK(s4 && s4->pcSources.size() == 1 && pcgame::pickAutoSource(s4->pcSources) == 0);
+        CHECK(s4 && s4->pcSources.size() == 1
+              && s4->pcSources[0].launchUrl == EaLibrary::launchUri(QStringLiteral("DR:225064100")));
+        // Shown from cache (#62): not ready, badged, never auto-picked.
+        const MediaItem* dai = find(c, pcgame::itemId(QStringLiteral("Dragon Age: Inquisition")));
+        CHECK(dai && dai->pcSources.size() == 1 && !dai->pcSources[0].ready && !dai->pcSources[0].available);
+        CHECK(dai && dai->subtitle == QStringLiteral("Unavailable?"));
+
+        // The launcher filter offers EA when it has games (after Ubisoft), and "what I have on EA" narrows to them.
+        QList<UbisoftGame> ubi;
+        { UbisoftGame g; g.id = QStringLiteral("4311"); g.name = QStringLiteral("Anno 1800"); ubi << g; }
+        CHECK(browse::pcLaunchersPresent(steam, {}, {}, {}, {}, {}, ubi, ea)
+              == QStringList({ QStringLiteral("steam"), QStringLiteral("ubisoft"), QStringLiteral("ea") }));
+        CHECK(!browse::pcLaunchersPresent(steam, {}, {}, {}, {}, {}, ubi).contains(QStringLiteral("ea")));
+        const MediaCatalog only = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QStringLiteral("ea"),
+                                                         noPoster, {}, {}, ubi, ea);
+        CHECK(only.items.size() == 3);
+        const MediaCatalog steamOnly = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(),
+                                                              QStringLiteral("steam"), noPoster, {}, {}, ubi, ea);
+        CHECK(steamOnly.items.size() == 1);
+        // The pre-merge id a launch through the EA source banks its records under.
+        CHECK(eaSrc && pcgame::legacyLaunchId(*eaSrc) == QStringLiteral("ea:1026023"));
+    }
+
+    // ---- EA Recents: the kind that relaunches it ------------------------------------------------------------
+    {
+        using RL = RecentStore::Relaunch;
+        CHECK(RecentStore::relaunchFor(QStringLiteral("eagame")) == RL::EaGame);
+        CHECK(browse::iconTypeForKind(QStringLiteral("eagame")) == QStringLiteral("game"));
+        CHECK(browse::isGameRecentKind(QStringLiteral("eagame")));
+        CHECK(!browse::isGameRecentKind(QStringLiteral("ea")));
+        RecentItem r; r.path = QStringLiteral("origin2://game/launch?offerIds=1026023&autoDownload=1");
+        r.title = QStringLiteral("BF1"); r.kind = QStringLiteral("eagame"); r.key = QStringLiteral("ea:1026023");
+        const MediaCatalog cat = browse::recentsCatalog({ r }, QStringLiteral("game"));
+        CHECK(cat.items.size() == 1 && cat.items[0].mime == QStringLiteral("eagame"));
+        // A playlist entry for it relaunches through the same mime (a URI launch: nothing rides in the path).
+        Playlist p; p.name = QStringLiteral("pl");
+        PlaylistEntry e; e.itemId = QStringLiteral("ea:1026023"); e.title = QStringLiteral("BF1"); p.items << e;
+        const MediaCatalog pl = browse::playlistItemsCatalog(p);
+        CHECK(pl.items.size() == 1 && pl.items[0].mime == QStringLiteral("eagame") && pl.items[0].url.isEmpty());
     }
 
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }

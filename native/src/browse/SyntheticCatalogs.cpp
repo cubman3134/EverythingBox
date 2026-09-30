@@ -22,7 +22,8 @@ QString iconTypeForKind(const QString& kind)
         || kind == QStringLiteral("steamgame") || kind == QStringLiteral("epicgame")
         || kind == QStringLiteral("goggame")
         || kind == QStringLiteral("battlenetgame")
-        || kind == QStringLiteral("ubisoftgame")) return QStringLiteral("game");
+        || kind == QStringLiteral("ubisoftgame")
+        || kind == QStringLiteral("eagame")) return QStringLiteral("game");
     return QString();
 }
 
@@ -31,7 +32,7 @@ bool isGameRecentKind(const QString& kind)
     return kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")
         || kind == QStringLiteral("steamgame") || kind == QStringLiteral("epicgame")
         || kind == QStringLiteral("goggame") || kind == QStringLiteral("battlenetgame")
-        || kind == QStringLiteral("ubisoftgame");
+        || kind == QStringLiteral("ubisoftgame") || kind == QStringLiteral("eagame");
 }
 
 MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker,
@@ -279,11 +280,13 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
         //                   path, and a coded game's url was empty at add-time so the emptiness rides back too
         //                   (an empty url is exactly what the battlenet:// URI launch expects).
         //   ubi:          — no url; the launch builds uplay://launch/<id>/0 from the id (the epic: shape).
+        //   ea:           — no url; the launch builds the origin2:// URI from the content id (the ubi: shape).
         if (e.itemId.startsWith(QStringLiteral("steam:")))     it.mime = QStringLiteral("steamgame"); // launch natively
         else if (e.itemId.startsWith(QStringLiteral("epic:"))) it.mime = QStringLiteral("epicgame");  // launch via URI
         else if (e.itemId.startsWith(QStringLiteral("gog:")))  { it.mime = QStringLiteral("goggame"); it.url = e.path; } // exe rides in path
         else if (e.itemId.startsWith(QStringLiteral("bnet:"))) { it.mime = QStringLiteral("battlenetgame"); it.url = e.path; } // exe (code-less) or empty (coded)
         else if (e.itemId.startsWith(QStringLiteral("ubi:")))  it.mime = QStringLiteral("ubisoftgame"); // launch via URI
+        else if (e.itemId.startsWith(QStringLiteral("ea:")))   it.mime = QStringLiteral("eagame");      // launch via URI
         else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);
     }
@@ -611,11 +614,11 @@ MediaCatalog liveTvChannelsCatalog(const QString& sourceName, const QVector<M3uE
 
 // ---- The merged PC Games folder -------------------------------------------------------------------------
 //
-// A STANDING RULE for everything below: no EpicLibrary::, BattleNetLibrary:: or
-// UbisoftLibrary:: call may appear below. probe_browse / probe_locallib / probe_perf compile this file
+// A STANDING RULE for everything below: no EpicLibrary::, BattleNetLibrary::, UbisoftLibrary:: or
+// EaLibrary:: call may appear below. probe_browse / probe_locallib / probe_perf compile this file
 // WITHOUT those .cpp files, so a call here is a CI-only link break — this repo has been bitten by exactly
 // that twice. The protocol URIs are therefore built INLINE, mirroring EpicLibrary::launchUrl,
-// BattleNetLibrary::launchUri and UbisoftLibrary::launchUri; probe_importers, which does link all three,
+// BattleNetLibrary::launchUri, UbisoftLibrary::launchUri and EaLibrary::launchUri; probe_importers, which does link all four,
 // asserts the inline forms still equal the canonical helpers, so the copies cannot drift silently. SteamLibrary IS linked into every target that
 // compiles this file, so its helpers are called normally.
 namespace {
@@ -640,7 +643,7 @@ bool isLauncherSource(const pcgame::PcGameSource& s)
 // Downloaded source carrying launcher = "steam" ranks last, exactly like one carrying nothing.
 int pcTitleRank(const pcgame::PcGameSource& s)
 {
-    if (!isLauncherSource(s))                       return 5;   // a downloaded / addon copy: a release name
+    if (!isLauncherSource(s))                       return 6;   // a downloaded / addon copy: a release name
     if (s.launcher == QStringLiteral("steam"))      return 0;
     if (s.launcher == QStringLiteral("epic"))       return 1;
     if (s.launcher == QStringLiteral("gog"))        return 2;
@@ -648,7 +651,9 @@ int pcTitleRank(const pcgame::PcGameSource& s)
     // Ubisoft (#60) ranks last among the launchers: its DisplayName is a curated product name, but it carries
     // the ® / ™ marks the other stores leave off, so any other launcher's spelling reads better on the tile.
     if (s.launcher == QStringLiteral("ubisoft"))    return 4;
-    return 5;   // a launcher copy from a store we have no precedence for
+    // The EA app (#60 increment 2) after it, for the same reason: its manifest titles carry the ™ mark too.
+    if (s.launcher == QStringLiteral("ea"))         return 5;
+    return 6;   // a launcher copy from a store we have no precedence for
 }
 
 // One game while it is being assembled: its merged id, the best title seen so far, every title that
@@ -676,7 +681,8 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
                             const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster,
                             const QList<SteamGame>& steamOwned,
                             const QList<EpicGame>& epicOwned,
-                            const QList<UbisoftGame>& ubisoft)
+                            const QList<UbisoftGame>& ubisoft,
+                            const QList<EaGame>& ea)
 {
     const QString q = query.trimmed();
     MediaCatalog cat;
@@ -856,6 +862,21 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.ready     = g.available && !g.id.isEmpty();
         add(g.name, pcTitleRank(s), s);
     }
+    // The EA app (#60 increment 2): the Ubisoft shape — origin2://game/launch?offerIds=<content id>&autoDownload=1
+    // handed to the OS. The parser has already refused any content id that is not a plain token, so the URI
+    // below is exactly EaLibrary::launchUri (inline for the link-break rule above; probe_importers pins it).
+    for (const EaGame& g : ea)
+    {
+        pcgame::PcGameSource s;
+        s.kind      = pcgame::PcGameSource::LauncherInstalled;
+        s.launcher  = QStringLiteral("ea");
+        s.launchId  = g.id;
+        s.launchUrl = QStringLiteral("origin2://game/launch?offerIds=") + g.id + QStringLiteral("&autoDownload=1");
+        s.label     = QObject::tr("EA app");
+        s.available = g.available;   // #62: unavailable when shown from cache (source unreadable this scan)
+        s.ready     = g.available && !g.id.isEmpty();
+        add(g.name, pcTitleRank(s), s);
+    }
     // Already-built sources (a downloaded copy from PcGameStore). Its label is its title AND its picker row;
     // the label is kept verbatim rather than rewritten — it is the caller's text, and the release name is
     // exactly what tells two downloaded copies apart in the picker.
@@ -1009,6 +1030,7 @@ QString pcLauncherLabel(const QString& launcher)
     if (launcher == QStringLiteral("gog"))       return QObject::tr("GOG");
     if (launcher == QStringLiteral("battlenet")) return QObject::tr("Battle.net");
     if (launcher == QStringLiteral("ubisoft"))   return QObject::tr("Ubisoft Connect");
+    if (launcher == QStringLiteral("ea"))        return QObject::tr("EA app");
     // The "Owned, not installed" group (issue #62) rides the same menu, so it needs a human row here too.
     if (launcher == QLatin1String(kPcFilterOwnedNotInstalled)) return QObject::tr("Owned, not installed");
     return QString();   // not a launcher this folder can filter on
@@ -1017,7 +1039,8 @@ QString pcLauncherLabel(const QString& launcher)
 QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
                                const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
                                const QList<SteamGame>& steamOwned, const QList<EpicGame>& epicOwned,
-                               const QList<UbisoftGame>& ubisoft)
+                               const QList<UbisoftGame>& ubisoft,
+                               const QList<EaGame>& ea)
 {
     // The SAME fixed order the display-title precedence uses (pcTitleRank), for the same reason: a menu
     // whose rows reshuffle when a launcher scan comes back in a different order is a menu whose muscle
@@ -1031,6 +1054,7 @@ QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGa
     if (!gog.isEmpty())                            out << QStringLiteral("gog");
     if (!bnet.isEmpty())                           out << QStringLiteral("battlenet");
     if (!ubisoft.isEmpty())                        out << QStringLiteral("ubisoft");
+    if (!ea.isEmpty())                             out << QStringLiteral("ea");
     // The "Owned, not installed" group (issue #62), offered ONLY when at least one owned game is not
     // installed — otherwise the filter would select an empty folder. An id that is both owned AND installed
     // is not owned-not-installed, so it does not qualify the row. Placed after the launchers so the launcher

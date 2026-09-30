@@ -500,6 +500,42 @@ int main(int argc, char** argv)
         CHECK(pickAutoSource({ steamOwned, ubi }) == 1);
     }
 
+    // ---- 7e. The EA app is a store like the others (issue #60, increment 2) -----------------------------
+    // Its source keys on the game's content id, so a launch banks under "ea:<content id>" - and the remap has
+    // to carry exactly that key onto the merged tile, or an EA launch's play time and marks sit under an id
+    // nothing reads.
+    {
+        PcGameSource ea = src(PcGameSource::LauncherInstalled, QStringLiteral("ea"), true);
+        ea.launchId   = QStringLiteral("1026023");
+        ea.sourceName = QStringLiteral("Battlefield 1");
+        CHECK(legacyLaunchId(ea) == QStringLiteral("ea:1026023"));
+        // The launcher's own id wins over its name, exactly like the other stores.
+        PcGameSource nameOnly = ea; nameOnly.launchId.clear();
+        CHECK(legacyLaunchId(nameOnly) == QStringLiteral("ea:Battlefield 1"));
+        // Nothing to key on at all: no pre-merge id (rule 1), never "ea:".
+        PcGameSource bare = ea; bare.launchId.clear(); bare.sourceName.clear();
+        CHECK(legacyLaunchId(bare).isEmpty());
+        // A content id carrying a colon keys verbatim.
+        PcGameSource dr = ea; dr.launchId = QStringLiteral("DR:225064100");
+        CHECK(legacyLaunchId(dr) == QStringLiteral("ea:DR:225064100"));
+
+        // The remap: a Steam copy and an EA copy of one game land on ONE merged id.
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:1238840"), QStringLiteral("Battlefield 1"))
+            << qMakePair(QStringLiteral("ea:1026023"), QString::fromUtf8("Battlefield\xE2\x84\xA2 1"));
+        const QHash<QString, QString> t = remapTable(lib);
+        CHECK(!t.value(QStringLiteral("ea:1026023")).isEmpty());
+        CHECK(t.value(QStringLiteral("ea:1026023")) == t.value(QStringLiteral("steam:1238840")));
+        CHECK(t.value(QStringLiteral("ea:1026023")) == itemId(QStringLiteral("Battlefield 1")));
+
+        // Two READY copies (Steam and EA): Play asks. One ready EA copy beside an owned-not-installed Steam
+        // one: Play takes the EA copy and never the download.
+        const PcGameSource steamReady = src(PcGameSource::LauncherInstalled, QStringLiteral("steam"), true);
+        CHECK(pickAutoSource({ steamReady, ea }) == -1);
+        const PcGameSource steamOwned = src(PcGameSource::LauncherOwned, QStringLiteral("steam"), false);
+        CHECK(pickAutoSource({ steamOwned, ea }) == 1);
+    }
+
     // ---- 7c. pcgame::itemId is the ONE id builder, and it is TITLE-ONLY on purpose ------------------
     // The remap used to take a title->igdb map and prefer the id it supplied, while the catalog keyed on
     // the title alone; a populated map would have moved every record onto an id no lookup ever performs.
