@@ -521,6 +521,7 @@ QString pcgame::legacyLaunchId(const PcGameSource& s)
     if (s.launcher == QStringLiteral("epic"))      return QStringLiteral("epic:")  + key;
     if (s.launcher == QStringLiteral("gog"))       return QStringLiteral("gog:")   + key;
     if (s.launcher == QStringLiteral("battlenet")) return QStringLiteral("bnet:")  + key;
+    if (s.launcher == QStringLiteral("ubisoft"))   return QStringLiteral("ubi:")   + key;   // #60
     return QString();   // a launcher with no id scheme here: no pre-merge id to claim (rule 1)
 }
 

@@ -467,6 +467,39 @@ int main(int argc, char** argv)
         // are the same strings for the same library. It is the only probe that can build both sides.)
     }
 
+    // ---- 7u. Ubisoft Connect is a store like the others (issue #60) ---------------------------------
+    // Its source has a launcher id of its own (the numeric install id), so the pre-merge id a launch banks
+    // under is "ubi:<id>" - and the remap has to carry exactly that key onto the merged tile, or the play
+    // time and marks a Ubisoft launch accrues sit under an id nothing reads.
+    {
+        PcGameSource ubi = src(PcGameSource::LauncherInstalled, QStringLiteral("ubisoft"), true);
+        ubi.launchId   = QStringLiteral("3539");
+        ubi.sourceName = QStringLiteral("Assassin's Creed Origins");
+        CHECK(legacyLaunchId(ubi) == QStringLiteral("ubi:3539"));
+        // The launcher's own id wins over its name, exactly like steam/epic/gog.
+        PcGameSource nameOnly = ubi; nameOnly.launchId.clear();
+        CHECK(legacyLaunchId(nameOnly) == QStringLiteral("ubi:Assassin's Creed Origins"));
+        // Nothing to key on at all: no pre-merge id (rule 1), never "ubi:".
+        PcGameSource bare = ubi; bare.launchId.clear(); bare.sourceName.clear();
+        CHECK(legacyLaunchId(bare).isEmpty());
+
+        // The remap: a Steam copy and a Ubisoft copy of one game land on ONE merged id.
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:582160"), QStringLiteral("Assassin's Creed Origins"))
+            << qMakePair(QStringLiteral("ubi:3539"), QString::fromUtf8("Assassin's Creed\xC2\xAE Origins"));
+        const QHash<QString, QString> t = remapTable(lib);
+        CHECK(!t.value(QStringLiteral("ubi:3539")).isEmpty());
+        CHECK(t.value(QStringLiteral("ubi:3539")) == t.value(QStringLiteral("steam:582160")));
+        CHECK(t.value(QStringLiteral("ubi:3539")) == itemId(QStringLiteral("Assassin's Creed Origins")));
+
+        // Two READY copies (Steam and Ubisoft): Play asks. One ready Ubisoft copy beside an owned-not-installed
+        // Steam one: Play takes the Ubisoft copy and never the download.
+        const PcGameSource steamReady = src(PcGameSource::LauncherInstalled, QStringLiteral("steam"), true);
+        CHECK(pickAutoSource({ steamReady, ubi }) == -1);
+        const PcGameSource steamOwned = src(PcGameSource::LauncherOwned, QStringLiteral("steam"), false);
+        CHECK(pickAutoSource({ steamOwned, ubi }) == 1);
+    }
+
     // ---- 7c. pcgame::itemId is the ONE id builder, and it is TITLE-ONLY on purpose ------------------
     // The remap used to take a title->igdb map and prefer the id it supplied, while the catalog keyed on
     // the title alone; a populated map would have moved every record onto an id no lookup ever performs.

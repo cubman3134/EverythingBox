@@ -525,6 +525,11 @@ private:
     // recorded path, else notify instead of failing silently. A coded game re-launches from its battlenet:// URI.
     void relaunchBattleNetGame(const QString& id, const QString& title, const QString& thumb,
                                const QString& recordedPath);
+    // Launch a Ubisoft Connect game (#60) by uplay://launch/<id>/0 — the Epic shape, fire-and-forget through
+    // handOffStoreLaunch — and record its "ubisoftgame" Recent under "ubi:<id>". The id comes from `key`
+    // ("ubi:<id>") when it has one, else from `uri`; a tile, a playlist row and a Recent all come through here.
+    // Defined in MainWindowLaunch.cpp.
+    void launchUbisoftGame(const QString& key, const QString& uri, const QString& title, const QString& thumb);
     // (The full-screen emulator / external-emulator play-time tracking lives in GameLauncher now. PC games are
     // still timed separately in launchPcExe, off their own process handle.)
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,

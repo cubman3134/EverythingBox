@@ -241,8 +241,8 @@ namespace pcgame
     {
         enum Kind { LauncherInstalled, LauncherOwned, Downloaded, AddonAvailable };
         Kind    kind = LauncherInstalled;
-        QString launcher;     // "steam" | "epic" | "gog" | "battlenet"; empty for an addon source
-        QString launchId;     // appid / appName / gog id / battle.net code
+        QString launcher;     // "steam" | "epic" | "gog" | "battlenet" | "ubisoft"; empty for an addon source
+        QString launchId;     // appid / appName / gog id / battle.net code / ubisoft install id
         QString exePath;      // when the launch is a direct exe
         QString launchUrl;    // when the launch is a protocol URL
         QString addonItemId;  // Downloaded / AddonAvailable
@@ -263,7 +263,7 @@ namespace pcgame
 
     // The PRE-MERGE, per-launcher id a launch through this source banks its Recent, play time and marks
     // under — i.e. the id the remap migrates FROM ("steam:<appid>", "epic:<appName>", "gog:<id>",
-    // "bnet:<code>", and for a code-less Battle.net title "bnet:<the launcher's own name>").
+    // "bnet:<code>", "ubi:<install id>", and for a code-less Battle.net title "bnet:<the launcher's own name>").
     //
     // It exists because that last case had two independent constructions. The launch site minted
     // "bnet:" + the MERGED DISPLAY TITLE, while the remap's candidate is built from Battle.net's own name;

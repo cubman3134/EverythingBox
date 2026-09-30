@@ -195,6 +195,7 @@ DownloadLeafArm downloadLeafArmFor(const MediaItem& it, TrackAddon addon)
     // Can't pull as a single file: a store-launcher game, or a page-based chapter.
     if (it.mime == QLatin1String("steamgame") || it.mime == QLatin1String("epicgame")
         || it.mime == QLatin1String("goggame") || it.mime == QLatin1String("battlenetgame")
+        || it.mime == QLatin1String("ubisoftgame")
         || isReadableChapterType(it.type))
         return DownloadLeafArm::None;
     // A script add-on's document or game: searched for on the file provider by title.

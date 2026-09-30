@@ -25,6 +25,9 @@
 //     code-less one carries its exe ⇒ launchPcExe), plus the in-folder query scoping and the empty case.
 //     (These were four per-launcher builders until the four folders became one; the mappings they pinned are
 //     the same, restated on the builder that now performs them.)
+//   * UbisoftLibrary (#60) - the pure registry-snapshot parser (installed / dir missing / DisplayName fallback /
+//     duplicate ids / odd ids), the uplay://launch/<id>/0 URL, the fixture JSON and its EB_UITEST-only seam, the
+//     Windows-only live reader, and Ubisoft as a SOURCE in the merged PC Games folder plus its Recents kind.
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, but the #224 block
@@ -35,6 +38,7 @@
 #include "EpicLibrary.h"
 #include "GogLibrary.h"
 #include "BattleNetLibrary.h"
+#include "UbisoftLibrary.h"
 #include "RecentStore.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -44,6 +48,10 @@
 
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QFile>
 #include <QSettings>
 #include <cstdio>
@@ -923,6 +931,286 @@ int main(int argc, char** argv)
         // A positional {appid, name} still builds, with no install folder.
         const SteamGame owned{ QStringLiteral("620"), QStringLiteral("Portal 2") };
         CHECK(owned.installDir.isEmpty() && owned.available);
+    }
+
+    // ---- Ubisoft Connect (issue #60, increment 1): the pure snapshot parser ---------------------------------
+    // The registry is fed in as plain records, so every rule is pinned here with no Ubisoft client installed.
+    // Install dirs are REAL temp folders because "installed" means the folder exists; the one that must not
+    // exist is a path under the temp root that is never created.
+    {
+        using R = UbisoftRegRecord;
+        QTemporaryDir root;
+        CHECK(root.isValid());
+        const QString base = root.path();
+        const QString originsDir = base + QStringLiteral("/games/Assassin's Creed Origins");
+        const QString anno       = base + QStringLiteral("/games/Anno 1800");
+        const QString fallback   = base + QStringLiteral("/games/Far Cry 5");
+        CHECK(QDir().mkpath(originsDir) && QDir().mkpath(anno) && QDir().mkpath(fallback));
+        const QString gone = base + QStringLiteral("/games/Uninstalled Long Ago");   // never created
+
+        auto inst = [](const QString& key, const QString& dir) {
+            R r; r.source = R::Installs; r.keyName = key; r.installDir = dir; return r; };
+        auto unin = [](const QString& key, const QString& name, const QString& loc) {
+            R r; r.source = R::Uninstall; r.keyName = key; r.displayName = name; r.installLocation = loc; return r; };
+
+        // Installed: InstallDir exists, DisplayName from the uninstall key. Ubisoft writes FORWARD slashes and a
+        // trailing slash; the parser keeps forward slashes and drops the trailing one.
+        {
+            QVector<R> snap;
+            snap << inst(QStringLiteral("3539"), originsDir + QStringLiteral("/"))
+                 << unin(QStringLiteral("Uplay Install 3539"), QStringLiteral("Assassin's Creed® Origins"),
+                         QString());
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1);
+            CHECK(g.size() == 1 && g[0].id == QStringLiteral("3539"));
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Assassin's Creed® Origins"));
+            CHECK(g.size() == 1 && g[0].installDir == originsDir);
+            CHECK(g.size() == 1 && g[0].available);
+        }
+        // Install dir MISSING: an InstallDir that does not exist on disk is not installed — and neither is an
+        // id with no dir at all (an Installs row with an empty InstallDir, an uninstall key with no location).
+        {
+            QVector<R> snap;
+            snap << inst(QStringLiteral("720"), gone)
+                 << unin(QStringLiteral("Uplay Install 720"), QStringLiteral("Gone Game"), gone)
+                 << inst(QStringLiteral("721"), QString())
+                 << unin(QStringLiteral("Uplay Install 722"), QStringLiteral("No Dir Anywhere"), QString());
+            CHECK(UbisoftLibrary::parseSnapshot(snap).isEmpty());
+        }
+        // DisplayName MISSING: the name falls back to the install folder's own name (Playnite's rule).
+        {
+            QVector<R> snap;
+            snap << inst(QStringLiteral("4311"), anno + QStringLiteral("/"));
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Anno 1800"));
+            // A whitespace-only DisplayName is no name either.
+            snap << unin(QStringLiteral("Uplay Install 4311"), QStringLiteral("   "), QString());
+            const QVector<UbisoftGame> g2 = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g2.size() == 1 && g2[0].name == QStringLiteral("Anno 1800"));
+        }
+        // InstallLocation is the FALLBACK, used only when InstallDir is empty — backslashes normalised.
+        {
+            QString winStyle = fallback;
+            winStyle.replace(QLatin1Char('/'), QLatin1Char('\\'));
+            winStyle += QLatin1Char('\\');
+            QVector<R> snap;
+            snap << inst(QStringLiteral("856"), QString())
+                 << unin(QStringLiteral("Uplay Install 856"), QStringLiteral("Far Cry® 5"), winStyle);
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1 && g[0].installDir == fallback && g[0].name == QStringLiteral("Far Cry® 5"));
+            // An uninstall-only id (no Installs row) with a real location is installed too.
+            QVector<R> only; only << unin(QStringLiteral("Uplay Install 856"), QStringLiteral("Far Cry® 5"), fallback);
+            CHECK(UbisoftLibrary::parseSnapshot(only).size() == 1);
+            // …but InstallLocation does NOT override a non-empty InstallDir: a stale InstallDir is not installed.
+            QVector<R> stale;
+            stale << inst(QStringLiteral("857"), gone)
+                  << unin(QStringLiteral("Uplay Install 857"), QStringLiteral("Stale"), fallback);
+            CHECK(UbisoftLibrary::parseSnapshot(stale).isEmpty());
+        }
+        // DUPLICATE ids: both registry views (and both hives) describe one game — ONE entry, first non-empty
+        // field wins, and whitespace around a key name does not make a second game.
+        {
+            QVector<R> snap;
+            snap << inst(QStringLiteral("3539"), originsDir)
+                 << inst(QStringLiteral(" 3539 "), originsDir)
+                 << unin(QStringLiteral("Uplay Install 3539"), QString(), QString())
+                 << unin(QStringLiteral("Uplay Install 3539"), QStringLiteral("Assassin's Creed® Origins"), QString())
+                 << unin(QStringLiteral("uplay install 3539"), QStringLiteral("Late Duplicate Name"), QString());
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 1);
+            CHECK(g.size() == 1 && g[0].name == QStringLiteral("Assassin's Creed® Origins"));
+        }
+        // ODD ids: an id is pasted into a URL and a record key, so anything but decimal digits is refused —
+        // never "cleaned". A non-Ubisoft uninstall key is not ours at all.
+        {
+            QVector<R> snap;
+            const QStringList bad = { QString(), QStringLiteral("   "), QStringLiteral("abc"),
+                                      QStringLiteral("12/34"), QStringLiteral("12 34"), QStringLiteral("-5"),
+                                      QStringLiteral("5?x=1"), QString::fromUtf8("\xEF\xBC\x91\xEF\xBC\x92"),
+                                      QStringLiteral("12345678901") };   // full-width "１２"; eleven digits
+            for (const QString& b : bad) snap << inst(b, anno);
+            snap << unin(QStringLiteral("Uplay Install"), QStringLiteral("No Id"), anno)
+                 << unin(QStringLiteral("Uplay Install x9"), QStringLiteral("Bad Id"), anno)
+                 << unin(QStringLiteral("Steam App 4311"), QStringLiteral("Not Ubisoft"), anno)
+                 << unin(QStringLiteral("Uplay"), QStringLiteral("Ubisoft Connect"), anno);   // the CLIENT
+            CHECK(UbisoftLibrary::parseSnapshot(snap).isEmpty());
+            CHECK(!UbisoftLibrary::isValidId(QStringLiteral("abc")));
+            CHECK(!UbisoftLibrary::isValidId(QString()));
+            CHECK(UbisoftLibrary::isValidId(QStringLiteral("0")));
+            CHECK(UbisoftLibrary::isValidId(QStringLiteral("1234567890")));
+        }
+        // Deterministic order: by name, case-insensitively, whatever order the registry enumerated.
+        {
+            QVector<R> snap;
+            snap << inst(QStringLiteral("4311"), anno) << inst(QStringLiteral("3539"), originsDir)
+                 << inst(QStringLiteral("856"), fallback);
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 3 && g[0].name == QStringLiteral("Anno 1800")
+                  && g[1].name == QStringLiteral("Assassin's Creed Origins") && g[2].name == QStringLiteral("Far Cry 5"));
+        }
+
+        // The LAUNCH URL: uplay://launch/<id>/0, and nothing at all for an id isValidId refuses.
+        CHECK(UbisoftLibrary::launchUri(QStringLiteral("3539")) == QStringLiteral("uplay://launch/3539/0"));
+        CHECK(UbisoftLibrary::launchUri(QStringLiteral("abc")).isEmpty());
+        CHECK(UbisoftLibrary::launchUri(QStringLiteral("12/34")).isEmpty());
+        CHECK(UbisoftLibrary::launchUri(QString()).isEmpty());
+        // ...and the id a launch / Recent names, read back from its key or its recorded URI.
+        CHECK(UbisoftLibrary::idFrom(QStringLiteral("ubi:3539"), QString()) == QStringLiteral("3539"));
+        CHECK(UbisoftLibrary::idFrom(QString(), QStringLiteral("uplay://launch/3539/0")) == QStringLiteral("3539"));
+        CHECK(UbisoftLibrary::idFrom(QStringLiteral("ubi:3539"), QStringLiteral("uplay://launch/1/0"))
+              == QStringLiteral("3539"));                                                  // the key wins
+        CHECK(UbisoftLibrary::idFrom(QStringLiteral("ubi:x"), QString()).isEmpty());
+        CHECK(UbisoftLibrary::idFrom(QString(), QStringLiteral("uplay://open/game/3539")).isEmpty());
+        CHECK(UbisoftLibrary::idFrom(QStringLiteral("epic:Pewter"), QString()).isEmpty());
+
+        // The fixture JSON form (what the EB_UITEST seam reads) round-trips into the same records.
+        {
+            QJsonObject i1; i1.insert(QStringLiteral("key"), QStringLiteral("4311"));
+            i1.insert(QStringLiteral("InstallDir"), anno);
+            QJsonObject u1; u1.insert(QStringLiteral("key"), QStringLiteral("Uplay Install 4311"));
+            u1.insert(QStringLiteral("DisplayName"), QString::fromUtf8("Anno 1800\xE2\x84\xA2"));
+            u1.insert(QStringLiteral("InstallLocation"), QString());
+            QJsonObject u2; u2.insert(QStringLiteral("key"), QStringLiteral("Uplay Install 99"));
+            u2.insert(QStringLiteral("DisplayName"), QStringLiteral("Ghost"));
+            u2.insert(QStringLiteral("InstallLocation"), gone);
+            QJsonObject top;
+            top.insert(QStringLiteral("installs"), QJsonArray{ i1 });
+            top.insert(QStringLiteral("uninstall"), QJsonArray{ u1, u2 });
+            const QByteArray json = QJsonDocument(top).toJson();
+            const QVector<R> snap = UbisoftLibrary::snapshotFromJson(json);
+            CHECK(snap.size() == 3);
+            CHECK(snap.size() == 3 && snap[0].source == R::Installs && snap[0].keyName == QStringLiteral("4311")
+                  && snap[0].installDir == anno);
+            CHECK(snap.size() == 3 && snap[1].source == R::Uninstall
+                  && snap[1].keyName == QStringLiteral("Uplay Install 4311"));
+            const QVector<UbisoftGame> g = UbisoftLibrary::parseSnapshot(snap);
+            const QString annoTm = QString::fromUtf8("Anno 1800\xE2\x84\xA2");
+            CHECK(g.size() == 1 && g[0].id == QStringLiteral("4311") && g[0].name == annoTm);
+            CHECK(UbisoftLibrary::snapshotFromJson(QByteArrayLiteral("not json")).isEmpty());
+            CHECK(UbisoftLibrary::snapshotFromJson(QByteArrayLiteral("[1,2]")).isEmpty());
+
+            // The seam is honoured ONLY on the test channel: the fixture path alone changes nothing.
+            QFile fx(base + QStringLiteral("/ubisoft-fixture.json"));
+            CHECK(fx.open(QIODevice::WriteOnly) && fx.write(json) == json.size());
+            fx.close();
+            const QByteArray hadUitest = qgetenv("EB_UITEST");
+            const bool uitestWasSet = qEnvironmentVariableIsSet("EB_UITEST");
+            qunsetenv("EB_UITEST");
+            qputenv("EB_UITEST_UBISOFT_FIXTURE", fx.fileName().toUtf8());
+            bool fixtureLeaked = false;
+            for (const UbisoftGame& x : UbisoftLibrary::installedGames())
+                if (x.id == QStringLiteral("4311") && x.installDir == anno) fixtureLeaked = true;
+            CHECK(!fixtureLeaked);
+            qputenv("EB_UITEST", "1");
+            const QVector<UbisoftGame> seam = UbisoftLibrary::installedGames();
+            CHECK(seam.size() == 1 && seam[0].id == QStringLiteral("4311"));
+            CHECK(UbisoftLibrary::isAvailable());
+            qunsetenv("EB_UITEST_UBISOFT_FIXTURE");
+            if (uitestWasSet) qputenv("EB_UITEST", hadUitest); else qunsetenv("EB_UITEST");
+        }
+    }
+
+    // ---- Ubisoft: the live reader is Windows-only -----------------------------------------------------------
+    // Off Windows there is no Ubisoft Connect: the reader is compiled (CI is GCC on Linux) and returns nothing.
+    {
+#ifdef Q_OS_WIN
+        CHECK(UbisoftLibrary::hasLiveReader());
+#else
+        CHECK(!UbisoftLibrary::hasLiveReader());
+        CHECK(UbisoftLibrary::readRegistrySnapshot().isEmpty());
+        CHECK(UbisoftLibrary::installedGames().isEmpty());
+        CHECK(!UbisoftLibrary::isAvailable());
+#endif
+    }
+
+    // ---- Ubisoft in the ONE PC Games folder: a source, merged with the same game's other copies ------------
+    {
+        QList<SteamGame> steam;
+        { SteamGame g; g.appid = QStringLiteral("582160"); g.name = QStringLiteral("Assassin's Creed Origins"); steam << g; }
+        QList<UbisoftGame> ubi;
+        { UbisoftGame g; g.id = QStringLiteral("3539"); g.name = QStringLiteral("Assassin's Creed® Origins");
+          g.installDir = QStringLiteral("C:/Games/ACO"); ubi << g; }
+        { UbisoftGame g; g.id = QStringLiteral("4311"); g.name = QStringLiteral("Anno 1800");
+          g.installDir = QStringLiteral("C:/Games/Anno"); ubi << g; }
+        { UbisoftGame g; g.id = QStringLiteral("856"); g.name = QStringLiteral("Far Cry 5");
+          g.available = false; ubi << g; }                            // shown from the #62 last-good cache
+        const auto noPoster = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog c = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), noPoster,
+                                                      {}, {}, ubi);
+        CHECK(c.items.size() == 3);   // Origins merged into one, plus Anno and Far Cry
+
+        // THE MERGE: installed on Steam AND on Ubisoft Connect is ONE entry with two sources.
+        // Looked up by the id the merge mints (pcgame::itemId owns its spelling), not a hand-built string.
+        const MediaItem* aco = find(c, pcgame::itemId(QStringLiteral("Assassin's Creed Origins")));
+        CHECK(aco != nullptr);
+        CHECK(aco && aco->mime == QStringLiteral("pcgame") && aco->pcSources.size() == 2);
+        const pcgame::PcGameSource* ubiSrc = nullptr;
+        const pcgame::PcGameSource* steamSrc = nullptr;
+        if (aco)
+            for (const pcgame::PcGameSource& s : aco->pcSources)
+            {
+                if (s.launcher == QStringLiteral("ubisoft")) ubiSrc = &s;
+                if (s.launcher == QStringLiteral("steam"))   steamSrc = &s;
+            }
+        CHECK(ubiSrc && steamSrc);
+        CHECK(ubiSrc && ubiSrc->kind == pcgame::PcGameSource::LauncherInstalled);
+        CHECK(ubiSrc && ubiSrc->launchId == QStringLiteral("3539"));
+        CHECK(ubiSrc && ubiSrc->launchUrl == QStringLiteral("uplay://launch/3539/0"));
+        CHECK(ubiSrc && ubiSrc->launchUrl == UbisoftLibrary::launchUri(QStringLiteral("3539")));  // inline == canonical
+        CHECK(ubiSrc && ubiSrc->label == QStringLiteral("Ubisoft Connect"));
+        CHECK(ubiSrc && ubiSrc->ready);
+        CHECK(ubiSrc && ubiSrc->exePath.isEmpty());          // a URI launch, never an exe
+        // Steam's curated name outranks Ubisoft's ® spelling for the tile title; Ubisoft's own name rides its source.
+        CHECK(aco && aco->title == QStringLiteral("Assassin's Creed Origins"));
+        CHECK(ubiSrc && ubiSrc->sourceName == QStringLiteral("Assassin's Creed® Origins"));
+        // Two ready copies: Play must ASK (the source picker), never guess.
+        CHECK(aco && pcgame::pickAutoSource(aco->pcSources) == -1);
+        // The picker/filter row a person reads for it.
+        CHECK(browse::pcLauncherLabel(QStringLiteral("ubisoft")) == QStringLiteral("Ubisoft Connect"));
+
+        // A Ubisoft-only game: one source, auto-picked.
+        const MediaItem* annoItem = find(c, QStringLiteral("pcgame:anno 1800"));
+        CHECK(annoItem && annoItem->pcSources.size() == 1 && pcgame::pickAutoSource(annoItem->pcSources) == 0);
+        // Shown from cache (#62): not ready, badged, never auto-picked.
+        const MediaItem* fc5 = find(c, QStringLiteral("pcgame:far cry 5"));
+        CHECK(fc5 && fc5->pcSources.size() == 1 && !fc5->pcSources[0].ready && !fc5->pcSources[0].available);
+        CHECK(fc5 && fc5->subtitle == QStringLiteral("Unavailable?"));
+
+        // The launcher filter offers Ubisoft when it has games, and "what I have on Ubisoft" narrows to them.
+        CHECK(browse::pcLaunchersPresent(steam, {}, {}, {}, {}, {}, ubi)
+              == QStringList({ QStringLiteral("steam"), QStringLiteral("ubisoft") }));
+        CHECK(!browse::pcLaunchersPresent(steam, {}, {}, {}).contains(QStringLiteral("ubisoft")));
+        const MediaCatalog only = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QStringLiteral("ubisoft"),
+                                                         noPoster, {}, {}, ubi);
+        CHECK(only.items.size() == 3);
+        const MediaCatalog steamOnly = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(),
+                                                              QStringLiteral("steam"), noPoster, {}, {}, ubi);
+        CHECK(steamOnly.items.size() == 1);
+        // The pre-merge id a launch through the Ubisoft source banks its records under.
+        CHECK(ubiSrc && pcgame::legacyLaunchId(*ubiSrc) == QStringLiteral("ubi:3539"));
+    }
+
+    // ---- Ubisoft Recents: the kind that relaunches it -------------------------------------------------------
+    {
+        using RL = RecentStore::Relaunch;
+        CHECK(RecentStore::relaunchFor(QStringLiteral("ubisoftgame")) == RL::UbisoftGame);
+        CHECK(browse::iconTypeForKind(QStringLiteral("ubisoftgame")) == QStringLiteral("game"));
+        // Every store kind belongs with Games (the Continue shelf groups on this; a miss headed its own group
+        // with the raw kind as its title).
+        for (const char* k : { "game", "pcgame", "steamgame", "epicgame", "goggame", "battlenetgame", "ubisoftgame" })
+            CHECK(browse::isGameRecentKind(QString::fromLatin1(k)));
+        CHECK(!browse::isGameRecentKind(QStringLiteral("video")));
+        CHECK(!browse::isGameRecentKind(QString()));
+        // A Ubisoft Recent groups under the games catalogue's Recent, like every other store's.
+        RecentItem r; r.path = QStringLiteral("uplay://launch/3539/0"); r.title = QStringLiteral("ACO");
+        r.kind = QStringLiteral("ubisoftgame"); r.key = QStringLiteral("ubi:3539");
+        const MediaCatalog cat = browse::recentsCatalog({ r }, QStringLiteral("game"));
+        CHECK(cat.items.size() == 1 && cat.items[0].mime == QStringLiteral("ubisoftgame"));
+        // A playlist entry for it relaunches through the same mime (a URI launch: nothing rides in the path).
+        Playlist p; p.name = QStringLiteral("pl");
+        PlaylistEntry e; e.itemId = QStringLiteral("ubi:3539"); e.title = QStringLiteral("ACO"); p.items << e;
+        const MediaCatalog pl = browse::playlistItemsCatalog(p);
+        CHECK(pl.items.size() == 1 && pl.items[0].mime == QStringLiteral("ubisoftgame") && pl.items[0].url.isEmpty());
     }
 
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }

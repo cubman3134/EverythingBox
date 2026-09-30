@@ -48,6 +48,7 @@
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
+#include "../core/UbisoftLibrary.h"
 #include "../core/PcScanCache.h"   // #62: persist the last good installed-scan per launcher
 #include "../core/StoreBackend.h"  // #118: owned libraries from a store BACKEND (legendary), no client needed
 #include "../core/Settings.h"
@@ -618,8 +619,9 @@ static QString openTitleFor(const QString& kind)
 static QString recentGroupKey(const RecentItem& r)
 {
     // One "Games" group at the top level — don't split by console here; the per-console split only happens
-    // when you drill into a specific console.
-    if (r.kind == QStringLiteral("game") || r.kind == QStringLiteral("pcgame")) return QStringLiteral("game");
+    // when you drill into a specific console. Every store launcher's kind folds in too (browse::isGameRecentKind):
+    // without that a Steam / Ubisoft / … Recent headed its own group with the raw kind ("ubisoftgame") as title.
+    if (browse::isGameRecentKind(r.kind)) return QStringLiteral("game");
     return r.kind; // video / audio / document
 }
 
@@ -5124,6 +5126,7 @@ struct PcLibScan
     QList<EpicGame>        epic;
     QList<GogGame>         gog;
     QList<BattleNetGame>   bnet;
+    QList<UbisoftGame>     ubisoft;   // Ubisoft Connect installs (#60)
     QVector<DownloadedItem> downloads;
     // Owned-but-not-installed on Steam. ownedGamesCached is network-free (populatePcGames arms the
     // background refresh separately), so gathering it here never blocks the GUI thread.
@@ -5200,6 +5203,13 @@ static PcLibScan scanPcLibrary()
         s.bnet = reconcileLauncherScan<BattleNetGame>(QStringLiteral("battlenet"), !fresh.isEmpty(), fresh,
             [](const BattleNetGame& g) { return g.code.isEmpty() ? g.name : g.code; });
     }
+    {
+        // Ubisoft Connect (#60): like GOG and Battle.net it has no readability signal apart from "found games",
+        // so an empty scan is treated as unreadable and the last-good list shows, marked unavailable.
+        const QList<UbisoftGame> fresh = UbisoftLibrary::installedGames();
+        s.ubisoft = reconcileLauncherScan<UbisoftGame>(QStringLiteral("ubisoft"), !fresh.isEmpty(), fresh,
+            [](const UbisoftGame& g) { return g.id; });
+    }
     s.downloads  = DownloadsStore::list();
     s.steamOwned = SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId());
     s.epicOwned  = epicOwnedFromBackend();
@@ -5244,7 +5254,8 @@ MediaCatalog HomeView::pcLibraryCatalog(const QString& query, const QString& lau
     // The owned-but-not-installed Steam list rides the scan (creds-gated, TTL-cached, network-free);
     // populatePcGames arms the background refresh that fills it.
     return browse::pcGamesCatalog(pre->steam, pre->epic, pre->gog, pre->bnet,
-                                  downloaded, query, launcherFilter, {}, pre->steamOwned, pre->epicOwned);
+                                  downloaded, query, launcherFilter, {}, pre->steamOwned, pre->epicOwned,
+                                  pre->ubisoft);
 }
 
 // Drill into the synthetic "PC Games" console (a child of the Games catalog). Pushed as a detail level so
@@ -5302,6 +5313,9 @@ void HomeView::populatePcGames(bool runRemap)
         // a launch banks its records under is a key of this table by construction (probe_browse pins it).
         for (const BattleNetGame& g : scan.bnet)
             lib << qMakePair(QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code), g.name);
+        // Ubisoft (#60) keys on its install id, exactly as pcgame::legacyLaunchId builds it for the source.
+        for (const UbisoftGame& g : scan.ubisoft)
+            lib << qMakePair(QStringLiteral("ubi:") + g.id, g.name);
         // OWNED-but-not-installed on Steam. It is in the same scan and it keys exactly like an installed
         // Steam entry ("steam:<appid>"), so leaving it out meant a pre-branch favourite on a game the user
         // owns and has not installed stayed under its per-launcher id — a second, stale star sitting beside
@@ -5344,7 +5358,7 @@ void HomeView::populatePcGames(bool runRemap)
     // Which launchers to OFFER is decided from the same scan the folder is built from, so the menu can
     // never list a launcher this machine has nothing in.
     pcLaunchersAvailable_ = browse::pcLaunchersPresent(scan.steam, scan.epic, scan.gog, scan.bnet,
-                                                       scan.steamOwned, scan.epicOwned);
+                                                       scan.steamOwned, scan.epicOwned, scan.ubisoft);
     MediaCatalog cat = pcLibraryCatalog(query, pcLauncherFilter_, &scan);
     // Pinned at the TOP, and shown unconditionally — including when the filter has emptied the folder,
     // which is exactly when it must still be reachable to clear. It is inserted HERE and not inside
@@ -5866,6 +5880,13 @@ void HomeView::launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s
         m.id = legacyId;
         m.mime = QStringLiteral("battlenetgame");
         m.url = s.launchUrl.isEmpty() ? s.exePath : s.launchUrl;
+    }
+    else if (s.launcher == QStringLiteral("ubisoft"))
+    {
+        // Ubisoft Connect (#60): the Epic shape — uplay://launch/<id>/0 handed to the client, keyed "ubi:<id>".
+        m.id = legacyId;
+        m.mime = QStringLiteral("ubisoftgame");
+        m.url = s.launchUrl;
     }
     else
     {
@@ -7666,6 +7687,7 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
         if (id.startsWith(QStringLiteral("epic:")))  return QStringLiteral("epic");
         if (id.startsWith(QStringLiteral("gog:")))   return QStringLiteral("gog");
         if (id.startsWith(QStringLiteral("bnet:")))  return QStringLiteral("battlenet");
+        if (id.startsWith(QStringLiteral("ubi:")))   return QStringLiteral("ubisoft");
         return QString();
     };
     e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
@@ -10896,6 +10918,13 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         emit openItem(it);
         return;
     }
+    if (it.mime == QStringLiteral("ubisoftgame"))
+    {
+        // Ubisoft Connect (#60): MainWindow builds uplay://launch/<id>/0 from the "ubi:<id>" id when the tile
+        // carries no url (a playlist entry). Hand the tile over untouched.
+        emit openItem(it);
+        return;
+    }
     if (isReadableChapter(it.type)) // a chapter leaf -> ask its addon for the pages, then open the reader
     {
         // WHICH ADDON, and whether it has said it can answer. An addon that does not declare the `pages`
@@ -12445,6 +12474,7 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     const bool isStoreLaunch = (item.mime == QStringLiteral("steamgame"))
                             || (item.mime == QStringLiteral("epicgame"))
                             || (item.mime == QStringLiteral("battlenetgame"))
+                            || (item.mime == QStringLiteral("ubisoftgame"))
                             || isMergedPcGame(item);
     const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
         && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
@@ -13868,6 +13898,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 || (EpicLibrary::isAvailable()      && !EpicLibrary::installedGames().isEmpty())
                 || (GogLibrary::isAvailable()       && !GogLibrary::installedGames().isEmpty())
                 || (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
+                || UbisoftLibrary::isAvailable()   // #60: "available" IS "has an installed game"
                 // OWNED-but-not-installed on Steam counts as "has something in it". The folder LISTS these
                 // (pcGamesCatalog mints a LauncherOwned source for each), so a gate that ignored them hid
                 // the whole console from the user whose PC library is entirely owned-not-installed — the
