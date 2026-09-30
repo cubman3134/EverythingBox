@@ -536,6 +536,40 @@ int main(int argc, char** argv)
         CHECK(pickAutoSource({ steamOwned, ea }) == 1);
     }
 
+    // ---- 7x. The Xbox app is a store like the others (issue #60, increment 3) -----------------------------
+    // Its source keys on the package's AUMID ("<PFN>!<AppId>", what the shell:AppsFolder launch takes), so a
+    // launch banks under "xbox:<AUMID>" - and the remap has to carry exactly that key onto the merged tile, or
+    // an Xbox launch's play time and marks sit under an id nothing reads.
+    {
+        const QString aumid = QStringLiteral("Microsoft.254428597CFE2_8wekyb3d8bbwe!Game");
+        PcGameSource xb = src(PcGameSource::LauncherInstalled, QStringLiteral("xbox"), true);
+        xb.launchId   = aumid;
+        xb.sourceName = QStringLiteral("Halo Infinite");
+        CHECK(legacyLaunchId(xb) == QStringLiteral("xbox:") + aumid);
+        // The launcher's own id wins over its name, exactly like the other stores.
+        PcGameSource nameOnly = xb; nameOnly.launchId.clear();
+        CHECK(legacyLaunchId(nameOnly) == QStringLiteral("xbox:Halo Infinite"));
+        // Nothing to key on at all: no pre-merge id (rule 1), never "xbox:".
+        PcGameSource bare = xb; bare.launchId.clear(); bare.sourceName.clear();
+        CHECK(legacyLaunchId(bare).isEmpty());
+
+        // The remap: a Steam copy and an Xbox copy of one game land on ONE merged id.
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:1240440"), QStringLiteral("Halo Infinite"))
+            << qMakePair(QStringLiteral("xbox:") + aumid, QStringLiteral("Halo Infinite"));
+        const QHash<QString, QString> t = remapTable(lib);
+        CHECK(!t.value(QStringLiteral("xbox:") + aumid).isEmpty());
+        CHECK(t.value(QStringLiteral("xbox:") + aumid) == t.value(QStringLiteral("steam:1240440")));
+        CHECK(t.value(QStringLiteral("xbox:") + aumid) == itemId(QStringLiteral("Halo Infinite")));
+
+        // Two READY copies (Steam and Xbox): Play asks. One ready Xbox copy beside an owned-not-installed Steam
+        // one: Play takes the Xbox copy and never the download.
+        const PcGameSource steamReady = src(PcGameSource::LauncherInstalled, QStringLiteral("steam"), true);
+        CHECK(pickAutoSource({ steamReady, xb }) == -1);
+        const PcGameSource steamOwned = src(PcGameSource::LauncherOwned, QStringLiteral("steam"), false);
+        CHECK(pickAutoSource({ steamOwned, xb }) == 1);
+    }
+
     // ---- 7c. pcgame::itemId is the ONE id builder, and it is TITLE-ONLY on purpose ------------------
     // The remap used to take a title->igdb map and prefer the id it supplied, while the catalog keyed on
     // the title alone; a populated map would have moved every record onto an id no lookup ever performs.

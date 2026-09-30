@@ -533,6 +533,9 @@ private:
     // Launch an EA app game (#60 increment 2) by origin2://game/launch?offerIds=<content id>&autoDownload=1 — the
     // Ubisoft shape — and record its "eagame" Recent under "ea:<content id>". Defined in MainWindowLaunch.cpp.
     void launchEaGame(const QString& key, const QString& uri, const QString& title, const QString& thumb);
+    // Launch an Xbox app / PC Game Pass game (#60 increment 3) by shell:AppsFolder\<PFN>!<AppId> — the EA shape —
+    // and record its "xboxgame" Recent under "xbox:<PFN>!<AppId>". Defined in MainWindowLaunch.cpp.
+    void launchXboxGame(const QString& key, const QString& uri, const QString& title, const QString& thumb);
     // (The full-screen emulator / external-emulator play-time tracking lives in GameLauncher now. PC games are
     // still timed separately in launchPcExe, off their own process handle.)
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,

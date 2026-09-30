@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.6.359 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.6.360 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -972,6 +972,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
         src/core/UbisoftLibrary.cpp src/core/UbisoftLibrary.h  # Ubisoft Connect registry detection (#60)
         src/core/EaLibrary.cpp src/core/EaLibrary.h  # EA app installerdata.xml + Uninstall detection (#60)
+        src/core/XboxLibrary.cpp src/core/XboxLibrary.h  # Xbox app / Game Pass gaming-root detection (#60)
         src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
         src/core/PcGameRemap.cpp  src/core/PcGameRemap.h   # marks/stats/favourites follow the merged id (pc-games T3)
         src/core/PcScanCache.cpp  src/core/PcScanCache.h   # persist the last good installed-scan per launcher (#62)
@@ -3894,6 +3895,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h
         src/core/UbisoftLibrary.cpp src/core/UbisoftLibrary.h   # #60: the Ubisoft snapshot parser + seam
         src/core/EaLibrary.cpp src/core/EaLibrary.h   # #60: the EA app snapshot parser + seam
+        src/core/XboxLibrary.cpp src/core/XboxLibrary.h   # #60: the Xbox package parser + seam
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/LiveTvIdentity.cpp src/core/LiveTvIdentity.h  # #203: liveTvChannelIds derives a channel identity here
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key

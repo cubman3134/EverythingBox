@@ -33,7 +33,7 @@ struct RecentItem
     QString path;   // absolute file path / URL to re-open
     QString title;  // display label
     QString kind;   // "video" | "audio" | "document" | "game" | "pcgame" | "steamgame" | "epicgame" | "goggame"
-                    // | "battlenetgame" | "ubisoftgame" | "eagame"
+                    // | "battlenetgame" | "ubisoftgame" | "eagame" | "xboxgame"
                     // A "steamgame" is a native Steam launch: path is the steam://rungameid/<appid> URL, key is
                     // "steam:<appid>", thumb is the vertical capsule; re-opening hands the URL back to Steam.
                     // An "epicgame" is the same fire-and-forget shape for the Epic launcher: path is the
@@ -49,6 +49,8 @@ struct RecentItem
                     // uplay://launch/<id>/0 URI, key is "ubi:<id>"; re-opening hands the URI back to the client.
                     // An "eagame" (#60 increment 2) is the same shape for the EA app: path is the
                     // origin2://game/launch?offerIds=<content id>&autoDownload=1 URI, key is "ea:<content id>".
+                    // An "xboxgame" (#60 increment 3) is the same shape for the Xbox app: path is the
+                    // shell:AppsFolder\<PFN>!<AppId> string, key is "xbox:<PFN>!<AppId>".
     QString thumb;  // optional poster image (path or http url); empty -> a type placeholder is drawn
     QString key;    // stable identity for resume + de-dup (e.g. an addon item id); empty -> use path. A
                     // streamed item's URL changes each session, so resume/de-dup key on this instead.
@@ -116,7 +118,7 @@ namespace RecentStore
     // How a Recent of a given kind is re-launched (the pure dispatch table). "steamgame"/"pcgame" relaunch
     // through their native launchers; the media kinds re-open their recorded file/URL. MainWindow::openRecent
     // switches on this so the app and the headless probe share one definition of the dispatch.
-    enum class Relaunch { SteamGame, EpicGame, GogGame, BattleNetGame, UbisoftGame, EaGame, PcGame, Video, Audio, Document, Game, Unknown };
+    enum class Relaunch { SteamGame, EpicGame, GogGame, BattleNetGame, UbisoftGame, EaGame, XboxGame, PcGame, Video, Audio, Document, Game, Unknown };
     Relaunch relaunchFor(const QString& kind);
 
     // How a Recent re-open gets its playable url (#224) — the second pure dispatch table, sibling to

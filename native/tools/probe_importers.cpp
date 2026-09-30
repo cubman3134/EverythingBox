@@ -33,6 +33,13 @@
 //     EA Uninstall recognition / duplicate ids / odd ids), the origin2:// launch URI and idFrom, gatherSnapshot
 //     over real temp folders, the fixture JSON and its EB_UITEST-only seam, the Windows-only live reader, and
 //     EA as a SOURCE in the merged PC Games folder plus its Recents kind.
+//   * XboxLibrary (#60 increment 3) - the AppxManifest.xml / MicrosoftGame.config parse (single app, several apps,
+//     no display name, a DLC and a store app that are not games), the publisher id and package family name
+//     against real pairs, the .GamingRoot file, gatherSnapshot over real temp folders, the pure snapshot parser
+//     (not a game / dir missing / odd PFN / no launchable app / the AppId choice / name fallbacks / duplicate
+//     PFNs), the exact shell:AppsFolder\<PFN>!<AppId> launch string and idFrom, the fixture JSON and its
+//     EB_UITEST-only seam, the Windows-only live reader, and Xbox as a SOURCE in the merged PC Games folder plus
+//     its Recents kind.
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, but the #224 block
@@ -45,6 +52,7 @@
 #include "BattleNetLibrary.h"
 #include "UbisoftLibrary.h"
 #include "EaLibrary.h"
+#include "XboxLibrary.h"
 #include "RecentStore.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -1606,6 +1614,463 @@ int main(int argc, char** argv)
         PlaylistEntry e; e.itemId = QStringLiteral("ea:1026023"); e.title = QStringLiteral("BF1"); p.items << e;
         const MediaCatalog pl = browse::playlistItemsCatalog(p);
         CHECK(pl.items.size() == 1 && pl.items[0].mime == QStringLiteral("eagame") && pl.items[0].url.isEmpty());
+    }
+
+    // ---- Xbox app / Game Pass (issue #60, increment 3): gaming roots + AppxManifest.xml, as plain records -------
+    // Every rule is pinned with no Xbox app installed. The package folders are REAL temp folders, because
+    // "installed" means the folder exists and the gather step reads the manifests from disk.
+    {
+        using R = XboxPackageRecord;
+        const QString msPub = QStringLiteral("CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US");
+
+        // The publisher id, against REAL pairs read from this machine's installed packages (Get-AppxPackage's
+        // Publisher / PublisherId). A wrong hash, alphabet or bit order breaks every one of them.
+        CHECK(XboxLibrary::publisherId(msPub) == QStringLiteral("8wekyb3d8bbwe"));
+        CHECK(XboxLibrary::publisherId(QStringLiteral("CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"))
+              == QStringLiteral("cw5n1h2txyewy"));
+        CHECK(XboxLibrary::publisherId(QStringLiteral("CN=D6816951-877F-493B-B4EE-41AB9419C326")) == QStringLiteral("56jybvy8sckqj"));
+        CHECK(XboxLibrary::publisherId(QStringLiteral("CN=EB51A5DA-0E72-4863-82E4-EA21C1F8DFE3")) == QStringLiteral("8j3eq9eme6ctt"));
+        CHECK(XboxLibrary::publisherId(QStringLiteral("CN=58D26209-1D57-482C-B403-B655571B5C7B")) == QStringLiteral("rz1tebttyb220"));
+        CHECK(XboxLibrary::publisherId(QString()).isEmpty());
+        const QString haloPfn = QStringLiteral("Microsoft.254428597CFE2_8wekyb3d8bbwe");
+        CHECK(XboxLibrary::familyName(QStringLiteral("Microsoft.254428597CFE2"), msPub) == haloPfn);
+        CHECK(XboxLibrary::familyName(QStringLiteral("x"), msPub).isEmpty());          // a name under 3 chars
+        CHECK(XboxLibrary::familyName(QStringLiteral("Bad Name"), msPub).isEmpty());   // a space
+        CHECK(XboxLibrary::familyName(QStringLiteral("Microsoft.Halo"), QString()).isEmpty());
+
+        // PFN and AppId shapes: plain tokens only, refused (never cleaned) otherwise.
+        CHECK(XboxLibrary::isValidPfn(haloPfn));
+        CHECK(XboxLibrary::isValidPfn(QStringLiteral("abc_8wekyb3d8bbwe")));
+        for (const char* bad : { "", "Microsoft.Halo", "Microsoft.Halo_", "_8wekyb3d8bbwe", "ab_8wekyb3d8bbwe",
+                                 "Microsoft.Halo_8wekyb3d8bbw", "Microsoft.Halo_8wekyb3d8bbwee",
+                                 "Microsoft.Halo_8WEKYB3D8BBWE", "Microsoft.Halo_8wekyb3d8bbwi",
+                                 "Microsoft Halo_8wekyb3d8bbwe", "Microsoft.Halo!Game_8wekyb3d8bbwe",
+                                 "Micro/soft_8wekyb3d8bbwe", "a_b_8wekyb3d8bbwe" })
+            CHECK(!XboxLibrary::isValidPfn(QString::fromLatin1(bad)));
+        CHECK(!XboxLibrary::isValidPfn(QString(51, QLatin1Char('a')) + QStringLiteral("_8wekyb3d8bbwe")));
+        CHECK(XboxLibrary::isValidPfn(QString(50, QLatin1Char('a')) + QStringLiteral("_8wekyb3d8bbwe")));
+        CHECK(XboxLibrary::isValidAppId(QStringLiteral("Game")));
+        CHECK(XboxLibrary::isValidAppId(QStringLiteral("App.Launcher2")));
+        CHECK(XboxLibrary::isValidAppId(QString(64, QLatin1Char('A'))));
+        for (const char* bad : { "", "1Game", "Game!", "Ga me", "Game.", ".Game", "Game..X", "Game.1x", "Game\\x",
+                                 "Game/x" })
+            CHECK(!XboxLibrary::isValidAppId(QString::fromLatin1(bad)));
+        CHECK(!XboxLibrary::isValidAppId(QString(65, QLatin1Char('A'))));
+
+        // THE LAUNCH STRING: exactly shell:AppsFolder\<PFN>!<AppId>, one backslash, nothing encoded.
+        const QString haloAumid = haloPfn + QStringLiteral("!Game");
+        CHECK(XboxLibrary::launchUri(haloAumid) == QStringLiteral("shell:AppsFolder\\Microsoft.254428597CFE2_8wekyb3d8bbwe!Game"));
+        CHECK(XboxLibrary::launchUri(QStringLiteral("abc_8wekyb3d8bbwe!App.Launcher2"))
+              == QStringLiteral("shell:AppsFolder\\abc_8wekyb3d8bbwe!App.Launcher2"));
+        for (const char* bad : { "", "Microsoft.254428597CFE2_8wekyb3d8bbwe", "Microsoft.254428597CFE2_8wekyb3d8bbwe!",
+                                 "!Game", "Microsoft.254428597CFE2_8wekyb3d8bbwe!Game!x",
+                                 "Microsoft.254428597CFE2_8wekyb3d8bbwe!Game&x=1", "bad pfn_8wekyb3d8bbwe!Game" })
+            CHECK(XboxLibrary::launchUri(QString::fromLatin1(bad)).isEmpty());
+        // idFrom: the record key wins; else the launch string (its prefix in any case); odd ones refused.
+        CHECK(XboxLibrary::idFrom(QStringLiteral("xbox:") + haloAumid, QString()) == haloAumid);
+        CHECK(XboxLibrary::idFrom(QString(), QStringLiteral("shell:AppsFolder\\") + haloAumid) == haloAumid);
+        CHECK(XboxLibrary::idFrom(QString(), QStringLiteral("SHELL:appsfolder\\") + haloAumid) == haloAumid);
+        CHECK(XboxLibrary::idFrom(QStringLiteral("xbox:") + haloAumid, QStringLiteral("shell:AppsFolder\\abc_8wekyb3d8bbwe!X"))
+              == haloAumid);
+        CHECK(XboxLibrary::idFrom(QStringLiteral("xbox:bad pfn!Game"), QString()).isEmpty());
+        CHECK(XboxLibrary::idFrom(QString(), QStringLiteral("shell:AppsFolder/") + haloAumid).isEmpty());
+        CHECK(XboxLibrary::idFrom(QString(), QStringLiteral("shell:Downloads")).isEmpty());
+        CHECK(XboxLibrary::idFrom(QStringLiteral("ea:1026023"), QString()).isEmpty());
+
+        // The fixture manifests. appx(): a GDK-shaped AppxManifest.xml (foundation + uap namespaces; the
+        // Dependencies block carries a Name attribute too, which must never be taken for the Identity's).
+        struct A { const char* id; bool listed; };
+        auto appx = [](const QString& name, const QString& pub, const QString* displayName, const QList<A>& apps) {
+            QString x = QStringLiteral(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                "<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\"\n"
+                "         xmlns:uap=\"http://schemas.microsoft.com/appx/manifest/uap/windows10\"\n"
+                "         xmlns:rescap=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities\"\n"
+                "         IgnorableNamespaces=\"uap rescap\">\n"
+                "  <Identity Name=\"") + name + QStringLiteral("\" Publisher=\"") + pub
+                + QStringLiteral("\" Version=\"1.0.0.0\" ProcessorArchitecture=\"x64\"/>\n  <Properties>\n");
+            if (displayName) x += QStringLiteral("    <DisplayName>") + *displayName + QStringLiteral("</DisplayName>\n");
+            x += QStringLiteral("    <PublisherDisplayName>Xbox Game Studios</PublisherDisplayName>\n"
+                                "    <Logo>StoreLogo.png</Logo>\n  </Properties>\n"
+                                "  <Dependencies><TargetDeviceFamily Name=\"Windows.Desktop\" MinVersion=\"10.0.19041.0\""
+                                " MaxVersionTested=\"10.0.19041.0\"/></Dependencies>\n");
+            if (!apps.isEmpty())
+            {
+                x += QStringLiteral("  <Applications>\n");
+                for (const A& a : apps)
+                    x += QStringLiteral("    <Application Id=\"") + QString::fromLatin1(a.id)
+                         + QStringLiteral("\" Executable=\"game.exe\" EntryPoint=\"Windows.FullTrustApplication\">\n"
+                                          "      <uap:VisualElements DisplayName=\"x\" Description=\"x\" BackgroundColor=\"#000000\""
+                                          " Square150x150Logo=\"Logo.png\" Square44x44Logo=\"SmallLogo.png\"")
+                         + (a.listed ? QString() : QStringLiteral(" AppListEntry=\"none\""))
+                         + QStringLiteral("/>\n    </Application>\n");
+                x += QStringLiteral("  </Applications>\n");
+            }
+            x += QStringLiteral("  <Capabilities><rescap:Capability Name=\"runFullTrust\"/></Capabilities>\n</Package>\n");
+            return x.toUtf8();
+        };
+        // gameCfg(): MicrosoftGame.config in the GDK samples' shape (SimpleTriangleDesktop). dlcCfg(): the DLC
+        // sample's shape — a <Game> root with NO ExecutableList.
+        auto gameCfg = [](const QString& defaultName) {
+            return (QStringLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Game configVersion=\"1\">\n"
+                                   "  <Identity Name=\"x\" Publisher=\"CN=x\" Version=\"1.0.0.0\"/>\n"
+                                   "  <ExecutableList>\n    <Executable Name=\"game.exe\" TargetDeviceFamily=\"PC\" Id=\"Game\"/>\n"
+                                   "  </ExecutableList>\n  <ShellVisuals DefaultDisplayName=\"") + defaultName
+                    + QStringLiteral("\" PublisherDisplayName=\"x\" Square150x150Logo=\"Logo.png\"/>\n</Game>\n")).toUtf8();
+        };
+        const QByteArray dlcCfg = QByteArrayLiteral(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Game configVersion=\"0\">\n"
+            "  <Identity Name=\"41336MicrosoftATG.ATGDCSDurablePackage1\" Publisher=\"CN=A4954634-DF4B-47C7-AB70-D3215D246AF1\" />\n"
+            "  <DesktopRegistration><MainPackageDependency Name=\"41336MicrosoftATG.ATGDownloadableContent\" />"
+            "<ProcessorArchitecture>x64</ProcessorArchitecture></DesktopRegistration>\n"
+            "  <ShellVisuals DefaultDisplayName=\"PC DLC\" PublisherDisplayName=\"Xbox ATG\" />\n</Game>\n");
+
+        const QString haloName = QStringLiteral("Halo Infinite");
+        const QString forzaName = QStringLiteral("Forza Horizon 5");
+        const QString msRes = QStringLiteral("ms-resource:AppDisplayName");
+        const QString appName = QStringLiteral("Some Store App");
+        const QByteArray haloXml = appx(QStringLiteral("Microsoft.254428597CFE2"), msPub, &haloName, { { "Game", true } });
+        // SEVERAL apps: a helper hidden from Start first, then the game, then a second listed one.
+        const QByteArray forzaXml = appx(QStringLiteral("Microsoft.624F8B84B80"), msPub, &forzaName,
+                                         { { "Helper", false }, { "ForzaHorizon5", true }, { "Editor", true } });
+        const QByteArray unnamedXml = appx(QStringLiteral("Contoso.UnnamedGame"), QStringLiteral("CN=Contoso"), nullptr,
+                                           { { "Game", true } });
+        const QByteArray seaXml = appx(QStringLiteral("Microsoft.SeaofThieves"), msPub, &msRes, { { "SeaofThieves", true } });
+        const QByteArray storeAppXml = appx(QStringLiteral("Contoso.NotesApp"), QStringLiteral("CN=Contoso"), &appName,
+                                            { { "App", true } });
+        const QByteArray dlcXml = appx(QStringLiteral("Microsoft.HaloDLC"), msPub, &haloName, {});
+
+        // THE MANIFEST PARSE: a single app.
+        {
+            const XboxLibrary::AppxManifest m = XboxLibrary::parseAppxManifest(haloXml);
+            CHECK(m.ok);
+            CHECK(m.name == QStringLiteral("Microsoft.254428597CFE2") && m.publisher == msPub);
+            CHECK(m.displayName == haloName);
+            CHECK(m.apps.size() == 1 && m.apps[0].id == QStringLiteral("Game") && m.apps[0].listed);
+            // Several apps, in document order, with the hidden one marked.
+            const XboxLibrary::AppxManifest f = XboxLibrary::parseAppxManifest(forzaXml);
+            CHECK(f.ok && f.apps.size() == 3);
+            CHECK(f.apps.size() == 3 && f.apps[0].id == QStringLiteral("Helper") && !f.apps[0].listed
+                  && f.apps[1].id == QStringLiteral("ForzaHorizon5") && f.apps[1].listed
+                  && f.apps[2].id == QStringLiteral("Editor") && f.apps[2].listed);
+            // No DisplayName element: empty, still ok.
+            const XboxLibrary::AppxManifest u = XboxLibrary::parseAppxManifest(unnamedXml);
+            CHECK(u.ok && u.displayName.isEmpty() && u.apps.size() == 1);
+            // No Applications at all (a content package).
+            const XboxLibrary::AppxManifest d = XboxLibrary::parseAppxManifest(dlcXml);
+            CHECK(d.ok && d.apps.isEmpty());
+            // Not a manifest: malformed, empty, or a different root.
+            CHECK(!XboxLibrary::parseAppxManifest(QByteArrayLiteral("<Package><Identity Name=\"a\"")).ok);
+            CHECK(!XboxLibrary::parseAppxManifest(QByteArray()).ok);
+            CHECK(!XboxLibrary::parseAppxManifest(QByteArrayLiteral("<Game><Identity Name=\"abc\"/></Game>")).ok);
+            // UTF-16LE with a BOM reads the same.
+            QByteArray u16("\xFF\xFE", 2);
+            const QString asText = QString::fromUtf8(haloXml).replace(QStringLiteral("utf-8"), QStringLiteral("utf-16"));
+            u16 += QByteArray(reinterpret_cast<const char*>(asText.utf16()), int(asText.size() * 2));
+            const XboxLibrary::AppxManifest w = XboxLibrary::parseAppxManifest(u16);
+            CHECK(w.ok && w.name == QStringLiteral("Microsoft.254428597CFE2") && w.displayName == haloName);
+
+            // MicrosoftGame.config: a game, a DLC (no executables), and not a config.
+            const XboxLibrary::GameConfig g = XboxLibrary::parseGameConfig(gameCfg(QStringLiteral("Sea of Thieves")));
+            CHECK(g.ok && g.isGame && g.displayName == QStringLiteral("Sea of Thieves"));
+            const XboxLibrary::GameConfig dl = XboxLibrary::parseGameConfig(dlcCfg);
+            CHECK(dl.ok && !dl.isGame);
+            CHECK(!XboxLibrary::parseGameConfig(QByteArray()).isGame);
+            CHECK(!XboxLibrary::parseGameConfig(QByteArrayLiteral("<Game><ExecutableList><Executable")).isGame);
+            CHECK(!XboxLibrary::parseGameConfig(QByteArrayLiteral(
+                      "<Package><ExecutableList><Executable Id=\"Game\"/></ExecutableList></Package>")).isGame);
+
+            // One folder's record from its two files.
+            const R h = XboxLibrary::recordFromManifests(QStringLiteral("D:/XboxGames/Halo Infinite/Content"), haloXml,
+                                                         gameCfg(haloName));
+            CHECK(h.pfn == haloPfn && h.displayName == haloName && h.isGame && h.apps.size() == 1);
+            CHECK(h.installDir == QStringLiteral("D:/XboxGames/Halo Infinite/Content"));
+            // An ms-resource display name gives way to the config's plain one.
+            const R s = XboxLibrary::recordFromManifests(QStringLiteral("D:/x"), seaXml, gameCfg(QStringLiteral("Sea of Thieves")));
+            CHECK(s.displayName == QStringLiteral("Sea of Thieves") && s.isGame);
+            // No config: not a game. A DLC config: not a game.
+            CHECK(!XboxLibrary::recordFromManifests(QStringLiteral("D:/x"), storeAppXml, QByteArray()).isGame);
+            CHECK(!XboxLibrary::recordFromManifests(QStringLiteral("D:/x"), dlcXml, dlcCfg).isGame);
+            // An unparseable manifest: no PFN, so nothing downstream can use it.
+            CHECK(XboxLibrary::recordFromManifests(QStringLiteral("D:/x"), QByteArrayLiteral("<Package>"), gameCfg(haloName))
+                      .pfn.isEmpty());
+        }
+
+        // .GamingRoot: GameFinder's own test bytes ("RGBX", 1 folder, "XboxGames"), then shapes that must fail.
+        {
+            const QByteArray gf("\x52\x47\x42\x58\x01\x00\x00\x00\x58\x00\x62\x00\x6f\x00\x78\x00\x47\x00\x61\x00"
+                                "\x6d\x00\x65\x00\x73\x00\x00\x00", 28);
+            CHECK(XboxLibrary::parseGamingRoot(gf) == QStringList({ QStringLiteral("XboxGames") }));
+            auto root = [](quint32 magic, quint32 count, const QStringList& folders) {
+                QByteArray b;
+                for (int i = 0; i < 4; ++i) b.append(char((magic >> (8 * i)) & 0xFF));
+                for (int i = 0; i < 4; ++i) b.append(char((count >> (8 * i)) & 0xFF));
+                for (const QString& f : folders)
+                {
+                    b += QByteArray(reinterpret_cast<const char*>(f.utf16()), int(f.size() * 2));
+                    b.append('\0'); b.append('\0');
+                }
+                return b;
+            };
+            CHECK(XboxLibrary::parseGamingRoot(root(0x58424752u, 2, { QStringLiteral("XboxGames"), QStringLiteral("Games\\Xbox") }))
+                  == QStringList({ QStringLiteral("XboxGames"), QStringLiteral("Games\\Xbox") }));
+            CHECK(XboxLibrary::parseGamingRoot(root(0x12345678u, 1, { QStringLiteral("XboxGames") })).isEmpty()); // wrong magic
+            CHECK(XboxLibrary::parseGamingRoot(root(0x58424752u, 2, { QStringLiteral("XboxGames") })).isEmpty()); // truncated
+            CHECK(XboxLibrary::parseGamingRoot(root(0x58424752u, 1000, { QStringLiteral("XboxGames") })).isEmpty()); // implausible
+            CHECK(XboxLibrary::parseGamingRoot(gf.left(26)).isEmpty());   // the terminator cut off
+            CHECK(XboxLibrary::parseGamingRoot(QByteArray()).isEmpty());
+        }
+
+        // ON DISK: a temp folder standing in for a drive root, with a .GamingRoot naming XboxGames and an
+        // advanced-management ModifiableWindowsApps folder beside it.
+        QTemporaryDir drive;
+        CHECK(drive.isValid());
+        const QString d = drive.path();
+        auto writeFile = [](const QString& path, const QByteArray& bytes) {
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            QFile f(path);
+            return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size();
+        };
+        {
+            QByteArray gr("\x52\x47\x42\x58\x01\x00\x00\x00", 8);
+            const QString folder = QStringLiteral("XboxGames");
+            gr += QByteArray(reinterpret_cast<const char*>(folder.utf16()), int(folder.size() * 2));
+            gr.append('\0'); gr.append('\0');
+            CHECK(writeFile(d + QStringLiteral("/.GamingRoot"), gr));
+        }
+        const QString xg = d + QStringLiteral("/XboxGames");
+        const QString mwa = d + QStringLiteral("/Program Files/ModifiableWindowsApps");
+        CHECK(writeFile(xg + QStringLiteral("/Halo Infinite/Content/appxmanifest.xml"), haloXml));
+        CHECK(writeFile(xg + QStringLiteral("/Halo Infinite/Content/MicrosoftGame.config"), gameCfg(haloName)));
+        CHECK(writeFile(xg + QStringLiteral("/Forza Horizon 5/Content/appxmanifest.xml"), forzaXml));
+        CHECK(writeFile(xg + QStringLiteral("/Forza Horizon 5/Content/MicrosoftGame.config"), gameCfg(forzaName)));
+        CHECK(writeFile(xg + QStringLiteral("/Unnamed Game/Content/appxmanifest.xml"), unnamedXml));
+        CHECK(writeFile(xg + QStringLiteral("/Unnamed Game/Content/MicrosoftGame.config"), gameCfg(QString())));
+        CHECK(writeFile(xg + QStringLiteral("/Notes App/AppxManifest.xml"), storeAppXml));   // NOT a game: no config
+        CHECK(writeFile(xg + QStringLiteral("/Halo DLC/Content/appxmanifest.xml"), dlcXml));
+        CHECK(writeFile(xg + QStringLiteral("/Halo DLC/Content/MicrosoftGame.config"), dlcCfg));
+        CHECK(QDir().mkpath(xg + QStringLiteral("/GameSave")));                              // no manifest at all
+        CHECK(writeFile(xg + QStringLiteral("/readme.txt"), QByteArrayLiteral("x")));        // a file, not a package
+        // Advanced-management install: the manifest in the folder itself, an ms-resource display name.
+        CHECK(writeFile(mwa + QStringLiteral("/Sea of Thieves/AppxManifest.xml"), seaXml));
+        CHECK(writeFile(mwa + QStringLiteral("/Sea of Thieves/MicrosoftGame.config"), gameCfg(QStringLiteral("Sea of Thieves"))));
+
+        {
+            const QStringList folders = XboxLibrary::libraryFoldersForRoots({ d, d + QStringLiteral("/No Such Drive") });
+            CHECK(folders.size() == 2 && folders.contains(xg) && folders.contains(mwa));
+            const QVector<R> snap = XboxLibrary::gatherSnapshot(folders);
+            CHECK(snap.size() == 6);   // four games + the store app + the DLC; GameSave and the file are no package
+            int games = 0;
+            for (const R& r : snap) if (r.isGame) ++games;
+            CHECK(games == 4);
+            const QVector<XboxGame> g = XboxLibrary::parseSnapshot(snap);
+            CHECK(g.size() == 4);
+            if (g.size() == 4)
+            {
+                // Sorted by name. Forza: several apps -> the first LISTED one, not the hidden helper before it.
+                CHECK(g[0].name == forzaName && g[0].appId == QStringLiteral("ForzaHorizon5")
+                      && g[0].pfn == QStringLiteral("Microsoft.624F8B84B80_8wekyb3d8bbwe")
+                      && g[0].id == QStringLiteral("Microsoft.624F8B84B80_8wekyb3d8bbwe!ForzaHorizon5"));
+                CHECK(g[1].name == haloName && g[1].id == haloAumid && g[1].pfn == haloPfn && g[1].appId == QStringLiteral("Game"));
+                CHECK(g[1].installDir == xg + QStringLiteral("/Halo Infinite/Content"));
+                // The ms-resource name fell through to MicrosoftGame.config's.
+                CHECK(g[2].name == QStringLiteral("Sea of Thieves") && g[2].installDir == mwa + QStringLiteral("/Sea of Thieves"));
+                // No display name anywhere: the game's folder (the parent of Content\), not "Content".
+                CHECK(g[3].name == QStringLiteral("Unnamed Game") && g[3].appId == QStringLiteral("Game"));
+                CHECK(g[3].pfn == XboxLibrary::familyName(QStringLiteral("Contoso.UnnamedGame"), QStringLiteral("CN=Contoso")));
+            }
+            for (const XboxGame& x : g)
+                CHECK(x.name != appName && x.name != QStringLiteral("PC DLC") && !x.name.contains(QStringLiteral("DLC")));
+        }
+
+        // THE PURE PARSER over hand-built records.
+        {
+            const QString live = xg + QStringLiteral("/Halo Infinite/Content");
+            const QString gone = d + QStringLiteral("/XboxGames/Uninstalled Long Ago");   // never created
+            auto rec = [](const QString& pfn, const QString& dir, const QString& name, const QVector<XboxApp>& apps,
+                          bool game) { R r; r.pfn = pfn; r.installDir = dir; r.displayName = name; r.apps = apps;
+                                       r.isGame = game; return r; };
+            const QVector<XboxApp> one = { { QStringLiteral("Game"), true } };
+            // Installed game: kept, with a trailing separator and backslashes normalised.
+            QString winDir = live; winDir.replace(QLatin1Char('/'), QLatin1Char('\\')); winDir += QLatin1Char('\\');
+            QVector<XboxGame> g = XboxLibrary::parseSnapshot({ rec(haloPfn, winDir, haloName, one, true) });
+            CHECK(g.size() == 1 && g.value(0).installDir == live && g.value(0).id == haloAumid);
+            // NOT A GAME: excluded however complete it is.
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, live, haloName, one, false) }).isEmpty());
+            // Not installed: a dir that is gone, or none at all.
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, gone, haloName, one, true) }).isEmpty());
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, QString(), haloName, one, true) }).isEmpty());
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, QStringLiteral("  "), haloName, one, true) }).isEmpty());
+            // An odd PFN: refused.
+            CHECK(XboxLibrary::parseSnapshot({ rec(QStringLiteral("Halo_8WEKYB3D8BBWE"), live, haloName, one, true) }).isEmpty());
+            CHECK(XboxLibrary::parseSnapshot({ rec(QString(), live, haloName, one, true) }).isEmpty());
+            // Nothing to launch: no apps, or only odd ids.
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, live, haloName, {}, true) }).isEmpty());
+            CHECK(XboxLibrary::parseSnapshot({ rec(haloPfn, live, haloName, { { QStringLiteral("1Game"), true },
+                                                                              { QStringLiteral("Ga me"), true } }, true) }).isEmpty());
+            // The first VALID listed app: an odd listed id is skipped for the next listed one.
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, live, haloName, { { QStringLiteral("Helper"), false },
+                                                                            { QStringLiteral("9bad"), true },
+                                                                            { QStringLiteral("Main"), true } }, true) });
+            CHECK(g.size() == 1 && g.value(0).appId == QStringLiteral("Main"));
+            // Every app hidden: the first valid one after all.
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, live, haloName, { { QStringLiteral("9bad"), false },
+                                                                            { QStringLiteral("Helper"), false },
+                                                                            { QStringLiteral("Other"), false } }, true) });
+            CHECK(g.size() == 1 && g.value(0).appId == QStringLiteral("Helper"));
+            // Name fallbacks: whitespace / ms-resource -> the folder (Content's parent); a folder with no name
+            // (a drive root) -> the PFN.
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, live, QStringLiteral("  "), one, true) });
+            CHECK(g.size() == 1 && g.value(0).name == QStringLiteral("Halo Infinite"));
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, live, QStringLiteral("ms-resource:Title"), one, true) });
+            CHECK(g.size() == 1 && g.value(0).name == QStringLiteral("Halo Infinite"));
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, mwa + QStringLiteral("/Sea of Thieves"), QString(), one, true) });
+            CHECK(g.size() == 1 && g.value(0).name == QStringLiteral("Sea of Thieves"));
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, QDir::rootPath(), QString(), one, true) });
+            CHECK(g.size() == 1 && g.value(0).name == haloPfn);
+            // A duplicate PFN is ONE game: a stale first sighting does not stick; the live one's dir wins.
+            g = XboxLibrary::parseSnapshot({ rec(haloPfn, gone, QStringLiteral("Stale"), one, true),
+                                             rec(haloPfn, live, haloName, one, true),
+                                             rec(haloPfn, mwa + QStringLiteral("/Sea of Thieves"), QStringLiteral("Other"), one, true) });
+            CHECK(g.size() == 1 && g.value(0).installDir == live && g.value(0).name == haloName);
+            // Deterministic order whatever the input order.
+            const QVector<R> ab = { rec(QStringLiteral("Zed.Game_8wekyb3d8bbwe"), live, QStringLiteral("zeta"), one, true),
+                                    rec(QStringLiteral("Alpha.Game_8wekyb3d8bbwe"), live, QStringLiteral("Alpha"), one, true) };
+            const QVector<R> ba = { ab[1], ab[0] };
+            const QVector<XboxGame> x1 = XboxLibrary::parseSnapshot(ab), x2 = XboxLibrary::parseSnapshot(ba);
+            CHECK(x1.size() == 2 && x2.size() == 2 && x1[0].name == QStringLiteral("Alpha") && x2[0].name == QStringLiteral("Alpha"));
+        }
+
+        // The fixture JSON (what the EB_UITEST seam reads), and the seam honoured ONLY on the test channel.
+        {
+            QJsonObject top;
+            top.insert(QStringLiteral("driveRoots"), QJsonArray{ d });
+            const QByteArray json = QJsonDocument(top).toJson();
+            CHECK(XboxLibrary::driveRootsFromJson(json) == QStringList({ d }));
+            CHECK(XboxLibrary::driveRootsFromJson(QByteArrayLiteral("not json")).isEmpty());
+            CHECK(XboxLibrary::driveRootsFromJson(QByteArrayLiteral("[1,2]")).isEmpty());
+            QFile fx(d + QStringLiteral("/xbox-fixture.json"));
+            CHECK(fx.open(QIODevice::WriteOnly) && fx.write(json) == json.size());
+            fx.close();
+            const QByteArray hadUitest = qgetenv("EB_UITEST");
+            const bool uitestWasSet = qEnvironmentVariableIsSet("EB_UITEST");
+            qunsetenv("EB_UITEST");
+            qputenv("EB_UITEST_XBOX_FIXTURE", fx.fileName().toUtf8());
+            bool fixtureLeaked = false;
+            for (const XboxGame& x : XboxLibrary::installedGames())
+                if (x.installDir.startsWith(d)) fixtureLeaked = true;
+            CHECK(!fixtureLeaked);
+            qputenv("EB_UITEST", "1");
+            const QVector<XboxGame> seam = XboxLibrary::installedGames();
+            CHECK(seam.size() == 4 && seam.value(1).id == haloAumid);
+            CHECK(XboxLibrary::isAvailable());
+            qunsetenv("EB_UITEST_XBOX_FIXTURE");
+            if (uitestWasSet) qputenv("EB_UITEST", hadUitest); else qunsetenv("EB_UITEST");
+        }
+    }
+
+    // ---- Xbox: the live reader is Windows-only --------------------------------------------------------------
+    // Off Windows there is no Xbox app: the reader is compiled (CI is GCC on Linux) and returns nothing.
+    {
+#ifdef Q_OS_WIN
+        CHECK(XboxLibrary::hasLiveReader());
+#else
+        CHECK(!XboxLibrary::hasLiveReader());
+        CHECK(XboxLibrary::readLiveSnapshot().isEmpty());
+        CHECK(XboxLibrary::installedGames().isEmpty());
+        CHECK(!XboxLibrary::isAvailable());
+#endif
+    }
+
+    // ---- Xbox in the ONE PC Games folder: a source, merged with the same game's other copies ----------------
+    {
+        const QString haloAumid = QStringLiteral("Microsoft.254428597CFE2_8wekyb3d8bbwe!Game");
+        const QString seaAumid = QStringLiteral("Microsoft.SeaofThieves_8wekyb3d8bbwe!SeaofThieves");
+        QList<SteamGame> steam;
+        { SteamGame g; g.appid = QStringLiteral("1240440"); g.name = QStringLiteral("Halo Infinite"); steam << g; }
+        QList<XboxGame> xbox;
+        { XboxGame g; g.id = haloAumid; g.pfn = QStringLiteral("Microsoft.254428597CFE2_8wekyb3d8bbwe");
+          g.appId = QStringLiteral("Game"); g.name = QStringLiteral("Halo Infinite");
+          g.installDir = QStringLiteral("D:/XboxGames/Halo Infinite/Content"); xbox << g; }
+        { XboxGame g; g.id = seaAumid; g.name = QStringLiteral("Sea of Thieves");
+          g.installDir = QStringLiteral("D:/XboxGames/Sea of Thieves/Content"); xbox << g; }
+        { XboxGame g; g.id = QStringLiteral("Microsoft.624F8B84B80_8wekyb3d8bbwe!ForzaHorizon5");
+          g.name = QStringLiteral("Forza Horizon 5"); g.available = false; xbox << g; }   // from the #62 cache
+        const auto noPoster = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog c = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), noPoster,
+                                                      {}, {}, {}, {}, xbox);
+        CHECK(c.items.size() == 3);   // Halo merged into one, plus Sea of Thieves and Forza
+
+        // THE MERGE: installed on Steam AND through the Xbox app is ONE entry with two sources.
+        const MediaItem* halo = find(c, pcgame::itemId(QStringLiteral("Halo Infinite")));
+        CHECK(halo != nullptr);
+        CHECK(halo && halo->mime == QStringLiteral("pcgame") && halo->pcSources.size() == 2);
+        const pcgame::PcGameSource* xs = nullptr;
+        const pcgame::PcGameSource* ss = nullptr;
+        if (halo)
+            for (const pcgame::PcGameSource& s : halo->pcSources)
+            {
+                if (s.launcher == QStringLiteral("xbox"))  xs = &s;
+                if (s.launcher == QStringLiteral("steam")) ss = &s;
+            }
+        CHECK(xs && ss);
+        CHECK(xs && xs->kind == pcgame::PcGameSource::LauncherInstalled);
+        CHECK(xs && xs->launchId == haloAumid);
+        CHECK(xs && xs->launchUrl == QStringLiteral("shell:AppsFolder\\Microsoft.254428597CFE2_8wekyb3d8bbwe!Game"));
+        CHECK(xs && xs->launchUrl == XboxLibrary::launchUri(haloAumid));   // inline == canonical
+        CHECK(xs && xs->label == QStringLiteral("Xbox"));
+        CHECK(xs && xs->ready);
+        CHECK(xs && xs->exePath.isEmpty());          // a shell launch, never an exe
+        CHECK(xs && xs->sourceName == QStringLiteral("Halo Infinite"));
+        CHECK(halo && halo->title == QStringLiteral("Halo Infinite"));
+        // Two ready copies: Play must ASK (the source picker), never guess.
+        CHECK(halo && pcgame::pickAutoSource(halo->pcSources) == -1);
+        CHECK(browse::pcLauncherLabel(QStringLiteral("xbox")) == QStringLiteral("Xbox"));
+
+        // An Xbox-only game: one source, auto-picked, its launch string canonical.
+        const MediaItem* sea = find(c, pcgame::itemId(QStringLiteral("Sea of Thieves")));
+        CHECK(sea && sea->pcSources.size() == 1 && pcgame::pickAutoSource(sea->pcSources) == 0);
+        CHECK(sea && sea->pcSources.size() == 1 && sea->pcSources[0].launchUrl == XboxLibrary::launchUri(seaAumid));
+        // Shown from cache (#62): not ready, badged, never auto-picked.
+        const MediaItem* fh = find(c, pcgame::itemId(QStringLiteral("Forza Horizon 5")));
+        CHECK(fh && fh->pcSources.size() == 1 && !fh->pcSources[0].ready && !fh->pcSources[0].available);
+        CHECK(fh && fh->subtitle == QStringLiteral("Unavailable?"));
+
+        // The launcher filter offers Xbox when it has games (after EA), and "what I have on Xbox" narrows to them.
+        QList<EaGame> ea;
+        { EaGame g; g.id = QStringLiteral("1026023"); g.name = QStringLiteral("Battlefield 1"); ea << g; }
+        CHECK(browse::pcLaunchersPresent(steam, {}, {}, {}, {}, {}, {}, ea, xbox)
+              == QStringList({ QStringLiteral("steam"), QStringLiteral("ea"), QStringLiteral("xbox") }));
+        CHECK(!browse::pcLaunchersPresent(steam, {}, {}, {}, {}, {}, {}, ea).contains(QStringLiteral("xbox")));
+        const MediaCatalog only = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QStringLiteral("xbox"),
+                                                         noPoster, {}, {}, {}, ea, xbox);
+        CHECK(only.items.size() == 3);
+        const MediaCatalog steamOnly = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(),
+                                                              QStringLiteral("steam"), noPoster, {}, {}, {}, ea, xbox);
+        CHECK(steamOnly.items.size() == 1);
+        // The pre-merge id a launch through the Xbox source banks its records under.
+        CHECK(xs && pcgame::legacyLaunchId(*xs) == QStringLiteral("xbox:") + haloAumid);
+    }
+
+    // ---- Xbox Recents: the kind that relaunches it ----------------------------------------------------------
+    {
+        using RL = RecentStore::Relaunch;
+        CHECK(RecentStore::relaunchFor(QStringLiteral("xboxgame")) == RL::XboxGame);
+        CHECK(browse::iconTypeForKind(QStringLiteral("xboxgame")) == QStringLiteral("game"));
+        for (const char* k : { "game", "pcgame", "steamgame", "epicgame", "goggame", "battlenetgame", "ubisoftgame",
+                               "eagame", "xboxgame" })
+            CHECK(browse::isGameRecentKind(QString::fromLatin1(k)));
+        CHECK(!browse::isGameRecentKind(QStringLiteral("xbox")));
+        const QString aumid = QStringLiteral("Microsoft.254428597CFE2_8wekyb3d8bbwe!Game");
+        RecentItem r; r.path = QStringLiteral("shell:AppsFolder\\") + aumid;
+        r.title = QStringLiteral("Halo"); r.kind = QStringLiteral("xboxgame"); r.key = QStringLiteral("xbox:") + aumid;
+        const MediaCatalog cat = browse::recentsCatalog({ r }, QStringLiteral("game"));
+        CHECK(cat.items.size() == 1 && cat.items[0].mime == QStringLiteral("xboxgame"));
+        // A playlist entry for it relaunches through the same mime (the launch rebuilds the string from the id).
+        Playlist p; p.name = QStringLiteral("pl");
+        PlaylistEntry e; e.itemId = QStringLiteral("xbox:") + aumid; e.title = QStringLiteral("Halo"); p.items << e;
+        const MediaCatalog pl = browse::playlistItemsCatalog(p);
+        CHECK(pl.items.size() == 1 && pl.items[0].mime == QStringLiteral("xboxgame") && pl.items[0].url.isEmpty());
     }
 
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }

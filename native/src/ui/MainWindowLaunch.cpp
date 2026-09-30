@@ -29,6 +29,7 @@
 #include "../core/BattleNetLibrary.h"
 #include "../core/UbisoftLibrary.h"
 #include "../core/EaLibrary.h"
+#include "../core/XboxLibrary.h"
 #include "../core/BingeStore.h"
 #include "../core/BoundedFetch.h"
 #include "../core/CastManager.h"
@@ -1024,6 +1025,24 @@ void MainWindow::launchEaGame(const QString& key, const QString& uri, const QStr
     statusBar()->showMessage(tr("Launching “%1” via the EA app…").arg(title), 5000);
 }
 
+void MainWindow::launchXboxGame(const QString& key, const QString& uri, const QString& title, const QString& thumb)
+{
+    const QString id = XboxLibrary::idFrom(key, uri);   // the AUMID "<PFN>!<AppId>"
+    const QString url = XboxLibrary::launchUri(id);     // rebuilt from the id: a recorded string is never replayed raw
+    if (url.isEmpty())
+    {
+        statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(title), kFeedbackLong);
+        return;
+    }
+    const QString recentKey = QStringLiteral("xbox:") + id;
+    // The same one store hand-off as EA: under EB_UITEST_STORE_URI_SINK it logs the string as held back instead
+    // of starting the game, which is how a UI-test drive proves this dispatch without the Xbox app. (No play-time
+    // watch: LaunchWatch knows steam:// and the Epic URI only, so this is a fire-and-forget handoff.)
+    handOffStoreLaunch(url, recentKey);
+    RecentStore::add({ url, title, QStringLiteral("xboxgame"), thumb, recentKey });
+    statusBar()->showMessage(tr("Launching “%1” via Xbox…").arg(title), 5000);
+}
+
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
     // A "Choose source…" fan-out still out from the PREVIOUS item is now stale: its reply must not clear the
@@ -1084,6 +1103,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         || item.url.startsWith(QStringLiteral("origin2://game/launch"), Qt::CaseInsensitive))
     {
         launchEaGame(item.id, item.url, item.title, item.thumbnailUrl);
+        return;
+    }
+    // An Xbox game (#60 increment 3), above the url.isEmpty() bail for the same reason: a playlist row carries
+    // only its "xbox:<AUMID>" id.
+    if (item.mime == QStringLiteral("xboxgame")
+        || item.url.startsWith(QStringLiteral("shell:AppsFolder\\"), Qt::CaseInsensitive))
+    {
+        launchXboxGame(item.id, item.url, item.title, item.thumbnailUrl);
         return;
     }
     if (item.url.isEmpty())
