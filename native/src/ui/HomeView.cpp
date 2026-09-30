@@ -50,6 +50,7 @@
 #include "../core/BattleNetLibrary.h"
 #include "../core/UbisoftLibrary.h"
 #include "../core/EaLibrary.h"
+#include "../core/XboxLibrary.h"
 #include "../core/PcScanCache.h"   // #62: persist the last good installed-scan per launcher
 #include "../core/StoreBackend.h"  // #118: owned libraries from a store BACKEND (legendary), no client needed
 #include "../core/Settings.h"
@@ -5129,6 +5130,7 @@ struct PcLibScan
     QList<BattleNetGame>   bnet;
     QList<UbisoftGame>     ubisoft;   // Ubisoft Connect installs (#60)
     QList<EaGame>          ea;        // EA app installs (#60 increment 2)
+    QList<XboxGame>        xbox;      // Xbox app / PC Game Pass installs (#60 increment 3)
     QVector<DownloadedItem> downloads;
     // Owned-but-not-installed on Steam. ownedGamesCached is network-free (populatePcGames arms the
     // background refresh separately), so gathering it here never blocks the GUI thread.
@@ -5218,6 +5220,12 @@ static PcLibScan scanPcLibrary()
         s.ea = reconcileLauncherScan<EaGame>(QStringLiteral("ea"), !fresh.isEmpty(), fresh,
             [](const EaGame& g) { return g.id; });
     }
+    {
+        // Xbox / PC Game Pass (#60 increment 3): the same rule. The cache id is the AUMID the launch takes.
+        const QList<XboxGame> fresh = XboxLibrary::installedGames();
+        s.xbox = reconcileLauncherScan<XboxGame>(QStringLiteral("xbox"), !fresh.isEmpty(), fresh,
+            [](const XboxGame& g) { return g.id; });
+    }
     s.downloads  = DownloadsStore::list();
     s.steamOwned = SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId());
     s.epicOwned  = epicOwnedFromBackend();
@@ -5263,7 +5271,7 @@ MediaCatalog HomeView::pcLibraryCatalog(const QString& query, const QString& lau
     // populatePcGames arms the background refresh that fills it.
     return browse::pcGamesCatalog(pre->steam, pre->epic, pre->gog, pre->bnet,
                                   downloaded, query, launcherFilter, {}, pre->steamOwned, pre->epicOwned,
-                                  pre->ubisoft, pre->ea);
+                                  pre->ubisoft, pre->ea, pre->xbox);
 }
 
 // Drill into the synthetic "PC Games" console (a child of the Games catalog). Pushed as a detail level so
@@ -5327,6 +5335,9 @@ void HomeView::populatePcGames(bool runRemap)
         // The EA app (#60 increment 2) keys on its content id, as pcgame::legacyLaunchId builds it.
         for (const EaGame& g : scan.ea)
             lib << qMakePair(QStringLiteral("ea:") + g.id, g.name);
+        // Xbox (#60 increment 3) keys on the AUMID, as pcgame::legacyLaunchId builds it.
+        for (const XboxGame& g : scan.xbox)
+            lib << qMakePair(QStringLiteral("xbox:") + g.id, g.name);
         // OWNED-but-not-installed on Steam. It is in the same scan and it keys exactly like an installed
         // Steam entry ("steam:<appid>"), so leaving it out meant a pre-branch favourite on a game the user
         // owns and has not installed stayed under its per-launcher id — a second, stale star sitting beside
@@ -5369,7 +5380,8 @@ void HomeView::populatePcGames(bool runRemap)
     // Which launchers to OFFER is decided from the same scan the folder is built from, so the menu can
     // never list a launcher this machine has nothing in.
     pcLaunchersAvailable_ = browse::pcLaunchersPresent(scan.steam, scan.epic, scan.gog, scan.bnet,
-                                                       scan.steamOwned, scan.epicOwned, scan.ubisoft, scan.ea);
+                                                       scan.steamOwned, scan.epicOwned, scan.ubisoft, scan.ea,
+                                                       scan.xbox);
     MediaCatalog cat = pcLibraryCatalog(query, pcLauncherFilter_, &scan);
     // Pinned at the TOP, and shown unconditionally — including when the filter has emptied the folder,
     // which is exactly when it must still be reachable to clear. It is inserted HERE and not inside
@@ -5904,6 +5916,13 @@ void HomeView::launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s
         // The EA app (#60 increment 2): the Ubisoft shape — the origin2:// URI handed over, keyed "ea:<id>".
         m.id = legacyId;
         m.mime = QStringLiteral("eagame");
+        m.url = s.launchUrl;
+    }
+    else if (s.launcher == QStringLiteral("xbox"))
+    {
+        // Xbox (#60 increment 3): the EA shape — shell:AppsFolder\<PFN>!<AppId> handed over, keyed "xbox:<AUMID>".
+        m.id = legacyId;
+        m.mime = QStringLiteral("xboxgame");
         m.url = s.launchUrl;
     }
     else
@@ -7707,6 +7726,7 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
         if (id.startsWith(QStringLiteral("bnet:")))  return QStringLiteral("battlenet");
         if (id.startsWith(QStringLiteral("ubi:")))   return QStringLiteral("ubisoft");
         if (id.startsWith(QStringLiteral("ea:")))    return QStringLiteral("ea");
+        if (id.startsWith(QStringLiteral("xbox:")))  return QStringLiteral("xbox");
         return QString();
     };
     e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
@@ -10937,10 +10957,12 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         emit openItem(it);
         return;
     }
-    if (it.mime == QStringLiteral("ubisoftgame") || it.mime == QStringLiteral("eagame"))
+    if (it.mime == QStringLiteral("ubisoftgame") || it.mime == QStringLiteral("eagame")
+        || it.mime == QStringLiteral("xboxgame"))
     {
-        // Ubisoft Connect (#60) / the EA app (#60 increment 2): MainWindow builds the launcher URI from the
-        // "ubi:<id>" / "ea:<id>" id when the tile carries no url (a playlist entry). Hand the tile over untouched.
+        // Ubisoft Connect (#60) / the EA app / Xbox (#60 increments 2, 3): MainWindow builds the launch string
+        // from the "ubi:" / "ea:" / "xbox:" id when the tile carries no url (a playlist entry). Hand the tile
+        // over untouched.
         emit openItem(it);
         return;
     }
@@ -12495,6 +12517,7 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
                             || (item.mime == QStringLiteral("battlenetgame"))
                             || (item.mime == QStringLiteral("ubisoftgame"))
                             || (item.mime == QStringLiteral("eagame"))
+                            || (item.mime == QStringLiteral("xboxgame"))
                             || isMergedPcGame(item);
     const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
         && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
@@ -13920,6 +13943,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 || (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
                 || UbisoftLibrary::isAvailable()   // #60: "available" IS "has an installed game"
                 || EaLibrary::isAvailable()        // #60 increment 2: likewise
+                || XboxLibrary::isAvailable()      // #60 increment 3: likewise
                 // OWNED-but-not-installed on Steam counts as "has something in it". The folder LISTS these
                 // (pcGamesCatalog mints a LauncherOwned source for each), so a gate that ignored them hid
                 // the whole console from the user whose PC library is entirely owned-not-installed — the

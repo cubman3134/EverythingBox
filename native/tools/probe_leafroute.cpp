@@ -1527,7 +1527,7 @@ int main(int argc, char** argv)
         // 11b. THE CRAWL'S ARM TABLE, row by row, in dlResolveLeaf's order.
         {
             // Can't be pulled as one file — under ANY add-on, whatever the type claims.
-            for (const char* mime : { "steamgame", "epicgame", "goggame", "battlenetgame", "ubisoftgame", "eagame" })
+            for (const char* mime : { "steamgame", "epicgame", "goggame", "battlenetgame", "ubisoftgame", "eagame", "xboxgame" })
                 for (TrackAddon a : kAll)
                 {
                     CHECK(browse::downloadLeafArmFor(leaf("game", mime), a) == DownloadLeafArm::None);

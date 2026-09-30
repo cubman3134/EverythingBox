@@ -324,6 +324,7 @@ RecentStore::Relaunch RecentStore::relaunchFor(const QString& kind)
     if (kind == QStringLiteral("battlenetgame")) return Relaunch::BattleNetGame;
     if (kind == QStringLiteral("ubisoftgame")) return Relaunch::UbisoftGame;
     if (kind == QStringLiteral("eagame"))    return Relaunch::EaGame;
+    if (kind == QStringLiteral("xboxgame"))  return Relaunch::XboxGame;
     if (kind == QStringLiteral("pcgame"))    return Relaunch::PcGame;
     if (kind == QStringLiteral("video"))     return Relaunch::Video;
     if (kind == QStringLiteral("audio"))     return Relaunch::Audio;

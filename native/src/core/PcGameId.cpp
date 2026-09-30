@@ -523,6 +523,7 @@ QString pcgame::legacyLaunchId(const PcGameSource& s)
     if (s.launcher == QStringLiteral("battlenet")) return QStringLiteral("bnet:")  + key;
     if (s.launcher == QStringLiteral("ubisoft"))   return QStringLiteral("ubi:")   + key;   // #60
     if (s.launcher == QStringLiteral("ea"))        return QStringLiteral("ea:")    + key;   // #60 increment 2
+    if (s.launcher == QStringLiteral("xbox"))      return QStringLiteral("xbox:")  + key;   // #60 increment 3 (the AUMID)
     return QString();   // a launcher with no id scheme here: no pre-merge id to claim (rule 1)
 }
 

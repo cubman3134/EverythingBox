@@ -17,6 +17,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFile>
+#include <QProcess>
 #include <QUrl>
 
 #include "../core/AppPaths.h"
@@ -64,9 +65,20 @@ const char* endName(LaunchWatch::State s)
 
 void MainWindow::handOffStoreLaunch(const QString& url, const QString& id)
 {
+    // An Xbox game (#60 increment 3) is shell:AppsFolder\<PFN>!<AppId> — a shell namespace path, not a URL. It is
+    // handed to explorer.exe as its one argument, byte for byte (Playnite's route for a packaged app), rather than
+    // through QUrl. It names a package and an app and nothing else, so the sink logs it verbatim: that line is
+    // the drive's proof of the exact string.
+    const bool shellApp = url.startsWith(QStringLiteral("shell:AppsFolder\\"), Qt::CaseInsensitive);
     if (storeUriSinkForTest())
         watchLog(QStringLiteral("uitest: store launch URI held back (EB_UITEST_STORE_URI_SINK): %1")
-                     .arg(LogSafeText::url(url)));
+                     .arg(shellApp ? url : LogSafeText::url(url)));
+    else if (shellApp)
+    {
+#ifdef Q_OS_WIN
+        QProcess::startDetached(QStringLiteral("explorer.exe"), { url });
+#endif
+    }
     else
         QDesktopServices::openUrl(QUrl(url));
 
